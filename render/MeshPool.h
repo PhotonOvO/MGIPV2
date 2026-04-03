@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/Handles.h"
+#include "../common/Handles.h"
 
 // MeshPool - GPU mesh resource pool
 // Implementation will be added in Task 5

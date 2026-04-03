@@ -8,6 +8,11 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+// Forward declaration for tinygltf
+namespace tinygltf {
+struct Model;
+}
+
 namespace demo {
 
 struct GltfMeshData {
