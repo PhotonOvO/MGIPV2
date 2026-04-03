@@ -240,6 +240,10 @@ add_library(demo_core STATIC
   render/Renderer.h
   render/passes/AnimateVerticesPass.h
   render/passes/AnimateVerticesPass.cpp
+  render/passes/GBufferPass.h
+  render/passes/GBufferPass.cpp
+  render/passes/LightPass.h
+  render/passes/LightPass.cpp
   render/passes/SceneOpaquePass.h
   render/passes/SceneOpaquePass.cpp
   render/passes/PresentPass.h
