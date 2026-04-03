@@ -133,9 +133,9 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     VkBufferCopy indexCopy{.size = record.indexCount * sizeof(uint32_t)};
     vkCmdCopyBuffer(cmd, indexStagingBuffer, record.indexBuffer, 1, &indexCopy);
 
-    // Cleanup staging buffers (will be freed after command buffer completes)
-    vmaDestroyBuffer(m_allocator, vertexStagingBuffer, vertexStagingAllocation);
-    vmaDestroyBuffer(m_allocator, indexStagingBuffer, indexStagingAllocation);
+    // Store staging buffers for deferred deletion after GPU sync
+    m_stagingBuffers.push_back({vertexStagingBuffer, vertexStagingAllocation});
+    m_stagingBuffers.push_back({indexStagingBuffer, indexStagingAllocation});
 
     return m_pool.emplace(std::move(record));
 }
@@ -159,6 +159,15 @@ void MeshPool::destroyMesh(MeshHandle handle) {
 
 const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {
     return m_pool.tryGet(handle);
+}
+
+void MeshPool::freeStagingBuffers() {
+    for (auto& buffer : m_stagingBuffers) {
+        if (buffer.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(m_allocator, buffer.buffer, buffer.allocation);
+        }
+    }
+    m_stagingBuffers.clear();
 }
 
 }  // namespace demo

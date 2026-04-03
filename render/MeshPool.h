@@ -35,6 +35,9 @@ public:
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
 
+    // Free staging buffers after GPU sync (call after command buffer completes)
+    void freeStagingBuffers();
+
     template<typename Fn>
     void forEachActive(Fn&& fn) {
         m_pool.forEachActive(std::forward<Fn>(fn));
@@ -44,6 +47,7 @@ private:
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
     HandlePool<MeshHandle, MeshRecord> m_pool;
+    std::vector<utils::Buffer> m_stagingBuffers;  // Deferred deletion after GPU sync
 };
 
 }  // namespace demo
