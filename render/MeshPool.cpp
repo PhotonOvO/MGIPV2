@@ -11,6 +11,9 @@ void MeshPool::init(VkDevice device, VmaAllocator allocator) {
 }
 
 void MeshPool::deinit() {
+    // Free any remaining staging buffers
+    freeStagingBuffers();
+
     // Destroy all remaining meshes
     std::vector<MeshHandle> handles;
     m_pool.forEachActive([&handles](MeshHandle handle, const MeshRecord&) {
@@ -26,6 +29,11 @@ void MeshPool::deinit() {
 }
 
 MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd) {
+    // Validate input
+    if (meshData.positions.empty() || meshData.indices.empty()) {
+        return kNullMeshHandle;
+    }
+
     MeshRecord record;
     record.vertexCount = static_cast<uint32_t>(meshData.positions.size() / 3);
     record.indexCount = static_cast<uint32_t>(meshData.indices.size());
@@ -92,15 +100,15 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
     };
 
-    vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-                    &vertexStagingBuffer, &vertexStagingAllocation, nullptr);
-    vmaMapMemory(m_allocator, vertexStagingAllocation, &vertexMappedData);
+    VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
+                    &vertexStagingBuffer, &vertexStagingAllocation, nullptr));
+    VK_CHECK(vmaMapMemory(m_allocator, vertexStagingAllocation, &vertexMappedData));
     std::memcpy(vertexMappedData, vertexData.data(), vertexData.size());
     vmaUnmapMemory(m_allocator, vertexStagingAllocation);
 
     // Create GPU vertex buffer
-    vmaCreateBuffer(m_allocator, &vertexBufferInfo, &vertexAllocInfo,
-                    &record.vertexBuffer, &record.vertexAllocation, nullptr);
+    VK_CHECK(vmaCreateBuffer(m_allocator, &vertexBufferInfo, &vertexAllocInfo,
+                    &record.vertexBuffer, &record.vertexAllocation, nullptr));
 
     // Copy to GPU
     VkBufferCopy vertexCopy{.size = vertexData.size()};
@@ -119,15 +127,15 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     void* indexMappedData = nullptr;
 
     stagingInfo.size = record.indexCount * sizeof(uint32_t);
-    vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-                    &indexStagingBuffer, &indexStagingAllocation, nullptr);
-    vmaMapMemory(m_allocator, indexStagingAllocation, &indexMappedData);
+    VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
+                    &indexStagingBuffer, &indexStagingAllocation, nullptr));
+    VK_CHECK(vmaMapMemory(m_allocator, indexStagingAllocation, &indexMappedData));
     std::memcpy(indexMappedData, meshData.indices.data(), record.indexCount * sizeof(uint32_t));
     vmaUnmapMemory(m_allocator, indexStagingAllocation);
 
     // Create GPU index buffer
-    vmaCreateBuffer(m_allocator, &indexBufferInfo, &vertexAllocInfo,
-                    &record.indexBuffer, &record.indexAllocation, nullptr);
+    VK_CHECK(vmaCreateBuffer(m_allocator, &indexBufferInfo, &vertexAllocInfo,
+                    &record.indexBuffer, &record.indexAllocation, nullptr));
 
     // Copy to GPU
     VkBufferCopy indexCopy{.size = record.indexCount * sizeof(uint32_t)};
