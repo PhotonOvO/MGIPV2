@@ -12,6 +12,10 @@
 #include "passes/SceneOpaquePass.h"
 #include "passes/PresentPass.h"
 #include "passes/ImguiPass.h"
+#include "passes/GBufferPass.h"
+#include "passes/LightPass.h"
+#include "MeshPool.h"
+#include "../loader/GltfLoader.h"
 #include "SceneResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
@@ -42,6 +46,13 @@ struct RenderParams
   std::function<void(rhi::CommandList&)> recordUi;
 };
 
+struct GltfUploadResult
+{
+  std::vector<MeshHandle>     meshes;
+  std::vector<MaterialHandle> materials;
+  std::vector<TextureHandle>  textures;
+};
+
 class Renderer
 {
 public:
@@ -51,6 +62,7 @@ public:
   {
     nonTextured = 0,
     textured    = 1,
+    light       = 2,
   };
 
   Renderer() = default;
@@ -81,6 +93,20 @@ public:
   ImTextureID    getViewportTextureID(TextureHandle handle) const;
   MaterialHandle getMaterialHandle(uint32_t slot) const;
   PipelineHandle getGraphicsPipelineHandle(GraphicsPipelineVariant variant) const;
+
+  // glTF model support
+  GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
+  void             destroyGltfResources(const GltfUploadResult& result);
+
+  MeshPool& getMeshPool() { return m_meshPool; }
+  void      waitForIdle();
+
+  // LightPass support
+  PipelineHandle getLightPipelineHandle() const;
+  uint64_t       getLightPipelineLayout() const;
+  uint64_t       getGBufferColorDescriptorSet() const;
+
+  VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
 
 private:
   class SamplerCache
@@ -222,11 +248,19 @@ private:
   };
 
   // Per-frame passes
+  std::unique_ptr<GBufferPass>         m_gbufferPass;
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
+  std::unique_ptr<LightPass>           m_lightPass;
   std::unique_ptr<PresentPass>         m_presentPass;
   std::unique_ptr<ImguiPass>           m_imguiPass;
   demo::PassExecutor                   m_passExecutor;
+
+  // glTF support
+  MeshPool m_meshPool;
+
+  // Light pipeline
+  PipelineHandle m_lightPipeline{};
 
   // Draw-call-scoped transient CPU/GPU data staging bucket.
   // Lifetime trigger: rebuilt per draw packet emission/consumption; currently no persistent owner fields.
