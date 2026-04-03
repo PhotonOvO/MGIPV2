@@ -1,16 +1,49 @@
 #pragma once
 
+#include "../common/Common.h"
 #include "../common/Handles.h"
+#include "../common/HandlePool.h"
 
-// MeshPool - GPU mesh resource pool
-// Implementation will be added in Task 5
+#include <cstdint>
+#include <cassert>
 
 namespace demo {
+
+struct GltfMeshData;  // Forward declaration
+
+struct MeshRecord {
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    VmaAllocation vertexAllocation = nullptr;
+    VmaAllocation indexAllocation = nullptr;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+    uint32_t vertexStride = 32;  // Position(12) + Normal(12) + TexCoord(8)
+    glm::mat4 transform = glm::mat4(1.0f);
+};
 
 class MeshPool {
 public:
     MeshPool() = default;
-    ~MeshPool() = default;
+    ~MeshPool() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+
+    void init(VkDevice device, VmaAllocator allocator);
+    void deinit();
+
+    MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd);
+    void destroyMesh(MeshHandle handle);
+
+    [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
+
+    template<typename Fn>
+    void forEachActive(Fn&& fn) {
+        m_pool.forEachActive(std::forward<Fn>(fn));
+    }
+
+private:
+    VkDevice m_device = VK_NULL_HANDLE;
+    VmaAllocator m_allocator = nullptr;
+    HandlePool<MeshHandle, MeshRecord> m_pool;
 };
 
-} // namespace demo
+}  // namespace demo
