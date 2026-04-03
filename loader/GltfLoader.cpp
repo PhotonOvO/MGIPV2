@@ -276,7 +276,7 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
             }
         } else {
             // No indices provided - generate sequential indices
-            meshData.indices.resize(vertexCount);
+            meshData.indices.reserve(vertexCount);
             for (size_t i = 0; i < vertexCount; ++i) {
                 meshData.indices.push_back(static_cast<uint32_t>(i));
             }
