@@ -91,6 +91,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(volk)
 
 FetchContent_Declare(
+  tinygltf
+  GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+  GIT_TAG v2.9.3
+)
+set(TINYGLTF_BUILD_LOADER_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_VALIDATION_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_GL_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_VALIDATION_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(tinygltf)
+
+FetchContent_Declare(
   VulkanMemoryAllocator
   GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
   GIT_TAG master
@@ -253,6 +264,10 @@ add_library(demo_core STATIC
   common/Common.h
   common/Handles.h
   common/HandlePool.h
+  loader/GltfLoader.h
+  loader/GltfLoader.cpp
+  render/MeshPool.h
+  render/MeshPool.cpp
 )
 
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
@@ -288,6 +303,7 @@ target_link_libraries(demo_core
     volk
     imgui_demo
     glm
+    tinygltf
     Vulkan::Vulkan
 )
 
