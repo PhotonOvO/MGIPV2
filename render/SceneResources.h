@@ -1,0 +1,60 @@
+#pragma once
+
+#include "../common/Common.h"
+#include "../rhi/RHIDevice.h"
+
+namespace demo {
+
+class SceneResources
+{
+public:
+  struct CreateInfo
+  {
+    VkExtent2D            size{};
+    std::vector<VkFormat> color;
+    VkFormat              depth{VK_FORMAT_UNDEFINED};
+    VkSampler             linearSampler{VK_NULL_HANDLE};
+    VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};
+  };
+
+  SceneResources() = default;
+  ~SceneResources() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+
+  void init(rhi::Device& device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo);
+  void deinit();
+  void update(VkCommandBuffer cmd, VkExtent2D newSize);
+
+  [[nodiscard]] ImTextureID                  getImTextureID(uint32_t i = 0) const;
+  [[nodiscard]] VkExtent2D                   getSize() const;
+  [[nodiscard]] VkImage                      getColorImage(uint32_t i = 0) const;
+  [[nodiscard]] VkImage                      getDepthImage() const;
+  [[nodiscard]] VkImageView                  getColorImageView(uint32_t i = 0) const;
+  [[nodiscard]] const VkDescriptorImageInfo& getDescriptorImageInfo(uint32_t i = 0) const;
+  [[nodiscard]] VkImageView                  getDepthImageView() const;
+  [[nodiscard]] VkFormat                     getColorFormat(uint32_t i = 0) const;
+  [[nodiscard]] VkFormat                     getDepthFormat() const;
+  [[nodiscard]] VkSampleCountFlagBits        getSampleCount() const;
+  [[nodiscard]] float                        getAspectRatio() const;
+
+private:
+  struct Resources
+  {
+    std::vector<utils::Image>          colorImages;
+    utils::Image                       depthImage{};
+    VkImageView                        depthView{};
+    std::vector<VkDescriptorImageInfo> descriptors;
+    std::vector<VkImageView>           uiImageViews;
+  };
+
+  void                       create(VkCommandBuffer cmd);
+  void                       destroy();
+  [[nodiscard]] utils::Image createImage(const VkImageCreateInfo& imageInfo) const;
+
+  VkDevice                 m_device{VK_NULL_HANDLE};
+  VmaAllocator             m_allocator{nullptr};
+  CreateInfo               m_createInfo{};
+  Resources                m_resources{};
+  std::vector<ImTextureID> m_imguiTextureIds;
+};
+
+}  // namespace demo
