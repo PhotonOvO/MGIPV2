@@ -351,6 +351,8 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
 
   m_device.samplerPool.init(nativeDevice);
 
+  m_meshPool.init(nativeDevice, m_device.allocator);
+
   const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
   ASSERT(nativeSurface != VK_NULL_HANDLE, "Renderer::init requires a valid initialized surface");
   DBG_VK_NAME(nativeSurface);
@@ -468,13 +470,17 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   updateGraphicsDescriptorSet();
 
   // Initialize passes and pass executor
+  m_gbufferPass         = std::make_unique<GBufferPass>(this);
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
+  m_lightPass           = std::make_unique<LightPass>(this);
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
   m_passExecutor.clear();
+  m_passExecutor.addPass(*m_gbufferPass);
   m_passExecutor.addPass(*m_animateVerticesPass);
   m_passExecutor.addPass(*m_sceneOpaquePass);
+  m_passExecutor.addPass(*m_lightPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
 }
@@ -549,6 +555,7 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
 
   m_swapchainDependent.sceneResources.deinit();
+  m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   if(m_device.allocator != nullptr)
   {
@@ -1684,4 +1691,164 @@ const Renderer::MaterialResources::TextureColdData* Renderer::tryGetTextureCold(
   const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
   return textureRecord != nullptr ? &textureRecord->cold : nullptr;
 }
+
+void Renderer::waitForIdle()
+{
+  m_device.device->waitIdle();
+}
+
+GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
+{
+  GltfUploadResult result;
+  const VkDevice   device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+
+  // Upload textures
+  for(const auto& imageData : model.images)
+  {
+    if(imageData.pixels.empty() || imageData.width <= 0 || imageData.height <= 0)
+    {
+      continue;
+    }
+
+    const VkFormat format = (imageData.channels == 4) ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8_UNORM;
+    const VkImageCreateInfo imageInfo = {
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType     = VK_IMAGE_TYPE_2D,
+        .format        = format,
+        .extent        = {static_cast<uint32_t>(imageData.width), static_cast<uint32_t>(imageData.height), 1},
+        .mipLevels     = 1,
+        .arrayLayers   = 1,
+        .samples       = VK_SAMPLE_COUNT_1_BIT,
+        .usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+    };
+
+    utils::Image image = createImage(m_device.allocator, imageInfo);
+    utils::cmdInitImageLayout(cmd, image.image);
+
+    const VkBufferImageCopy copyRegion = {
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+        .imageExtent      = imageInfo.extent,
+    };
+
+    const size_t       pixelSize     = imageData.pixels.size();
+    utils::Buffer      stagingBuffer = createBuffer(device, m_device.allocator, pixelSize, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
+                                               VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+
+    void* mapped = nullptr;
+    VK_CHECK(vmaMapMemory(m_device.allocator, stagingBuffer.allocation, &mapped));
+    std::memcpy(mapped, imageData.pixels.data(), pixelSize);
+    vmaUnmapMemory(m_device.allocator, stagingBuffer.allocation);
+
+    vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
+
+    const VkImageViewCreateInfo viewInfo = {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = image.image,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = format,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
+    };
+
+    VkImageView imageView = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
+
+    // Create ImageResource
+    utils::ImageResource imageResource{};
+    imageResource.image      = image.image;
+    imageResource.allocation = image.allocation;
+    imageResource.view       = imageView;
+    imageResource.layout     = VK_IMAGE_LAYOUT_GENERAL;
+    imageResource.extent     = {imageInfo.extent.width, imageInfo.extent.height};
+
+    TextureHandle texHandle = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
+        .hot =
+            {
+                .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
+                .sampledImageView   = imageView,
+                .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            },
+        .cold =
+            {
+                .ownedImage   = imageResource,
+                .sourceExtent = {imageInfo.extent.width, imageInfo.extent.height},
+            },
+    });
+
+    result.textures.push_back(texHandle);
+    m_device.stagingBuffers.push_back(stagingBuffer);
+  }
+
+  // Create materials
+  for(const auto& matData : model.materials)
+  {
+    TextureHandle texHandle = kNullTextureHandle;
+    if(matData.baseColorTexture >= 0 && matData.baseColorTexture < static_cast<int>(result.textures.size()))
+    {
+      texHandle = result.textures[matData.baseColorTexture];
+    }
+
+    const rhi::ResourceIndex descriptorIndex = static_cast<rhi::ResourceIndex>(result.materials.size());
+    MaterialHandle            matHandle      = m_materials.materialPool.emplace(MaterialResources::MaterialRecord{
+        .sampledTexture  = texHandle,
+        .descriptorIndex = descriptorIndex,
+        .debugName       = "gltf-material",
+    });
+
+    result.materials.push_back(matHandle);
+  }
+
+  // Upload meshes
+  for(const auto& meshData : model.meshes)
+  {
+    MeshHandle meshHandle = m_meshPool.uploadMesh(meshData, cmd);
+    result.meshes.push_back(meshHandle);
+  }
+
+  return result;
+}
+
+void Renderer::destroyGltfResources(const GltfUploadResult& result)
+{
+  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+
+  // Destroy meshes
+  for(MeshHandle handle : result.meshes)
+  {
+    m_meshPool.destroyMesh(handle);
+  }
+
+  // Destroy materials
+  for(MaterialHandle handle : result.materials)
+  {
+    m_materials.materialPool.destroy(handle);
+  }
+
+  // Destroy textures
+  for(TextureHandle handle : result.textures)
+  {
+    const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
+    if(cold && cold->ownedImage.image != VK_NULL_HANDLE)
+    {
+      utils::ImageResource image = cold->ownedImage;
+      destroyImageResource(device, m_device.allocator, image);
+    }
+    m_materials.texturePool.destroy(handle);
+  }
+}
+
+PipelineHandle Renderer::getLightPipelineHandle() const
+{
+  return m_lightPipeline;
+}
+
+uint64_t Renderer::getLightPipelineLayout() const
+{
+  return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
+}
+
+uint64_t Renderer::getGBufferColorDescriptorSet() const
+{
+  return getBindGroupDescriptorSetOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+}
+
 }  // namespace demo
