@@ -25,7 +25,7 @@ void ImguiPass::execute(const PassContext& context) const
     return;
   }
   context.cmd->beginEvent("ImGui");
-  m_renderer->beginPresentPass(*context.cmd);
+  // PresentPass already began dynamic rendering, just render UI and end
   m_renderer->executeImGuiPass(*context.cmd, *context.params);
   m_renderer->endPresentPass(*context.cmd);
   context.cmd->endEvent();

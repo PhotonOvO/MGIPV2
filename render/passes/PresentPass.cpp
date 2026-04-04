@@ -24,6 +24,8 @@ void PresentPass::execute(const PassContext& context) const
   if(m_renderer == nullptr || context.params == nullptr)
     return;
   context.cmd->beginEvent("Present");
+  // Begin dynamic rendering to swapchain for subsequent passes (LightPass, ImguiPass)
+  m_renderer->beginPresentPass(*context.cmd);
   context.cmd->endEvent();
 }
 
