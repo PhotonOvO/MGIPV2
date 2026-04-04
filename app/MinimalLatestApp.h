@@ -5,8 +5,10 @@
 #include "../render/Renderer.h"
 #include "../rhi/RHISurface.h"
 #include "../rhi/vulkan/VulkanSurface.h"
+#include "../loader/GltfLoader.h"
 
 #include <memory>
+#include <optional>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -27,10 +29,12 @@ public:
     m_surface = std::make_unique<demo::rhi::vulkan::VulkanSurface>();
     m_renderer.init(m_window, *m_surface, m_vSync);
     m_selectedMaterial = m_renderer.getMaterialHandle(0);
+    m_gltfLoader       = std::make_unique<demo::GltfLoader>();
   }
 
   ~MinimalLatestApp()
   {
+    unloadModel();
     m_renderer.shutdown(*m_surface);
     glfwDestroyWindow(m_window);
   }
@@ -122,6 +126,9 @@ public:
         }
       }
       ImGui::End();
+
+      drawModelLoaderUI();
+
       ImGui::Render();
 
       demo::RenderParams frameParams{};
@@ -156,4 +163,95 @@ private:
   bool                       m_vSync{true};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
+
+  // glTF model loading
+  std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
+  std::optional<demo::GltfUploadResult>           m_currentModel;
+  std::string                                     m_modelPath;
+  bool                                            m_modelLoaded = false;
+
+  // UI state
+  char m_modelPathBuffer[512] = "resources/models/Box/Box.gltf";
+
+  void loadModel(const std::string& path);
+  void unloadModel();
+  void drawModelLoaderUI();
 };
+
+inline void MinimalLatestApp::loadModel(const std::string& path)
+{
+  demo::GltfModel model;
+  if(!m_gltfLoader->load(path, model))
+  {
+    LOGE("Failed to load model: %s, error: %s", path.c_str(), m_gltfLoader->getLastError().c_str());
+    return;
+  }
+
+  m_renderer.waitForIdle();
+  unloadModel();
+
+  // For now, just store model info - actual upload requires command buffer integration
+  m_modelPath  = path;
+  m_modelLoaded = true;
+
+  LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)", path.c_str(), model.meshes.size(), model.materials.size(),
+       model.images.size());
+}
+
+inline void MinimalLatestApp::unloadModel()
+{
+  if(m_modelLoaded && m_currentModel.has_value())
+  {
+    m_renderer.waitForIdle();
+    m_renderer.destroyGltfResources(*m_currentModel);
+    m_currentModel.reset();
+    m_modelLoaded = false;
+  }
+}
+
+inline void MinimalLatestApp::drawModelLoaderUI()
+{
+  if(ImGui::Begin("Model Loader"))
+  {
+    // Model path input
+    ImGui::InputText("Model Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
+
+    // Load button
+    if(ImGui::Button("Load Model"))
+    {
+      loadModel(std::string(m_modelPathBuffer));
+    }
+
+    ImGui::SameLine();
+
+    // Unload button
+    if(ImGui::Button("Unload"))
+    {
+      unloadModel();
+    }
+
+    // Preset models
+    ImGui::Separator();
+    ImGui::Text("Presets:");
+
+    if(ImGui::Button("Triangle (default)"))
+    {
+      unloadModel();
+      m_modelLoaded = false;
+    }
+
+    // Current model info
+    if(m_modelLoaded)
+    {
+      ImGui::Separator();
+      ImGui::Text("Current Model: %s", m_modelPath.c_str());
+      if(m_currentModel.has_value())
+      {
+        ImGui::Text("  Meshes: %zu", m_currentModel->meshes.size());
+        ImGui::Text("  Materials: %zu", m_currentModel->materials.size());
+        ImGui::Text("  Textures: %zu", m_currentModel->textures.size());
+      }
+    }
+  }
+  ImGui::End();
+}

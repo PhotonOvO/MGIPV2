@@ -1,8 +1,8 @@
 #include "GltfLoader.h"
 
 #define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE
 #include <tiny_gltf.h>
 
 #include <glm/gtc/matrix_transform.hpp>
