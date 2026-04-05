@@ -166,9 +166,10 @@ void VulkanCommandList::end()
 
 VkImageView VulkanCommandList::getVkImageViewFromHandle(TextureViewHandle view) const
 {
-  // This is a temporary implementation
-  // The actual implementation will query a view registry
-  return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(view.index));
+  // TextureViewHandle::fromNativePtr() encodes the 64-bit pointer in index+generation
+  // Use toNativePtr() to correctly reconstruct the full pointer value
+  // VkImageView is a non-dispatchable handle, reinterpret from void*
+  return reinterpret_cast<VkImageView>(view.toNativePtr());
 }
 
 void VulkanCommandList::beginRenderPass(const RenderPassDesc& desc)

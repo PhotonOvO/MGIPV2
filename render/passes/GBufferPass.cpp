@@ -3,7 +3,7 @@
 #include "../MeshPool.h"
 #include "../SceneResources.h"
 #include "../../shaders/shader_io.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan commands until RHI handles support 64-bit native pointers
+#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
 
 #include <array>
 #include <cstring>
@@ -53,45 +53,40 @@ void GBufferPass::execute(const PassContext& context) const
         sceneResources.getSize().height
     };
 
-    // Setup MRT color attachments (GBuffer0/1/2) using RHI types
-    // BLOCKER: TextureViewHandle uses 32-bit index, can't store 64-bit VkImageView pointer
-    // Using native Vulkan rendering for now until RHI handles support 64-bit native pointers
-    std::array<VkRenderingAttachmentInfo, 3> colorAttachments{};
+    // Setup MRT color attachments (GBuffer0/1/2) using RHI RenderTargetDesc
+    std::array<rhi::RenderTargetDesc, 3> colorTargets{};
     for(uint32_t i = 0; i < 3; ++i)
     {
-        colorAttachments[i] = {
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = sceneResources.getGBufferImageView(i),
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue  = {{{0.0f, 0.0f, 0.0f, 0.0f}}},
+        colorTargets[i] = {
+            .texture = {},  // Not used when view carries native pointer
+            .view = rhi::TextureViewHandle::fromNative(sceneResources.getGBufferImageView(i)),
+            .state = rhi::ResourceState::general,
+            .loadOp = rhi::LoadOp::clear,
+            .storeOp = rhi::StoreOp::store,
+            .clearColor = {0.0f, 0.0f, 0.0f, 0.0f},
         };
     }
 
-    // Setup depth attachment
-    const VkRenderingAttachmentInfo depthAttachment{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = sceneResources.getDepthImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = {{{1.0f, 0}}},
+    // Setup depth attachment using RHI DepthTargetDesc
+    const rhi::DepthTargetDesc depthTarget{
+        .texture = {},  // Not used when view carries native pointer
+        .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
+        .state = rhi::ResourceState::general,
+        .loadOp = rhi::LoadOp::clear,
+        .storeOp = rhi::StoreOp::store,
+        .clearValue = {1.0f, 0},
     };
 
-    // Begin dynamic rendering with MRT
-    // BLOCKER: RHI beginRenderPass requires TextureViewHandle which can't hold 64-bit native pointers
-    const VkRenderingInfo renderingInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = {{0, 0}, {extent.width, extent.height}},
-        .layerCount           = 1,
-        .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
-        .pColorAttachments    = colorAttachments.data(),
-        .pDepthAttachment     = &depthAttachment,
+    // Begin render pass using RHI interface
+    const rhi::RenderPassDesc passDesc = {
+        .renderArea = {{0, 0}, extent},
+        .colorTargets = colorTargets.data(),
+        .colorTargetCount = static_cast<uint32_t>(colorTargets.size()),
+        .depthTarget = &depthTarget,
     };
-    rhi::vulkan::cmdBeginRendering(*context.cmd, renderingInfo);
+    context.cmd->beginRenderPass(passDesc);
 
-    // Set viewport and scissor using RHI interface (works correctly)
+    // Set viewport and scissor using RHI interface
     const rhi::Viewport viewport{
         0.0f, 0.0f,
         static_cast<float>(extent.width),
@@ -139,12 +134,9 @@ void GBufferPass::execute(const PassContext& context) const
         const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
         // Bind global bindless texture group (set 0) if available
-        // BLOCKER: demo::BindGroupHandle and rhi::BindGroupHandle are separate types
-        // RHI bindBindGroup expects rhi::BindGroupHandle, but PassContext uses demo::BindGroupHandle
-        // Using native Vulkan binding until handle types are unified
+        // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
         if(!context.globalBindlessGroup.isNull())
         {
-            // Fallback: bind via native Vulkan (will be replaced once handle types unified)
             const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
                 m_renderer->getGBufferPipelineLayout());
             const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
@@ -155,7 +147,7 @@ void GBufferPass::execute(const PassContext& context) const
         }
 
         // Bind camera descriptor set (set 1) with dynamic offset
-        // BLOCKER: Same handle type mismatch issue
+        // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
         if(!cameraBindGroupHandle.isNull())
         {
             const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
@@ -207,8 +199,7 @@ void GBufferPass::execute(const PassContext& context) const
             }
 
             // Bind pipeline if changed
-            // BLOCKER: demo::PipelineHandle and rhi::PipelineHandle are separate types
-            // RHI bindPipeline expects rhi::PipelineHandle, but we have demo::PipelineHandle
+            // BLOCKER: RHI bindPipeline is a stub placeholder, using native Vulkan binding
             if(gbufferPipeline != currentPipeline && !gbufferPipeline.isNull())
             {
                 const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
@@ -261,7 +252,7 @@ void GBufferPass::execute(const PassContext& context) const
             context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
 
             // Bind draw descriptor set (set 2) with dynamic offset
-            // BLOCKER: Handle type mismatch - same as camera bind group
+            // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
             if(!drawBindGroupHandle.isNull())
             {
                 const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
@@ -274,22 +265,22 @@ void GBufferPass::execute(const PassContext& context) const
                                         shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
             }
 
-            // Bind vertex and index buffers
-            const VkDeviceSize vertexOffset = 0;
-            VkBuffer vertexBuffer = mesh->getNativeVertexBuffer();
-            VkBuffer indexBuffer = mesh->getNativeIndexBuffer();
-            rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
-            rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // Bind vertex and index buffers using RHI interface with opaque uint64_t handles
+            const uint64_t vertexHandle = mesh->vertexBufferHandle;
+            const uint64_t vertexOffset = 0;
+            context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
 
-            // Draw indexed
-            // BLOCKER: drawIndexed works, but buffer binding above requires native handles
-            rhi::vulkan::cmdDrawIndexed(*context.cmd, mesh->indexCount, 1, 0, 0, 0);
+            const uint64_t indexHandle = mesh->indexBufferHandle;
+            context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+
+            // Draw indexed using RHI interface
+            context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
         }
     }
     // No fallback triangle - if no model, only clear
 
-    // BLOCKER: endRenderPass would work, but cmdEndRendering is needed to match cmdBeginRendering
-    rhi::vulkan::cmdEndRendering(*context.cmd);
+    // End render pass using RHI interface
+    context.cmd->endRenderPass();
 
     context.cmd->endEvent();
 }
