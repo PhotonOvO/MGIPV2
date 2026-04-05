@@ -12,8 +12,8 @@ namespace demo {
 struct GltfMeshData;  // Forward declaration
 
 struct MeshRecord {
-    VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    uint64_t vertexBufferHandle = 0;  // Opaque buffer handle (encoded VkBuffer)
+    uint64_t indexBufferHandle = 0;   // Opaque buffer handle (encoded VkBuffer)
     VmaAllocation vertexAllocation = nullptr;
     VmaAllocation indexAllocation = nullptr;
     uint32_t vertexCount = 0;
@@ -21,6 +21,22 @@ struct MeshRecord {
     uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
     glm::mat4 transform = glm::mat4(1.0f);
     int32_t materialIndex = -1;  // -1 = default material
+
+    // Helper to get native VkBuffer from opaque handle
+    VkBuffer getNativeVertexBuffer() const {
+        return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(vertexBufferHandle));
+    }
+    VkBuffer getNativeIndexBuffer() const {
+        return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(indexBufferHandle));
+    }
+
+    // Helper to set from native VkBuffer
+    void setNativeVertexBuffer(VkBuffer buffer) {
+        vertexBufferHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer));
+    }
+    void setNativeIndexBuffer(VkBuffer buffer) {
+        indexBufferHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer));
+    }
 };
 
 class MeshPool {

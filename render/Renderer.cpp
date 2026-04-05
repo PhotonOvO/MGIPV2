@@ -1208,8 +1208,10 @@ void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& 
     {
       // Bind glTF mesh vertex and index buffers
       const VkDeviceSize vertexOffset = 0;
-      rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &meshRecord->vertexBuffer, &vertexOffset);
-      rhi::vulkan::cmdBindIndexBuffer(cmd, meshRecord->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+      VkBuffer vertexBuffer = meshRecord->getNativeVertexBuffer();
+      VkBuffer indexBuffer = meshRecord->getNativeIndexBuffer();
+      rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &vertexOffset);
+      rhi::vulkan::cmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
       // Use default push constants for now
       pushValues.color = glm::vec3(1, 1, 1);

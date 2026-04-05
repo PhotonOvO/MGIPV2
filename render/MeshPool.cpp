@@ -122,12 +122,14 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     vmaUnmapMemory(m_allocator, vertexStagingAllocation);
 
     // Create GPU vertex buffer
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VK_CHECK(vmaCreateBuffer(m_allocator, &vertexBufferInfo, &vertexAllocInfo,
-                    &record.vertexBuffer, &record.vertexAllocation, nullptr));
+                    &vertexBuffer, &record.vertexAllocation, nullptr));
+    record.setNativeVertexBuffer(vertexBuffer);
 
     // Copy to GPU
     VkBufferCopy vertexCopy{.size = vertexData.size()};
-    vkCmdCopyBuffer(cmd, vertexStagingBuffer, record.vertexBuffer, 1, &vertexCopy);
+    vkCmdCopyBuffer(cmd, vertexStagingBuffer, vertexBuffer, 1, &vertexCopy);
 
     // Create index buffer
     VkBufferCreateInfo indexBufferInfo{
@@ -149,12 +151,14 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     vmaUnmapMemory(m_allocator, indexStagingAllocation);
 
     // Create GPU index buffer
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
     VK_CHECK(vmaCreateBuffer(m_allocator, &indexBufferInfo, &vertexAllocInfo,
-                    &record.indexBuffer, &record.indexAllocation, nullptr));
+                    &indexBuffer, &record.indexAllocation, nullptr));
+    record.setNativeIndexBuffer(indexBuffer);
 
     // Copy to GPU
     VkBufferCopy indexCopy{.size = record.indexCount * sizeof(uint32_t)};
-    vkCmdCopyBuffer(cmd, indexStagingBuffer, record.indexBuffer, 1, &indexCopy);
+    vkCmdCopyBuffer(cmd, indexStagingBuffer, indexBuffer, 1, &indexCopy);
 
     // Store staging buffers for deferred deletion after GPU sync
     m_stagingBuffers.push_back({vertexStagingBuffer, vertexStagingAllocation});
@@ -169,12 +173,15 @@ void MeshPool::destroyMesh(MeshHandle handle) {
         return;
     }
 
-    if (record->vertexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator, record->vertexBuffer, record->vertexAllocation);
+    VkBuffer vertexBuffer = record->getNativeVertexBuffer();
+    VkBuffer indexBuffer = record->getNativeIndexBuffer();
+
+    if (vertexBuffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(m_allocator, vertexBuffer, record->vertexAllocation);
     }
 
-    if (record->indexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator, record->indexBuffer, record->indexAllocation);
+    if (indexBuffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(m_allocator, indexBuffer, record->indexAllocation);
     }
 
     m_pool.destroy(handle);

@@ -298,11 +298,11 @@ void ForwardPass::execute(const PassContext& context) const
         }
 
         // Bind vertex and index buffers
-        // BLOCKER: MeshRecord uses VkBuffer directly, not rhi::BufferHandle
-        // RHI bindVertexBuffers/bindIndexBuffer expect rhi::BufferHandle
         const VkDeviceSize vertexOffset = 0;
-        rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &mesh->vertexBuffer, &vertexOffset);
-        rhi::vulkan::cmdBindIndexBuffer(*context.cmd, mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        VkBuffer vertexBuffer = mesh->getNativeVertexBuffer();
+        VkBuffer indexBuffer = mesh->getNativeIndexBuffer();
+        rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
+        rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
         // Draw indexed
         // BLOCKER: drawIndexed works, but buffer binding above requires native handles
