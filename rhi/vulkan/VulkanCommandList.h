@@ -32,6 +32,9 @@ public:
 
   void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) override;
   void bindBindTable(PipelineBindPoint bindPoint, uint32_t slot, BindTableHandle bindTable, const uint32_t* dynamicOffsets, uint32_t dynamicOffsetCount) override;
+  void bindBindGroup(uint32_t slot, BindGroupHandle bindGroup,
+                     const uint32_t* dynamicOffsets,
+                     uint32_t dynamicOffsetCount) override;
   void bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets, uint32_t bufferCount) override;
   void bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format) override;
   void pushConstants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data) override;

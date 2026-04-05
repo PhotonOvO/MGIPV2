@@ -363,6 +363,12 @@ void VulkanCommandList::bindBindTable(PipelineBindPoint, uint32_t, BindTableHand
   ensureCommandBuffer(m_commandBuffer);
 }
 
+void VulkanCommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  // Placeholder implementation - will be properly implemented after Pipeline tracks BindGroupLayout
+}
+
 void VulkanCommandList::bindVertexBuffers(uint32_t, const BufferHandle*, const uint64_t*, uint32_t)
 {
   ensureCommandBuffer(m_commandBuffer);
