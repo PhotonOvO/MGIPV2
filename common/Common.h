@@ -62,6 +62,7 @@
 #include "_autogen/shader.rast.slang.h"
 #include "_autogen/shader.light.slang.h"
 #include "_autogen/shader.gbuffer.slang.h"
+#include "_autogen/shader.forward.slang.h"
 #else
 #include "_autogen/shader.frag.glsl.h"
 #include "_autogen/shader.vert.glsl.h"

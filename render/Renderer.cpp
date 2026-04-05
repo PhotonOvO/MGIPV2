@@ -1640,12 +1640,12 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     // Alpha blending for transparent objects
     const rhi::BlendAttachmentState forwardBlend{
         .blendEnable = true,
-        .srcBlend = rhi::BlendFactor::srcAlpha,
-        .dstBlend = rhi::BlendFactor::oneMinusSrcAlpha,
-        .blendOp = rhi::BlendOp::add,
-        .srcBlendAlpha = rhi::BlendFactor::one,
-        .dstBlendAlpha = rhi::BlendFactor::oneMinusSrcAlpha,
-        .blendOpAlpha = rhi::BlendOp::add,
+        .srcColorBlendFactor = rhi::BlendFactor::srcAlpha,
+        .dstColorBlendFactor = rhi::BlendFactor::oneMinusSrcAlpha,
+        .colorBlendOp = rhi::BlendOp::add,
+        .srcAlphaBlendFactor = rhi::BlendFactor::one,
+        .dstAlphaBlendFactor = rhi::BlendFactor::oneMinusSrcAlpha,
+        .alphaBlendOp = rhi::BlendOp::add,
         .colorWriteMask = rhi::ColorComponentFlags::all,
     };
 
