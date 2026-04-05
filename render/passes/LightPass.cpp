@@ -1,7 +1,7 @@
 #include "LightPass.h"
 #include "../Renderer.h"
 #include "../SceneResources.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan commands until RHI handles support 64-bit native pointers
+#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -38,38 +38,36 @@ void LightPass::execute(const PassContext& context) const
     context.cmd->beginEvent("LightPass");
 
     // Get swapchain image view and extent
-    // BLOCKER: TextureViewHandle uses 32-bit index, can't store 64-bit VkImageView pointer
-    const VkImageView swapchainImageView = m_renderer->getCurrentSwapchainImageView();
+    rhi::TextureViewHandle swapchainViewHandle = rhi::TextureViewHandle::fromNative(
+        m_renderer->getCurrentSwapchainImageView());
     const rhi::Extent2D extent = {
         m_renderer->getSwapchainExtent().width,
         m_renderer->getSwapchainExtent().height
     };
 
-    if(swapchainImageView == VK_NULL_HANDLE)
+    if(swapchainViewHandle.isNull())
     {
         context.cmd->endEvent();
         return;
     }
 
     // Setup color attachment for dynamic rendering
-    // BLOCKER: RHI beginRenderPass requires TextureViewHandle which can't hold 64-bit native pointers
-    const VkRenderingAttachmentInfo colorAttachment{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = swapchainImageView,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Preserve previous content
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    rhi::RenderTargetDesc colorTarget = {
+        .texture = {},  // Not used when view carries native pointer
+        .view = swapchainViewHandle,
+        .state = rhi::ResourceState::general,
+        .loadOp = rhi::LoadOp::load,  // Preserve previous content
+        .storeOp = rhi::StoreOp::store,
     };
 
-    // Begin dynamic rendering (INDEPENDENT render pass)
-    const VkRenderingInfo renderingInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = {{0, 0}, {extent.width, extent.height}},
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &colorAttachment,
+    // Begin render pass using RHI interface
+    const rhi::RenderPassDesc passDesc = {
+        .renderArea = {{0, 0}, extent},
+        .colorTargets = &colorTarget,
+        .colorTargetCount = 1,
+        .depthTarget = nullptr,
     };
-    rhi::vulkan::cmdBeginRendering(*context.cmd, renderingInfo);
+    context.cmd->beginRenderPass(passDesc);
 
     // Set viewport and scissor using RHI interface
     const rhi::Viewport viewport{
@@ -83,12 +81,11 @@ void LightPass::execute(const PassContext& context) const
     context.cmd->setScissor(scissor);
 
     // Bind light pipeline
-    // BLOCKER: demo::PipelineHandle and rhi::PipelineHandle are separate types
-    // RHI bindPipeline expects rhi::PipelineHandle, but we have demo::PipelineHandle
+    // BLOCKER: RHI bindPipeline is a stub placeholder, using native Vulkan binding
     const PipelineHandle lightPipeline = m_renderer->getLightPipelineHandle();
     if(lightPipeline.isNull())
     {
-        rhi::vulkan::cmdEndRendering(*context.cmd);
+        context.cmd->endRenderPass();
         context.cmd->endEvent();
         return;
     }
@@ -98,25 +95,23 @@ void LightPass::execute(const PassContext& context) const
     rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
 
     // Get pipeline layout for descriptor binding
-    // BLOCKER: Handle type mismatch between demo:: and rhi:: handle types
+    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
         m_renderer->getLightPipelineLayout());
 
     // Bind GBuffer texture descriptor set (set 0)
-    // BLOCKER: demo::BindGroupHandle and rhi::BindGroupHandle are separate types
-    // RHI bindBindGroup expects rhi::BindGroupHandle, but we have demo::BindGroupHandle
+    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getGBufferTextureDescriptorSet());
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    // Draw fullscreen triangle
-    rhi::vulkan::cmdDraw(*context.cmd, 3, 1, 0, 0);
+    // Draw fullscreen triangle using RHI interface
+    context.cmd->draw(3, 1, 0, 0);
 
-    // End dynamic rendering
-    // BLOCKER: endRenderPass would work, but cmdEndRendering is needed to match cmdBeginRendering
-    rhi::vulkan::cmdEndRendering(*context.cmd);
+    // End render pass using RHI interface
+    context.cmd->endRenderPass();
 
     context.cmd->endEvent();
 }

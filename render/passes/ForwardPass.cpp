@@ -3,7 +3,7 @@
 #include "../MeshPool.h"
 #include "../SceneResources.h"
 #include "../../shaders/shader_io.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan commands until RHI handles support 64-bit native pointers
+#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
 
 #include <algorithm>
 #include <array>
@@ -43,7 +43,6 @@ void ForwardPass::execute(const PassContext& context) const
     context.cmd->beginEvent("ForwardPass");
 
     // Get swapchain image view and extent
-    // BLOCKER: TextureViewHandle uses 32-bit index, can't store 64-bit VkImageView pointer
     const VkImageView swapchainImageView = m_renderer->getCurrentSwapchainImageView();
     const rhi::Extent2D swapchainExtent = {
         m_renderer->getSwapchainExtent().width,
@@ -127,34 +126,31 @@ void ForwardPass::execute(const PassContext& context) const
         [](const auto& a, const auto& b) { return a.second > b.second; });
 
     // Setup color attachment with LOAD loadOp (preserve LightPass output)
-    const VkRenderingAttachmentInfo colorAttachment{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = swapchainImageView,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Preserve existing content
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    rhi::RenderTargetDesc colorTarget = {
+        .texture = {},  // Not used when view carries native pointer
+        .view = rhi::TextureViewHandle::fromNative(swapchainImageView),
+        .state = rhi::ResourceState::general,
+        .loadOp = rhi::LoadOp::load,  // Preserve existing content
+        .storeOp = rhi::StoreOp::store,
     };
 
     // Setup depth attachment (read-only, for depth test)
-    const VkRenderingAttachmentInfo depthAttachment{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = sceneResources.getDepthImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Read existing depth
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    rhi::DepthTargetDesc depthTarget = {
+        .texture = {},  // Not used when view carries native pointer
+        .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
+        .state = rhi::ResourceState::general,
+        .loadOp = rhi::LoadOp::load,  // Read existing depth
+        .storeOp = rhi::StoreOp::store,
     };
 
-    // Begin dynamic rendering
-    // BLOCKER: RHI beginRenderPass requires TextureViewHandle which can't hold 64-bit native pointers
-    const VkRenderingInfo renderingInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = {{0, 0}, {renderExtent.width, renderExtent.height}},
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &colorAttachment,
-        .pDepthAttachment     = &depthAttachment,
+    // Begin render pass using RHI interface
+    const rhi::RenderPassDesc passDesc = {
+        .renderArea = {{0, 0}, renderExtent},
+        .colorTargets = &colorTarget,
+        .colorTargetCount = 1,
+        .depthTarget = &depthTarget,
     };
-    rhi::vulkan::cmdBeginRendering(*context.cmd, renderingInfo);
+    context.cmd->beginRenderPass(passDesc);
 
     // Set viewport and scissor using RHI interface
     const rhi::Viewport viewport{
@@ -168,12 +164,11 @@ void ForwardPass::execute(const PassContext& context) const
     context.cmd->setScissor(scissor);
 
     // Bind Forward pipeline
-    // BLOCKER: demo::PipelineHandle and rhi::PipelineHandle are separate types
-    // RHI bindPipeline expects rhi::PipelineHandle, but we have demo::PipelineHandle
+    // BLOCKER: RHI bindPipeline is a stub placeholder, using native Vulkan binding
     const PipelineHandle forwardPipeline = m_renderer->getForwardPipelineHandle();
     if(forwardPipeline.isNull())
     {
-        rhi::vulkan::cmdEndRendering(*context.cmd);
+        context.cmd->endRenderPass();
         context.cmd->endEvent();
         return;
     }
@@ -183,13 +178,12 @@ void ForwardPass::execute(const PassContext& context) const
     rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
 
     // Get pipeline layout for descriptor set binding
-    // BLOCKER: Handle type mismatch between demo:: and rhi:: handle types
+    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
         m_renderer->getGBufferPipelineLayout());
 
     // Bind texture descriptor set (set 0)
-    // BLOCKER: demo::BindGroupHandle and rhi::BindGroupHandle are separate types
-    // RHI bindBindGroup expects rhi::BindGroupHandle, but we have demo::BindGroupHandle
+    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getGBufferColorDescriptorSet());
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
@@ -221,7 +215,7 @@ void ForwardPass::execute(const PassContext& context) const
     context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
 
     // Get camera descriptor set (per-frame, uses dynamic offsets)
-    // BLOCKER: Same handle type mismatch issue as texture descriptor set
+    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     if(!cameraBindGroupHandle.isNull())
     {
@@ -286,7 +280,7 @@ void ForwardPass::execute(const PassContext& context) const
         context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
 
         // Bind draw descriptor set (set 2) with dynamic offset
-        // BLOCKER: Handle type mismatch - same as camera bind group
+        // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
         if(!drawBindGroupHandle.isNull())
         {
             uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
@@ -297,20 +291,20 @@ void ForwardPass::execute(const PassContext& context) const
                                     shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
         }
 
-        // Bind vertex and index buffers
-        const VkDeviceSize vertexOffset = 0;
-        VkBuffer vertexBuffer = mesh->getNativeVertexBuffer();
-        VkBuffer indexBuffer = mesh->getNativeIndexBuffer();
-        rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
-        rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        // Bind vertex and index buffers using RHI interface with opaque uint64_t handles
+        const uint64_t vertexHandle = mesh->vertexBufferHandle;
+        const uint64_t vertexOffset = 0;
+        context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
 
-        // Draw indexed
-        // BLOCKER: drawIndexed works, but buffer binding above requires native handles
-        rhi::vulkan::cmdDrawIndexed(*context.cmd, mesh->indexCount, 1, 0, 0, 0);
+        const uint64_t indexHandle = mesh->indexBufferHandle;
+        context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+
+        // Draw indexed using RHI interface
+        context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
     }
 
-    // BLOCKER: endRenderPass would work, but cmdEndRendering is needed to match cmdBeginRendering
-    rhi::vulkan::cmdEndRendering(*context.cmd);
+    // End render pass using RHI interface
+    context.cmd->endRenderPass();
 
     context.cmd->endEvent();
 }
