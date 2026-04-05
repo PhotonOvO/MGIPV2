@@ -100,8 +100,11 @@ public:
                              BindGroupHandle bindGroup,
                              const uint32_t* dynamicOffsets,
                              uint32_t        dynamicOffsetCount)                  = 0;
-  virtual void bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets, uint32_t bufferCount) = 0;
-  virtual void bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format) = 0;
+  // Bind vertex buffers with opaque handles (can store native pointers)
+  virtual void bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
+                                 const uint64_t* offsets, uint32_t bufferCount) = 0;
+  // Bind index buffer with opaque handle
+  virtual void bindIndexBuffer(uint64_t bufferHandle, uint64_t offset, IndexFormat format) = 0;
   virtual void pushConstants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data) = 0;
 
   virtual void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) = 0;

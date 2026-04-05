@@ -152,16 +152,35 @@ void MetalCommandList::bindBindTable(PipelineBindPoint bindPoint, uint32_t slot,
   (void)dynamicOffsetCount;
 }
 
-void MetalCommandList::bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets, uint32_t bufferCount)
+void MetalCommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+{
+  // TODO: Metal implementation
+  // Placeholder - will be properly implemented when needed
+}
+
+void MetalCommandList::bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
+                                         const uint64_t* offsets, uint32_t bufferCount)
 {
   // TODO: Metal implementation
   // NOTES:
   // Call [m_renderEncoder setVertexBuffers:bufferPointers offsets:offsets withRange:NSMakeRange(firstBinding, bufferCount)]
-  // Need to convert BufferHandles to MTLBuffer pointers and offsets to NSUInteger
+  // Need to convert opaque handles to MTLBuffer pointers
   (void)firstBinding;
-  (void)buffers;
+  (void)bufferHandles;
   (void)offsets;
   (void)bufferCount;
+}
+
+void MetalCommandList::bindIndexBuffer(uint64_t bufferHandle, uint64_t offset, IndexFormat format)
+{
+  // TODO: Metal implementation
+  // NOTES:
+  // Metal uses index buffers differently:
+  // [m_renderEncoder setVertexBuffer:indexBuffer offset:offset atIndex:slot]
+  // DrawIndexed uses drawIndexedPrimitives with index buffer
+  (void)bufferHandle;
+  (void)offset;
+  (void)format;
 }
 
 void MetalCommandList::pushConstants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data)
@@ -201,6 +220,20 @@ void MetalCommandList::draw(uint32_t vertexCount, uint32_t instanceCount, uint32
   (void)firstInstance;
 }
 
+void MetalCommandList::drawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+{
+  // TODO: Metal implementation
+  // NOTES:
+  // Call [m_renderEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+  //                                  indexCount:indexCount
+  //                                   indexType:MTLIndexTypeUInt32 or UInt16
+  //                                 indexBuffer:indexBuffer
+  //                           indexBufferOffset:offset
+  //                               instanceCount:instanceCount
+  //                                  baseVertex:vertexOffset
+  //                                baseInstance:firstInstance]
+}
+
 void MetalCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   // TODO: Metal implementation
@@ -213,6 +246,21 @@ void MetalCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint
   (void)groupCountX;
   (void)groupCountY;
   (void)groupCountZ;
+}
+
+void MetalCommandList::beginEvent(const char*)
+{
+  // TODO: Metal implementation
+  // NOTES:
+  // Metal doesn't have debug markers like Vulkan/D3D12
+  // Can use signposts or custom tracking
+}
+
+void MetalCommandList::endEvent()
+{
+  // TODO: Metal implementation
+  // NOTES:
+  // Metal doesn't have debug markers like Vulkan/D3D12
 }
 
 ResourceState MetalCommandList::getTrackedState(ResourceHandle resource, ResourceState fallback) const

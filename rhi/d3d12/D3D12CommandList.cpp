@@ -140,13 +140,36 @@ void D3D12CommandList::bindBindTable(PipelineBindPoint bindPoint, uint32_t slot,
   // 5. Apply dynamic offsets if needed (root constants or root descriptors)
 }
 
-void D3D12CommandList::bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets, uint32_t bufferCount)
+void D3D12CommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+{
+  // TODO: D3D12 implementation
+  // Placeholder - will be properly implemented when needed
+}
+
+void D3D12CommandList::bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
+                                         const uint64_t* offsets, uint32_t bufferCount)
 {
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Create D3D12_VERTEX_BUFFER_VIEW array
   // 2. Fill each view with buffer address, size, stride
   // 3. Call: IASetVertexBuffers(firstBinding, bufferCount, views)
+  (void)firstBinding;
+  (void)bufferHandles;
+  (void)offsets;
+  (void)bufferCount;
+}
+
+void D3D12CommandList::bindIndexBuffer(uint64_t bufferHandle, uint64_t offset, IndexFormat format)
+{
+  // TODO: D3D12 implementation
+  // NOTES:
+  // 1. Create D3D12_INDEX_BUFFER_VIEW
+  // 2. Set buffer address, size, format (DXGI_FORMAT_R32_UINT or R16_UINT)
+  // 3. Call: IASetIndexBuffer(&view)
+  (void)bufferHandle;
+  (void)offset;
+  (void)format;
 }
 
 void D3D12CommandList::pushConstants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data)
@@ -166,11 +189,32 @@ void D3D12CommandList::draw(uint32_t vertexCount, uint32_t instanceCount, uint32
   // Call: m_commandList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance)
 }
 
+void D3D12CommandList::drawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+{
+  // TODO: D3D12 implementation
+  // NOTES:
+  // Call: m_commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertexLocation, startInstanceLocation)
+}
+
 void D3D12CommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   // TODO: D3D12 implementation
   // NOTES:
   // Call: m_commandList->Dispatch(groupCountX, groupCountY, groupCountZ)
+}
+
+void D3D12CommandList::beginEvent(const char*)
+{
+  // TODO: D3D12 implementation
+  // NOTES:
+  // PIX or D3D12 debug marker: BeginEvent()
+}
+
+void D3D12CommandList::endEvent()
+{
+  // TODO: D3D12 implementation
+  // NOTES:
+  // PIX or D3D12 debug marker: EndEvent()
 }
 
 ResourceState D3D12CommandList::getTrackedState(ResourceHandle resource, ResourceState fallback) const

@@ -376,15 +376,25 @@ void VulkanCommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*
   // Placeholder implementation - will be properly implemented after Pipeline tracks BindGroupLayout
 }
 
-void VulkanCommandList::bindVertexBuffers(uint32_t, const BufferHandle*, const uint64_t*, uint32_t)
+void VulkanCommandList::bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
+                                          const uint64_t* offsets, uint32_t bufferCount)
 {
   ensureCommandBuffer(m_commandBuffer);
+  // Convert opaque handles to VkBuffer (handles are just encoded pointers)
+  std::vector<VkBuffer> nativeBuffers(bufferCount);
+  for(uint32_t i = 0; i < bufferCount; ++i)
+  {
+    nativeBuffers[i] = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(bufferHandles[i]));
+  }
+  vkCmdBindVertexBuffers(m_commandBuffer, firstBinding, bufferCount, nativeBuffers.data(), offsets);
 }
 
-void VulkanCommandList::bindIndexBuffer(BufferHandle, uint64_t offset, IndexFormat format)
+void VulkanCommandList::bindIndexBuffer(uint64_t bufferHandle, uint64_t offset, IndexFormat format)
 {
   ensureCommandBuffer(m_commandBuffer);
-  // Note: Actual binding requires native buffer handle, placeholder for now
+  VkBuffer   nativeBuffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(bufferHandle));
+  VkIndexType indexType   = toVkIndexType(format);
+  vkCmdBindIndexBuffer(m_commandBuffer, nativeBuffer, offset, indexType);
 }
 
 void VulkanCommandList::pushConstants(ShaderStage, uint32_t, uint32_t, const void*)
