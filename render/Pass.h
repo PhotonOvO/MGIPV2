@@ -27,6 +27,8 @@ struct PassContext
   std::vector<StreamEntry>* drawStream{nullptr};
   // glTF model data for rendering meshes
   const GltfUploadResult*   gltfModel{nullptr};
+  // Global bindless resource (bind once at pass start)
+  BindGroupHandle           globalBindlessGroup{};
 };
 
 enum class ResourceAccess : uint8_t
