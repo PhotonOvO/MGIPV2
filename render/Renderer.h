@@ -138,6 +138,12 @@ public:
   BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;
   BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;
 
+  // BindGroup creation (new RHI interface)
+  rhi::BindGroupLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
+  rhi::BindGroupHandle createBindGroup(const rhi::BindGroupDesc& desc);
+  void destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle);
+  void destroyBindGroup(rhi::BindGroupHandle handle);
+
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
   int32_t getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
