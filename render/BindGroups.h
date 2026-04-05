@@ -2,13 +2,9 @@
 
 #include "../common/Handles.h"
 #include "../rhi/RHIBindlessTypes.h"
+#include "../rhi/RHIDescriptor.h"
 
 #include <cstdint>
-
-namespace demo::rhi {
-class BindTableLayout;
-class BindTable;
-}  // namespace demo::rhi
 
 namespace demo {
 

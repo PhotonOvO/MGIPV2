@@ -99,6 +99,37 @@ struct BindGroupLayoutDesc
   uint32_t                    entryCount{0};
 };
 
+// BindGroup entry for resource binding
+struct BindGroupEntry
+{
+  uint32_t     binding{0};
+  BufferHandle buffer{};
+  TextureHandle texture{};
+  uint64_t     offset{0};
+  uint64_t     range{0};
+};
+
+struct BindGroupDesc
+{
+  BindGroupLayoutHandle layout{};
+  const BindGroupEntry* entries{nullptr};
+  uint32_t              entryCount{0};
+};
+
+class BindGroup
+{
+public:
+  virtual ~BindGroup() = default;
+
+  virtual void init(void* nativeDevice, const BindGroupDesc& desc) = 0;
+  virtual void deinit() = 0;
+  virtual void update(uint32_t entryIndex, const BindGroupEntry& entry) = 0;
+  virtual uint64_t getNativeHandle() const = 0;
+};
+
+// Alias for backwards compatibility
+using BindTable = BindGroup;
+
 // Forward declaration for handle type
 class BindGroupLayout;
 
@@ -149,19 +180,6 @@ struct BindTableWrite
   const DescriptorBufferInfo* pBufferInfo{nullptr};
   ResourceVisibility          visibility{ResourceVisibility::all};
   BindlessUpdateFlags         updateFlags{BindlessUpdateFlags::immediateVisibility};
-};
-
-class BindTable
-{
-public:
-  virtual ~BindTable() = default;
-
-  virtual void init(void* nativeDevice, const BindTableLayout& layout, uint32_t maxLogicalEntries) = 0;
-  virtual void deinit()                                                                            = 0;
-
-  virtual void update(uint32_t writeCount, const BindTableWrite* writes) = 0;
-
-  virtual uint64_t getNativeHandle() const = 0;
 };
 
 }  // namespace demo::rhi
