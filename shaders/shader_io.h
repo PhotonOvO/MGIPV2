@@ -53,8 +53,16 @@ struct DrawUniforms
 {
   mat4 modelMatrix;
   vec4 baseColorFactor;
-  uint32_t materialIndex;
-  uint32_t _padding[3];
+  int32_t baseColorTextureIndex;   // Bindless texture index, -1 = no texture
+  int32_t normalTextureIndex;      // -1 = no texture
+  int32_t metallicRoughnessTextureIndex;  // -1 = no texture
+  int32_t occlusionTextureIndex;   // -1 = no texture
+  float metallicFactor;
+  float roughnessFactor;
+  float normalScale;
+  int32_t alphaMode;      // 0=OPAQUE, 1=MASK, 2=BLEND
+  float alphaCutoff;      // Default 0.5, used for MASK mode
+  float _padding[2];
 };
 
 struct SceneInfo
@@ -109,6 +117,11 @@ struct PushConstantGltf
 
 // Tangent vertex location
 STATIC_CONST int LVGltfTangent = 3;
+
+// Alpha mode constants (matches glTF spec)
+STATIC_CONST int LAlphaOpaque   = 0;
+STATIC_CONST int LAlphaMask     = 1;
+STATIC_CONST int LAlphaBlend    = 2;
 
 // Vertex with tangent for GBuffer pass
 struct VertexGltfTangent
