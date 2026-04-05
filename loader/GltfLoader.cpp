@@ -1,8 +1,8 @@
 #include "GltfLoader.h"
 
 #define TINYGLTF_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#define TINYGLTF_NO_STB_IMAGE
 #include <tiny_gltf.h>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -11,6 +11,15 @@
 #include <iostream>
 
 namespace demo {
+
+// Forward declarations for tangent generation
+static std::vector<float> computeTangents(
+    const std::vector<float>& positions,
+    const std::vector<float>& normals,
+    const std::vector<float>& texCoords,
+    const std::vector<uint32_t>& indices
+);
+static void generateTangentsIfMissing(GltfMeshData& mesh);
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     tinygltf::Model model;
@@ -227,9 +236,9 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
 
             meshData.texCoords.reserve(vertexCount * 2);
             for (size_t i = 0; i < vertexCount; ++i) {
-                // Flip Y coordinate for Vulkan convention
+                // glTF 2.0 uses upper-left origin (same as Vulkan), no Y-flip needed
                 meshData.texCoords.push_back(texData[i * 2]);
-                meshData.texCoords.push_back(1.0f - texData[i * 2 + 1]);
+                meshData.texCoords.push_back(texData[i * 2 + 1]);
             }
         } else {
             // Generate default UVs
@@ -282,6 +291,9 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
             }
         }
 
+        // Generate tangents if not provided by the glTF file
+        generateTangentsIfMissing(meshData);
+
         outModel.meshes.push_back(std::move(meshData));
     }
 
@@ -291,30 +303,66 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
 void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outModel) {
     outModel.materials.reserve(model.materials.size());
 
-    for (const auto& material : model.materials) {
-        GltfMaterialData matData;
+    for (const auto& mat : model.materials) {
+        GltfMaterialData data;
+        data.name = mat.name;
+        data.doubleSided = mat.doubleSided;
 
-        // Get base color texture
-        auto baseColorIt = material.values.find("baseColorTexture");
-        if (baseColorIt != material.values.end()) {
-            matData.baseColorTexture = baseColorIt->second.TextureIndex();
+        // PBR Metallic-Roughness
+        const auto& pbr = mat.pbrMetallicRoughness;
+
+        // Base color
+        data.baseColorFactor = glm::vec4(
+            static_cast<float>(pbr.baseColorFactor[0]),
+            static_cast<float>(pbr.baseColorFactor[1]),
+            static_cast<float>(pbr.baseColorFactor[2]),
+            static_cast<float>(pbr.baseColorFactor[3])
+        );
+        if (pbr.baseColorTexture.index >= 0) {
+            data.baseColorTexture = pbr.baseColorTexture.index;
         }
 
-        // Get base color factor
-        auto baseColorFactorIt = material.values.find("baseColorFactor");
-        if (baseColorFactorIt != material.values.end()) {
-            const auto& factor = baseColorFactorIt->second.number_array;
-            if (factor.size() >= 4) {
-                matData.baseColorFactor = glm::vec4(
-                    static_cast<float>(factor[0]),
-                    static_cast<float>(factor[1]),
-                    static_cast<float>(factor[2]),
-                    static_cast<float>(factor[3])
-                );
-            }
+        // Metallic-Roughness
+        data.metallicFactor = static_cast<float>(pbr.metallicFactor);
+        data.roughnessFactor = static_cast<float>(pbr.roughnessFactor);
+        if (pbr.metallicRoughnessTexture.index >= 0) {
+            data.metallicRoughnessTexture = pbr.metallicRoughnessTexture.index;
         }
 
-        outModel.materials.push_back(matData);
+        // Normal map
+        if (mat.normalTexture.index >= 0) {
+            data.normalTexture = mat.normalTexture.index;
+            data.normalScale = static_cast<float>(mat.normalTexture.scale);
+        }
+
+        // Occlusion
+        if (mat.occlusionTexture.index >= 0) {
+            data.occlusionTexture = mat.occlusionTexture.index;
+            data.occlusionStrength = static_cast<float>(mat.occlusionTexture.strength);
+        }
+
+        // Emissive
+        data.emissiveFactor = glm::vec3(
+            static_cast<float>(mat.emissiveFactor[0]),
+            static_cast<float>(mat.emissiveFactor[1]),
+            static_cast<float>(mat.emissiveFactor[2])
+        );
+        if (mat.emissiveTexture.index >= 0) {
+            data.emissiveTexture = mat.emissiveTexture.index;
+        }
+
+        // Alpha mode (glTF spec)
+        std::string alphaModeStr = mat.alphaMode;
+        if (alphaModeStr == "MASK") {
+            data.alphaMode = 1;  // LAlphaMask
+            data.alphaCutoff = static_cast<float>(mat.alphaCutoff);
+        } else if (alphaModeStr == "BLEND") {
+            data.alphaMode = 2;  // LAlphaBlend
+        } else {
+            data.alphaMode = 0;  // LAlphaOpaque (default)
+        }
+
+        outModel.materials.push_back(data);
     }
 }
 
@@ -331,6 +379,77 @@ void GltfLoader::processImages(const tinygltf::Model& model, GltfModel& outModel
         imageData.pixels = image.image;
 
         outModel.images.push_back(std::move(imageData));
+    }
+}
+
+// Tangent generation using Lengyel's method
+static std::vector<float> computeTangents(
+    const std::vector<float>& positions,
+    const std::vector<float>& normals,
+    const std::vector<float>& texCoords,
+    const std::vector<uint32_t>& indices
+) {
+    const size_t vertexCount = positions.size() / 3;
+    std::vector<glm::vec3> tangents(vertexCount, glm::vec3(0.0f));
+    std::vector<glm::vec3> bitangents(vertexCount, glm::vec3(0.0f));
+
+    // Accumulate tangent vectors for each triangle
+    for (size_t i = 0; i < indices.size(); i += 3) {
+        const uint32_t i0 = indices[i];
+        const uint32_t i1 = indices[i + 1];
+        const uint32_t i2 = indices[i + 2];
+
+        const glm::vec3 p0(positions[i0 * 3], positions[i0 * 3 + 1], positions[i0 * 3 + 2]);
+        const glm::vec3 p1(positions[i1 * 3], positions[i1 * 3 + 1], positions[i1 * 3 + 2]);
+        const glm::vec3 p2(positions[i2 * 3], positions[i2 * 3 + 1], positions[i2 * 3 + 2]);
+
+        const glm::vec2 uv0(texCoords[i0 * 2], texCoords[i0 * 2 + 1]);
+        const glm::vec2 uv1(texCoords[i1 * 2], texCoords[i1 * 2 + 1]);
+        const glm::vec2 uv2(texCoords[i2 * 2], texCoords[i2 * 2 + 1]);
+
+        const glm::vec3 e1 = p1 - p0;
+        const glm::vec3 e2 = p2 - p0;
+        const glm::vec2 duv1 = uv1 - uv0;
+        const glm::vec2 duv2 = uv2 - uv0;
+
+        const float r = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y);
+
+        const glm::vec3 tangent = r * (e1 * duv2.y - e2 * duv1.y);
+        const glm::vec3 bitangent = r * (e2 * duv1.x - e1 * duv2.x);
+
+        tangents[i0] += tangent;
+        tangents[i1] += tangent;
+        tangents[i2] += tangent;
+
+        bitangents[i0] += bitangent;
+        bitangents[i1] += bitangent;
+        bitangents[i2] += bitangent;
+    }
+
+    // Orthogonalize and compute handedness
+    std::vector<float> result;
+    result.reserve(vertexCount * 4);
+
+    for (size_t i = 0; i < vertexCount; ++i) {
+        const glm::vec3 n(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
+        glm::vec3 t = tangents[i] - n * glm::dot(n, tangents[i]);
+        t = glm::normalize(t);
+
+        // Handedness (w component)
+        const float w = (glm::dot(glm::cross(n, t), bitangents[i]) < 0.0f) ? -1.0f : 1.0f;
+
+        result.push_back(t.x);
+        result.push_back(t.y);
+        result.push_back(t.z);
+        result.push_back(w);
+    }
+
+    return result;
+}
+
+static void generateTangentsIfMissing(GltfMeshData& mesh) {
+    if (mesh.tangents.empty() && !mesh.normals.empty() && !mesh.texCoords.empty() && !mesh.indices.empty()) {
+        mesh.tangents = computeTangents(mesh.positions, mesh.normals, mesh.texCoords, mesh.indices);
     }
 }
 
