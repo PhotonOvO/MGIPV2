@@ -248,6 +248,12 @@ enum class VertexFormat : uint8_t
   r32g32b32a32Sfloat = 4,
 };
 
+enum class IndexFormat : uint8_t
+{
+  uint16 = 0,
+  uint32 = 1,
+};
+
 struct VertexBindingDesc
 {
   uint32_t        binding{0};
