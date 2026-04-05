@@ -113,7 +113,9 @@ public:
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
-  PipelineHandle getGBufferPipelineHandle() const;
+  PipelineHandle getGBufferOpaquePipelineHandle() const;
+  PipelineHandle getGBufferAlphaTestPipelineHandle() const;
+  PipelineHandle getForwardPipelineHandle() const;
   uint64_t       getLightPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
@@ -128,6 +130,28 @@ public:
   uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
       return getBindGroupDescriptorSetOpaque(handle, slot);
   }
+
+  // Get material baseColorFactor and texture info for glTF rendering
+  glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
+  int32_t getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
+
+  // Material texture indices struct for GBuffer rendering
+  struct MaterialTextureIndices {
+    int32_t baseColor = -1;
+    int32_t normal = -1;
+    int32_t metallicRoughness = -1;
+    int32_t occlusion = -1;
+    float metallicFactor = 1.0f;
+    float roughnessFactor = 1.0f;
+    float normalScale = 1.0f;
+    int32_t alphaMode = 0;    // 0=OPAQUE, 1=MASK, 2=BLEND
+    float alphaCutoff = 0.5f;
+  };
+  MaterialTextureIndices getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
+
+  void updateBindlessTexture(uint32_t index, TextureHandle textureHandle);
+  // Get the base index for glTF textures in the bindless array
+  static constexpr uint32_t getGltfTextureBaseIndex() { return kDemoMaterialSlotCount; }
 
   VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
   VkImageView getCurrentSwapchainImageView() const;
@@ -287,7 +311,9 @@ private:
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
-  PipelineHandle m_gbufferPipeline{};  // GBuffer MRT pipeline
+  PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
+  PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
+  PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
 
   // GBuffer uniform buffer bind groups (per-frame)
   BindGroupHandle m_gbufferCameraBindGroup{kNullBindGroupHandle};
@@ -349,6 +375,10 @@ private:
       float     normalScale{1.0f};
       float     occlusionStrength{1.0f};
       glm::vec3 emissiveFactor{0.0f};
+
+      // Alpha properties
+      int32_t alphaMode = 0;        // 0=OPAQUE, 1=MASK, 2=BLEND
+      float alphaCutoff = 0.5f;     // for MASK mode
 
       // Bindless descriptor slot
       rhi::ResourceIndex descriptorIndex{0};
