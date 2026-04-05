@@ -408,6 +408,9 @@ private:
     HandlePool<TextureHandle, TextureRecord>       texturePool;
     HandlePool<MaterialHandle, MaterialRecord>     materialPool;
     HandlePool<BindGroupHandle, BindGroupResource> bindGroupPool;
+    // New RHI interface handle pools
+    HandlePool<rhi::BindGroupLayoutHandle, std::unique_ptr<rhi::BindTableLayout>> bindGroupLayoutPool;
+    HandlePool<rhi::BindGroupHandle, std::unique_ptr<rhi::BindGroup>> bindGroupRhiPool;
     MaterialHandle                                 sampleMaterials[kDemoMaterialSlotCount]{};
     TextureHandle                                  viewportTextureHandle{};
     BindGroupHandle                                materialBindGroup{};

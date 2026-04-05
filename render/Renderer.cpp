@@ -2173,6 +2173,46 @@ void Renderer::updateGraphicsDescriptorSet()
   }
 }
 
+rhi::BindGroupLayoutHandle Renderer::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
+{
+  // Convert BindGroupLayoutDesc to BindTableLayoutEntry format
+  std::vector<rhi::BindTableLayoutEntry> tableEntries;
+  tableEntries.reserve(desc.entryCount);
+  for(uint32_t i = 0; i < desc.entryCount; ++i)
+  {
+    tableEntries.push_back(rhi::BindTableLayoutEntry{
+        .logicalIndex    = desc.entries[i].binding,
+        .resourceType    = desc.entries[i].type,
+        .descriptorCount = desc.entries[i].count,
+        .visibility      = static_cast<rhi::ResourceVisibility>(desc.entries[i].visibility),
+    });
+  }
+
+  auto layout = std::make_unique<rhi::vulkan::VulkanBindTableLayout>();
+  layout->init(reinterpret_cast<void*>(static_cast<uintptr_t>(m_device.device->getNativeDevice())), tableEntries);
+  return m_materials.bindGroupLayoutPool.emplace(std::move(layout));
+}
+
+rhi::BindGroupHandle Renderer::createBindGroup(const rhi::BindGroupDesc& desc)
+{
+  // TODO: Implement BindGroup creation using new RHI interface
+  // This will be implemented in a later task
+  ASSERT(false, "createBindGroup(rhi::BindGroupDesc) not yet implemented");
+  return rhi::BindGroupHandle{};
+}
+
+void Renderer::destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle)
+{
+  // TODO: Implement BindGroupLayout destruction
+  // This will be implemented in a later task
+}
+
+void Renderer::destroyBindGroup(rhi::BindGroupHandle handle)
+{
+  // TODO: Implement BindGroup destruction using new RHI interface
+  // This will be implemented in a later task
+}
+
 BindGroupHandle Renderer::createBindGroup(BindGroupDesc desc)
 {
   ASSERT(isStableBindGroupSetSlot(desc.slot), "BindGroupDesc slot must be one of stable set slots 0..3");
