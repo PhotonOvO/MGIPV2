@@ -36,7 +36,41 @@ using BufferHandle       = Handle<BufferTag>;
 using TextureHandle      = Handle<TextureTag>;
 using PipelineHandle     = Handle<PipelineTag>;
 using SamplerHandle      = Handle<SamplerTag>;
-using TextureViewHandle  = Handle<TextureViewTag>;
+
+// TextureViewHandle with native pointer support for wrapping native image views
+struct TextureViewHandle : Handle<TextureViewTag>
+{
+  // Create from native pointer (encodes 64-bit pointer into index+generation)
+  [[nodiscard]] static TextureViewHandle fromNativePtr(void* nativePtr) noexcept
+  {
+    TextureViewHandle h;
+    const uint64_t value = reinterpret_cast<uint64_t>(nativePtr);
+    h.index = static_cast<uint32_t>(value & 0xFFFFFFFFULL);
+    h.generation = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFFULL);
+    return h;
+  }
+
+  // Get native pointer from handle
+  [[nodiscard]] void* toNativePtr() const noexcept
+  {
+    const uint64_t value = (static_cast<uint64_t>(generation) << 32) | index;
+    return reinterpret_cast<void*>(value);
+  }
+
+  // Convenience for typed access
+  template <typename T>
+  [[nodiscard]] static TextureViewHandle fromNative(T* ptr) noexcept
+  {
+    return fromNativePtr(static_cast<void*>(ptr));
+  }
+
+  template <typename T>
+  [[nodiscard]] T* as() const noexcept
+  {
+    return static_cast<T*>(toNativePtr());
+  }
+};
+
 using BufferViewHandle   = Handle<BufferViewTag>;
 using ResourceViewHandle = Handle<ResourceViewTag>;
 using BindLayoutHandle   = Handle<BindLayoutTag>;
