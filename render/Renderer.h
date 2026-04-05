@@ -162,6 +162,12 @@ public:
   };
   MaterialTextureIndices getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
 
+  // RHI accessors (replacing native accessors)
+  rhi::TextureViewHandle getCurrentSwapchainView() const;
+  rhi::TextureViewHandle getGBufferView(uint32_t index) const;
+  rhi::TextureViewHandle getDepthView() const;
+  rhi::BindGroupHandle getGlobalBindlessGroup() const;
+
   void updateBindlessTexture(uint32_t index, TextureHandle textureHandle);
   // Get the base index for glTF textures in the bindless array
   static constexpr uint32_t getGltfTextureBaseIndex() { return kDemoMaterialSlotCount; }
