@@ -45,16 +45,18 @@ struct TextureViewDesc
 
 struct RenderTargetDesc
 {
-  TextureHandle   texture{};
-  ResourceState   state{ResourceState::general};
-  LoadOp          loadOp{LoadOp::load};
-  StoreOp         storeOp{StoreOp::store};
-  ClearColorValue clearColor{};
+  TextureHandle     texture{};
+  TextureViewHandle view{};            // Texture view for rendering
+  ResourceState     state{ResourceState::general};
+  LoadOp            loadOp{LoadOp::load};
+  StoreOp           storeOp{StoreOp::store};
+  ClearColorValue   clearColor{};
 };
 
 struct DepthTargetDesc
 {
   TextureHandle          texture{};
+  TextureViewHandle      view{};            // Texture view for rendering
   ResourceState          state{ResourceState::general};
   LoadOp                 loadOp{LoadOp::load};
   StoreOp                storeOp{StoreOp::store};
