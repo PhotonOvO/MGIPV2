@@ -482,7 +482,6 @@ struct ValidationSettings
   VkBool32 unique_handles{VK_TRUE};
   VkBool32 object_lifetime{VK_TRUE};
   VkBool32 stateless_param{VK_TRUE};
-  VkBool32 gpu_validation_enable{VK_TRUE};  // GPU-assisted validation for detecting runtime errors
   std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG"};  // "VK_DBG_LAYER_ACTION_DEBUG_OUTPUT", "VK_DBG_LAYER_ACTION_BREAK"
   std::vector<const char*> report_flags{"error", "warn"};  // Enable both errors and warnings
   std::vector<const char*> message_id_filter{"WARNING-legacy-gpdp2"};  // Filter: legacy vkGetPhysicalDeviceProperties warning from third-party libs (ImGui/VMA)
@@ -501,7 +500,6 @@ struct ValidationSettings
         {layerName, "unique_handles", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &unique_handles},
         {layerName, "object_lifetime", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &object_lifetime},
         {layerName, "stateless_param", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &stateless_param},
-        {layerName, "gpu_validation_enable", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &gpu_validation_enable},
         {layerName, "debug_action", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(debug_action.size()), debug_action.data()},
         {layerName, "report_flags", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(report_flags.size()), report_flags.data()},
         {layerName, "message_id_filter", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(message_id_filter.size()),

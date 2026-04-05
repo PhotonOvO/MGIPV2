@@ -120,7 +120,8 @@ public:
   uint64_t       getLightPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
-  uint64_t       getGBufferColorDescriptorSet() const;
+  uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
+  uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
 
   // GBuffer uniform buffer bind groups
@@ -247,6 +248,9 @@ private:
     VkCommandPool                              transientCmdPool{};
     VkDescriptorPool                           descriptorPool{};
     VkDescriptorPool                           uiDescriptorPool{};
+    VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
+    VkDescriptorSet                            gbufferTextureSet{nullptr};
+    VkPipelineLayout                           lightPipelineLayout{nullptr};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
@@ -414,6 +418,7 @@ private:
   void                 createDescriptorPool();
   void                 createGraphicDescriptorSet();
   void                 updateGraphicsDescriptorSet();
+  void                 updateGBufferTextureDescriptorSet();
   void                 destroyBindGroups();
   utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
   PipelineHandle       selectComputePipelineHandle() const;

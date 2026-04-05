@@ -396,7 +396,46 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
 
+    // Create GBuffer descriptor set layout and set for LightPass
+    {
+      // Create descriptor set layout with 1 binding: array of 3 sampled images (GBuffer textures)
+      const VkDescriptorSetLayoutBinding binding{
+          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutCreateInfo layoutInfo{
+          .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings    = &binding,
+      };
+      VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &layoutInfo, nullptr, &m_device.gbufferTextureSetLayout));
+      DBG_VK_NAME(m_device.gbufferTextureSetLayout);
+
+      // Allocate descriptor set
+      const VkDescriptorSetAllocateInfo allocInfo{
+          .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool     = m_device.descriptorPool,
+          .descriptorSetCount = 1,
+          .pSetLayouts        = &m_device.gbufferTextureSetLayout,
+      };
+      VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, &m_device.gbufferTextureSet));
+      DBG_VK_NAME(m_device.gbufferTextureSet);
+    }
+
     utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
+  }
+
+  // Update GBuffer texture descriptor set
+  updateGBufferTextureDescriptorSet();
+
+  // Create pipeline layout for LightPass
+  {
+    const VkPipelineLayoutCreateInfo layoutInfo{
+        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts    = &m_device.gbufferTextureSetLayout,
+    };
+    VK_CHECK(vkCreatePipelineLayout(nativeDevice, &layoutInfo, nullptr, &m_device.lightPipelineLayout));
+    DBG_VK_NAME(m_device.lightPipelineLayout);
   }
 
   createGraphicDescriptorSet();
@@ -756,6 +795,62 @@ bool Renderer::prepareFrameResources()
   return acquireSwapchainImage(*m_swapchainDependent.swapchain, m_swapchainDependent.currentImageIndex);
 }
 
+void Renderer::updateGBufferTextureDescriptorSet()
+{
+  if(m_device.gbufferTextureSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
+
+  // Verify the SceneResources has valid image views
+  for(uint32_t i = 0; i < 3; ++i)
+  {
+    const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
+    if(sceneDesc.imageView == VK_NULL_HANDLE)
+    {
+      LOGW("SceneResources image view %u is null, skipping GBuffer descriptor update", i);
+      return;
+    }
+  }
+
+  const VkSampler linearSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
+      .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter   = VK_FILTER_LINEAR,
+      .minFilter   = VK_FILTER_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .maxLod      = VK_LOD_CLAMP_NONE,
+  });
+
+  // Write descriptor array for GBuffer textures (indices 0-2)
+  std::array<VkDescriptorImageInfo, 3> imageInfos{};
+  for(uint32_t i = 0; i < 3; ++i)
+  {
+    const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
+    imageInfos[i] = VkDescriptorImageInfo{
+        .sampler     = linearSampler,
+        .imageView   = sceneDesc.imageView,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+  }
+
+  const VkWriteDescriptorSet write{
+      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet          = m_device.gbufferTextureSet,
+      .dstBinding      = 0,
+      .dstArrayElement = 0,
+      .descriptorCount = 3,
+      .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo      = imageInfos.data(),
+  };
+
+  vkUpdateDescriptorSets(nativeDevice, 1, &write, 0, nullptr);
+}
+
 void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
 {
   if(requestedViewportSize.has_value() && isValidExtent(requestedViewportSize.value()))
@@ -789,6 +884,9 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
   VkCommandBuffer cmd           = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
   m_swapchainDependent.sceneResources.update(cmd, m_swapchainDependent.viewportSize);
   utils::endSingleTimeCommands(cmd, device, m_device.transientCmdPool, graphicsQueue);
+
+  // Update GBuffer texture descriptor set after potential SceneResources resize
+  updateGBufferTextureDescriptorSet();
 }
 
 rhi::CommandList& Renderer::beginCommandRecording()
@@ -1298,92 +1396,6 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), fragShaderModule, nullptr);
 #endif
 
-  // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
-#ifdef USE_SLANG
-  {
-    VkShaderModule lightShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                                {shader_light_slang, std::size(shader_light_slang)});
-    DBG_VK_NAME(lightShaderModule);
-
-    // Light pipeline uses no vertex input (fullscreen triangle generated in VS)
-    const rhi::VertexInputLayoutDesc emptyVertexInput{
-        .bindings       = nullptr,
-        .bindingCount   = 0,
-        .attributes     = nullptr,
-        .attributeCount = 0,
-    };
-
-    const std::array<rhi::DynamicState, 2> lightDynamicStates{{
-        rhi::DynamicState::viewport,
-        rhi::DynamicState::scissor,
-    }};
-
-    // No blending for light pass output
-    const std::array<rhi::BlendAttachmentState, 1> lightBlendStates{{
-        rhi::BlendAttachmentState{
-            .blendEnable         = false,
-            .colorWriteMask      = rhi::ColorComponentFlags::all,
-        },
-    }};
-
-    std::array<rhi::PipelineShaderStageDesc, 2> lightShaderStages{{
-        rhi::PipelineShaderStageDesc{
-            .stage        = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
-            .entryPoint   = "vertexMain",
-        },
-        rhi::PipelineShaderStageDesc{
-            .stage        = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
-            .entryPoint   = "fragmentMain",
-        },
-    }};
-
-    const std::array<rhi::TextureFormat, 1> swapchainColorFormat{{
-        toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat),
-    }};
-
-    rhi::GraphicsPipelineDesc lightGraphicsDesc{
-        .layout            = m_device.graphicPipelineLayout.get(),
-        .shaderStages      = lightShaderStages.data(),
-        .shaderStageCount  = static_cast<uint32_t>(lightShaderStages.size()),
-        .vertexInput       = emptyVertexInput,
-        .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{false, false, rhi::CompareOp::always},
-        .blendStates       = lightBlendStates.data(),
-        .blendStateCount   = static_cast<uint32_t>(lightBlendStates.size()),
-        .dynamicStates     = lightDynamicStates.data(),
-        .dynamicStateCount = static_cast<uint32_t>(lightDynamicStates.size()),
-        .renderingInfo =
-            {
-                .colorFormats     = swapchainColorFormat.data(),
-                .colorFormatCount = static_cast<uint32_t>(swapchainColorFormat.size()),
-                .depthFormat      = rhi::TextureFormat::undefined,
-            },
-    };
-    lightGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
-    lightGraphicsDesc.rasterState.cullMode    = rhi::CullMode::none;
-    lightGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
-    lightGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
-
-    rhi::vulkan::GraphicsPipelineCreateInfo lightCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 2,  // Light variant
-            },
-        .desc = lightGraphicsDesc,
-    };
-    const VkPipeline lightPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCreateInfo);
-    DBG_VK_NAME(lightPipeline);
-    m_lightPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                       reinterpret_cast<uint64_t>(lightPipeline),
-                                       lightCreateInfo.key.specializationVariant);
-
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightShaderModule, nullptr);
-  }
-
   // Create GBuffer pipeline layout with uniform buffer bindings
   {
     // Set 1: Camera uniform buffer layout
@@ -1485,6 +1497,138 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
     m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
   }
+
+  // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
+#ifdef USE_SLANG
+  {
+    VkShaderModule lightShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                {shader_light_slang, std::size(shader_light_slang)});
+    DBG_VK_NAME(lightShaderModule);
+
+    // Shader stages
+    const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{{
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = lightShaderModule,
+            .pName  = "vertexMain",
+        },
+        {
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = lightShaderModule,
+            .pName  = "fragmentMain",
+        },
+    }};
+
+    // Vertex input (empty - fullscreen triangle generated in VS)
+    const VkPipelineVertexInputStateCreateInfo vertexInput{
+        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount   = 0,
+        .vertexAttributeDescriptionCount = 0,
+    };
+
+    // Input assembly
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+
+    // Rasterizer
+    const VkPipelineRasterizationStateCreateInfo rasterizer{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable        = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode             = VK_POLYGON_MODE_FILL,
+        .cullMode                = VK_CULL_MODE_NONE,
+        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable         = VK_FALSE,
+        .lineWidth               = 1.0f,
+    };
+
+    // Multisampling
+    const VkPipelineMultisampleStateCreateInfo multisampling{
+        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable  = VK_FALSE,
+    };
+
+    // Color blend
+    const VkPipelineColorBlendAttachmentState colorBlendAttachment{
+        .blendEnable         = VK_FALSE,
+        .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlending{
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable   = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments    = &colorBlendAttachment,
+    };
+
+    // Dynamic state
+    const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+        .pDynamicStates    = dynamicStates.data(),
+    };
+
+    // Depth stencil (disabled for light pass)
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable       = VK_FALSE,
+        .depthWriteEnable      = VK_FALSE,
+        .depthCompareOp        = VK_COMPARE_OP_ALWAYS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable     = VK_FALSE,
+    };
+
+    // Viewport state (required even with dynamic viewport/scissor)
+    const VkPipelineViewportStateCreateInfo viewportState{
+        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 0,  // Set dynamically with VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT
+        .scissorCount  = 0,  // Set dynamically with VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT
+    };
+
+    // Pipeline rendering info
+    const VkFormat colorFormat = m_swapchainDependent.swapchainImageFormat;
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &colorFormat,
+    };
+
+    // Graphics pipeline create info
+    const VkGraphicsPipelineCreateInfo pipelineInfo{
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &renderingInfo,
+        .stageCount          = static_cast<uint32_t>(shaderStages.size()),
+        .pStages             = shaderStages.data(),
+        .pVertexInputState   = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState      = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState   = &multisampling,
+        .pDepthStencilState  = &depthStencil,
+        .pColorBlendState    = &colorBlending,
+        .pDynamicState       = &dynamicState,
+        .layout              = m_device.lightPipelineLayout,
+        .renderPass          = VK_NULL_HANDLE,
+        .subpass             = 0,
+    };
+
+    VkPipeline lightPipeline = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                        VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &lightPipeline));
+    DBG_VK_NAME(lightPipeline);
+    m_lightPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                       reinterpret_cast<uint64_t>(lightPipeline),
+                                       2);  // specialization variant
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightShaderModule, nullptr);
+  }
+#endif
 
   // Create GBuffer pipelines (Opaque + AlphaTest variants)
   {
@@ -1706,7 +1850,6 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
   }
-#endif
 }
 
 void Renderer::initImGui(GLFWwindow* window)
@@ -2390,7 +2533,7 @@ void Renderer::destroyGltfResources(const GltfUploadResult& result)
 
 uint64_t Renderer::getLightPipelineLayout() const
 {
-  return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
+  return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
 }
 
 uint64_t Renderer::getGraphicsPipelineLayout() const
@@ -2406,6 +2549,11 @@ uint64_t Renderer::getGBufferPipelineLayout() const
 uint64_t Renderer::getGBufferColorDescriptorSet() const
 {
   return getBindGroupDescriptorSetOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+}
+
+uint64_t Renderer::getGBufferTextureDescriptorSet() const
+{
+  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSet);
 }
 
 glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const
