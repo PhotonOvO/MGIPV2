@@ -1,10 +1,21 @@
 #pragma once
 
+#include "../rhi/RHIHandles.h"
+
 #include <cstdint>
 #include <type_traits>
 
 namespace demo {
 
+// Use RHI handles directly (unified types)
+using BufferHandle    = rhi::BufferHandle;
+using TextureHandle   = rhi::TextureHandle;
+using PipelineHandle  = rhi::PipelineHandle;
+using SamplerHandle   = rhi::SamplerHandle;
+using BindGroupHandle = rhi::BindGroupHandle;
+
+// Keep application-specific handles that don't exist in RHI
+// Using the original macro pattern
 #define DEMO_DECLARE_TYPED_HANDLE(handleName)                                                                          \
   struct handleName                                                                                                    \
   {                                                                                                                    \
@@ -19,15 +30,16 @@ namespace demo {
   static_assert(std::is_standard_layout_v<handleName>, #handleName " must stay standard layout");                      \
   inline constexpr handleName kNull##handleName {}
 
-DEMO_DECLARE_TYPED_HANDLE(BufferHandle);
-DEMO_DECLARE_TYPED_HANDLE(TextureHandle);
-DEMO_DECLARE_TYPED_HANDLE(SamplerHandle);
-DEMO_DECLARE_TYPED_HANDLE(ShaderHandle);
-DEMO_DECLARE_TYPED_HANDLE(PipelineHandle);
-DEMO_DECLARE_TYPED_HANDLE(BindGroupHandle);
 DEMO_DECLARE_TYPED_HANDLE(MeshHandle);
 DEMO_DECLARE_TYPED_HANDLE(MaterialHandle);
 
 #undef DEMO_DECLARE_TYPED_HANDLE
+
+// Null handle constants for unified types
+inline constexpr rhi::BufferHandle   kNullBufferHandle{};
+inline constexpr rhi::TextureHandle  kNullTextureHandle{};
+inline constexpr rhi::PipelineHandle kNullPipelineHandle{};
+inline constexpr rhi::SamplerHandle  kNullSamplerHandle{};
+inline constexpr rhi::BindGroupHandle kNullBindGroupHandle{};
 
 }  // namespace demo

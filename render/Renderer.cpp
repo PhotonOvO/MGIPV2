@@ -2209,8 +2209,18 @@ void Renderer::destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle)
 
 void Renderer::destroyBindGroup(rhi::BindGroupHandle handle)
 {
-  // TODO: Implement BindGroup destruction using new RHI interface
-  // This will be implemented in a later task
+  BindGroupResource* bindGroup = m_materials.bindGroupPool.tryGet(handle);
+  if(bindGroup == nullptr)
+  {
+    return;
+  }
+
+  delete bindGroup->desc.table;
+  bindGroup->desc.table = nullptr;
+  delete bindGroup->desc.layout;
+  bindGroup->desc.layout = nullptr;
+
+  m_materials.bindGroupPool.destroy(handle);
 }
 
 BindGroupHandle Renderer::createBindGroup(BindGroupDesc desc)
@@ -2233,22 +2243,6 @@ void Renderer::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite
   const BindGroupResource* bindGroup = tryGetBindGroup(handle);
   ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve before update");
   bindGroup->desc.table->update(writeCount, writes);
-}
-
-bool Renderer::destroyBindGroup(BindGroupHandle handle)
-{
-  BindGroupResource* bindGroup = m_materials.bindGroupPool.tryGet(handle);
-  if(bindGroup == nullptr)
-  {
-    return false;
-  }
-
-  delete bindGroup->desc.table;
-  bindGroup->desc.table = nullptr;
-  delete bindGroup->desc.layout;
-  bindGroup->desc.layout = nullptr;
-
-  return m_materials.bindGroupPool.destroy(handle);  
 }
 
 void Renderer::destroyBindGroups()

@@ -452,7 +452,7 @@ private:
   const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;
   BindGroupHandle                           createBindGroup(BindGroupDesc desc);
   void           updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const;
-  bool           destroyBindGroup(BindGroupHandle handle);
+  // destroyBindGroup is provided by public RHI interface (line 145)
   PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant);
   void           destroyPipelines();
   const DeviceLifetimeResources::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;

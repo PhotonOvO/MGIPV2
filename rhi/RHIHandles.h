@@ -10,7 +10,9 @@ struct Handle
   uint32_t index{0};
   uint32_t generation{0};
 
-  [[nodiscard]] constexpr bool isValid() const { return index != 0 || generation != 0; }
+  [[nodiscard]] constexpr bool isValid() const noexcept { return index != 0 || generation != 0; }
+  [[nodiscard]] constexpr bool isNull() const noexcept { return index == 0 && generation == 0; }
+  constexpr explicit operator bool() const noexcept { return isValid(); }
 
   constexpr bool operator==(const Handle&) const = default;
 };
