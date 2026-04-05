@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Demo VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)  
 
 #====================================================================================
 # SHADER AUTHORITY POLICY
@@ -248,7 +248,7 @@ add_library(demo_core STATIC
   render/passes/SceneOpaquePass.cpp
   render/passes/PresentPass.h
   render/passes/PresentPass.cpp
-  render/passes/ImguiPass.h
+  render/passes/ImguiPass.h 
   render/passes/ImguiPass.cpp
   render/BindGroups.h
   render/Pass.h
@@ -272,6 +272,8 @@ add_library(demo_core STATIC
   loader/GltfLoader.cpp
   render/MeshPool.h
   render/MeshPool.cpp
+  render/Camera.h
+  render/Camera.cpp
 )
 
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)

@@ -6,6 +6,7 @@
 #include "../rhi/RHISurface.h"
 #include "../rhi/vulkan/VulkanSurface.h"
 #include "../loader/GltfLoader.h"
+#include "../render/Camera.h"
 
 #include <memory>
 #include <optional>
@@ -30,6 +31,11 @@ public:
     m_renderer.init(m_window, *m_surface, m_vSync);
     m_selectedMaterial = m_renderer.getMaterialHandle(0);
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
+
+    // Initialize camera
+    m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
+    m_camera.setPosition(glm::vec3(0.0f, 0.0f, 3.0f));
+    m_camera.update();
   }
 
   ~MinimalLatestApp()
@@ -45,6 +51,61 @@ public:
     {
       m_framePacer.paceFrame(m_vSync ? utils::getMonitorsMinRefreshRate() : 10000.0);
       glfwPollEvents();
+
+      // Camera input handling
+      {
+          // Keyboard movement
+          glm::vec3 moveDir{0.0f};
+          if(glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) moveDir.z += 1.0f;
+          if(glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS) moveDir.z -= 1.0f;
+          if(glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS) moveDir.x -= 1.0f;
+          if(glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS) moveDir.x += 1.0f;
+          if(glfwGetKey(m_window, GLFW_KEY_Q) == GLFW_PRESS) moveDir.y += 1.0f;
+          if(glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS) moveDir.y -= 1.0f;
+
+          if(glm::length(moveDir) > 0.0f)
+          {
+              moveDir = glm::normalize(moveDir) * m_moveSpeed * ImGui::GetIO().DeltaTime;
+              m_camera.move(moveDir);
+          }
+
+          // Mouse rotation (right-click to capture)
+          if(glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+          {
+              if(!m_cursorCaptured)
+              {
+                  glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                  double xpos, ypos;
+                  glfwGetCursorPos(m_window, &xpos, &ypos);
+                  m_lastMousePos = glm::vec2(static_cast<float>(xpos), static_cast<float>(ypos));
+                  m_cursorCaptured = true;
+              }
+              else
+              {
+                  double xpos, ypos;
+                  glfwGetCursorPos(m_window, &xpos, &ypos);
+                  float deltaX = static_cast<float>(xpos - m_lastMousePos.x) * m_rotateSpeed;
+                  float deltaY = static_cast<float>(ypos - m_lastMousePos.y) * m_rotateSpeed;
+                  m_lastMousePos = glm::vec2(xpos, ypos);
+                  m_camera.rotate(deltaX, -deltaY);  // Inverted Y for natural feel
+              }
+          }
+          else if(m_cursorCaptured)
+          {
+              glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+              m_cursorCaptured = false;
+          }
+
+          // Update camera matrices
+          m_camera.update();
+
+          // Update camera uniforms for rendering
+          m_cameraUniforms.view = m_camera.getViewMatrix();
+          m_cameraUniforms.projection = m_camera.getProjectionMatrix();
+          m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
+          m_cameraUniforms.cameraPosition = m_camera.getPosition();
+      }
+
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
       {
         ImGui_ImplGlfw_Sleep(10);
@@ -90,6 +151,7 @@ public:
       {
         m_viewportSize = requestedViewportSize;
         m_renderer.resize(m_viewportSize);
+        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
       }
 
       const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
@@ -137,6 +199,8 @@ public:
       frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
       frameParams.materialHandle = m_selectedMaterial;
       frameParams.clearColor     = m_clearColor;
+      frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
+      frameParams.cameraUniforms = &m_cameraUniforms;
       frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
@@ -170,8 +234,16 @@ private:
   std::string                                     m_modelPath;
   bool                                            m_modelLoaded = false;
 
+  // Camera
+  demo::Camera m_camera;
+  float m_moveSpeed{5.0f};       // Units per second
+  float m_rotateSpeed{0.1f};     // Mouse sensitivity
+  bool m_cursorCaptured{false};  // Mouse capture state
+  glm::vec2 m_lastMousePos{0.0f};
+  shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
+
   // UI state
-  char m_modelPathBuffer[512] = "resources/models/Box/Box.gltf";
+  char m_modelPathBuffer[512] = "resources/shader_ball.gltf";
 
   void loadModel(const std::string& path);
   void unloadModel();
@@ -190,7 +262,11 @@ inline void MinimalLatestApp::loadModel(const std::string& path)
   m_renderer.waitForIdle();
   unloadModel();
 
-  // For now, just store model info - actual upload requires command buffer integration
+  // Upload model to GPU
+  m_renderer.executeUploadCommand([&model, this](VkCommandBuffer cmd) {
+    m_currentModel = m_renderer.uploadGltfModel(model, cmd);
+  });
+
   m_modelPath  = path;
   m_modelLoaded = true;
 
