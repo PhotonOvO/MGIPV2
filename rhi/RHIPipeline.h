@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RHIHandles.h"
 #include "RHIBindlessTypes.h"
 #include "RHIShaderReflection.h"
 #include "RHITypes.h"
@@ -141,6 +142,10 @@ struct GraphicsPipelineDesc
   const DynamicState*            dynamicStates{nullptr};
   uint32_t                       dynamicStateCount{0};
   PipelineRenderingInfo          renderingInfo{};
+
+  // BindGroupLayouts for each descriptor set slot
+  const BindGroupLayoutHandle*   bindGroupLayouts{nullptr};
+  uint32_t                       bindGroupLayoutCount{0};
 };
 
 struct ComputePipelineDesc
