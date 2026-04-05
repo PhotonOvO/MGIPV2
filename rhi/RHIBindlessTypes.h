@@ -28,6 +28,8 @@ enum class BindlessResourceType : uint8_t
   storageBuffer,
   uniformTexelBuffer,
   storageTexelBuffer,
+  uniformBufferDynamic,
+  storageBufferDynamic,
 };
 
 enum class ResourceVisibility : uint32_t

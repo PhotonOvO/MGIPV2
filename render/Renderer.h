@@ -32,6 +32,11 @@
 #include <unordered_map>
 
 namespace demo {
+namespace rhi {
+namespace vulkan {
+class VulkanBindTableLayout;  // Forward declaration for shared layout ownership
+}
+}
 
 namespace rhi {
 struct BindTableWrite;
@@ -124,14 +129,14 @@ public:
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
 
-  // GBuffer uniform buffer bind groups
-  BindGroupHandle getCameraBindGroup() const { return m_gbufferCameraBindGroup; }
-  BindGroupHandle getDrawBindGroup() const { return m_gbufferDrawBindGroup; }
-
   // Get descriptor set from bind group (for descriptor set binding)
   uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
       return getBindGroupDescriptorSetOpaque(handle, slot);
   }
+
+  // Per-frame bind group accessors for dynamic uniform buffers
+  BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;
+  BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;
 
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
@@ -274,6 +279,7 @@ private:
     VkExtent2D                      viewportSize{800, 600};
     VkFormat                        swapchainImageFormat{VK_FORMAT_B8G8R8A8_UNORM};
     uint32_t                        currentImageIndex{0};
+    std::vector<rhi::ResourceState> imageStates;  // Track per-image layout state
     bool                            vSync{true};
   };
 
@@ -288,6 +294,8 @@ private:
     {
       TransientAllocator transientAllocator{};
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
+      BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
+      BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -322,8 +330,8 @@ private:
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
 
   // GBuffer uniform buffer bind groups (per-frame)
-  BindGroupHandle m_gbufferCameraBindGroup{kNullBindGroupHandle};
-  BindGroupHandle m_gbufferDrawBindGroup{kNullBindGroupHandle};
+  // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public
+  // BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;    // Moved to public
 
   // Draw-call-scoped transient CPU/GPU data staging bucket.
   // Lifetime trigger: rebuilt per draw packet emission/consumption; currently no persistent owner fields.

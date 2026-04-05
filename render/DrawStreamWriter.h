@@ -27,6 +27,7 @@ public:
   void setDynamicBufferIndex(demo::rhi::ResourceIndex dynamicBufferIndex);
   void setDynamicOffset(uint32_t dynamicOffset);
   void draw(uint32_t vertexOffset, uint32_t vertexCount, uint32_t instanceCount);
+  void drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
 
   [[nodiscard]] const State&      state() const;
   [[nodiscard]] const DrawStream& entries() const;

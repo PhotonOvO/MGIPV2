@@ -12,6 +12,7 @@ namespace demo {
 // Forward declaration to allow PassContext to carry render params without a
 // hard dependency on the full RenderParams type from Renderer.
 struct RenderParams;
+struct GltfUploadResult;
 class TransientAllocator;
 
 struct PassContext
@@ -24,6 +25,8 @@ struct PassContext
   // high-level render state without needing direct access to Renderer.
   const RenderParams*       params{nullptr};
   std::vector<StreamEntry>* drawStream{nullptr};
+  // glTF model data for rendering meshes
+  const GltfUploadResult*   gltfModel{nullptr};
 };
 
 enum class ResourceAccess : uint8_t

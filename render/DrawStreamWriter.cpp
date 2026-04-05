@@ -48,6 +48,21 @@ void DrawStreamWriter::draw(uint32_t vertexOffset, uint32_t vertexCount, uint32_
   m_entries.push_back(drawEntry);
 }
 
+void DrawStreamWriter::drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
+{
+  const uint32_t dirtyMask = emitCurrentState();
+
+  StreamEntry drawEntry{};
+  drawEntry.type                               = StreamEntryType::drawIndexed;
+  drawEntry.payload.drawIndexed.dirtyMask     = dirtyMask;
+  drawEntry.payload.drawIndexed.indexCount    = indexCount;
+  drawEntry.payload.drawIndexed.instanceCount = instanceCount;
+  drawEntry.payload.drawIndexed.firstIndex    = firstIndex;
+  drawEntry.payload.drawIndexed.vertexOffset  = vertexOffset;
+  drawEntry.payload.drawIndexed.firstInstance = firstInstance;
+  m_entries.push_back(drawEntry);
+}
+
 const DrawStreamWriter::State& DrawStreamWriter::state() const
 {
   return m_state;

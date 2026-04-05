@@ -33,6 +33,9 @@ public:
   bool                                     resolveLogicalIndex(ResourceIndex logicalIndex, uint32_t& outBinding) const;
   const std::vector<BindTableLayoutEntry>& entries() const;
 
+  // Direct access to Vulkan descriptor set layout
+  VkDescriptorSetLayout getVkDescriptorSetLayout() const { return m_layout; }
+
 private:
   VkDevice                                    m_device{nullptr};
   VkDescriptorSetLayout                       m_layout{nullptr};
@@ -52,6 +55,9 @@ public:
   void update(uint32_t writeCount, const BindTableWrite* writes) override;
 
   uint64_t getNativeHandle() const override;
+
+  // Direct access to Vulkan descriptor set
+  VkDescriptorSet getVkDescriptorSet() const { return m_set; }
 
 private:
   VkDevice         m_device{nullptr};

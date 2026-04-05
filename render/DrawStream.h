@@ -16,6 +16,7 @@ enum class StreamEntryType : uint8_t
   setDynamicBuffer = 3,
   setDynamicOffset = 4,
   draw             = 5,
+  drawIndexed      = 6,
 };
 
 inline constexpr uint32_t                 kDrawStreamInvalidDynamicOffset = 0xFFFFFFFFu;
@@ -43,6 +44,15 @@ struct StreamEntry
       uint32_t vertexCount;
       uint32_t instanceCount;
     } draw;
+    struct
+    {
+      uint32_t dirtyMask;
+      uint32_t indexCount;
+      uint32_t instanceCount;
+      uint32_t firstIndex;
+      int32_t  vertexOffset;
+      uint32_t firstInstance;
+    } drawIndexed;
   } payload{};
 };
 

@@ -45,7 +45,7 @@ void ForwardPass::execute(const PassContext& context) const
 
     // Get swapchain image view and extent
     const VkImageView swapchainImageView = m_renderer->getCurrentSwapchainImageView();
-    const VkExtent2D extent = m_renderer->getSwapchainExtent();
+    const VkExtent2D swapchainExtent = m_renderer->getSwapchainExtent();
 
     if(swapchainImageView == VK_NULL_HANDLE)
     {
@@ -61,6 +61,18 @@ void ForwardPass::execute(const PassContext& context) const
     }
 
     MeshPool& meshPool = m_renderer->getMeshPool();
+    SceneResources& sceneResources = m_renderer->getSceneResources();
+    const VkExtent2D sceneExtent = sceneResources.getSize();
+    // Use intersection of swapchain and scene extents for renderArea
+    const VkExtent2D renderExtent{
+        std::min(swapchainExtent.width, sceneExtent.width),
+        std::min(swapchainExtent.height, sceneExtent.height),
+    };
+    if(renderExtent.width == 0 || renderExtent.height == 0)
+    {
+        context.cmd->endEvent();
+        return;
+    }
 
     // Collect transparent meshes and sort by distance
     std::vector<std::pair<size_t, float>> transparentMeshes;
@@ -118,7 +130,6 @@ void ForwardPass::execute(const PassContext& context) const
     };
 
     // Setup depth attachment (read-only, for depth test)
-    SceneResources& sceneResources = m_renderer->getSceneResources();
     const VkRenderingAttachmentInfo depthAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = sceneResources.getDepthImageView(),
@@ -130,7 +141,7 @@ void ForwardPass::execute(const PassContext& context) const
     // Begin dynamic rendering
     const VkRenderingInfo renderingInfo{
         .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = {{0, 0}, extent},
+        .renderArea           = {{0, 0}, renderExtent},
         .layerCount           = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments    = &colorAttachment,
@@ -141,11 +152,11 @@ void ForwardPass::execute(const PassContext& context) const
     // Set viewport and scissor
     const VkViewport viewport{
         0.0f, 0.0f,
-        static_cast<float>(extent.width),
-        static_cast<float>(extent.height),
+        static_cast<float>(renderExtent.width),
+        static_cast<float>(renderExtent.height),
         0.0f, 1.0f
     };
-    const VkRect2D scissor{{0, 0}, extent};
+    const VkRect2D scissor{{0, 0}, renderExtent};
     rhi::vulkan::cmdSetViewport(*context.cmd, viewport);
     rhi::vulkan::cmdSetScissor(*context.cmd, scissor);
 
@@ -188,7 +199,7 @@ void ForwardPass::execute(const PassContext& context) const
     {
         cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         cameraData.projection = glm::perspective(glm::radians(45.0f),
-            static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 100.0f);
+            static_cast<float>(renderExtent.width) / static_cast<float>(renderExtent.height), 0.1f, 100.0f);
         cameraData.projection[1][1] *= -1.0f;
         cameraData.viewProjection = cameraData.projection * cameraData.view;
         cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
@@ -197,37 +208,22 @@ void ForwardPass::execute(const PassContext& context) const
     std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
     context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
 
-    // Get camera descriptor set
-    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup();
+    // Get camera descriptor set (per-frame, uses dynamic offsets)
+    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     if(!cameraBindGroupHandle.isNull())
     {
         uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
         VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
 
-        VkDescriptorBufferInfo bufferInfo{
-            .buffer = reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
-            .offset = cameraAlloc.offset,
-            .range  = sizeof(shaderio::CameraUniforms),
-        };
-        VkWriteDescriptorSet write{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = cameraDescriptorSet,
-            .dstBinding      = shaderio::LBindCamera,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &bufferInfo,
-        };
-        vkUpdateDescriptorSets(reinterpret_cast<VkDevice>(m_renderer->getDeviceOpaque()), 1, &write, 0, nullptr);
-
-        // Bind camera descriptor set (set 1)
+        // Bind camera descriptor set (set 1) with dynamic offset
+        const uint32_t cameraDynamicOffset = cameraAlloc.offset;
         vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                 VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                shaderio::LSetScene, 1, &cameraDescriptorSet, 0, nullptr);
+                                shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
     }
 
-    // Get draw descriptor set
-    const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup();
+    // Get draw descriptor set (per-frame)
+    const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
     // Render transparent meshes (sorted back to front)
     for(const auto& [meshIndex, distance] : transparentMeshes)
@@ -276,32 +272,15 @@ void ForwardPass::execute(const PassContext& context) const
         std::memcpy(drawAlloc.cpuPtr, &drawData, sizeof(drawData));
         context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
 
-        // Update draw descriptor
+        // Bind draw descriptor set (set 2) with dynamic offset
         if(!drawBindGroupHandle.isNull())
         {
             uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
             VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
-
-            VkDescriptorBufferInfo bufferInfo{
-                .buffer = reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
-                .offset = drawAlloc.offset,
-                .range  = sizeof(shaderio::DrawUniforms),
-            };
-            VkWriteDescriptorSet write{
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = drawDescriptorSet,
-                .dstBinding      = shaderio::LBindDrawModel,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo     = &bufferInfo,
-            };
-            vkUpdateDescriptorSets(reinterpret_cast<VkDevice>(m_renderer->getDeviceOpaque()), 1, &write, 0, nullptr);
-
-            // Bind draw descriptor set (set 2)
+            const uint32_t drawDynamicOffset = drawAlloc.offset;
             vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                    shaderio::LSetDraw, 1, &drawDescriptorSet, 0, nullptr);
+                                    shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
         }
 
         // Bind vertex and index buffers

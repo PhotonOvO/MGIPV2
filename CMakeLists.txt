@@ -278,7 +278,7 @@ add_library(demo_core STATIC
   render/Camera.cpp
 )
 
-target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
+target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES) 
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
 endif()

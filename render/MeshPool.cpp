@@ -38,12 +38,13 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     record.vertexCount = static_cast<uint32_t>(meshData.positions.size() / 3);
     record.indexCount = static_cast<uint32_t>(meshData.indices.size());
     record.transform = meshData.transform;
+    record.materialIndex = meshData.materialIndex;
 
-    // Build interleaved vertex buffer: Position(12) + Normal(12) + TexCoord(8) = 32 bytes
-    std::vector<uint8_t> vertexData(record.vertexCount * 32);
+    // Build interleaved vertex buffer: Position(12) + Normal(12) + TexCoord(8) + Tangent(16) = 48 bytes
+    std::vector<uint8_t> vertexData(record.vertexCount * 48);
 
     for (uint32_t i = 0; i < record.vertexCount; ++i) {
-        float* dst = reinterpret_cast<float*>(&vertexData[i * 32]);
+        float* dst = reinterpret_cast<float*>(&vertexData[i * 48]);
 
         // Position
         dst[0] = meshData.positions[i * 3 + 0];
@@ -68,6 +69,20 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         } else {
             dst[6] = 0.0f;
             dst[7] = 0.0f;
+        }
+
+        // Tangent
+        if (!meshData.tangents.empty()) {
+            dst[8] = meshData.tangents[i * 4 + 0];
+            dst[9] = meshData.tangents[i * 4 + 1];
+            dst[10] = meshData.tangents[i * 4 + 2];
+            dst[11] = meshData.tangents[i * 4 + 3];
+        } else {
+            // Default tangent (right-handed)
+            dst[8] = 1.0f;
+            dst[9] = 0.0f;
+            dst[10] = 0.0f;
+            dst[11] = 1.0f;
         }
     }
 
@@ -97,7 +112,7 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
 
     VmaAllocationCreateInfo stagingAllocInfo{
         .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-        .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+        .usage = VMA_MEMORY_USAGE_CPU_ONLY,  // Use system RAM for staging, not device-local heap
     };
 
     VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,

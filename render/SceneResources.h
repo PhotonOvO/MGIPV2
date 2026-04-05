@@ -36,6 +36,10 @@ public:
   [[nodiscard]] VkSampleCountFlagBits        getSampleCount() const;
   [[nodiscard]] float                        getAspectRatio() const;
 
+  // GBuffer MRT accessors (alias for existing color accessors)
+  [[nodiscard]] VkImageView                  getGBufferImageView(uint32_t index) const { return getColorImageView(index); }
+  [[nodiscard]] const VkDescriptorImageInfo& getGBufferDescriptor(uint32_t index) const { return getDescriptorImageInfo(index); }
+
 private:
   struct Resources
   {

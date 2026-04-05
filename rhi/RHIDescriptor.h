@@ -41,6 +41,10 @@ enum class DescriptorKind : uint8_t
       return DescriptorKind::UniformTexelBuffer;
     case BindlessResourceType::storageTexelBuffer:
       return DescriptorKind::StorageTexelBuffer;
+    case BindlessResourceType::uniformBufferDynamic:
+      return DescriptorKind::UniformBufferDynamic;
+    case BindlessResourceType::storageBufferDynamic:
+      return DescriptorKind::StorageBufferDynamic;
     default:
       return DescriptorKind::CombinedImageSampler;
   }

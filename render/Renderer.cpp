@@ -371,6 +371,9 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_swapchainDependent.windowSize     = VkExtent2D{swapchainExtent.width, swapchainExtent.height};
 
   m_swapchainDependent.currentImageIndex = 0;
+  m_swapchainDependent.imageStates.assign(
+      m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+      rhi::ResourceState::Undefined);
 
   createFrameSubmission(m_swapchainDependent.swapchain->getMaxFramesInFlight());
   createDescriptorPool();
@@ -544,11 +547,43 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
   m_device.samplerPool.deinit();
 
+  // Destroy bind groups FIRST (they use descriptor pools)
+  destroyBindGroups();
+
+  // Shutdown ImGui Vulkan backend BEFORE destroying uiDescriptorPool
+  // ImGui_ImplVulkan_Shutdown() frees descriptor sets from uiDescriptorPool
   ImGui_ImplVulkan_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();
 
-  destroyBindGroups();
+  // Destroy Vulkan objects that are not managed by smart pointers
+  if(m_device.lightPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.lightPipelineLayout, nullptr);
+    m_device.lightPipelineLayout = VK_NULL_HANDLE;
+  }
+  // Note: gbufferTextureSet is freed automatically when descriptorPool is destroyed
+  m_device.gbufferTextureSet = VK_NULL_HANDLE;
+  if(m_device.gbufferTextureSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.gbufferTextureSetLayout, nullptr);
+    m_device.gbufferTextureSetLayout = VK_NULL_HANDLE;
+  }
+  if(m_device.uiDescriptorPool != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorPool(device, m_device.uiDescriptorPool, nullptr);
+    m_device.uiDescriptorPool = VK_NULL_HANDLE;
+  }
+  if(m_device.descriptorPool != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorPool(device, m_device.descriptorPool, nullptr);
+    m_device.descriptorPool = VK_NULL_HANDLE;
+  }
+  if(m_device.transientCmdPool != VK_NULL_HANDLE)
+  {
+    vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
+    m_device.transientCmdPool = VK_NULL_HANDLE;
+  }
 
   destroyPipelines();
   if(m_device.graphicPipelineLayout)
@@ -566,21 +601,8 @@ void Renderer::shutdown(rhi::Surface& surface)
     m_device.gbufferPipelineLayout->deinit();
     m_device.gbufferPipelineLayout.reset();
   }
-  // Destroy GBuffer bind groups
-  if(!m_gbufferCameraBindGroup.isNull())
-  {
-    destroyBindGroup(m_gbufferCameraBindGroup);
-    m_gbufferCameraBindGroup = kNullBindGroupHandle;
-  }
-  if(!m_gbufferDrawBindGroup.isNull())
-  {
-    destroyBindGroup(m_gbufferDrawBindGroup);
-    m_gbufferDrawBindGroup = kNullBindGroupHandle;
-  }
-  vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
-  vkDestroyDescriptorPool(device, m_device.descriptorPool, nullptr);
-  vkDestroyDescriptorPool(device, m_device.uiDescriptorPool, nullptr);
-
+  // Per-frame bind groups already destroyed by destroyBindGroups() above
+  // Just cleanup the transient allocators
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     frameUserData.transientAllocator.destroy();
@@ -865,6 +887,9 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
     const rhi::Extent2D extent             = m_swapchainDependent.swapchain->getExtent();
     m_swapchainDependent.windowSize        = VkExtent2D{extent.width, extent.height};
     m_swapchainDependent.currentImageIndex = 0;
+    m_swapchainDependent.imageStates.assign(
+        m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+        rhi::ResourceState::Undefined);
     swapchainRebuilt                       = true;
   }
 
@@ -902,6 +927,17 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   auto&          frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
 
+  // Get the actual initial state of the current swapchain image
+  // Newly created/rebuilt swapchain images start as UNDEFINED
+  if(m_swapchainDependent.currentImageIndex >= m_swapchainDependent.imageStates.size())
+  {
+    m_swapchainDependent.imageStates.resize(
+        m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+        rhi::ResourceState::Undefined);
+  }
+  const rhi::ResourceState swapchainInitialState =
+      m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
+
   // Route through pass executor to orchestrate multi-pass rendering
   m_passExecutor.clearResourceBindings();
   m_passExecutor.bindBuffer({
@@ -930,7 +966,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       .handle       = kPassSwapchainHandle,
       .nativeImage  = m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex),
       .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::present,
+      .initialState = swapchainInitialState,
       .isSwapchain  = true,
   });
 
@@ -938,6 +974,9 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel};
   m_passExecutor.execute(context);
+
+  // Update swapchain image state after rendering
+  m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex] = rhi::ResourceState::Present;
 }
 
 void Renderer::endFrame(rhi::CommandList& cmd)
@@ -1398,66 +1437,127 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
   // Create GBuffer pipeline layout with uniform buffer bindings
   {
-    // Set 1: Camera uniform buffer layout
+    // Set 1: Camera uniform buffer layout (dynamic)
     std::vector<rhi::BindTableLayoutEntry> cameraLayoutEntries{
         rhi::BindTableLayoutEntry{
             .logicalIndex    = shaderio::LBindCamera,
-            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
             .descriptorCount = 1,
             .visibility      = rhi::ResourceVisibility::vertex,
         },
     };
 
-    auto* cameraLayout = new rhi::vulkan::VulkanBindTableLayout();
-    cameraLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), cameraLayoutEntries);
-    DBG_VK_NAME(cameraLayout->getVkDescriptorSetLayout());
+    // Create per-frame camera bind groups (each with its own layout)
+    VkDescriptorSetLayout cameraSetLayout = VK_NULL_HANDLE;
+    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
+    {
+      auto* cameraLayout = new rhi::vulkan::VulkanBindTableLayout();
+      cameraLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), cameraLayoutEntries);
+      DBG_VK_NAME(cameraLayout->getVkDescriptorSetLayout());
 
-    auto* cameraTable = new rhi::vulkan::VulkanBindTable();
-    cameraTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                      *cameraLayout, 1);
-    DBG_VK_NAME(cameraTable->getVkDescriptorSet());
+      auto* cameraTable = new rhi::vulkan::VulkanBindTable();
+      cameraTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                        *cameraLayout, 1);
+      DBG_VK_NAME(cameraTable->getVkDescriptorSet());
 
-    BindGroupDesc cameraBindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = cameraLayout,
-        .table               = cameraTable,
-        .primaryLogicalIndex = shaderio::LBindCamera,
-        .debugName           = "gbuffer-camera",
-    };
-    m_gbufferCameraBindGroup = createBindGroup(cameraBindGroupDesc);
+      BindGroupDesc cameraBindGroupDesc{
+          .slot                = BindGroupSetSlot::shaderSpecific,
+          .layout              = cameraLayout,
+          .table               = cameraTable,
+          .primaryLogicalIndex = shaderio::LBindCamera,
+          .debugName           = "gbuffer-camera",
+      };
+      m_perFrame.frameUserData[i].cameraBindGroup = createBindGroup(cameraBindGroupDesc);
+
+      // Initialize the descriptor to point to this frame's transient allocator buffer
+      // Dynamic offsets will be used at draw time to access specific allocations
+      // For dynamic UBOs, range must be <= maxUniformBufferRange and is the size of the uniform struct
+      VkDescriptorBufferInfo cameraBufferInfo{
+          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
+          .offset = 0,
+          .range  = sizeof(shaderio::CameraUniforms),
+      };
+      VkWriteDescriptorSet cameraWrite{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = cameraTable->getVkDescriptorSet(),
+          .dstBinding      = shaderio::LBindCamera,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo     = &cameraBufferInfo,
+      };
+      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                             1, &cameraWrite, 0, nullptr);
+
+      // Save the layout handle for pipeline layout creation (use first one, they're all identical)
+      if(i == 0)
+      {
+        cameraSetLayout = cameraLayout->getVkDescriptorSetLayout();
+      }
+    }
 
     // Set 2: Draw uniform buffer layout (dynamic)
     std::vector<rhi::BindTableLayoutEntry> drawLayoutEntries{
         rhi::BindTableLayoutEntry{
             .logicalIndex    = shaderio::LBindDrawModel,
-            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
             .descriptorCount = 1,
             .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
         },
     };
 
-    auto* drawLayout = new rhi::vulkan::VulkanBindTableLayout();
-    drawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), drawLayoutEntries);
-    DBG_VK_NAME(drawLayout->getVkDescriptorSetLayout());
+    // Create per-frame draw bind groups (each with its own layout)
+    VkDescriptorSetLayout drawSetLayout = VK_NULL_HANDLE;
+    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
+    {
+      auto* drawLayout = new rhi::vulkan::VulkanBindTableLayout();
+      drawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), drawLayoutEntries);
+      DBG_VK_NAME(drawLayout->getVkDescriptorSetLayout());
 
-    auto* drawTable = new rhi::vulkan::VulkanBindTable();
-    drawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                    *drawLayout, 1);
-    DBG_VK_NAME(drawTable->getVkDescriptorSet());
+      auto* drawTable = new rhi::vulkan::VulkanBindTable();
+      drawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                      *drawLayout, 1);
+      DBG_VK_NAME(drawTable->getVkDescriptorSet());
 
-    BindGroupDesc drawBindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = drawLayout,
-        .table               = drawTable,
-        .primaryLogicalIndex = shaderio::LBindDrawModel,
-        .debugName           = "gbuffer-draw",
-    };
-    m_gbufferDrawBindGroup = createBindGroup(drawBindGroupDesc);
+      BindGroupDesc drawBindGroupDesc{
+          .slot                = BindGroupSetSlot::shaderSpecific,
+          .layout              = drawLayout,
+          .table               = drawTable,
+          .primaryLogicalIndex = shaderio::LBindDrawModel,
+          .debugName           = "gbuffer-draw",
+      };
+      m_perFrame.frameUserData[i].drawBindGroup = createBindGroup(drawBindGroupDesc);
+
+      // Initialize the descriptor to point to this frame's transient allocator buffer
+      // For dynamic UBOs, range must be <= maxUniformBufferRange and is the size of the uniform struct
+      VkDescriptorBufferInfo drawBufferInfo{
+          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
+          .offset = 0,
+          .range  = sizeof(shaderio::DrawUniforms),
+      };
+      VkWriteDescriptorSet drawWrite{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = drawTable->getVkDescriptorSet(),
+          .dstBinding      = shaderio::LBindDrawModel,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo     = &drawBufferInfo,
+      };
+      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                             1, &drawWrite, 0, nullptr);
+
+      // Save the layout handle for pipeline layout creation (use first one, they're all identical)
+      if(i == 0)
+      {
+        drawSetLayout = drawLayout->getVkDescriptorSetLayout();
+      }
+    }
 
     // Create GBuffer pipeline layout
     const uint64_t textureLayoutHandle = getBindGroupLayoutOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
-    const uint64_t cameraLayoutHandle = getBindGroupLayoutOpaque(m_gbufferCameraBindGroup, BindGroupSetSlot::shaderSpecific);
-    const uint64_t drawLayoutHandle = getBindGroupLayoutOpaque(m_gbufferDrawBindGroup, BindGroupSetSlot::shaderSpecific);
+    const uint64_t cameraLayoutHandle = reinterpret_cast<uint64_t>(cameraSetLayout);
+    const uint64_t drawLayoutHandle = reinterpret_cast<uint64_t>(drawSetLayout);
 
     rhi::ShaderReflectionData gbufferReflection{};
     gbufferReflection.name = "shader.gbuffer";
@@ -1469,9 +1569,9 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
                                    rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
                                    Renderer::kDemoMaterialSlotCount, 0},
-        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                    rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
-        rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+        rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                    rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
                                    shaderio::LSetDraw, shaderio::LBindDrawModel, 1, 0},
     };
@@ -2108,7 +2208,7 @@ bool Renderer::destroyBindGroup(BindGroupHandle handle)
   delete bindGroup->desc.layout;
   bindGroup->desc.layout = nullptr;
 
-  return m_materials.bindGroupPool.destroy(handle);
+  return m_materials.bindGroupPool.destroy(handle);  
 }
 
 void Renderer::destroyBindGroups()
@@ -2124,6 +2224,8 @@ void Renderer::destroyBindGroups()
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     frameUserData.sceneBindGroup = kNullBindGroupHandle;
+    frameUserData.cameraBindGroup = kNullBindGroupHandle;
+    frameUserData.drawBindGroup = kNullBindGroupHandle;  
   }
 }
 
@@ -2554,6 +2656,24 @@ uint64_t Renderer::getGBufferColorDescriptorSet() const
 uint64_t Renderer::getGBufferTextureDescriptorSet() const
 {
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSet);
+}
+
+BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const
+{
+  if(frameIndex < m_perFrame.frameUserData.size())
+  {
+    return m_perFrame.frameUserData[frameIndex].cameraBindGroup;
+  }
+  return kNullBindGroupHandle;
+}
+
+BindGroupHandle Renderer::getDrawBindGroup(uint32_t frameIndex) const
+{
+  if(frameIndex < m_perFrame.frameUserData.size())
+  {
+    return m_perFrame.frameUserData[frameIndex].drawBindGroup;
+  }
+  return kNullBindGroupHandle;
 }
 
 glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const

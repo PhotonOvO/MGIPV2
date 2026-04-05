@@ -223,7 +223,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
 
   set(_CORE_FLAGS
     -emit-spirv-directly
-    -matrix-layout-row-major
+    -matrix-layout-column-major
     -force-glsl-scalar-layout
     -fvk-use-entrypoint-name
   )

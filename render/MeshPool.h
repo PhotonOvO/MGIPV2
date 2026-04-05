@@ -18,8 +18,9 @@ struct MeshRecord {
     VmaAllocation indexAllocation = nullptr;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
-    uint32_t vertexStride = 32;  // Position(12) + Normal(12) + TexCoord(8)
+    uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
     glm::mat4 transform = glm::mat4(1.0f);
+    int32_t materialIndex = -1;  // -1 = default material
 };
 
 class MeshPool {

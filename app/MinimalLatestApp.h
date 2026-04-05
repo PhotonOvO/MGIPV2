@@ -10,6 +10,8 @@
 
 #include <memory>
 #include <optional>
+#include <future>
+#include <atomic>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -51,6 +53,9 @@ public:
     {
       m_framePacer.paceFrame(m_vSync ? utils::getMonitorsMinRefreshRate() : 10000.0);
       glfwPollEvents();
+
+      // Check async loading progress
+      updateAsyncLoading();
 
       // Camera input handling
       {
@@ -243,35 +248,111 @@ private:
   shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
 
   // UI state
-  char m_modelPathBuffer[512] = "resources/shader_ball.gltf";
+  char m_modelPathBuffer[512] = "resources/GLTF_Sponza/sponza.gltf";
 
-  void loadModel(const std::string& path);
+  // Preset models
+  struct PresetModel {
+    const char* name;
+    const char* path;
+  };
+  static constexpr PresetModel m_presetModels[] = {
+    {"Sponza", "resources/GLTF_Sponza/sponza.gltf"},
+    {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
+  };
+  int m_selectedPreset = 0;
+
+  // Async loading state
+  std::future<std::optional<demo::GltfModel>> m_loadFuture;
+  std::string m_pendingModelPath;
+  bool m_isLoading = false;
+  float m_loadProgress = 0.0f;
+  std::string m_loadStatus;
+
+  void loadModelAsync(const std::string& path);
   void unloadModel();
   void drawModelLoaderUI();
+  void updateAsyncLoading();
 };
 
-inline void MinimalLatestApp::loadModel(const std::string& path)
+inline void MinimalLatestApp::loadModelAsync(const std::string& path)
 {
-  demo::GltfModel model;
-  if(!m_gltfLoader->load(path, model))
+  // Don't start a new load if already loading
+  if(m_isLoading)
   {
-    LOGE("Failed to load model: %s, error: %s", path.c_str(), m_gltfLoader->getLastError().c_str());
     return;
   }
 
-  m_renderer.waitForIdle();
-  unloadModel();
+  m_isLoading = true;
+  m_loadProgress = 0.0f;
+  m_loadStatus = "Starting load...";
+  m_pendingModelPath = path;
 
-  // Upload model to GPU
-  m_renderer.executeUploadCommand([&model, this](VkCommandBuffer cmd) {
-    m_currentModel = m_renderer.uploadGltfModel(model, cmd);
+  // Start async loading (only file parsing, no member access)
+  m_loadFuture = std::async(std::launch::async, [path]() -> std::optional<demo::GltfModel> {
+    demo::GltfLoader loader;
+    demo::GltfModel model;
+    if(!loader.load(path, model))
+    {
+      return std::nullopt;
+    }
+    return model;
   });
+}
 
-  m_modelPath  = path;
-  m_modelLoaded = true;
+inline void MinimalLatestApp::updateAsyncLoading()
+{
+  if(!m_isLoading || !m_loadFuture.valid())
+  {
+    return;
+  }
 
-  LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)", path.c_str(), model.meshes.size(), model.materials.size(),
-       model.images.size());
+  // Simulate progress while waiting
+  if(m_loadProgress < 0.4f)
+  {
+    m_loadProgress += 0.005f;
+    m_loadStatus = "Loading glTF file...";
+  }
+
+  // Check if loading is complete (non-blocking)
+  auto status = m_loadFuture.wait_for(std::chrono::milliseconds(0));
+  if(status == std::future_status::ready)
+  {
+    m_loadProgress = 0.5f;
+    m_loadStatus = "Preparing GPU upload...";
+
+    auto result = m_loadFuture.get();
+    if(result.has_value())
+    {
+      m_loadStatus = "Uploading to GPU...";
+      m_loadProgress = 0.7f;
+
+      m_renderer.waitForIdle();
+      unloadModel();
+
+      m_loadProgress = 0.9f;
+
+      // Upload model to GPU
+      m_renderer.executeUploadCommand([this, &result](VkCommandBuffer cmd) {
+        m_currentModel = m_renderer.uploadGltfModel(*result, cmd);
+      });
+
+      m_modelPath = m_pendingModelPath;
+      m_modelLoaded = true;
+      m_loadProgress = 1.0f;
+      m_loadStatus = "Done!";
+
+      LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
+           m_pendingModelPath.c_str(), result->meshes.size(), result->materials.size(), result->images.size());
+    }
+    else
+    {
+      m_loadStatus = "Failed to load model";
+      m_loadProgress = 0.0f;
+      LOGE("Failed to load model: %s", m_pendingModelPath.c_str());
+    }
+
+    m_isLoading = false;
+  }
 }
 
 inline void MinimalLatestApp::unloadModel()
@@ -289,28 +370,64 @@ inline void MinimalLatestApp::drawModelLoaderUI()
 {
   if(ImGui::Begin("Model Loader"))
   {
-    // Model path input
-    ImGui::InputText("Model Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
+    // Preset model dropdown
+    ImGui::Text("Select Model:");
+    const char* currentName = m_presetModels[m_selectedPreset].name;
+    if(ImGui::BeginCombo("##PresetCombo", currentName))
+    {
+      for(int i = 0; i < static_cast<int>(sizeof(m_presetModels) / sizeof(m_presetModels[0])); ++i)
+      {
+        const bool isSelected = (i == m_selectedPreset);
+        if(ImGui::Selectable(m_presetModels[i].name, isSelected))
+        {
+          m_selectedPreset = i;
+          std::strncpy(m_modelPathBuffer, m_presetModels[i].path, sizeof(m_modelPathBuffer) - 1);
+          m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
+        }
+        if(isSelected)
+        {
+          ImGui::SetItemDefaultFocus();
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    ImGui::Separator();
+
+    // Custom path input (optional)
+    if(ImGui::CollapsingHeader("Custom Path"))
+    {
+      ImGui::InputText("Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
+    }
 
     // Load button
-    if(ImGui::Button("Load Model"))
+    if(ImGui::Button(m_isLoading ? "Loading..." : "Load Model", ImVec2(120, 0)))
     {
-      loadModel(std::string(m_modelPathBuffer));
+      if(!m_isLoading)
+      {
+        loadModelAsync(std::string(m_modelPathBuffer));
+      }
     }
 
     ImGui::SameLine();
 
     // Unload button
-    if(ImGui::Button("Unload"))
+    if(ImGui::Button("Unload", ImVec2(80, 0)))
     {
       unloadModel();
     }
 
-    // Preset models
-    ImGui::Separator();
-    ImGui::Text("Presets:");
+    // Progress bar during loading
+    if(m_isLoading)
+    {
+      ImGui::Separator();
+      ImGui::Text("%s", m_loadStatus.c_str());
+      ImGui::ProgressBar(m_loadProgress, ImVec2(-1, 0));
+    }
 
-    if(ImGui::Button("Triangle (default)"))
+    // Clear scene
+    ImGui::Separator();
+    if(ImGui::Button("Clear Scene"))
     {
       unloadModel();
       m_modelLoaded = false;
@@ -320,7 +437,7 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     if(m_modelLoaded)
     {
       ImGui::Separator();
-      ImGui::Text("Current Model: %s", m_modelPath.c_str());
+      ImGui::Text("Current: %s", m_modelPath.c_str());
       if(m_currentModel.has_value())
       {
         ImGui::Text("  Meshes: %zu", m_currentModel->meshes.size());

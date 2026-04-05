@@ -484,6 +484,16 @@ void cmdDraw(const demo::rhi::CommandList& commandList, uint32_t vertexCount, ui
   vkCmdDraw(getNativeCommandBuffer(commandList), vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
+void cmdBindIndexBuffer(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType)
+{
+  vkCmdBindIndexBuffer(getNativeCommandBuffer(commandList), buffer, offset, indexType);
+}
+
+void cmdDrawIndexed(const demo::rhi::CommandList& commandList, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
+{
+  vkCmdDrawIndexed(getNativeCommandBuffer(commandList), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
 void cmdDispatch(const demo::rhi::CommandList& commandList, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   vkCmdDispatch(getNativeCommandBuffer(commandList), groupCountX, groupCountY, groupCountZ);

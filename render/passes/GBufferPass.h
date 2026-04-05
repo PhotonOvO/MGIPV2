@@ -15,11 +15,8 @@ public:
     [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
     void execute(const PassContext& context) const override;
 
-    void setModel(const void* modelData) { m_modelData = modelData; }
-
 private:
     Renderer* m_renderer;
-    const void* m_modelData = nullptr;
 };
 
 }  // namespace demo

@@ -292,7 +292,10 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
     };
   }
 
-  const uint64_t signalValue = ++m_frameCounter;
+  const uint64_t currentTimelineValue = m_timelineSemaphore->getCurrentValue();
+  const uint64_t signalValue =
+      (m_frameCounter > currentTimelineValue ? m_frameCounter : currentTimelineValue) + 1;
+  m_frameCounter = signalValue;
   signalInfos[signalCount++] = VkSemaphoreSubmitInfo{
       .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       .semaphore = m_timelineSemaphore->nativeSemaphore(),

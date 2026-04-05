@@ -4,7 +4,6 @@
     printf((format), __VA_ARGS__);                                                                                     \
     printf("\n");                                                                                                      \
   }
-#define STB_IMAGE_IMPLEMENTATION
 
 #include "MinimalLatestApp.h"
 

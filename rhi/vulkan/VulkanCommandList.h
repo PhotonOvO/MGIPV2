@@ -83,7 +83,9 @@ void cmdBindVertexBuffers(const demo::rhi::CommandList& commandList,
                           uint32_t                      bindingCount,
                           const VkBuffer*               buffers,
                           const VkDeviceSize*           offsets);
+void cmdBindIndexBuffer(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType);
 void cmdDraw(const demo::rhi::CommandList& commandList, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
+void cmdDrawIndexed(const demo::rhi::CommandList& commandList, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
 void cmdDispatch(const demo::rhi::CommandList& commandList, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
 
 }  // namespace demo::rhi::vulkan

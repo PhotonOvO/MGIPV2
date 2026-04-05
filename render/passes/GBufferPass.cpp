@@ -133,33 +133,12 @@ void GBufferPass::execute(const PassContext& context) const
         std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
         context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
 
-        // Get camera and draw descriptor sets
-        const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup();
-        const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup();
+        // Get camera and draw descriptor sets (per-frame)
+        const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
+        const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
-        // Update camera descriptor to point to the buffer
-        if(!cameraBindGroupHandle.isNull())
-        {
-            // Get the camera descriptor set
-            uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
-            VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
-
-            VkDescriptorBufferInfo bufferInfo{
-                .buffer = reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
-                .offset = cameraAlloc.offset,
-                .range  = sizeof(shaderio::CameraUniforms),
-            };
-            VkWriteDescriptorSet write{
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet          = cameraDescriptorSet,
-                .dstBinding      = shaderio::LBindCamera,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                .pBufferInfo     = &bufferInfo,
-            };
-            vkUpdateDescriptorSets(reinterpret_cast<VkDevice>(m_renderer->getDeviceOpaque()), 1, &write, 0, nullptr);
-        }
+        // The camera bind group uses dynamic offsets, so the descriptor points to a
+        // "base" buffer. We pass the actual allocation offset at bind time.
 
         // Bind texture descriptor set (set 0)
         const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
@@ -168,14 +147,15 @@ void GBufferPass::execute(const PassContext& context) const
                                 VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                 shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-        // Bind camera descriptor set (set 1)
+        // Bind camera descriptor set (set 1) with dynamic offset
         if(!cameraBindGroupHandle.isNull())
         {
             uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
             VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
+            const uint32_t cameraDynamicOffset = cameraAlloc.offset;
             vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                    shaderio::LSetScene, 1, &cameraDescriptorSet, 0, nullptr);
+                                    shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
         }
 
         // Track current pipeline to avoid unnecessary rebinds
@@ -268,32 +248,17 @@ void GBufferPass::execute(const PassContext& context) const
             std::memcpy(drawAlloc.cpuPtr, &drawData, sizeof(drawData));
             context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
 
-            // Update draw descriptor to point to the buffer
+            // Bind draw descriptor set (set 2) with dynamic offset
+            // The bind group uses VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, so we pass
+            // the allocation offset as a dynamic offset at bind time.
             if(!drawBindGroupHandle.isNull())
             {
                 uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
                 VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
-
-                VkDescriptorBufferInfo bufferInfo{
-                    .buffer = reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
-                    .offset = drawAlloc.offset,
-                    .range  = sizeof(shaderio::DrawUniforms),
-                };
-                VkWriteDescriptorSet write{
-                    .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet          = drawDescriptorSet,
-                    .dstBinding      = shaderio::LBindDrawModel,
-                    .dstArrayElement = 0,
-                    .descriptorCount = 1,
-                    .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .pBufferInfo     = &bufferInfo,
-                };
-                vkUpdateDescriptorSets(reinterpret_cast<VkDevice>(m_renderer->getDeviceOpaque()), 1, &write, 0, nullptr);
-
-                // Bind draw descriptor set (set 2)
+                const uint32_t drawDynamicOffset = drawAlloc.offset;
                 vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                         VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                        shaderio::LSetDraw, 1, &drawDescriptorSet, 0, nullptr);
+                                        shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
             }
 
             // Bind vertex and index buffers

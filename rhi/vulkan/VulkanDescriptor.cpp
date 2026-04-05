@@ -102,23 +102,23 @@ void VulkanBindTableLayout::init(void* nativeDevice, const std::vector<BindTable
   std::vector<VkDescriptorSetLayoutBinding> vkBindings;
   vkBindings.reserve(entries.size());
 
-  uint32_t nextBinding = 0;
   for(const BindTableLayoutEntry& entry : entries)
   {
     ASSERT(isValidResourceIndex(entry.logicalIndex), "VulkanBindTableLayout::init requires valid logical index");
     ASSERT(m_logicalToBinding.find(entry.logicalIndex) == m_logicalToBinding.end(),
            "VulkanBindTableLayout::init logical index must be unique");
-    m_logicalToBinding.emplace(entry.logicalIndex, nextBinding);
+
+    // Use logicalIndex as the actual binding number (not sequential)
+    const uint32_t binding = entry.logicalIndex;
+    m_logicalToBinding.emplace(entry.logicalIndex, binding);
 
     vkBindings.push_back(VkDescriptorSetLayoutBinding{
-        .binding            = nextBinding,
+        .binding            = binding,
         .descriptorType     = toVkDescriptorType(entry.resourceType),
         .descriptorCount    = entry.descriptorCount,
         .stageFlags         = toVkShaderStageFlags(entry.visibility),
         .pImmutableSamplers = nullptr,
     });
-
-    ++nextBinding;
   }
 
   const VkDescriptorSetLayoutCreateInfo createInfo{
@@ -240,11 +240,9 @@ void VulkanBindTable::deinit()
     return;
   }
 
-  if(m_set != VK_NULL_HANDLE && m_pool != VK_NULL_HANDLE)
-  {
-    vkFreeDescriptorSets(m_device, m_pool, 1, &m_set);
-    m_set = VK_NULL_HANDLE;
-  }
+  // Destroying the pool automatically frees all descriptor sets allocated from it
+  // So we don't need to call vkFreeDescriptorSets separately
+  m_set = VK_NULL_HANDLE;
 
   if(m_pool != VK_NULL_HANDLE)
   {

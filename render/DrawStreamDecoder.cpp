@@ -60,6 +60,31 @@ bool DrawStreamDecoder::decode(const DrawStream& stream, std::vector<DecodedDraw
         decodedDraw.vertexOffset  = entry.payload.draw.vertexOffset;
         decodedDraw.vertexCount   = entry.payload.draw.vertexCount;
         decodedDraw.instanceCount = entry.payload.draw.instanceCount;
+        decodedDraw.isIndexed     = false;
+        outDraws.push_back(decodedDraw);
+        pendingDirtyMask = 0;
+      }
+      break;
+      case StreamEntryType::drawIndexed: {
+        if(!(hasPipeline && hasMaterial && hasMesh && hasDynamicBuffer && hasDynamicOffset))
+        {
+          outDraws.clear();
+          return false;
+        }
+        if(entry.payload.drawIndexed.dirtyMask != pendingDirtyMask)
+        {
+          outDraws.clear();
+          return false;
+        }
+
+        DecodedDraw decodedDraw{};
+        decodedDraw.state              = currentState;
+        decodedDraw.isIndexed          = true;
+        decodedDraw.indexCount         = entry.payload.drawIndexed.indexCount;
+        decodedDraw.instanceCount      = entry.payload.drawIndexed.instanceCount;
+        decodedDraw.firstIndex         = entry.payload.drawIndexed.firstIndex;
+        decodedDraw.vertexOffsetIndexed = entry.payload.drawIndexed.vertexOffset;
+        decodedDraw.firstInstance      = entry.payload.drawIndexed.firstInstance;
         outDraws.push_back(decodedDraw);
         pendingDirtyMask = 0;
       }
@@ -92,6 +117,12 @@ bool DrawStreamDecoder::decodeToDrawPackets(const DrawStream& stream, std::vecto
     packet.vertexOffset       = decodedDraw.vertexOffset;
     packet.vertexCount        = decodedDraw.vertexCount;
     packet.instanceCount      = decodedDraw.instanceCount;
+    // Indexed draw support
+    packet.isIndexed          = decodedDraw.isIndexed;
+    packet.indexCount         = decodedDraw.indexCount;
+    packet.firstIndex         = decodedDraw.firstIndex;
+    packet.vertexOffsetIndexed = decodedDraw.vertexOffsetIndexed;
+    packet.firstInstance      = decodedDraw.firstInstance;
     outPackets.push_back(packet);
   }
 

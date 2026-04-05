@@ -31,7 +31,7 @@ void TransientAllocator::init(rhi::Device& device, VmaAllocator allocator, uint3
 
   const VmaAllocationCreateInfo allocInfo{
       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-      .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+      .usage = VMA_MEMORY_USAGE_CPU_ONLY,  // Use system RAM, not device-local heap
   };
 
   VmaAllocationInfo allocationInfo{};
