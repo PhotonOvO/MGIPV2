@@ -48,6 +48,8 @@ public:
   void beginEvent(const char* name) override;
   void endEvent() override;
 
+  [[nodiscard]] VkImageView getVkImageViewFromHandle(TextureViewHandle view) const;
+
 private:
   struct ResourceStateEntry
   {

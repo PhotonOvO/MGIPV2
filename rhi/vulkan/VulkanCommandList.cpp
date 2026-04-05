@@ -164,6 +164,13 @@ void VulkanCommandList::end()
   ensureCommandBuffer(m_commandBuffer);
 }
 
+VkImageView VulkanCommandList::getVkImageViewFromHandle(TextureViewHandle view) const
+{
+  // This is a temporary implementation
+  // The actual implementation will query a view registry
+  return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(view.index));
+}
+
 void VulkanCommandList::beginRenderPass(const RenderPassDesc& desc)
 {
   ensureCommandBuffer(m_commandBuffer);
@@ -172,7 +179,7 @@ void VulkanCommandList::beginRenderPass(const RenderPassDesc& desc)
   {
     colorAttachments[i] = VkRenderingAttachmentInfo{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = VK_NULL_HANDLE,
+        .imageView   = getVkImageViewFromHandle(desc.colorTargets[i].view),
         .imageLayout = toVkImageLayout(desc.colorTargets[i].state),
         .loadOp      = toVkLoadOp(desc.colorTargets[i].loadOp),
         .storeOp     = toVkStoreOp(desc.colorTargets[i].storeOp),
@@ -195,7 +202,7 @@ void VulkanCommandList::beginRenderPass(const RenderPassDesc& desc)
   {
     depthAttachment = VkRenderingAttachmentInfo{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = VK_NULL_HANDLE,
+        .imageView   = getVkImageViewFromHandle(desc.depthTarget->view),
         .imageLayout = toVkImageLayout(desc.depthTarget->state),
         .loadOp      = toVkLoadOp(desc.depthTarget->loadOp),
         .storeOp     = toVkStoreOp(desc.depthTarget->storeOp),
