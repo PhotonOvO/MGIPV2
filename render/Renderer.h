@@ -36,6 +36,8 @@ namespace rhi {
 struct BindTableWrite;
 }
 
+struct GltfUploadResult;
+
 struct RenderParams
 {
   rhi::Extent2D                          viewportSize{};
@@ -44,6 +46,10 @@ struct RenderParams
   MaterialHandle                         materialHandle{};
   rhi::ClearColorValue                   clearColor{0.2F, 0.2F, 0.3F, 1.0F};
   std::function<void(rhi::CommandList&)> recordUi;
+  // glTF model data for rendering
+  const GltfUploadResult*                gltfModel{nullptr};
+  // Camera data (pointer to App-owned CameraUniforms)
+  const shaderio::CameraUniforms*       cameraUniforms{nullptr};
 };
 
 struct GltfUploadResult
@@ -98,15 +104,34 @@ public:
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
   void             destroyGltfResources(const GltfUploadResult& result);
 
+  // Execute upload commands with internal command buffer management
+  void executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn);
+
   MeshPool& getMeshPool() { return m_meshPool; }
+  SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
   void      waitForIdle();
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
+  PipelineHandle getGBufferPipelineHandle() const;
   uint64_t       getLightPipelineLayout() const;
+  uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
+  uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
   uint64_t       getGBufferColorDescriptorSet() const;
+  uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
+
+  // GBuffer uniform buffer bind groups
+  BindGroupHandle getCameraBindGroup() const { return m_gbufferCameraBindGroup; }
+  BindGroupHandle getDrawBindGroup() const { return m_gbufferDrawBindGroup; }
+
+  // Get descriptor set from bind group (for descriptor set binding)
+  uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
+      return getBindGroupDescriptorSetOpaque(handle, slot);
+  }
 
   VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
+  VkImageView getCurrentSwapchainImageView() const;
+  uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
   class SamplerCache
@@ -199,6 +224,7 @@ private:
     VkDescriptorPool                           uiDescriptorPool{};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
+    std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
     struct PrebuiltPipelineVariants
@@ -261,6 +287,11 @@ private:
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
+  PipelineHandle m_gbufferPipeline{};  // GBuffer MRT pipeline
+
+  // GBuffer uniform buffer bind groups (per-frame)
+  BindGroupHandle m_gbufferCameraBindGroup{kNullBindGroupHandle};
+  BindGroupHandle m_gbufferDrawBindGroup{kNullBindGroupHandle};
 
   // Draw-call-scoped transient CPU/GPU data staging bucket.
   // Lifetime trigger: rebuilt per draw packet emission/consumption; currently no persistent owner fields.
@@ -301,7 +332,25 @@ private:
 
     struct MaterialRecord
     {
+      // PBR Texture handles (each independent for sharing)
+      TextureHandle baseColorTexture{kNullTextureHandle};
+      TextureHandle metallicRoughnessTexture{kNullTextureHandle};
+      TextureHandle normalTexture{kNullTextureHandle};
+      TextureHandle occlusionTexture{kNullTextureHandle};
+      TextureHandle emissiveTexture{kNullTextureHandle};
+
+      // Legacy compatibility
       TextureHandle      sampledTexture{};
+
+      // PBR Factors (fallback when texture missing)
+      glm::vec4 baseColorFactor{1.0f};
+      float     metallicFactor{1.0f};
+      float     roughnessFactor{1.0f};
+      float     normalScale{1.0f};
+      float     occlusionStrength{1.0f};
+      glm::vec3 emissiveFactor{0.0f};
+
+      // Bindless descriptor slot
       rhi::ResourceIndex descriptorIndex{0};
       const char*        debugName{"material"};
     };
@@ -347,7 +396,6 @@ private:
   PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant);
   void           destroyPipelines();
   const DeviceLifetimeResources::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;
-  uint64_t                 getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
   const BindGroupResource* tryGetBindGroup(BindGroupHandle handle) const;
   uint64_t                 getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
