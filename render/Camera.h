@@ -1,5 +1,7 @@
 #pragma once
 
+// GLM configuration for Vulkan (must be defined before including glm)
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 

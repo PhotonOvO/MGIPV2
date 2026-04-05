@@ -1,4 +1,3 @@
-
 #ifndef HOST_DEVICE_H
 #define HOST_DEVICE_H
 
@@ -9,29 +8,62 @@ typealias vec4 = float4;
 typealias mat4 = float4x4;
 #define STATIC_CONST static const
 #else
-#define STATIC_CONST const
+#include <cstdint>
+// GLM configuration for Vulkan (must be defined before including glm)
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#include <glm/glm.hpp>
+using vec2 = glm::vec2;
+using vec3 = glm::vec3;
+using vec4 = glm::vec4;
+using mat4 = glm::mat4;
+#define STATIC_CONST static const
 #endif
 
 // Layout constants
-// Set 0
+// Set 0: Pass-global textures (bindless)
 STATIC_CONST int LSetTextures  = 0;
 STATIC_CONST int LBindTextures = 0;
-// Set 1
+
+// Set 1: Scene-level uniform buffers
 STATIC_CONST int LSetScene      = 1;
-STATIC_CONST int LBindSceneInfo = 0;
+STATIC_CONST int LBindSceneInfo = 0;      // SceneInfo for compute
+STATIC_CONST int LBindCamera    = 1;      // Camera uniform buffer
+
+// Set 2: Draw-level dynamic uniforms
+STATIC_CONST int LSetDraw       = 2;
+STATIC_CONST int LBindDrawModel = 0;      // Per-draw model matrix
+
 // Vertex layout
 STATIC_CONST int LVPosition = 0;
 STATIC_CONST int LVColor    = 1;
 STATIC_CONST int LVTexCoord = 2;
 
+// Camera uniform buffer (per-scene)
+struct CameraUniforms
+{
+  mat4 view;
+  mat4 projection;
+  mat4 viewProjection;
+  vec3 cameraPosition;
+  float _padding;
+};
+
+// Per-draw uniform buffer (dynamic)
+struct DrawUniforms
+{
+  mat4 modelMatrix;
+  vec4 baseColorFactor;
+  uint32_t materialIndex;
+  uint32_t _padding[3];
+};
 
 struct SceneInfo
 {
   uint64_t dataBufferAddress;
   vec2     resolution;
   float    animValue;
-  int      numData;
-  int      texId;
+  int32_t  numData;
+  int32_t  texId;
 };
 
 struct PushConstant
@@ -43,7 +75,7 @@ struct PushConstantCompute
 {
   uint64_t bufferAddress;
   float    rotationAngle;
-  int      numVertex;
+  int32_t  numVertex;
 };
 
 struct Vertex
@@ -65,14 +97,57 @@ struct VertexGltf
   vec2 texCoord;
 };
 
-// Push constant for glTF rendering
+// Push constant for glTF rendering (legacy, will be removed)
 struct PushConstantGltf
 {
   mat4 model;
   mat4 viewProjection;
   vec4 baseColorFactor;
-  uint  materialIndex;
-  uint  _padding[3];
+  uint32_t materialIndex;
+  uint32_t _padding[3];
+};
+
+// Tangent vertex location
+STATIC_CONST int LVGltfTangent = 3;
+
+// Vertex with tangent for GBuffer pass
+struct VertexGltfTangent
+{
+  vec3 position;
+  vec3 normal;
+  vec2 texCoord;
+  vec4 tangent;  // xyz = tangent direction, w = handedness
+};
+
+// Push constant for GBuffer pass with PBR material params (legacy)
+struct PushConstantGBuffer
+{
+  mat4 modelMatrix;
+  mat4 viewProjectionMatrix;
+
+  // Material factors
+  vec4 baseColorFactor;
+  float metallicFactor;
+  float roughnessFactor;
+  float normalScale;
+  float occlusionStrength;
+  vec3 emissiveFactor;
+  float _padding;
+
+  // Texture indices (bindless)
+  uint32_t baseColorTextureIndex;
+  uint32_t metallicRoughnessTextureIndex;
+  uint32_t normalTextureIndex;
+  uint32_t occlusionTextureIndex;
+  uint32_t emissiveTextureIndex;
+
+  // Flags (0/1)
+  uint32_t hasBaseColorTexture;
+  uint32_t hasMetallicRoughnessTexture;
+  uint32_t hasNormalTexture;
+  uint32_t hasOcclusionTexture;
+  uint32_t hasEmissiveTexture;
+  uint32_t _padding2[3];
 };
 
 
