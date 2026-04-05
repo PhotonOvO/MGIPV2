@@ -2,6 +2,7 @@
 
 #include "RHIBindlessTypes.h"
 #include "RHIHandles.h"
+#include "RHITypes.h"
 
 #include <cstdint>
 #include <vector>
@@ -82,6 +83,27 @@ struct BindTableLayoutEntry
   uint32_t             descriptorCount{1};
   ResourceVisibility   visibility{ResourceVisibility::all};
 };
+
+// Unified BindGroupLayout - supports both bindless arrays and per-draw resources
+struct BindGroupLayoutEntry
+{
+  uint32_t           binding{0};            // Binding slot index
+  ShaderStage        visibility{ShaderStage::none};
+  BindlessResourceType type{BindlessResourceType::sampledTexture};
+  uint32_t           count{1};              // 1 = single resource, >1 = bindless array
+};
+
+struct BindGroupLayoutDesc
+{
+  const BindGroupLayoutEntry* entries{nullptr};
+  uint32_t                    entryCount{0};
+};
+
+// Forward declaration for handle type
+class BindGroupLayout;
+
+// Note: BindTableLayout alias will be added after renaming the class:
+// using BindTableLayout = BindGroupLayout;
 
 class BindTableLayout
 {
