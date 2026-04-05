@@ -14,6 +14,7 @@
 #include "passes/ImguiPass.h"
 #include "passes/GBufferPass.h"
 #include "passes/LightPass.h"
+#include "passes/ForwardPass.h"
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
@@ -302,6 +303,7 @@ private:
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
   std::unique_ptr<LightPass>           m_lightPass;
+  std::unique_ptr<ForwardPass>         m_forwardPass;
   std::unique_ptr<PresentPass>         m_presentPass;
   std::unique_ptr<ImguiPass>           m_imguiPass;
   demo::PassExecutor                   m_passExecutor;
