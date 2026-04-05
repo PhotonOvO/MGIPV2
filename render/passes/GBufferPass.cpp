@@ -3,8 +3,7 @@
 #include "../MeshPool.h"
 #include "../SceneResources.h"
 #include "../../shaders/shader_io.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
-#include "../../rhi/vulkan/VulkanDescriptor.h"
+#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan commands until RHI handles support 64-bit native pointers
 
 #include <array>
 #include <cstring>
@@ -49,9 +48,14 @@ void GBufferPass::execute(const PassContext& context) const
 
     // Get SceneResources for GBuffer attachments
     SceneResources& sceneResources = m_renderer->getSceneResources();
-    const VkExtent2D extent = sceneResources.getSize();
+    const rhi::Extent2D extent = {
+        sceneResources.getSize().width,
+        sceneResources.getSize().height
+    };
 
-    // Setup MRT color attachments (GBuffer0/1/2)
+    // Setup MRT color attachments (GBuffer0/1/2) using RHI types
+    // BLOCKER: TextureViewHandle uses 32-bit index, can't store 64-bit VkImageView pointer
+    // Using native Vulkan rendering for now until RHI handles support 64-bit native pointers
     std::array<VkRenderingAttachmentInfo, 3> colorAttachments{};
     for(uint32_t i = 0; i < 3; ++i)
     {
@@ -76,9 +80,10 @@ void GBufferPass::execute(const PassContext& context) const
     };
 
     // Begin dynamic rendering with MRT
+    // BLOCKER: RHI beginRenderPass requires TextureViewHandle which can't hold 64-bit native pointers
     const VkRenderingInfo renderingInfo{
         .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = {{0, 0}, extent},
+        .renderArea           = {{0, 0}, {extent.width, extent.height}},
         .layerCount           = 1,
         .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
         .pColorAttachments    = colorAttachments.data(),
@@ -86,24 +91,20 @@ void GBufferPass::execute(const PassContext& context) const
     };
     rhi::vulkan::cmdBeginRendering(*context.cmd, renderingInfo);
 
-    // Set viewport and scissor
-    const VkViewport viewport{
+    // Set viewport and scissor using RHI interface (works correctly)
+    const rhi::Viewport viewport{
         0.0f, 0.0f,
         static_cast<float>(extent.width),
         static_cast<float>(extent.height),
         0.0f, 1.0f
     };
-    const VkRect2D scissor{{0, 0}, extent};
-    rhi::vulkan::cmdSetViewport(*context.cmd, viewport);
-    rhi::vulkan::cmdSetScissor(*context.cmd, scissor);
+    const rhi::Rect2D scissor{{0, 0}, extent};
+    context.cmd->setViewport(viewport);
+    context.cmd->setScissor(scissor);
 
     // Only render if glTF model is loaded
     if(context.gltfModel != nullptr && !context.gltfModel->meshes.empty() && context.drawStream != nullptr)
     {
-        // Get pipeline layout for descriptor set binding
-        const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
-            m_renderer->getGBufferPipelineLayout());
-
         MeshPool& meshPool = m_renderer->getMeshPool();
 
         // Allocate CameraUniforms from transient allocator
@@ -137,19 +138,28 @@ void GBufferPass::execute(const PassContext& context) const
         const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
         const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
-        // The camera bind group uses dynamic offsets, so the descriptor points to a
-        // "base" buffer. We pass the actual allocation offset at bind time.
-
-        // Bind texture descriptor set (set 0)
-        const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
-            m_renderer->getGBufferColorDescriptorSet());
-        vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                                VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+        // Bind global bindless texture group (set 0) if available
+        // BLOCKER: demo::BindGroupHandle and rhi::BindGroupHandle are separate types
+        // RHI bindBindGroup expects rhi::BindGroupHandle, but PassContext uses demo::BindGroupHandle
+        // Using native Vulkan binding until handle types are unified
+        if(!context.globalBindlessGroup.isNull())
+        {
+            // Fallback: bind via native Vulkan (will be replaced once handle types unified)
+            const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
+                m_renderer->getGBufferPipelineLayout());
+            const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
+                m_renderer->getGBufferColorDescriptorSet());
+            vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                                    VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                    shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+        }
 
         // Bind camera descriptor set (set 1) with dynamic offset
+        // BLOCKER: Same handle type mismatch issue
         if(!cameraBindGroupHandle.isNull())
         {
+            const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
+                m_renderer->getGBufferPipelineLayout());
             uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
             VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
             const uint32_t cameraDynamicOffset = cameraAlloc.offset;
@@ -197,6 +207,8 @@ void GBufferPass::execute(const PassContext& context) const
             }
 
             // Bind pipeline if changed
+            // BLOCKER: demo::PipelineHandle and rhi::PipelineHandle are separate types
+            // RHI bindPipeline expects rhi::PipelineHandle, but we have demo::PipelineHandle
             if(gbufferPipeline != currentPipeline && !gbufferPipeline.isNull())
             {
                 const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
@@ -249,10 +261,11 @@ void GBufferPass::execute(const PassContext& context) const
             context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
 
             // Bind draw descriptor set (set 2) with dynamic offset
-            // The bind group uses VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, so we pass
-            // the allocation offset as a dynamic offset at bind time.
+            // BLOCKER: Handle type mismatch - same as camera bind group
             if(!drawBindGroupHandle.isNull())
             {
+                const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
+                    m_renderer->getGBufferPipelineLayout());
                 uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
                 VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
                 const uint32_t drawDynamicOffset = drawAlloc.offset;
@@ -262,16 +275,20 @@ void GBufferPass::execute(const PassContext& context) const
             }
 
             // Bind vertex and index buffers
+            // BLOCKER: MeshRecord uses VkBuffer directly, not rhi::BufferHandle
+            // RHI bindVertexBuffers/bindIndexBuffer expect rhi::BufferHandle
             const VkDeviceSize vertexOffset = 0;
             rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &mesh->vertexBuffer, &vertexOffset);
             rhi::vulkan::cmdBindIndexBuffer(*context.cmd, mesh->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
             // Draw indexed
+            // BLOCKER: drawIndexed works, but buffer binding above requires native handles
             rhi::vulkan::cmdDrawIndexed(*context.cmd, mesh->indexCount, 1, 0, 0, 0);
         }
     }
     // No fallback triangle - if no model, only clear
 
+    // BLOCKER: endRenderPass would work, but cmdEndRendering is needed to match cmdBeginRendering
     rhi::vulkan::cmdEndRendering(*context.cmd);
 
     context.cmd->endEvent();
