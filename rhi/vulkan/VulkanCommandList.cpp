@@ -139,6 +139,11 @@ VkPipelineBindPoint toVkBindPoint(PipelineBindPoint bindPoint)
   return bindPoint == PipelineBindPoint::compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
 }
 
+VkIndexType toVkIndexType(IndexFormat format)
+{
+  return format == IndexFormat::uint32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+}
+
 void ensureCommandBuffer(VkCommandBuffer commandBuffer)
 {
   if(commandBuffer == VK_NULL_HANDLE)
@@ -363,6 +368,12 @@ void VulkanCommandList::bindVertexBuffers(uint32_t, const BufferHandle*, const u
   ensureCommandBuffer(m_commandBuffer);
 }
 
+void VulkanCommandList::bindIndexBuffer(BufferHandle, uint64_t offset, IndexFormat format)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  // Note: Actual binding requires native buffer handle, placeholder for now
+}
+
 void VulkanCommandList::pushConstants(ShaderStage, uint32_t, uint32_t, const void*)
 {
   ensureCommandBuffer(m_commandBuffer);
@@ -372,6 +383,14 @@ void VulkanCommandList::draw(uint32_t vertexCount, uint32_t instanceCount, uint3
 {
   ensureCommandBuffer(m_commandBuffer);
   vkCmdDraw(m_commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+void VulkanCommandList::drawIndexed(uint32_t indexCount, uint32_t instanceCount,
+                                    uint32_t firstIndex, int32_t vertexOffset,
+                                    uint32_t firstInstance)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
 void VulkanCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
