@@ -131,6 +131,8 @@ void GBufferPass::execute(const PassContext& context) const
                 cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
                 cameraData.projection = glm::perspective(glm::radians(45.0f),
                     static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 100.0f);
+                // Flip Y for Vulkan NDC (Y-axis points down in Vulkan clip space)
+                cameraData.projection[1][1] *= -1.0f;
                 cameraData.viewProjection = cameraData.projection * cameraData.view;
                 cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
             }

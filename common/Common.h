@@ -28,6 +28,11 @@
 #include <signal.h>
 #endif
 #include <GLFW/glfw3.h>
+
+// GLM configuration for Vulkan:
+// - Depth range [0, 1] (Vulkan standard, OpenGL uses [-1, 1])
+// - Note: Y-axis still needs manual flip in projection matrix for Vulkan NDC
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include "logger.h"
 #include "debug_util.h"
@@ -55,6 +60,8 @@
 #ifdef USE_SLANG
 #include "_autogen/shader.comp.slang.h"
 #include "_autogen/shader.rast.slang.h"
+#include "_autogen/shader.light.slang.h"
+#include "_autogen/shader.gbuffer.slang.h"
 #else
 #include "_autogen/shader.frag.glsl.h"
 #include "_autogen/shader.vert.glsl.h"
@@ -575,6 +582,31 @@ static std::string findFile(const std::string& filename, const std::vector<std::
     LOGI("  %s", path.c_str());
   }
   return "";
+}
+
+//--- Normal Packing Utilities (RGB10A2) ------------------------------------------------------------------------------------------------
+
+/*--
+ * Pack a world-space normal [-1,1] to RGB10A2 format (10 bits per channel, 2 bits alpha)
+ * This provides higher precision than RGBA8 for normal storage
+--*/
+inline uint32_t packNormalRGB10A2(const glm::vec3& normal)
+{
+  const uint32_t x = static_cast<uint32_t>(glm::clamp(normal.x * 0.5f + 0.5f, 0.0f, 1.0f) * 1023.0f);
+  const uint32_t y = static_cast<uint32_t>(glm::clamp(normal.y * 0.5f + 0.5f, 0.0f, 1.0f) * 1023.0f);
+  const uint32_t z = static_cast<uint32_t>(glm::clamp(normal.z * 0.5f + 0.5f, 0.0f, 1.0f) * 1023.0f);
+  return (z << 20) | (y << 10) | x;
+}
+
+/*--
+ * Unpack a normal from RGB10A2 format back to world-space [-1,1]
+--*/
+inline glm::vec3 unpackNormalRGB10A2(uint32_t packed)
+{
+  const float x = static_cast<float>(packed & 0x3FF) / 1023.0f * 2.0f - 1.0f;
+  const float y = static_cast<float>((packed >> 10) & 0x3FF) / 1023.0f * 2.0f - 1.0f;
+  const float z = static_cast<float>((packed >> 20) & 0x3FF) / 1023.0f * 2.0f - 1.0f;
+  return glm::normalize(glm::vec3(x, y, z));
 }
 
 }  // namespace utils

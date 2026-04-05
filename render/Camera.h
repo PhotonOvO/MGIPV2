@@ -15,6 +15,11 @@ public:
     void setPosition(const glm::vec3& position);
     void setYawPitch(float yaw, float pitch);
 
+    // Y-flip configuration for different RHI backends:
+    // - Vulkan/D3D12: NDC Y-axis points down, need flip (flipY = true, default)
+    // - Metal: NDC Y-axis points up, no flip needed (flipY = false)
+    void setFlipY(bool flipY) { m_flipY = flipY; }
+
     // Input interfaces (abstract, platform-agnostic)
     void move(const glm::vec3& delta);              // Move in camera-relative space
     void rotate(float deltaYaw, float deltaPitch);  // Rotate view (degrees)
@@ -39,6 +44,7 @@ private:
     float m_aspectRatio{16.0f / 9.0f};
     float m_nearPlane{0.1f};
     float m_farPlane{100.0f};
+    bool m_flipY{true};  // Y-flip for Vulkan/D3D12 (default), false for Metal
 
     // Derived vectors
     glm::vec3 m_front{0.0f, 0.0f, -1.0f};

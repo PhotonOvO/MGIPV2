@@ -71,6 +71,12 @@ void Camera::updateMatrices()
 {
     m_view = glm::lookAt(m_position, m_position + m_front, m_up);
     m_projection = glm::perspective(glm::radians(m_fov), m_aspectRatio, m_nearPlane, m_farPlane);
+    // Flip Y for Vulkan/D3D12 NDC (Y-axis points down in clip space)
+    // Metal uses OpenGL-style NDC (Y-axis points up), no flip needed
+    if(m_flipY)
+    {
+        m_projection[1][1] *= -1.0f;
+    }
     m_viewProjection = m_projection * m_view;
 }
 
