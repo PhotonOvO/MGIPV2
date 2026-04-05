@@ -33,6 +33,16 @@ struct TextureBarrierDesc
   bool           isSwapchain{false};
 };
 
+struct TextureViewDesc
+{
+  TextureHandle  texture{};
+  TextureAspect  aspect{TextureAspect::color};
+  uint32_t       baseMipLevel{0};
+  uint32_t       mipLevelCount{1};
+  uint32_t       baseArrayLayer{0};
+  uint32_t       arrayLayerCount{1};
+};
+
 struct RenderTargetDesc
 {
   TextureHandle   texture{};
