@@ -127,9 +127,6 @@ public:
   virtual uint64_t getNativeHandle() const = 0;
 };
 
-// Alias for backwards compatibility
-using BindTable = BindGroup;
-
 // Forward declaration for handle type
 class BindGroupLayout;
 
@@ -180,6 +177,21 @@ struct BindTableWrite
   const DescriptorBufferInfo* pBufferInfo{nullptr};
   ResourceVisibility          visibility{ResourceVisibility::all};
   BindlessUpdateFlags         updateFlags{BindlessUpdateFlags::immediateVisibility};
+};
+
+// Existing BindTable class - used by current implementations
+// Will be migrated to BindGroup in a future phase
+class BindTable
+{
+public:
+  virtual ~BindTable() = default;
+
+  virtual void init(void* nativeDevice, const BindTableLayout& layout, uint32_t maxLogicalEntries) = 0;
+  virtual void deinit()                                                                            = 0;
+
+  virtual void update(uint32_t writeCount, const BindTableWrite* writes) = 0;
+
+  virtual uint64_t getNativeHandle() const = 0;
 };
 
 }  // namespace demo::rhi
