@@ -1227,10 +1227,10 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   }};
 
   // Specialization constants for useTexture (constant_id = 0)
-  // Textured variant: useTexture = true
-  bool                                    useTextureTrue = true;
-  rhi::SpecializationConstant             specConstantTrue(0, 0, sizeof(bool));
-  rhi::SpecializationData                 specDataTrue{&useTextureTrue, sizeof(bool)};
+  // Textured variant: useTexture = true (must be VkBool32 = uint32_t = 4 bytes)
+  uint32_t                                useTextureTrue = VK_TRUE;
+  rhi::SpecializationConstant             specConstantTrue(0, 0, sizeof(uint32_t));
+  rhi::SpecializationData                 specDataTrue{&useTextureTrue, sizeof(uint32_t)};
   shaderStages[1].specializationData         = specDataTrue;
   shaderStages[1].specializationConstants    = &specConstantTrue;
   shaderStages[1].specializationConstantCount = 1;
@@ -1279,10 +1279,10 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
   graphicsCreateInfo.key.specializationVariant = 0;
   shaderStages[1].specializationVariant        = 0;
-  // Non-textured variant: useTexture = false
-  bool useTextureFalse = false;
-  rhi::SpecializationConstant specConstantFalse(0, 0, sizeof(bool));
-  rhi::SpecializationData     specDataFalse{&useTextureFalse, sizeof(bool)};
+  // Non-textured variant: useTexture = false (must be VkBool32 = uint32_t = 4 bytes)
+  uint32_t useTextureFalse = VK_FALSE;
+  rhi::SpecializationConstant specConstantFalse(0, 0, sizeof(uint32_t));
+  rhi::SpecializationData     specDataFalse{&useTextureFalse, sizeof(uint32_t)};
   shaderStages[1].specializationData         = specDataFalse;
   shaderStages[1].specializationConstants    = &specConstantFalse;
   shaderStages[1].specializationConstantCount = 1;
@@ -1530,8 +1530,8 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         rhi::TextureFormat::rgba8Unorm,  // GBuffer2: Material
     }};
 
-    // Specialization constant for alpha test
-    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(bool));
+    // Specialization constant for alpha test (must be VkBool32 = uint32_t = 4 bytes)
+    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
 
     std::array<rhi::PipelineShaderStageDesc, 2> gbufferShaderStages{{
         rhi::PipelineShaderStageDesc{
@@ -1561,7 +1561,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             {
                 .colorFormats     = gbufferColorFormats.data(),
                 .colorFormatCount = static_cast<uint32_t>(gbufferColorFormats.size()),
-                .depthFormat      = rhi::TextureFormat::d32Sfloat,
+                .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
             },
     };
     gbufferGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
@@ -1570,8 +1570,8 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     gbufferGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
     // Variant 0: Opaque (alphaTestEnabled = false)
-    bool alphaTestFalse = false;
-    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(bool)};
+    uint32_t alphaTestFalse = VK_FALSE;
+    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
     gbufferShaderStages[1].specializationData = specDataFalse;
     gbufferShaderStages[1].specializationConstants = &specConstantAlphaTest;
     gbufferShaderStages[1].specializationConstantCount = 1;
@@ -1592,8 +1592,8 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                                gbufferCreateInfo.key.specializationVariant);
 
     // Variant 1: AlphaTest (alphaTestEnabled = true)
-    bool alphaTestTrue = true;
-    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(bool)};
+    uint32_t alphaTestTrue = VK_TRUE;
+    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
     gbufferShaderStages[1].specializationData = specDataTrue;
     gbufferCreateInfo.key.specializationVariant = 4;  // GBuffer AlphaTest variant
 
@@ -1664,6 +1664,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
     // Render to swapchain format
     const rhi::TextureFormat swapchainFormat = toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat);
+    const rhi::TextureFormat depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat());
 
     rhi::GraphicsPipelineDesc forwardGraphicsDesc{
         .layout            = m_device.gbufferPipelineLayout.get(),
@@ -1680,7 +1681,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             {
                 .colorFormats     = &swapchainFormat,
                 .colorFormatCount = 1,
-                .depthFormat      = rhi::TextureFormat::d32Sfloat,
+                .depthFormat      = depthFormat,
             },
     };
     forwardGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;

@@ -267,9 +267,12 @@ void VulkanDevice::initInstance()
       .apiVersion         = m_apiVersion,
   };
 
+  // Validation settings with GPU-assisted validation enabled
+  utils::ValidationSettings validationSettings{};
+
   const VkInstanceCreateInfo instanceCreateInfo{
       .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-      .pNext                   = nullptr,
+      .pNext                   = m_createInfo.enableValidationLayers ? validationSettings.buildPNextChain() : nullptr,
       .pApplicationInfo        = &appInfo,
       .enabledLayerCount       = static_cast<uint32_t>(enabledLayers.size()),
       .ppEnabledLayerNames     = enabledLayers.data(),
