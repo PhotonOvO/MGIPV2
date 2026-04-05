@@ -271,9 +271,10 @@ static rhi::ShaderReflectionData buildRasterShaderReflection()
                                  static_cast<uint32_t>(shaderio::LSetScene), static_cast<uint32_t>(shaderio::LBindSceneInfo), 1, 0},
   };
   reflection.pushConstantRanges = {
-      rhi::PushConstantRange{rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment, 0, sizeof(shaderio::PushConstant)},
+      rhi::PushConstantRange{rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment, 0,
+                             std::max(sizeof(shaderio::PushConstant), sizeof(shaderio::PushConstantGltf))},
   };
-  reflection.pushConstantSize        = sizeof(shaderio::PushConstant);
+  reflection.pushConstantSize        = std::max(sizeof(shaderio::PushConstant), sizeof(shaderio::PushConstantGltf));
   reflection.specializationConstants = {
       rhi::SpecializationConstant{0, 0, sizeof(VkBool32)},
   };
@@ -385,7 +386,11 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     const VkFormat             depthFormat = utils::findDepthFormat(nativePhysicalDevice);
     SceneResources::CreateInfo sceneResourcesInit{
         .size          = m_swapchainDependent.windowSize,
-        .color         = {VK_FORMAT_R8G8B8A8_UNORM},
+        .color         = {
+            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer0: BaseColor
+            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer1: Normal
+            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer2: MaterialParams
+        },
         .depth         = depthFormat,
         .linearSampler = linearSampler,
     };
@@ -478,8 +483,8 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_imguiPass           = std::make_unique<ImguiPass>(this);
   m_passExecutor.clear();
   m_passExecutor.addPass(*m_gbufferPass);
-  m_passExecutor.addPass(*m_animateVerticesPass);
-  m_passExecutor.addPass(*m_sceneOpaquePass);
+  // m_passExecutor.addPass(*m_animateVerticesPass);
+  // m_passExecutor.addPass(*m_sceneOpaquePass);
   m_passExecutor.addPass(*m_lightPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
@@ -514,6 +519,22 @@ void Renderer::shutdown(rhi::Surface& surface)
   {
     m_device.computePipelineLayout->deinit();
     m_device.computePipelineLayout.reset();
+  }
+  if(m_device.gbufferPipelineLayout)
+  {
+    m_device.gbufferPipelineLayout->deinit();
+    m_device.gbufferPipelineLayout.reset();
+  }
+  // Destroy GBuffer bind groups
+  if(!m_gbufferCameraBindGroup.isNull())
+  {
+    destroyBindGroup(m_gbufferCameraBindGroup);
+    m_gbufferCameraBindGroup = kNullBindGroupHandle;
+  }
+  if(!m_gbufferDrawBindGroup.isNull())
+  {
+    destroyBindGroup(m_gbufferDrawBindGroup);
+    m_gbufferDrawBindGroup = kNullBindGroupHandle;
   }
   vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
   vkDestroyDescriptorPool(device, m_device.descriptorPool, nullptr);
@@ -610,6 +631,36 @@ MaterialHandle Renderer::getMaterialHandle(uint32_t slot) const
 PipelineHandle Renderer::getGraphicsPipelineHandle(GraphicsPipelineVariant variant) const
 {
   return selectGraphicsPipelineHandle(variant);
+}
+
+PipelineHandle Renderer::getLightPipelineHandle() const
+{
+  return m_lightPipeline;
+}
+
+PipelineHandle Renderer::getGBufferOpaquePipelineHandle() const
+{
+  return m_gbufferOpaquePipeline;
+}
+
+PipelineHandle Renderer::getGBufferAlphaTestPipelineHandle() const
+{
+  return m_gbufferAlphaTestPipeline;
+}
+
+PipelineHandle Renderer::getForwardPipelineHandle() const
+{
+  return m_forwardPipeline;
+}
+
+VkImageView Renderer::getCurrentSwapchainImageView() const
+{
+  if(m_swapchainDependent.swapchain == nullptr)
+  {
+    return VK_NULL_HANDLE;
+  }
+  return fromNativeHandle<VkImageView>(
+      m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
 }
 
 void Renderer::render(const RenderParams& params)
@@ -785,7 +836,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
   m_perPass.drawStream.clear();
   demo::PassContext context{
-      &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream};
+      &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel};
   m_passExecutor.execute(context);
 }
 
@@ -1008,17 +1059,46 @@ void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& 
                                             m_device.graphicPipelineLayout->getNativeHandle(), sceneSetIndex.value(),
                                             sceneBindTableHandle, 1, &dynamicSceneOffset);
 
-    const VkDeviceSize drawVertexOffset = static_cast<VkDeviceSize>(decodedDraw.vertexOffset) * sizeof(shaderio::Vertex);
-    const VkDeviceSize drawOffsets[] = {drawVertexOffset};
-    rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &m_device.vertexBuffer.buffer, drawOffsets);
-
-    pushValues.color = (decodedDraw.vertexOffset == 0) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
-    rhi::vulkan::cmdPushConstants(cmd, pushInfo);
-
     rhi::vulkan::cmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                  reinterpret_cast<VkPipeline>(this->getPipelineOpaque(
                                      decodedDraw.state.pipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS))));
-    rhi::vulkan::cmdDraw(cmd, decodedDraw.vertexCount, decodedDraw.instanceCount, 0, 0);
+
+    // Check if we're using a glTF mesh or the default vertex buffer
+    const MeshRecord* meshRecord = m_meshPool.tryGet(decodedDraw.state.mesh);
+    if(meshRecord != nullptr)
+    {
+      // Bind glTF mesh vertex and index buffers
+      const VkDeviceSize vertexOffset = 0;
+      rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &meshRecord->vertexBuffer, &vertexOffset);
+      rhi::vulkan::cmdBindIndexBuffer(cmd, meshRecord->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+      // Use default push constants for now
+      pushValues.color = glm::vec3(1, 1, 1);
+      rhi::vulkan::cmdPushConstants(cmd, pushInfo);
+
+      // Indexed draw
+      if(decodedDraw.isIndexed)
+      {
+        rhi::vulkan::cmdDrawIndexed(cmd, decodedDraw.indexCount, decodedDraw.instanceCount,
+                                    decodedDraw.firstIndex, decodedDraw.vertexOffsetIndexed, decodedDraw.firstInstance);
+      }
+      else
+      {
+        rhi::vulkan::cmdDraw(cmd, decodedDraw.vertexCount, decodedDraw.instanceCount, 0, 0);
+      }
+    }
+    else
+    {
+      // Use default vertex buffer (triangle)
+      const VkDeviceSize drawVertexOffset = static_cast<VkDeviceSize>(decodedDraw.vertexOffset) * sizeof(shaderio::Vertex);
+      const VkDeviceSize drawOffsets[] = {drawVertexOffset};
+      rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &m_device.vertexBuffer.buffer, drawOffsets);
+
+      pushValues.color = (decodedDraw.vertexOffset == 0) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+      rhi::vulkan::cmdPushConstants(cmd, pushInfo);
+
+      rhi::vulkan::cmdDraw(cmd, decodedDraw.vertexCount, decodedDraw.instanceCount, 0, 0);
+    }
   }
 
   rhi::vulkan::cmdEndRendering(cmd);
@@ -1214,6 +1294,415 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), vertShaderModule, nullptr);
 #ifndef USE_SLANG
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), fragShaderModule, nullptr);
+#endif
+
+  // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
+#ifdef USE_SLANG
+  {
+    VkShaderModule lightShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                {shader_light_slang, std::size(shader_light_slang)});
+    DBG_VK_NAME(lightShaderModule);
+
+    // Light pipeline uses no vertex input (fullscreen triangle generated in VS)
+    const rhi::VertexInputLayoutDesc emptyVertexInput{
+        .bindings       = nullptr,
+        .bindingCount   = 0,
+        .attributes     = nullptr,
+        .attributeCount = 0,
+    };
+
+    const std::array<rhi::DynamicState, 2> lightDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+
+    // No blending for light pass output
+    const std::array<rhi::BlendAttachmentState, 1> lightBlendStates{{
+        rhi::BlendAttachmentState{
+            .blendEnable         = false,
+            .colorWriteMask      = rhi::ColorComponentFlags::all,
+        },
+    }};
+
+    std::array<rhi::PipelineShaderStageDesc, 2> lightShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage        = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+            .entryPoint   = "vertexMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage        = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+            .entryPoint   = "fragmentMain",
+        },
+    }};
+
+    const std::array<rhi::TextureFormat, 1> swapchainColorFormat{{
+        toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat),
+    }};
+
+    rhi::GraphicsPipelineDesc lightGraphicsDesc{
+        .layout            = m_device.graphicPipelineLayout.get(),
+        .shaderStages      = lightShaderStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(lightShaderStages.size()),
+        .vertexInput       = emptyVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{false, false, rhi::CompareOp::always},
+        .blendStates       = lightBlendStates.data(),
+        .blendStateCount   = static_cast<uint32_t>(lightBlendStates.size()),
+        .dynamicStates     = lightDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(lightDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = swapchainColorFormat.data(),
+                .colorFormatCount = static_cast<uint32_t>(swapchainColorFormat.size()),
+                .depthFormat      = rhi::TextureFormat::undefined,
+            },
+    };
+    lightGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    lightGraphicsDesc.rasterState.cullMode    = rhi::CullMode::none;
+    lightGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    lightGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo lightCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 2,  // Light variant
+            },
+        .desc = lightGraphicsDesc,
+    };
+    const VkPipeline lightPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCreateInfo);
+    DBG_VK_NAME(lightPipeline);
+    m_lightPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                       reinterpret_cast<uint64_t>(lightPipeline),
+                                       lightCreateInfo.key.specializationVariant);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightShaderModule, nullptr);
+  }
+
+  // Create GBuffer pipeline layout with uniform buffer bindings
+  {
+    // Set 1: Camera uniform buffer layout
+    std::vector<rhi::BindTableLayoutEntry> cameraLayoutEntries{
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindCamera,
+            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::vertex,
+        },
+    };
+
+    auto* cameraLayout = new rhi::vulkan::VulkanBindTableLayout();
+    cameraLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), cameraLayoutEntries);
+    DBG_VK_NAME(cameraLayout->getVkDescriptorSetLayout());
+
+    auto* cameraTable = new rhi::vulkan::VulkanBindTable();
+    cameraTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                      *cameraLayout, 1);
+    DBG_VK_NAME(cameraTable->getVkDescriptorSet());
+
+    BindGroupDesc cameraBindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = cameraLayout,
+        .table               = cameraTable,
+        .primaryLogicalIndex = shaderio::LBindCamera,
+        .debugName           = "gbuffer-camera",
+    };
+    m_gbufferCameraBindGroup = createBindGroup(cameraBindGroupDesc);
+
+    // Set 2: Draw uniform buffer layout (dynamic)
+    std::vector<rhi::BindTableLayoutEntry> drawLayoutEntries{
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindDrawModel,
+            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
+        },
+    };
+
+    auto* drawLayout = new rhi::vulkan::VulkanBindTableLayout();
+    drawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), drawLayoutEntries);
+    DBG_VK_NAME(drawLayout->getVkDescriptorSetLayout());
+
+    auto* drawTable = new rhi::vulkan::VulkanBindTable();
+    drawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                    *drawLayout, 1);
+    DBG_VK_NAME(drawTable->getVkDescriptorSet());
+
+    BindGroupDesc drawBindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = drawLayout,
+        .table               = drawTable,
+        .primaryLogicalIndex = shaderio::LBindDrawModel,
+        .debugName           = "gbuffer-draw",
+    };
+    m_gbufferDrawBindGroup = createBindGroup(drawBindGroupDesc);
+
+    // Create GBuffer pipeline layout
+    const uint64_t textureLayoutHandle = getBindGroupLayoutOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+    const uint64_t cameraLayoutHandle = getBindGroupLayoutOpaque(m_gbufferCameraBindGroup, BindGroupSetSlot::shaderSpecific);
+    const uint64_t drawLayoutHandle = getBindGroupLayoutOpaque(m_gbufferDrawBindGroup, BindGroupSetSlot::shaderSpecific);
+
+    rhi::ShaderReflectionData gbufferReflection{};
+    gbufferReflection.name = "shader.gbuffer";
+    gbufferReflection.entryPoints = {
+        rhi::ShaderEntryPoint{"vertexMain", rhi::ShaderStageFlagBits::vertex},
+        rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
+    };
+    gbufferReflection.resourceBindings = {
+        rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
+                                   rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
+                                   Renderer::kDemoMaterialSlotCount, 0},
+        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
+        rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+                                   rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
+                                   shaderio::LSetDraw, shaderio::LBindDrawModel, 1, 0},
+    };
+    gbufferReflection.pushConstantRanges = {};  // No push constants for GBuffer
+
+    rhi::PipelineLayoutDesc gbufferLayoutDesc = rhi::derivePipelineLayoutDesc(gbufferReflection);
+    gbufferLayoutDesc.debugName = "gbuffer-layout";
+
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> gbufferLayoutMappings{
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, drawLayoutHandle),
+    };
+
+    const rhi::vulkan::VulkanPipelineLayoutLowering gbufferLayoutLowering{
+        .setLayouts     = gbufferLayoutMappings.data(),
+        .setLayoutCount = static_cast<uint32_t>(gbufferLayoutMappings.size()),
+    };
+
+    auto gbufferPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    gbufferPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                                gbufferLayoutDesc, gbufferLayoutLowering);
+    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
+    m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
+  }
+
+  // Create GBuffer pipelines (Opaque + AlphaTest variants)
+  {
+    VkShaderModule gbufferShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                {shader_gbuffer_slang, std::size(shader_gbuffer_slang)});
+    DBG_VK_NAME(gbufferShaderModule);
+
+    // GBuffer vertex input: Position(12) + Normal(12) + TexCoord(8) + Tangent(16) = 48 bytes
+    const std::array<rhi::VertexBindingDesc, 1> gbufferBindings{{
+        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
+    }};
+
+    const std::array<rhi::VertexAttributeDesc, 4> gbufferAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},    // Position
+        {.location = shaderio::LVGltfNormal,   .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 12},   // Normal
+        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat,    .offset = 24},   // TexCoord
+        {.location = shaderio::LVGltfTangent,  .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 32}, // Tangent
+    }};
+
+    const rhi::VertexInputLayoutDesc gbufferVertexInput{
+        .bindings       = gbufferBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(gbufferBindings.size()),
+        .attributes     = gbufferAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(gbufferAttributes.size()),
+    };
+
+    const std::array<rhi::DynamicState, 2> gbufferDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+
+    // No blending for GBuffer
+    const std::array<rhi::BlendAttachmentState, 3> gbufferBlendStates{{
+        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+    }};
+
+    // GBuffer formats: 3 color attachments + depth
+    const std::array<rhi::TextureFormat, 3> gbufferColorFormats{{
+        rhi::TextureFormat::rgba8Unorm,  // GBuffer0: BaseColor
+        rhi::TextureFormat::rgba8Unorm,  // GBuffer1: Normal
+        rhi::TextureFormat::rgba8Unorm,  // GBuffer2: Material
+    }};
+
+    // Specialization constant for alpha test
+    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(bool));
+
+    std::array<rhi::PipelineShaderStageDesc, 2> gbufferShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .entryPoint = "vertexMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .entryPoint = "fragmentMain",
+        },
+    }};
+
+    rhi::GraphicsPipelineDesc gbufferGraphicsDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),
+        .shaderStages      = gbufferShaderStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(gbufferShaderStages.size()),
+        .vertexInput       = gbufferVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::less},
+        .blendStates       = gbufferBlendStates.data(),
+        .blendStateCount   = static_cast<uint32_t>(gbufferBlendStates.size()),
+        .dynamicStates     = gbufferDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(gbufferDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = gbufferColorFormats.data(),
+                .colorFormatCount = static_cast<uint32_t>(gbufferColorFormats.size()),
+                .depthFormat      = rhi::TextureFormat::d32Sfloat,
+            },
+    };
+    gbufferGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    gbufferGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
+    gbufferGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    gbufferGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    // Variant 0: Opaque (alphaTestEnabled = false)
+    bool alphaTestFalse = false;
+    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(bool)};
+    gbufferShaderStages[1].specializationData = specDataFalse;
+    gbufferShaderStages[1].specializationConstants = &specConstantAlphaTest;
+    gbufferShaderStages[1].specializationConstantCount = 1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo gbufferCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 3,  // GBuffer Opaque variant
+            },
+        .desc = gbufferGraphicsDesc,
+    };
+    const VkPipeline gbufferOpaquePipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferCreateInfo);
+    DBG_VK_NAME(gbufferOpaquePipeline);
+    m_gbufferOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                               reinterpret_cast<uint64_t>(gbufferOpaquePipeline),
+                                               gbufferCreateInfo.key.specializationVariant);
+
+    // Variant 1: AlphaTest (alphaTestEnabled = true)
+    bool alphaTestTrue = true;
+    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(bool)};
+    gbufferShaderStages[1].specializationData = specDataTrue;
+    gbufferCreateInfo.key.specializationVariant = 4;  // GBuffer AlphaTest variant
+
+    const VkPipeline gbufferAlphaTestPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferCreateInfo);
+    DBG_VK_NAME(gbufferAlphaTestPipeline);
+    m_gbufferAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                   reinterpret_cast<uint64_t>(gbufferAlphaTestPipeline),
+                                                   gbufferCreateInfo.key.specializationVariant);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferShaderModule, nullptr);
+  }
+
+  // Create Forward pipeline for transparent objects
+  {
+    VkShaderModule forwardShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                {shader_forward_slang, std::size(shader_forward_slang)});
+    DBG_VK_NAME(forwardShaderModule);
+
+    // Same vertex input as GBuffer
+    const std::array<rhi::VertexBindingDesc, 1> forwardBindings{{
+        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
+    }};
+
+    const std::array<rhi::VertexAttributeDesc, 4> forwardAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
+        {.location = shaderio::LVGltfNormal,   .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 12},
+        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat,    .offset = 24},
+        {.location = shaderio::LVGltfTangent,  .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 32},
+    }};
+
+    const rhi::VertexInputLayoutDesc forwardVertexInput{
+        .bindings       = forwardBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(forwardBindings.size()),
+        .attributes     = forwardAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(forwardAttributes.size()),
+    };
+
+    const std::array<rhi::DynamicState, 2> forwardDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+
+    // Alpha blending for transparent objects
+    const rhi::BlendAttachmentState forwardBlend{
+        .blendEnable = true,
+        .srcBlend = rhi::BlendFactor::srcAlpha,
+        .dstBlend = rhi::BlendFactor::oneMinusSrcAlpha,
+        .blendOp = rhi::BlendOp::add,
+        .srcBlendAlpha = rhi::BlendFactor::one,
+        .dstBlendAlpha = rhi::BlendFactor::oneMinusSrcAlpha,
+        .blendOpAlpha = rhi::BlendOp::add,
+        .colorWriteMask = rhi::ColorComponentFlags::all,
+    };
+
+    std::array<rhi::PipelineShaderStageDesc, 2> forwardShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .entryPoint = "vertexMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .entryPoint = "fragmentMain",
+        },
+    }};
+
+    // Render to swapchain format
+    const rhi::TextureFormat swapchainFormat = toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat);
+
+    rhi::GraphicsPipelineDesc forwardGraphicsDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),
+        .shaderStages      = forwardShaderStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(forwardShaderStages.size()),
+        .vertexInput       = forwardVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::lessOrEqual},  // Test enabled, write disabled
+        .blendStates       = &forwardBlend,
+        .blendStateCount   = 1,
+        .dynamicStates     = forwardDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(forwardDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = &swapchainFormat,
+                .colorFormatCount = 1,
+                .depthFormat      = rhi::TextureFormat::d32Sfloat,
+            },
+    };
+    forwardGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    forwardGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
+    forwardGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    forwardGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo forwardCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 5,  // Forward variant
+            },
+        .desc = forwardGraphicsDesc,
+    };
+    const VkPipeline forwardPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardCreateInfo);
+    DBG_VK_NAME(forwardPipeline);
+    m_forwardPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                         reinterpret_cast<uint64_t>(forwardPipeline),
+                                         forwardCreateInfo.key.specializationVariant);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
+  }
 #endif
 }
 
@@ -1697,6 +2186,21 @@ void Renderer::waitForIdle()
   m_device.device->waitIdle();
 }
 
+void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
+{
+  const VkDevice       device       = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const rhi::QueueInfo graphicsInfo = m_device.device->getGraphicsQueue();
+  const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
+
+  VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
+  uploadFn(cmd);
+  utils::endSingleTimeCommands(cmd, device, m_device.transientCmdPool, graphicsQueue);
+
+  // Free staging buffers after GPU sync (upload is complete)
+  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+  m_meshPool.freeStagingBuffers();
+}
+
 GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
 {
   GltfUploadResult result;
@@ -1778,22 +2282,58 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
     m_device.stagingBuffers.push_back(stagingBuffer);
   }
 
-  // Create materials
+  // Create materials with PBR properties
   for(const auto& matData : model.materials)
   {
-    TextureHandle texHandle = kNullTextureHandle;
+    MaterialResources::MaterialRecord record;
+
+    // Base color texture
     if(matData.baseColorTexture >= 0 && matData.baseColorTexture < static_cast<int>(result.textures.size()))
     {
-      texHandle = result.textures[matData.baseColorTexture];
+      record.baseColorTexture = result.textures[matData.baseColorTexture];
+      record.sampledTexture = record.baseColorTexture;  // Legacy compatibility
     }
 
-    const rhi::ResourceIndex descriptorIndex = static_cast<rhi::ResourceIndex>(result.materials.size());
-    MaterialHandle            matHandle      = m_materials.materialPool.emplace(MaterialResources::MaterialRecord{
-        .sampledTexture  = texHandle,
-        .descriptorIndex = descriptorIndex,
-        .debugName       = "gltf-material",
-    });
+    // Metallic-Roughness texture
+    if(matData.metallicRoughnessTexture >= 0 && matData.metallicRoughnessTexture < static_cast<int>(result.textures.size()))
+    {
+      record.metallicRoughnessTexture = result.textures[matData.metallicRoughnessTexture];
+    }
 
+    // Normal texture
+    if(matData.normalTexture >= 0 && matData.normalTexture < static_cast<int>(result.textures.size()))
+    {
+      record.normalTexture = result.textures[matData.normalTexture];
+    }
+
+    // Occlusion texture
+    if(matData.occlusionTexture >= 0 && matData.occlusionTexture < static_cast<int>(result.textures.size()))
+    {
+      record.occlusionTexture = result.textures[matData.occlusionTexture];
+    }
+
+    // Emissive texture
+    if(matData.emissiveTexture >= 0 && matData.emissiveTexture < static_cast<int>(result.textures.size()))
+    {
+      record.emissiveTexture = result.textures[matData.emissiveTexture];
+    }
+
+    // Factors
+    record.baseColorFactor = matData.baseColorFactor;
+    record.metallicFactor = matData.metallicFactor;
+    record.roughnessFactor = matData.roughnessFactor;
+    record.normalScale = matData.normalScale;
+    record.occlusionStrength = matData.occlusionStrength;
+    record.emissiveFactor = matData.emissiveFactor;
+
+    // Alpha properties
+    record.alphaMode = matData.alphaMode;
+    record.alphaCutoff = matData.alphaCutoff;
+
+    record.descriptorIndex = static_cast<rhi::ResourceIndex>(result.materials.size());
+    record.debugName = matData.name.empty() ? "gltf-material" : matData.name.c_str();
+
+    MaterialHandle matHandle = m_materials.materialPool.emplace(std::move(record));
     result.materials.push_back(matHandle);
   }
 
@@ -1802,6 +2342,15 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
   {
     MeshHandle meshHandle = m_meshPool.uploadMesh(meshData, cmd);
     result.meshes.push_back(meshHandle);
+  }
+
+  // Update bindless texture array with glTF textures
+  // Use index offset to avoid conflict with sample materials
+  const uint32_t gltfTextureBaseIndex = kDemoMaterialSlotCount;  // Start after predefined slots
+  for(size_t i = 0; i < result.textures.size(); ++i)
+  {
+    const uint32_t bindlessIndex = gltfTextureBaseIndex + static_cast<uint32_t>(i);
+    updateBindlessTexture(bindlessIndex, result.textures[i]);
   }
 
   return result;
@@ -1836,19 +2385,153 @@ void Renderer::destroyGltfResources(const GltfUploadResult& result)
   }
 }
 
-PipelineHandle Renderer::getLightPipelineHandle() const
-{
-  return m_lightPipeline;
-}
-
 uint64_t Renderer::getLightPipelineLayout() const
 {
   return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
 }
 
+uint64_t Renderer::getGraphicsPipelineLayout() const
+{
+  return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
+}
+
+uint64_t Renderer::getGBufferPipelineLayout() const
+{
+  return m_device.gbufferPipelineLayout ? m_device.gbufferPipelineLayout->getNativeHandle() : 0;
+}
+
 uint64_t Renderer::getGBufferColorDescriptorSet() const
 {
   return getBindGroupDescriptorSetOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+}
+
+glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const
+{
+  const MaterialResources::MaterialRecord* material = tryGetMaterial(handle);
+  if(material)
+  {
+    return material->baseColorFactor;
+  }
+  return glm::vec4(1.0f);
+}
+
+int32_t Renderer::getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
+{
+  if(!gltfModel)
+  {
+    return -1;
+  }
+
+  const MaterialResources::MaterialRecord* material = tryGetMaterial(materialHandle);
+  if(!material || material->baseColorTexture.isNull())
+  {
+    return -1;
+  }
+
+  // Find texture index in gltfModel->textures
+  const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+  for(size_t i = 0; i < gltfModel->textures.size(); ++i)
+  {
+    if(gltfModel->textures[i] == material->baseColorTexture)
+    {
+      return static_cast<int32_t>(gltfTextureBaseIndex + i);
+    }
+  }
+
+  return -1;
+}
+
+Renderer::MaterialTextureIndices Renderer::getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
+{
+  MaterialTextureIndices result;
+
+  if(!gltfModel)
+  {
+    return result;
+  }
+
+  const MaterialResources::MaterialRecord* material = tryGetMaterial(materialHandle);
+  if(!material)
+  {
+    return result;
+  }
+
+  // Fill PBR factors
+  result.metallicFactor = material->metallicFactor;
+  result.roughnessFactor = material->roughnessFactor;
+  result.normalScale = material->normalScale;
+
+  const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+
+  // Helper to find texture index
+  auto findTextureIndex = [&](TextureHandle handle) -> int32_t {
+    if(handle.isNull())
+    {
+      return -1;
+    }
+    for(size_t i = 0; i < gltfModel->textures.size(); ++i)
+    {
+      if(gltfModel->textures[i] == handle)
+      {
+        return static_cast<int32_t>(gltfTextureBaseIndex + i);
+      }
+    }
+    return -1;
+  };
+
+  result.baseColor = findTextureIndex(material->baseColorTexture);
+  result.normal = findTextureIndex(material->normalTexture);
+  result.metallicRoughness = findTextureIndex(material->metallicRoughnessTexture);
+  result.occlusion = findTextureIndex(material->occlusionTexture);
+
+  // Fill alpha properties
+  result.alphaMode = material->alphaMode;
+  result.alphaCutoff = material->alphaCutoff;
+
+  return result;
+}
+
+void Renderer::updateBindlessTexture(uint32_t index, TextureHandle textureHandle)
+{
+  const MaterialResources::TextureHotData* textureHot = tryGetTextureHot(textureHandle);
+  if(!textureHot || textureHot->runtimeKind != MaterialResources::TextureRuntimeKind::materialSampled)
+  {
+    return;
+  }
+
+  const VkSampler sampler = m_device.samplerPool.acquireSampler({
+      .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter    = VK_FILTER_LINEAR,
+      .minFilter    = VK_FILTER_LINEAR,
+      .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .maxLod       = VK_LOD_CLAMP_NONE,
+  });
+
+  const VkDescriptorImageInfo imageInfo{
+      .sampler     = sampler,
+      .imageView   = textureHot->sampledImageView,
+      .imageLayout = textureHot->sampledImageLayout,
+  };
+
+  const rhi::DescriptorImageInfo descriptorImageInfo{
+      .sampler     = reinterpret_cast<uint64_t>(imageInfo.sampler),
+      .imageView   = reinterpret_cast<uint64_t>(imageInfo.imageView),
+      .imageLayout = static_cast<uint32_t>(imageInfo.imageLayout),
+  };
+
+  const rhi::BindTableWrite textureWrite{
+      .dstIndex        = kMaterialBindlessTexturesIndex,
+      .dstArrayElement = index,
+      .resourceType    = rhi::BindlessResourceType::sampledTexture,
+      .descriptorCount = 1,
+      .pImageInfo      = &descriptorImageInfo,
+      .visibility      = rhi::ResourceVisibility::allGraphics,
+      .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
+  };
+  updateBindGroup(m_materials.materialBindGroup, &textureWrite, 1);
 }
 
 }  // namespace demo
