@@ -375,6 +375,8 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
       m_swapchainDependent.swapchain->getMaxFramesInFlight(),
       rhi::ResourceState::Undefined);
 
+  // Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
+  createMaterialBindGroup();
   createFrameSubmission(m_swapchainDependent.swapchain->getMaxFramesInFlight());
   createDescriptorPool();
   initImGui(window);
@@ -401,14 +403,22 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
 
     // Create GBuffer descriptor set layout and set for LightPass
     {
-      // Create descriptor set layout with 1 binding: array of 3 sampled images (GBuffer textures)
-      const VkDescriptorSetLayoutBinding binding{
-          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      // Binding 0: Array of 4 sampled images (GBuffer0/1/2 + Depth)
+      const VkDescriptorSetLayoutBinding textureBinding{
+          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
+
+      // Binding 1: Camera uniform buffer (dynamic, but we'll use fixed offset for LightPass)
+      const VkDescriptorSetLayoutBinding cameraBinding{
+          1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      const std::array<VkDescriptorSetLayoutBinding, 2> bindings = {textureBinding, cameraBinding};
+
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .bindingCount = 1,
-          .pBindings    = &binding,
+          .bindingCount = static_cast<uint32_t>(bindings.size()),
+          .pBindings    = bindings.data(),
       };
       VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &layoutInfo, nullptr, &m_device.gbufferTextureSetLayout));
       DBG_VK_NAME(m_device.gbufferTextureSetLayout);
@@ -430,12 +440,21 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   // Update GBuffer texture descriptor set
   updateGBufferTextureDescriptorSet();
 
-  // Create pipeline layout for LightPass
+  // Create pipeline layout for LightPass (with push constants)
   {
+    // Push constants for light parameters (48 bytes: 3 vec3 + padding)
+    const VkPushConstantRange pushConstantRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset     = 0,
+        .size       = sizeof(shaderio::LightParams),
+    };
+
     const VkPipelineLayoutCreateInfo layoutInfo{
         .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts    = &m_device.gbufferTextureSetLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &pushConstantRange,
     };
     VK_CHECK(vkCreatePipelineLayout(nativeDevice, &layoutInfo, nullptr, &m_device.lightPipelineLayout));
     DBG_VK_NAME(m_device.lightPipelineLayout);
@@ -505,7 +524,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     m_materials.viewportTextureHandle = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
             {
-                .runtimeKind             = MaterialResources::TextureRuntimeKind::viewportAttachment,
+                .runtimeKind             = MaterialResources::TextureRuntimeKind::outputTexture,
                 .viewportAttachmentIndex = 0,
             },
     });
@@ -529,7 +548,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
   m_passExecutor.addPass(*m_lightPass);
-  m_passExecutor.addPass(*m_forwardPass);
+  m_passExecutor.addPass(*m_forwardPass); 
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
 }
@@ -679,6 +698,11 @@ ImTextureID Renderer::getViewportTextureID(TextureHandle handle) const
     return m_swapchainDependent.sceneResources.getImTextureID(textureHot->viewportAttachmentIndex);
   }
 
+  if(textureHot->runtimeKind == MaterialResources::TextureRuntimeKind::outputTexture)
+  {
+    return m_swapchainDependent.sceneResources.getOutputTextureImID();
+  }
+
   return ImTextureID{};
 }
 
@@ -726,6 +750,21 @@ VkImageView Renderer::getCurrentSwapchainImageView() const
       m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
 }
 
+VkImage Renderer::getCurrentSwapchainImage() const
+{
+  if(m_swapchainDependent.swapchain == nullptr)
+  {
+    return VK_NULL_HANDLE;
+  }
+  return fromNativeHandle<VkImage>(
+      m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex));
+}
+
+VkImageView Renderer::getOutputTextureView() const
+{
+  return m_swapchainDependent.sceneResources.getOutputTextureView();
+}
+
 void Renderer::render(const RenderParams& params)
 {
   if(params.viewportSize.width > 0 && params.viewportSize.height > 0
@@ -770,6 +809,24 @@ void Renderer::beginPresentPass(rhi::CommandList& cmd)
 void Renderer::endPresentPass(rhi::CommandList& cmd)
 {
   endDynamicRenderingToSwapchain(cmd);
+
+  // Transition swapchain image to PRESENT_SRC_KHR for presentation
+  VkImage swapchainImage = getCurrentSwapchainImage();
+  if(swapchainImage != VK_NULL_HANDLE)
+  {
+    cmd.transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(swapchainImage),
+        .aspect      = rhi::TextureAspect::color,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::BottomOfPipe,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::General,
+        .newState    = rhi::ResourceState::Present,
+        .isSwapchain = true,
+    });
+  }
 }
 
 void Renderer::createTransientCommandPool()
@@ -837,6 +894,11 @@ void Renderer::updateGBufferTextureDescriptorSet()
       return;
     }
   }
+  if(sceneResources.getDepthImageView() == VK_NULL_HANDLE)
+  {
+    LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
+    return;
+  }
 
   const VkSampler linearSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
       .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -848,8 +910,8 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .maxLod      = VK_LOD_CLAMP_NONE,
   });
 
-  // Write descriptor array for GBuffer textures (indices 0-2)
-  std::array<VkDescriptorImageInfo, 3> imageInfos{};
+  // Write descriptor array for GBuffer textures (indices 0-2) + depth (index 3)
+  std::array<VkDescriptorImageInfo, 4> imageInfos{};
   for(uint32_t i = 0; i < 3; ++i)
   {
     const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
@@ -859,18 +921,47 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
-
-  const VkWriteDescriptorSet write{
-      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet          = m_device.gbufferTextureSet,
-      .dstBinding      = 0,
-      .dstArrayElement = 0,
-      .descriptorCount = 3,
-      .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .pImageInfo      = imageInfos.data(),
+  // Depth texture at index 3
+  imageInfos[3] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getDepthImageView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
-  vkUpdateDescriptorSets(nativeDevice, 1, &write, 0, nullptr);
+  // Camera uniform buffer binding (binding 1)
+  // We use a fixed buffer for LightPass camera data - allocate from transient allocator
+  // For now, we'll update this per-frame in LightPass using dynamic UBO
+  // Create a dedicated camera buffer for LightPass
+  const VkDescriptorBufferInfo cameraBufferInfo{
+      .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[0].transientAllocator.getBufferOpaque()),
+      .offset = 0,
+      .range  = sizeof(shaderio::CameraUniforms),
+  };
+
+  const std::array<VkWriteDescriptorSet, 2> writes = {
+      // Texture array (binding 0, 4 textures)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 0,
+          .dstArrayElement = 0,
+          .descriptorCount = 4,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo      = imageInfos.data(),
+      },
+      // Camera uniform buffer (binding 1)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 1,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo     = &cameraBufferInfo,
+      },
+  };
+
+  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
@@ -963,6 +1054,13 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       .isSwapchain  = false,
   });
   m_passExecutor.bindTexture({
+      .handle       = kPassOutputHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
       .handle       = kPassSwapchainHandle,
       .nativeImage  = m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex),
       .aspect       = rhi::TextureAspect::color,
@@ -972,7 +1070,8 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
   m_perPass.drawStream.clear();
   demo::PassContext context{
-      &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel};
+      &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
+      m_materials.materialBindGroup};
   m_passExecutor.execute(context);
 
   // Update swapchain image state after rendering
@@ -999,9 +1098,8 @@ void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) con
       .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
       .imageView   = swapchainImageView,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Preserve LightPass/ForwardPass output
       .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-      .clearValue  = {{{0.0f, 0.0f, 0.0f, 1.0f}}},
   }}};
 
   const VkRenderingInfo renderingInfo{
@@ -2002,9 +2100,10 @@ void Renderer::createDescriptorPool()
     const uint32_t maxDescriptorSets = 20U;
     const uint32_t dynamicUniformCount =
         std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
-    const std::array<VkDescriptorPoolSize, 2> poolSizes{{
+    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -2039,33 +2138,36 @@ void Renderer::createDescriptorPool()
   }
 }
 
+void Renderer::createMaterialBindGroup()
+{
+  // Create material bind group early - needed for pipeline layout creation
+  std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
+      .logicalIndex    = kMaterialBindlessTexturesIndex,
+      .resourceType    = rhi::BindlessResourceType::sampledTexture,
+      .descriptorCount = m_materials.maxTextures,
+      .visibility      = rhi::ResourceVisibility::allGraphics,
+  }};
+
+  auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
+  materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
+
+  auto* materialTable = new rhi::vulkan::VulkanBindTable();
+  materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                      *materialLayout, m_materials.maxTextures);
+
+  BindGroupDesc materialBindGroupDesc{
+      .slot                = BindGroupSetSlot::material,
+      .layout              = materialLayout,
+      .table               = materialTable,
+      .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
+      .debugName           = "material-texture-bind-group",
+  };
+  m_materials.materialBindGroup = createBindGroup(std::move(materialBindGroupDesc));
+}
+
 void Renderer::createGraphicDescriptorSet()
 {
-  {
-    std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
-        .logicalIndex    = kMaterialBindlessTexturesIndex,
-        .resourceType    = rhi::BindlessResourceType::sampledTexture,
-        .descriptorCount = m_materials.maxTextures,
-        .visibility      = rhi::ResourceVisibility::allGraphics,
-    }};
-
-    auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
-    materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
-
-    auto* materialTable = new rhi::vulkan::VulkanBindTable();
-    materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                        *materialLayout, m_materials.maxTextures);
-
-    BindGroupDesc materialBindGroupDesc{
-        .slot                = BindGroupSetSlot::material,
-        .layout              = materialLayout,
-        .table               = materialTable,
-        .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
-        .debugName           = "material-texture-bind-group",
-    };
-    m_materials.materialBindGroup = createBindGroup(std::move(materialBindGroupDesc));
-  }
-
+  // Create per-frame scene bind groups - must be called after createFrameSubmission()
   {
     std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
         .logicalIndex    = kSceneBindlessInfoIndex,
@@ -2710,6 +2812,11 @@ BindGroupHandle Renderer::getDrawBindGroup(uint32_t frameIndex) const
     return m_perFrame.frameUserData[frameIndex].drawBindGroup;
   }
   return kNullBindGroupHandle;
+}
+
+rhi::BindGroupHandle Renderer::getGlobalBindlessGroup() const
+{
+  return m_materials.materialBindGroup;
 }
 
 glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const

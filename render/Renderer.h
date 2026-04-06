@@ -174,6 +174,8 @@ public:
 
   VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
   VkImageView getCurrentSwapchainImageView() const;
+  VkImage getCurrentSwapchainImage() const;
+  VkImageView getOutputTextureView() const;
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
@@ -360,6 +362,7 @@ private:
     {
       materialSampled,
       viewportAttachment,
+      outputTexture,  // OutputTexture for PBR lighting result
     };
 
     struct TextureHotData
@@ -439,6 +442,7 @@ private:
   void                 createPrebuiltComputePipelineVariant();
   void                 initImGui(GLFWwindow* window);
   void                 createDescriptorPool();
+  void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
   void                 createGraphicDescriptorSet();
   void                 updateGraphicsDescriptorSet();
   void                 updateGBufferTextureDescriptorSet();

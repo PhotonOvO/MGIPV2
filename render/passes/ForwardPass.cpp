@@ -18,15 +18,10 @@ ForwardPass::ForwardPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> ForwardPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 2> dependencies = {
+    static const std::array<PassResourceDependency, 1> dependencies = {
         PassResourceDependency::texture(
-            kPassSwapchainHandle,
+            kPassOutputHandle,
             ResourceAccess::readWrite,  // Read existing LightPass output, write blended result
-            rhi::ShaderStage::fragment
-        ),
-        PassResourceDependency::texture(
-            kPassGBufferDepthHandle,
-            ResourceAccess::read,
             rhi::ShaderStage::fragment
         ),
     };
@@ -42,14 +37,14 @@ void ForwardPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("ForwardPass");
 
-    // Get swapchain image view and extent
-    const VkImageView swapchainImageView = m_renderer->getCurrentSwapchainImageView();
-    const rhi::Extent2D swapchainExtent = {
-        m_renderer->getSwapchainExtent().width,
-        m_renderer->getSwapchainExtent().height
+    // Get output texture view and fixed extent
+    const VkImageView outputImageView = m_renderer->getOutputTextureView();
+    const rhi::Extent2D outputExtent = {
+        SceneResources::kOutputTextureWidth,
+        SceneResources::kOutputTextureHeight
     };
 
-    if(swapchainImageView == VK_NULL_HANDLE)
+    if(outputImageView == VK_NULL_HANDLE)
     {
         context.cmd->endEvent();
         return;
@@ -64,15 +59,8 @@ void ForwardPass::execute(const PassContext& context) const
 
     MeshPool& meshPool = m_renderer->getMeshPool();
     SceneResources& sceneResources = m_renderer->getSceneResources();
-    const rhi::Extent2D sceneExtent = {
-        sceneResources.getSize().width,
-        sceneResources.getSize().height
-    };
-    // Use intersection of swapchain and scene extents for renderArea
-    const rhi::Extent2D renderExtent{
-        std::min(swapchainExtent.width, sceneExtent.width),
-        std::min(swapchainExtent.height, sceneExtent.height),
-    };
+    // Use output texture extent for rendering
+    const rhi::Extent2D renderExtent = outputExtent;
     if(renderExtent.width == 0 || renderExtent.height == 0)
     {
         context.cmd->endEvent();
@@ -128,27 +116,22 @@ void ForwardPass::execute(const PassContext& context) const
     // Setup color attachment with LOAD loadOp (preserve LightPass output)
     rhi::RenderTargetDesc colorTarget = {
         .texture = {},  // Not used when view carries native pointer
-        .view = rhi::TextureViewHandle::fromNative(swapchainImageView),
+        .view = rhi::TextureViewHandle::fromNative(outputImageView),
         .state = rhi::ResourceState::general,
         .loadOp = rhi::LoadOp::load,  // Preserve existing content
         .storeOp = rhi::StoreOp::store,
     };
 
-    // Setup depth attachment (read-only, for depth test)
-    rhi::DepthTargetDesc depthTarget = {
-        .texture = {},  // Not used when view carries native pointer
-        .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
-        .state = rhi::ResourceState::general,
-        .loadOp = rhi::LoadOp::load,  // Read existing depth
-        .storeOp = rhi::StoreOp::store,
-    };
+    // Note: Not using depth attachment for transparent pass since:
+    // 1. OutputTexture is 1920x1080 but depth buffer is viewport-sized
+    // 2. Transparent objects are sorted back-to-front for proper blending
 
     // Begin render pass using RHI interface
     const rhi::RenderPassDesc passDesc = {
         .renderArea = {{0, 0}, renderExtent},
         .colorTargets = &colorTarget,
         .colorTargetCount = 1,
-        .depthTarget = &depthTarget,
+        .depthTarget = nullptr,
     };
     context.cmd->beginRenderPass(passDesc);
 

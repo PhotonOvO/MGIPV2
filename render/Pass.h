@@ -76,6 +76,7 @@ struct PassResourceDependency
 inline constexpr BufferHandle  kPassVertexBufferHandle{0xF001u, 1u};
 inline constexpr TextureHandle kPassGBufferColorHandle{0xF101u, 1u};
 inline constexpr TextureHandle kPassGBufferDepthHandle{0xF102u, 1u};
+inline constexpr TextureHandle kPassOutputHandle{0xF103u, 1u};      // OutputTexture (PBR result)
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

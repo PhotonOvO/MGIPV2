@@ -129,6 +129,33 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.descriptors[c].imageLayout = layout;
   }
 
+  // Create fixed-resolution output texture
+  {
+    const VkImageCreateInfo outputInfo{
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = VK_FORMAT_B8G8R8A8_UNORM,
+        .extent      = {kOutputTextureWidth, kOutputTextureHeight, 1},
+        .mipLevels   = 1,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .usage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                     | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+    };
+    m_resources.outputTextureImage = createImage(outputInfo);
+    dutil.setObjectName(m_resources.outputTextureImage.image, "OutputTexture");
+
+    const VkImageViewCreateInfo outputViewInfo{
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = m_resources.outputTextureImage.image,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = VK_FORMAT_B8G8R8A8_UNORM,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
+    };
+    VK_CHECK(vkCreateImageView(m_device, &outputViewInfo, nullptr, &m_resources.outputTextureView));
+    dutil.setObjectName(m_resources.outputTextureView, "OutputTextureView");
+  }
+
   if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
   {
     const VkImageCreateInfo depthInfo{
@@ -164,6 +191,13 @@ void SceneResources::create(VkCommandBuffer cmd)
     vkCmdClearColorImage(cmd, m_resources.colorImages[c].image, layout, &clearValue, uint32_t(range.size()), range.data());
   }
 
+  // Initialize output texture layout
+  utils::cmdInitImageLayout(cmd, m_resources.outputTextureImage.image);
+  const VkClearColorValue outputClearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  const VkImageSubresourceRange outputRange{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+  vkCmdClearColorImage(cmd, m_resources.outputTextureImage.image, VK_IMAGE_LAYOUT_GENERAL,
+                       &outputClearValue, 1, &outputRange);
+
   if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
   {
     utils::cmdInitImageLayout(cmd, m_resources.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -177,10 +211,36 @@ void SceneResources::create(VkCommandBuffer cmd)
           ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, m_resources.uiImageViews[d], layout));
     }
   }
+
+  // Create ImGui descriptor for output texture
+  if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
+  {
+    m_resources.outputTextureImID = reinterpret_cast<ImTextureID>(
+        ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, m_resources.outputTextureView,
+                                    VK_IMAGE_LAYOUT_GENERAL));
+  }
 }
 
 void SceneResources::destroy()
 {
+  // Cleanup output texture
+  if(m_resources.outputTextureImID)
+  {
+    using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
+    ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<ImGuiTextureHandle>(m_resources.outputTextureImID));
+    m_resources.outputTextureImID = {};
+  }
+  if(m_resources.outputTextureImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.outputTextureImage.image, m_resources.outputTextureImage.allocation);
+    m_resources.outputTextureImage = {};
+  }
+  if(m_resources.outputTextureView != VK_NULL_HANDLE)
+  {
+    vkDestroyImageView(m_device, m_resources.outputTextureView, nullptr);
+    m_resources.outputTextureView = VK_NULL_HANDLE;
+  }
+
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
   {
     using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
@@ -236,6 +296,21 @@ utils::Image SceneResources::createImage(const VkImageCreateInfo& imageInfo) con
   VmaAllocationInfo allocInfo{};
   VK_CHECK(vmaCreateImage(m_allocator, &imageInfo, &allocationInfo, &image.image, &image.allocation, &allocInfo));
   return image;
+}
+
+VkImageView SceneResources::getOutputTextureView() const
+{
+  return m_resources.outputTextureView;
+}
+
+ImTextureID SceneResources::getOutputTextureImID() const
+{
+  return m_resources.outputTextureImID;
+}
+
+VkImage SceneResources::getOutputTextureImage() const
+{
+  return m_resources.outputTextureImage.image;
 }
 
 }  // namespace demo

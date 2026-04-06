@@ -40,6 +40,15 @@ public:
   [[nodiscard]] VkImageView                  getGBufferImageView(uint32_t index) const { return getColorImageView(index); }
   [[nodiscard]] const VkDescriptorImageInfo& getGBufferDescriptor(uint32_t index) const { return getDescriptorImageInfo(index); }
 
+  // Fixed resolution output texture (for PBR lighting result)
+  static constexpr uint32_t kOutputTextureWidth = 1920;
+  static constexpr uint32_t kOutputTextureHeight = 1080;
+  static constexpr uint32_t kOutputTextureIndex = 3;  // After GBuffer[0-2]
+
+  [[nodiscard]] VkImageView getOutputTextureView() const;
+  [[nodiscard]] ImTextureID getOutputTextureImID() const;
+  [[nodiscard]] VkImage getOutputTextureImage() const;
+
 private:
   struct Resources
   {
@@ -48,6 +57,9 @@ private:
     VkImageView                        depthView{};
     std::vector<VkDescriptorImageInfo> descriptors;
     std::vector<VkImageView>           uiImageViews;
+    utils::Image                       outputTextureImage{};  // Fixed-res output for PBR result
+    VkImageView                        outputTextureView{};
+    ImTextureID                        outputTextureImID{};
   };
 
   void                       create(VkCommandBuffer cmd);

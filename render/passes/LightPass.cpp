@@ -5,6 +5,7 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
+#include <cstring>
 
 namespace demo {
 
@@ -22,7 +23,7 @@ PassNode::HandleSlice<PassResourceDependency> LightPass::getDependencies() const
             rhi::ShaderStage::fragment
         ),
         PassResourceDependency::texture(
-            kPassSwapchainHandle,
+            kPassOutputHandle,
             ResourceAccess::write,
             rhi::ShaderStage::fragment
         ),
@@ -37,15 +38,15 @@ void LightPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("LightPass");
 
-    // Get swapchain image view and extent
-    rhi::TextureViewHandle swapchainViewHandle = rhi::TextureViewHandle::fromNative(
-        m_renderer->getCurrentSwapchainImageView());
+    // Get output texture view and fixed extent
+    rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(
+        m_renderer->getOutputTextureView());
     const rhi::Extent2D extent = {
-        m_renderer->getSwapchainExtent().width,
-        m_renderer->getSwapchainExtent().height
+        SceneResources::kOutputTextureWidth,
+        SceneResources::kOutputTextureHeight
     };
 
-    if(swapchainViewHandle.isNull())
+    if(outputViewHandle.isNull())
     {
         context.cmd->endEvent();
         return;
@@ -54,10 +55,11 @@ void LightPass::execute(const PassContext& context) const
     // Setup color attachment for dynamic rendering
     rhi::RenderTargetDesc colorTarget = {
         .texture = {},  // Not used when view carries native pointer
-        .view = swapchainViewHandle,
+        .view = outputViewHandle,
         .state = rhi::ResourceState::general,
-        .loadOp = rhi::LoadOp::load,  // Preserve previous content
+        .loadOp = rhi::LoadOp::clear,  // Clear output texture
         .storeOp = rhi::StoreOp::store,
+        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},  // Black background
     };
 
     // Begin render pass using RHI interface
@@ -106,6 +108,23 @@ void LightPass::execute(const PassContext& context) const
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+
+    // Setup light parameters via push constants
+    shaderio::LightParams lightParams;
+    // Direction TO the light source (sun direction, pointing towards the scene)
+    lightParams.lightDirection = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
+    // Light color (warm sunlight)
+    lightParams.lightColor = glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f;  // Bright enough
+    // Ambient color (sky ambient)
+    lightParams.ambientColor = glm::vec3(0.1f, 0.12f, 0.15f);
+
+    // Push constants for light parameters
+    vkCmdPushConstants(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                       pipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0,
+                       sizeof(shaderio::LightParams),
+                       &lightParams);
 
     // Draw fullscreen triangle using RHI interface
     context.cmd->draw(3, 1, 0, 0);

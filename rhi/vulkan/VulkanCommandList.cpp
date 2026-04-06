@@ -324,8 +324,9 @@ void VulkanCommandList::transitionTexture(const TextureBarrierDesc& desc)
   ensureCommandBuffer(m_commandBuffer);
 
   const ResourceHandle trackedResource{ResourceKind::Texture, desc.texture.index, desc.texture.generation};
-  const ResourceState  resolvedOldState =
-      desc.oldState == ResourceState::Undefined ? getTrackedState(trackedResource, desc.oldState) : desc.oldState;
+  // Always check tracked state first, use it if available
+  const ResourceState trackedState = getTrackedState(trackedResource, desc.oldState);
+  const ResourceState resolvedOldState = trackedState;
 
   const VkAccessFlags2 srcAccess =
       resolvedOldState == ResourceState::Undefined ?
