@@ -54,8 +54,8 @@ void PresentPass::execute(const PassContext& context) const
   const float srcAspect = static_cast<float>(srcExtent.width) / static_cast<float>(srcExtent.height);
   const float dstAspect = static_cast<float>(dstExtent.width) / static_cast<float>(dstExtent.height);
 
-  VkOffset3D srcOffset0 = {0, 0, 0};
-  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), static_cast<int32_t>(srcExtent.height), 1};
+  VkOffset3D srcOffset0 = {0, static_cast<int32_t>(srcExtent.height), 0};  // Y flipped: start from bottom
+  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), 0, 1};   // Y flipped: end at top
   VkOffset3D dstOffset0 = {0, 0, 0};
   VkOffset3D dstOffset1 = {static_cast<int32_t>(dstExtent.width), static_cast<int32_t>(dstExtent.height), 1};
 
