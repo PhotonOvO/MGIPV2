@@ -123,6 +123,14 @@ STATIC_CONST int LAlphaOpaque   = 0;
 STATIC_CONST int LAlphaMask     = 1;
 STATIC_CONST int LAlphaBlend    = 2;
 
+// Light parameters for PBR lighting pass (push constants)
+struct LightParams
+{
+  vec3 lightDirection;      // Direction TO light source (normalized)
+  vec3 lightColor;          // RGB light intensity
+  vec3 ambientColor;        // Ambient contribution
+};
+
 // Vertex with tangent for GBuffer pass
 struct VertexGltfTangent
 {
