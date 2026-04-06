@@ -226,9 +226,7 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID) {
 
     output.position = float4(positions[vertexIndex], 0.0, 1.0);
     output.uv = positions[vertexIndex] * 0.5 + 0.5;
-
-    // Flip Y for Vulkan NDC (Y-axis points down)
-    output.uv.y = 1.0 - output.uv.y;
+    // Note: UV flip removed - Y orientation handled by projection matrix
 
     return output;
 }

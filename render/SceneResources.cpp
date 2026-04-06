@@ -224,12 +224,12 @@ void SceneResources::create(VkCommandBuffer cmd)
 void SceneResources::destroy()
 {
   // Cleanup output texture
-  if(m_resources.outputTextureImID)
+  if(m_resources.outputTextureImID && ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().BackendPlatformUserData != nullptr)
   {
     using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
     ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<ImGuiTextureHandle>(m_resources.outputTextureImID));
-    m_resources.outputTextureImID = {};
   }
+  m_resources.outputTextureImID = {};
   if(m_resources.outputTextureImage.image != VK_NULL_HANDLE)
   {
     vmaDestroyImage(m_allocator, m_resources.outputTextureImage.image, m_resources.outputTextureImage.allocation);

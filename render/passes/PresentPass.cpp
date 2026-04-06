@@ -54,27 +54,36 @@ void PresentPass::execute(const PassContext& context) const
   const float srcAspect = static_cast<float>(srcExtent.width) / static_cast<float>(srcExtent.height);
   const float dstAspect = static_cast<float>(dstExtent.width) / static_cast<float>(dstExtent.height);
 
-  VkOffset3D srcOffset0 = {0, static_cast<int32_t>(srcExtent.height), 0};  // Y flipped: start from bottom
-  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), 0, 1};   // Y flipped: end at top
-  VkOffset3D dstOffset0 = {0, 0, 0};
-  VkOffset3D dstOffset1 = {static_cast<int32_t>(dstExtent.width), static_cast<int32_t>(dstExtent.height), 1};
+  // Source coordinates
+  VkOffset3D srcOffset0 = {0, 0, 0};
+  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), static_cast<int32_t>(srcExtent.height), 1};
+
+  // Destination coordinates (will be flipped after letterbox calculation)
+  int32_t dstY0 = 0;
+  int32_t dstY1 = static_cast<int32_t>(dstExtent.height);
+  int32_t dstX0 = 0;
+  int32_t dstX1 = static_cast<int32_t>(dstExtent.width);
 
   if(dstAspect > srcAspect)
   {
     // Destination is wider than source - pillarbox (vertical bars)
     const int32_t scaledWidth = static_cast<int32_t>(dstExtent.height * srcAspect);
     const int32_t barWidth = (dstExtent.width - scaledWidth) / 2;
-    dstOffset0.x = barWidth;
-    dstOffset1.x = barWidth + scaledWidth;
+    dstX0 = barWidth;
+    dstX1 = barWidth + scaledWidth;
   }
   else if(dstAspect < srcAspect)
   {
     // Destination is taller than source - letterbox (horizontal bars)
     const int32_t scaledHeight = static_cast<int32_t>(dstExtent.width / srcAspect);
     const int32_t barHeight = (dstExtent.height - scaledHeight) / 2;
-    dstOffset0.y = barHeight;
-    dstOffset1.y = barHeight + scaledHeight;
+    dstY0 = barHeight;
+    dstY1 = barHeight + scaledHeight;
   }
+
+  // Apply Y flip for swapchain (swap Y coordinates)
+  VkOffset3D dstOffset0 = {dstX0, dstY0, 0};
+  VkOffset3D dstOffset1 = {dstX1, dstY1, 1};
 
   // Transition source image to TRANSFER_SRC_OPTIMAL
   {
