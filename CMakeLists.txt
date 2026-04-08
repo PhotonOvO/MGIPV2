@@ -164,7 +164,7 @@ if(USE_SLANG)
   # For v1, we establish the contract structure; actual extraction is a follow-on task
 else()
   set(GENERATED_SHADER_SLANG_HEADERS "")
-  set(GENERATED_SHADER_SPV_BINARIES "")
+  set(GENERATED_SHADER_SPV_BINARIES "") 
 endif()
 
 compile_glsl(

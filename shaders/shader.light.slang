@@ -250,10 +250,10 @@ float4 fragmentMain(VSOutput input) : SV_Target {
         // Return ambient color for background
         return float4(lightParams.ambientColor, 1.0);
     }
-
+     
     // Extract GBuffer data
     vec3 baseColor = baseColorSample.rgb;
-    vec3 normal    = normalSample.rgb;
+    vec3 normal = normalSample.rgb;
     float metallic = materialSample.r;
     float roughness = materialSample.g;
     float ao       = materialSample.b;

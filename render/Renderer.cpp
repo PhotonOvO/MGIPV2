@@ -548,7 +548,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
   m_passExecutor.addPass(*m_lightPass);
-  m_passExecutor.addPass(*m_forwardPass); 
+  // m_passExecutor.addPass(*m_forwardPass); 
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
 }

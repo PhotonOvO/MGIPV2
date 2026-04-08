@@ -198,10 +198,9 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     set(COMPILE_SHADER_TARGET "spirv")
   endif()
 
-  # Default to debug info level 1, which embeds shader source for Nsight and other tools
-  if(NOT DEFINED COMPILE_SHADER_DEBUG_LEVEL)
-    set(COMPILE_SHADER_DEBUG_LEVEL 1)
-  endif()
+  # Debug level is now handled via generator expressions in _BUILD_FLAGS below.
+  # This allows proper per-configuration handling for multi-config generators (VS, Xcode).
+  # Users can still override by explicitly setting DEBUG_LEVEL.
 
   # Default to no optimization for faster builds, and to avoid spirv-opt bugs that have
   # broken some of our shaders
@@ -239,10 +238,21 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     list(APPEND _OPTIONAL_FLAGS -capability ${COMPILE_SHADER_CAPABILITIES})
   endif()
 
+  # Build flags (optimization level is always set)
   set(_BUILD_FLAGS
-    -g${COMPILE_SHADER_DEBUG_LEVEL}
     -O${COMPILE_SHADER_OPTIMIZATION_LEVEL}
   )
+
+  # Debug level: use generator expression for per-configuration handling
+  # Default: Debug/RelWithDebInfo get -g1 (embed source), Release/MinSizeRel get -g0 (no debug)
+  # Users can override by explicitly setting DEBUG_LEVEL
+  if(DEFINED COMPILE_SHADER_DEBUG_LEVEL AND NOT "${COMPILE_SHADER_DEBUG_LEVEL}" STREQUAL "")
+    # User explicitly specified debug level - use it directly
+    set(_DEBUG_LEVEL ${COMPILE_SHADER_DEBUG_LEVEL})
+  else()
+    # Will use generator expression in the command
+    set(_DEBUG_LEVEL "auto")
+  endif()
 
   # User flags listed last so they can override earlier settings
   set(_SLANG_FLAGS
@@ -252,6 +262,15 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     ${_BUILD_FLAGS}
     ${COMPILE_SHADER_EXTRA_FLAGS}
   )
+
+  # Debug flag - either user-specified or determined by build configuration
+  if(_DEBUG_LEVEL STREQUAL "auto")
+    # Generator expression: Debug/RelWithDebInfo get -g1, others get -g0
+    set(_DEBUG_FLAG_GENEX "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,-g1,-g0>")
+  else()
+    # User specified explicit level
+    set(_DEBUG_FLAG_GENEX "-g${_DEBUG_LEVEL}")
+  endif()
 
   #------------------------------------------------------------------------------------------------
   # Process each shader file
@@ -280,6 +299,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
         -source-embed-name ${_EMBED_NAME}
         -source-embed-style text
         ${_SLANG_FLAGS}
+        "${_DEBUG_FLAG_GENEX}"
         -o "${OUTPUT_H_FILE}"
         ${SHADER}
       )
@@ -304,6 +324,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     if(_GENERATE_SPV)
       set(_COMMAND_S ${Slang_SLANGC_EXECUTABLE}
         ${_SLANG_FLAGS}
+        "${_DEBUG_FLAG_GENEX}"
         -o "${OUTPUT_SPV_FILE}"
         ${SHADER}
       )
@@ -329,6 +350,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     # Single custom command per shader: all outputs built together so that
     # VS right-click "Compile" on a .slang file produces everything.
     # Cross-shader parallelism is still achieved since each shader has its own command.
+    # COMMAND_EXPAND_LISTS is required for generator expressions to be evaluated.
     if(_OUTPUT_FILES)
       add_custom_command(
         OUTPUT ${_OUTPUT_FILES}
@@ -336,6 +358,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
         MAIN_DEPENDENCY ${SHADER}
         DEPFILE "${OUTPUT_DEP_FILE}"
         COMMENT "Compiling Slang shader: ${SHADER_NAME}"
+        COMMAND_EXPAND_LISTS
         VERBATIM
       )
     endif()

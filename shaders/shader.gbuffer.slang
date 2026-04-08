@@ -84,6 +84,7 @@ VertexOutput vertexMain(VertexInput input)
 [shader("fragment")]
 void fragmentMain(
     VertexOutput input,
+    bool isFrontFace : SV_IsFrontFace,
     out float4 outGBuffer0 : SV_Target0,
     out float4 outGBuffer1 : SV_Target1,
     out float4 outGBuffer2 : SV_Target2
@@ -115,17 +116,24 @@ void fragmentMain(
         // Convert from [0,1] to [-1,1]
         tangentNormal = tangentNormal * 2.0 - 1.0;
         // Apply normal scale
-        tangentNormal.xy *= draw.normalScale;
+        // tangentNormal.xy *= draw.normalScale;
 
+        tangentNormal = normalize(tangentNormal);
         // Build TBN matrix
         float3 N = normalize(input.worldNormal);
         float3 T = normalize(input.worldTangent);
         // Recalculate bitangent using normal and tangent
-        float3 B = cross(N, T) * input.tangentW;
-        float3x3 TBN = float3x3(T, B, N);
+        float3 B = normalize(cross(N, T)) * input.tangentW;
 
-        // Transform to world space
-        worldNormal = normalize(mul(TBN, tangentNormal));
+        // Transform to world space explicitly to avoid row/column-major ambiguity.
+        worldNormal = normalize(tangentNormal.x * T + tangentNormal.y * B + tangentNormal.z * N);
+        // worldNormal = tangentNormal;
+    }
+    
+    // Flip normal for back faces (double-sided rendering support)
+    if (!isFrontFace)
+    {
+        worldNormal = -worldNormal;
     }
 
     // 3. PBR values

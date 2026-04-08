@@ -42,11 +42,11 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access)
   switch(access)
   {
     case ResourceAccess::read:
-      return VK_ACCESS_2_MEMORY_READ_BIT;
+      return VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
     case ResourceAccess::write:
-      return VK_ACCESS_2_MEMORY_WRITE_BIT;
+      return VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
     case ResourceAccess::readWrite:
-      return VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+      return VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
     default:
       return VK_ACCESS_2_NONE;
   }
@@ -85,13 +85,21 @@ VkAccessFlags2 stateToDefaultAccess(ResourceState state)
   switch(state)
   {
     case ResourceState::ShaderRead:
+      return VK_ACCESS_2_SHADER_READ_BIT;
     case ResourceState::TransferSrc:
+      return VK_ACCESS_2_TRANSFER_READ_BIT;
     case ResourceState::Present:
-      return VK_ACCESS_2_MEMORY_READ_BIT;
+      return VK_ACCESS_2_NONE;  // Present src stage is BottomOfPipe, no access needed
+    case ResourceState::TransferDst:
+      return VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    case ResourceState::ColorAttachment:
+      return VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    case ResourceState::DepthStencilAttachment:
+      return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     case ResourceState::Undefined:
       return VK_ACCESS_2_NONE;
-    default:
-      return VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    default:  // General, ShaderWrite, etc.
+      return VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
   }
 }
 
@@ -104,6 +112,7 @@ VkPipelineStageFlags2 stateToDefaultStage(ResourceState state)
     case ResourceState::DepthStencilAttachment:
       return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     case ResourceState::ShaderRead:
+      return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     case ResourceState::ShaderWrite:
       return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     case ResourceState::TransferSrc:
@@ -111,8 +120,10 @@ VkPipelineStageFlags2 stateToDefaultStage(ResourceState state)
       return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     case ResourceState::Present:
       return VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-    default:
-      return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    case ResourceState::Undefined:
+      return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+    default:  // General
+      return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
   }
 }
 
@@ -273,18 +284,18 @@ void VulkanCommandList::insertBarrier(BarrierType barrierType)
   switch(barrierType)
   {
     case BarrierType::Execution:
-      memoryBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      memoryBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
       memoryBarrier.srcAccessMask = VK_ACCESS_2_NONE;
-      memoryBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      memoryBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
       memoryBarrier.dstAccessMask = VK_ACCESS_2_NONE;
       break;
     case BarrierType::LayoutTransition:
     case BarrierType::Memory:
     default:
-      memoryBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-      memoryBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-      memoryBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-      memoryBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+      memoryBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+      memoryBarrier.srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      memoryBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+      memoryBarrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
       break;
   }
 
@@ -324,20 +335,41 @@ void VulkanCommandList::transitionTexture(const TextureBarrierDesc& desc)
   ensureCommandBuffer(m_commandBuffer);
 
   const ResourceHandle trackedResource{ResourceKind::Texture, desc.texture.index, desc.texture.generation};
-  // Always check tracked state first, use it if available
+  // Check tracked state, but use desc.oldState as fallback
   const ResourceState trackedState = getTrackedState(trackedResource, desc.oldState);
-  const ResourceState resolvedOldState = trackedState;
 
+  // Resolve oldLayout: use tracked state, but for swapchain images in Present state,
+  // use Undefined to avoid validation errors when actual state differs (e.g., RenderDoc injection)
+  ResourceState resolvedOldState = trackedState;
+  if(desc.isSwapchain && trackedState == ResourceState::Present)
+  {
+    // Swapchain images may have their actual state changed externally (RenderDoc, etc.)
+    // Using Undefined avoids validation errors when actual layout doesn't match tracked state
+    resolvedOldState = ResourceState::Undefined;
+  }
+
+  // Derive srcAccess from oldState for specific states, ensuring stage/access compatibility
   const VkAccessFlags2 srcAccess =
-      resolvedOldState == ResourceState::Undefined ?
-          VK_ACCESS_2_NONE :
-          (desc.srcAccess == ResourceAccess::read ? stateToDefaultAccess(resolvedOldState) : toVkAccessMask(desc.srcAccess));
-  const VkAccessFlags2 dstAccess =
-      desc.dstAccess == ResourceAccess::read ? stateToDefaultAccess(desc.newState) : toVkAccessMask(desc.dstAccess);
+      resolvedOldState == ResourceState::Undefined ? VK_ACCESS_2_NONE : stateToDefaultAccess(resolvedOldState);
+
+  // Derive dstAccess from newState for specific states, ensuring stage/access compatibility
+  const VkAccessFlags2 dstAccess = stateToDefaultAccess(desc.newState);
+
+  // Derive srcStage from oldState for specific states to ensure stage/access compatibility
   const VkPipelineStageFlags2 srcStage =
-      desc.srcStage == PipelineStage::TopOfPipe ? stateToDefaultStage(resolvedOldState) : toVkStageMask(desc.srcStage);
+      (resolvedOldState == ResourceState::TransferSrc || resolvedOldState == ResourceState::TransferDst ||
+       resolvedOldState == ResourceState::Present || resolvedOldState == ResourceState::ColorAttachment ||
+       resolvedOldState == ResourceState::DepthStencilAttachment)
+          ? stateToDefaultStage(resolvedOldState)
+          : (desc.srcStage == PipelineStage::TopOfPipe ? stateToDefaultStage(resolvedOldState) : toVkStageMask(desc.srcStage));
+
+  // Derive dstStage from newState for specific states to ensure stage/access compatibility
   const VkPipelineStageFlags2 dstStage =
-      desc.dstStage == PipelineStage::BottomOfPipe ? stateToDefaultStage(desc.newState) : toVkStageMask(desc.dstStage);
+      (desc.newState == ResourceState::TransferSrc || desc.newState == ResourceState::TransferDst ||
+       desc.newState == ResourceState::Present || desc.newState == ResourceState::ColorAttachment ||
+       desc.newState == ResourceState::DepthStencilAttachment)
+          ? stateToDefaultStage(desc.newState)
+          : (desc.dstStage == PipelineStage::BottomOfPipe ? stateToDefaultStage(desc.newState) : toVkStageMask(desc.dstStage));
 
   const VkImageMemoryBarrier2 barrier{
       .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,

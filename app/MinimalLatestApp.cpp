@@ -7,8 +7,18 @@
 
 #include "MinimalLatestApp.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 int main()
 {
+#ifdef _WIN32
+  // Pause at startup to allow debugger attachment
+  printf("Press any key to continue...\n");
+  getchar();
+#endif
+
   // Get the logger instance
   utils::Logger& logger = utils::Logger::getInstance();
   // logger.enableFileOutput(false);  // Don't write log to file

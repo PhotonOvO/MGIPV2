@@ -8,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <cstring>
 #include <iostream>
 
 namespace demo {
@@ -20,6 +21,14 @@ static std::vector<float> computeTangents(
     const std::vector<uint32_t>& indices
 );
 static void generateTangentsIfMissing(GltfMeshData& mesh);
+static int resolveTextureSourceIndex(const tinygltf::Model& model, int textureIndex);
+static bool readFloatAccessor(
+    const tinygltf::Model& model,
+    const tinygltf::Accessor& accessor,
+    int expectedType,
+    int componentCount,
+    std::vector<float>& out
+);
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     tinygltf::Model model;
@@ -181,39 +190,19 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
         }
 
         const auto& posAccessor = model.accessors[posIt->second];
-        const auto& posBufferView = model.bufferViews[posAccessor.bufferView];
-        const auto& posBuffer = model.buffers[posBufferView.buffer];
-
-        // Extract positions
-        const float* posData = reinterpret_cast<const float*>(
-            &posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset]
-        );
-
         size_t vertexCount = posAccessor.count;
-        meshData.positions.reserve(vertexCount * 3);
-
-        for (size_t i = 0; i < vertexCount; ++i) {
-            meshData.positions.push_back(posData[i * 3]);
-            meshData.positions.push_back(posData[i * 3 + 1]);
-            meshData.positions.push_back(posData[i * 3 + 2]);
+        if (!readFloatAccessor(model, posAccessor, TINYGLTF_TYPE_VEC3, 3, meshData.positions)) {
+            m_lastError = "Mesh POSITION accessor must be VEC3 float";
+            return false;
         }
 
         // Get normals (optional)
         auto normIt = primitive.attributes.find("NORMAL");
         if (normIt != primitive.attributes.end()) {
             const auto& normAccessor = model.accessors[normIt->second];
-            const auto& normBufferView = model.bufferViews[normAccessor.bufferView];
-            const auto& normBuffer = model.buffers[normBufferView.buffer];
-
-            const float* normData = reinterpret_cast<const float*>(
-                &normBuffer.data[normBufferView.byteOffset + normAccessor.byteOffset]
-            );
-
-            meshData.normals.reserve(vertexCount * 3);
-            for (size_t i = 0; i < vertexCount; ++i) {
-                meshData.normals.push_back(normData[i * 3]);
-                meshData.normals.push_back(normData[i * 3 + 1]);
-                meshData.normals.push_back(normData[i * 3 + 2]);
+            if (!readFloatAccessor(model, normAccessor, TINYGLTF_TYPE_VEC3, 3, meshData.normals)) {
+                m_lastError = "Mesh NORMAL accessor must be VEC3 float";
+                return false;
             }
         } else {
             // Generate default normals (facing up)
@@ -227,22 +216,23 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
         auto texIt = primitive.attributes.find("TEXCOORD_0");
         if (texIt != primitive.attributes.end()) {
             const auto& texAccessor = model.accessors[texIt->second];
-            const auto& texBufferView = model.bufferViews[texAccessor.bufferView];
-            const auto& texBuffer = model.buffers[texBufferView.buffer];
-
-            const float* texData = reinterpret_cast<const float*>(
-                &texBuffer.data[texBufferView.byteOffset + texAccessor.byteOffset]
-            );
-
-            meshData.texCoords.reserve(vertexCount * 2);
-            for (size_t i = 0; i < vertexCount; ++i) {
-                // glTF 2.0 uses upper-left origin (same as Vulkan), no Y-flip needed
-                meshData.texCoords.push_back(texData[i * 2]);
-                meshData.texCoords.push_back(texData[i * 2 + 1]);
+            if (!readFloatAccessor(model, texAccessor, TINYGLTF_TYPE_VEC2, 2, meshData.texCoords)) {
+                m_lastError = "Mesh TEXCOORD_0 accessor must be VEC2 float";
+                return false;
             }
         } else {
             // Generate default UVs
             meshData.texCoords.resize(vertexCount * 2, 0.0f);
+        }
+
+        // Get tangents (optional, but preferred over runtime generation for normal maps)
+        auto tangentIt = primitive.attributes.find("TANGENT");
+        if (tangentIt != primitive.attributes.end()) {
+            const auto& tangentAccessor = model.accessors[tangentIt->second];
+            if (!readFloatAccessor(model, tangentAccessor, TINYGLTF_TYPE_VEC4, 4, meshData.tangents)) {
+                m_lastError = "Mesh TANGENT accessor must be VEC4 float";
+                return false;
+            }
         }
 
         // Get indices
@@ -319,25 +309,25 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
             static_cast<float>(pbr.baseColorFactor[3])
         );
         if (pbr.baseColorTexture.index >= 0) {
-            data.baseColorTexture = pbr.baseColorTexture.index;
+            data.baseColorTexture = resolveTextureSourceIndex(model, pbr.baseColorTexture.index);
         }
 
         // Metallic-Roughness
         data.metallicFactor = static_cast<float>(pbr.metallicFactor);
         data.roughnessFactor = static_cast<float>(pbr.roughnessFactor);
         if (pbr.metallicRoughnessTexture.index >= 0) {
-            data.metallicRoughnessTexture = pbr.metallicRoughnessTexture.index;
+            data.metallicRoughnessTexture = resolveTextureSourceIndex(model, pbr.metallicRoughnessTexture.index);
         }
 
         // Normal map
         if (mat.normalTexture.index >= 0) {
-            data.normalTexture = mat.normalTexture.index;
+            data.normalTexture = resolveTextureSourceIndex(model, mat.normalTexture.index);
             data.normalScale = static_cast<float>(mat.normalTexture.scale);
         }
 
         // Occlusion
         if (mat.occlusionTexture.index >= 0) {
-            data.occlusionTexture = mat.occlusionTexture.index;
+            data.occlusionTexture = resolveTextureSourceIndex(model, mat.occlusionTexture.index);
             data.occlusionStrength = static_cast<float>(mat.occlusionTexture.strength);
         }
 
@@ -348,7 +338,7 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
             static_cast<float>(mat.emissiveFactor[2])
         );
         if (mat.emissiveTexture.index >= 0) {
-            data.emissiveTexture = mat.emissiveTexture.index;
+            data.emissiveTexture = resolveTextureSourceIndex(model, mat.emissiveTexture.index);
         }
 
         // Alpha mode (glTF spec)
@@ -451,6 +441,52 @@ static void generateTangentsIfMissing(GltfMeshData& mesh) {
     if (mesh.tangents.empty() && !mesh.normals.empty() && !mesh.texCoords.empty() && !mesh.indices.empty()) {
         mesh.tangents = computeTangents(mesh.positions, mesh.normals, mesh.texCoords, mesh.indices);
     }
+}
+
+static int resolveTextureSourceIndex(const tinygltf::Model& model, int textureIndex) {
+    if (textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size())) {
+        return -1;
+    }
+
+    const int imageIndex = model.textures[textureIndex].source;
+    if (imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size())) {
+        return -1;
+    }
+
+    return imageIndex;
+}
+
+static bool readFloatAccessor(
+    const tinygltf::Model& model,
+    const tinygltf::Accessor& accessor,
+    int expectedType,
+    int componentCount,
+    std::vector<float>& out
+) {
+    if (accessor.bufferView < 0 || accessor.bufferView >= static_cast<int>(model.bufferViews.size())) {
+        return false;
+    }
+    if (accessor.type != expectedType || accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT) {
+        return false;
+    }
+
+    const auto& bufferView = model.bufferViews[accessor.bufferView];
+    if (bufferView.buffer < 0 || bufferView.buffer >= static_cast<int>(model.buffers.size())) {
+        return false;
+    }
+
+    const auto& buffer = model.buffers[bufferView.buffer];
+    const size_t stride = accessor.ByteStride(bufferView);
+    const size_t packedSize = sizeof(float) * static_cast<size_t>(componentCount);
+    const size_t byteStride = stride == 0 ? packedSize : stride;
+    const uint8_t* base = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+
+    out.resize(accessor.count * static_cast<size_t>(componentCount));
+    for (size_t i = 0; i < accessor.count; ++i) {
+        std::memcpy(out.data() + i * componentCount, base + i * byteStride, packedSize);
+    }
+
+    return true;
 }
 
 }  // namespace demo

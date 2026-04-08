@@ -36,8 +36,12 @@ public:
 
     // Initialize camera
     m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
-    m_camera.setPosition(glm::vec3(0.0f, 0.0f, 3.0f));
+    m_camera.setPosition(glm::vec3(8.0f, 1.5f, 0.0f));
+    m_camera.setYawPitch(180.0, 0.0);
     m_camera.update();
+
+
+    ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
   }
 
   ~MinimalLatestApp()
@@ -191,6 +195,14 @@ public:
           m_clearColor.g = color[1];
           m_clearColor.b = color[2];
         }
+
+        // Camera coordinates display
+        ImGui::Separator();
+        ImGui::Text("Camera Position:");
+        const glm::vec3& camPos = m_camera.getPosition();
+        ImGui::Text("  X: %.2f", camPos.x);
+        ImGui::Text("  Y: %.2f", camPos.y);
+        ImGui::Text("  Z: %.2f", camPos.z);
       }
       ImGui::End();
 
@@ -258,6 +270,7 @@ private:
   static constexpr PresetModel m_presetModels[] = {
     {"Sponza", "resources/GLTF_Sponza/sponza.gltf"},
     {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
+	{"SponzaNew", "resources/Sponza/sponza.gltf"}
   };
   int m_selectedPreset = 0;
 
