@@ -243,6 +243,11 @@ void ShadowResources::updateCascadeMatrices(VkCommandBuffer cmd, const glm::mat4
 
     shadowUniforms->cascades[i].viewProjectionMatrix = lightProj * lightView;
 
+    // For non-atlas CSM (each cascade in its own texture layer),
+    // scale and offset are identity - no atlas coordinate transformation needed
+    shadowUniforms->cascades[i].cascadeScale = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    shadowUniforms->cascades[i].cascadeOffset = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+
     // Calculate texel size for filtering
     shadowUniforms->cascades[i].texelSize = 1.0f / static_cast<float>(m_shadowMapSize);
     shadowUniforms->cascades[i].cascadeIndex = i;
