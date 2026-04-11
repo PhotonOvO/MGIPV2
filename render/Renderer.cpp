@@ -401,6 +401,13 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
 
+    // Initialize IBL resources for PBR rendering
+    IBLResources::CreateInfo iblInfo{
+        .cubeMapSize = 128,
+        .dfgLUTSize = 256,
+    };
+    m_iblResources.init(nativeDevice, m_device.allocator, cmd, iblInfo);
+
     // Create GBuffer descriptor set layout and set for LightPass
     {
       // Binding 0: Array of 4 sampled images (GBuffer0/1/2 + Depth)
@@ -660,6 +667,7 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
 
   m_swapchainDependent.sceneResources.deinit();
+  m_iblResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   if(m_device.allocator != nullptr)

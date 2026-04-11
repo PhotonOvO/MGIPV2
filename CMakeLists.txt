@@ -278,6 +278,8 @@ add_library(demo_core STATIC
   render/MeshPool.cpp
   render/LightResources.h
   render/LightResources.cpp
+  render/IBLResources.h
+  render/IBLResources.cpp
   render/Camera.h
   render/Camera.cpp
 )

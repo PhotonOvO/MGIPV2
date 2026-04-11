@@ -19,6 +19,8 @@
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
+#include "LightResources.h"
+#include "IBLResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
@@ -116,6 +118,7 @@ public:
 
   MeshPool& getMeshPool() { return m_meshPool; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
+  IBLResources& getIBLResources() { return m_iblResources; }
   void      waitForIdle();
 
   // LightPass support
@@ -338,6 +341,9 @@ private:
 
   // glTF support
   MeshPool m_meshPool;
+
+  // IBL support (swapchain-dependent for now)
+  IBLResources m_iblResources;
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
