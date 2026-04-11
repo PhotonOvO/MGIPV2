@@ -123,6 +123,41 @@ STATIC_CONST int LAlphaOpaque   = 0;
 STATIC_CONST int LAlphaMask     = 1;
 STATIC_CONST int LAlphaBlend    = 2;
 
+// Light types
+STATIC_CONST int LLightTypeDirectional = 0;
+STATIC_CONST int LLightTypePoint       = 1;
+STATIC_CONST int LLightTypeSpot        = 2;
+
+// Single light data (64 bytes aligned)
+struct LightData
+{
+  vec3 positionOrDirection;  // Direction for directional, position for point/spot
+  float intensity;           // Light intensity multiplier
+  vec3 color;                // RGB light color
+  float range;               // Point/spot light range (unused for directional)
+  vec3 spotDirection;        // Spot light direction (unused for point/directional)
+  float spotInnerAngle;      // Spot light inner cone angle (cos)
+  uint32_t lightType;        // 0=directional, 1=point, 2=spot
+  float spotOuterAngle;      // Spot light outer cone angle (cos)
+  float _padding[2];
+};
+
+// Light list uniform buffer
+struct LightListUniforms
+{
+  uint32_t numLights;
+  uint32_t numDirectionalLights;
+  uint32_t numPointLights;
+  uint32_t numSpotLights;
+  vec3 ambientColor;
+  float _padding;
+};
+
+// Tile/Cluster culling config
+STATIC_CONST int LTileSizeX = 16;
+STATIC_CONST int LTileSizeY = 16;
+STATIC_CONST int LMaxLightsPerTile = 32;
+
 // Light parameters for PBR lighting pass (push constants)
 struct LightParams
 {

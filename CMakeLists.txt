@@ -274,6 +274,8 @@ add_library(demo_core STATIC
   loader/GltfLoader.cpp
   render/MeshPool.h
   render/MeshPool.cpp
+  render/LightResources.h
+  render/LightResources.cpp
   render/Camera.h
   render/Camera.cpp
 )
