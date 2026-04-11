@@ -16,11 +16,13 @@
 #include "passes/LightPass.h"
 #include "passes/ForwardPass.h"
 #include "passes/LightCullingPass.h"
+#include "passes/ShadowPass.h"
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
 #include "LightResources.h"
 #include "IBLResources.h"
+#include "ShadowResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
@@ -119,6 +121,7 @@ public:
   MeshPool& getMeshPool() { return m_meshPool; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
   IBLResources& getIBLResources() { return m_iblResources; }
+  ShadowResources& getShadowResources() { return m_shadowResources; }
   void      waitForIdle();
 
   // LightPass support
@@ -329,6 +332,7 @@ private:
   };
 
   // Per-frame passes
+  std::unique_ptr<ShadowPass>          m_shadowPass;
   std::unique_ptr<GBufferPass>         m_gbufferPass;
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
@@ -344,6 +348,9 @@ private:
 
   // IBL support (swapchain-dependent for now)
   IBLResources m_iblResources;
+
+  // Shadow support (CSM cascades)
+  ShadowResources m_shadowResources;
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};

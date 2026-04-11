@@ -252,8 +252,10 @@ add_library(demo_core STATIC
   render/passes/SceneOpaquePass.cpp
   render/passes/PresentPass.h
   render/passes/PresentPass.cpp
-  render/passes/ImguiPass.h 
+  render/passes/ImguiPass.h
   render/passes/ImguiPass.cpp
+  render/passes/ShadowPass.h
+  render/passes/ShadowPass.cpp
   render/BindGroups.h
   render/Pass.h
   render/TransientAllocator.cpp

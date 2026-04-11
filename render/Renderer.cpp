@@ -408,6 +408,13 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_iblResources.init(nativeDevice, m_device.allocator, cmd, iblInfo);
 
+    // Initialize Shadow resources for CSM cascades
+    ShadowResources::CreateInfo shadowInfo{
+        .shadowMapSize = 1024,
+        .cascadeCount = 4,
+    };
+    m_shadowResources.init(nativeDevice, m_device.allocator, cmd, shadowInfo);
+
     // Create GBuffer descriptor set layout and set for LightPass
     {
       // Binding 0: Array of 4 sampled images (GBuffer0/1/2 + Depth)
@@ -560,6 +567,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   updateGraphicsDescriptorSet();
 
   // Initialize passes and pass executor
+  m_shadowPass          = std::make_unique<ShadowPass>(this);
   m_gbufferPass         = std::make_unique<GBufferPass>(this);
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
@@ -569,6 +577,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
   m_passExecutor.clear();
+  m_passExecutor.addPass(*m_shadowPass);      // Shadow depth FIRST
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
@@ -685,6 +694,7 @@ void Renderer::shutdown(rhi::Surface& surface)
 
   m_swapchainDependent.sceneResources.deinit();
   m_iblResources.deinit();
+  m_shadowResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   if(m_device.allocator != nullptr)
