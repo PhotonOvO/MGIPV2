@@ -1,7 +1,8 @@
 // LightPass shader: Full PBR lighting from GBuffer
-// Implements Cook-Torrance BRDF with directional light
+// Implements Cook-Torrance BRDF with directional light and IBL
 
 #include "shader_io.h"
+#include "shader_ibl.h"
 
 //------------------------------------------------------------------------------
 // Resource Bindings
@@ -15,6 +16,18 @@ Sampler2D inTexture[];
 // Binding 1: Camera uniform buffer (for inverse projection)
 [[vk::binding(1, 0)]]
 ConstantBuffer<CameraUniforms> camera;
+
+// Binding 2: Prefiltered environment cube map (IBL specular)
+[[vk::binding(2, 0)]]
+SamplerCube prefilteredMap;
+
+// Binding 3: DFG LUT texture (IBL BRDF integration)
+[[vk::binding(3, 0)]]
+Sampler2D dfgLUT;
+
+// Binding 4: Irradiance cube map (IBL diffuse)
+[[vk::binding(4, 0)]]
+SamplerCube irradianceMap;
 
 //------------------------------------------------------------------------------
 // GBuffer Texture Indices
@@ -186,14 +199,27 @@ vec3 computePBRLighting(
     // Diffuse term (Lambertian)
     vec3 diffuse = kD * baseColor / PI;
 
-    // Final lighting
+    // Final lighting (direct)
     vec3 Lo = (diffuse + specular) * radiance * NdotL;
 
-    // Ambient term
-    vec3 ambient = lightParams.ambientColor * baseColor * ao;
+    // IBL contribution
+    // Sample irradiance cube map for diffuse IBL
+    vec3 irradiance = irradianceMap.Sample(N).rgb;
 
-    // Final color
-    vec3 color = ambient + Lo;
+    // Compute IBL contribution using helper from shader_ibl.h
+    // maxMipLevel = 5 (from IBLResources configuration)
+    vec3 iblContribution = computeIBLContribution(
+        N, V, baseColor, metallic, roughness,
+        prefilteredMap, dfgLUT,
+        5,  // maxMipLevel
+        irradiance
+    );
+
+    // Ambient term (reduced when IBL is active)
+    vec3 ambient = lightParams.ambientColor * baseColor * ao * 0.1;
+
+    // Final color: direct lighting + IBL + ambient
+    vec3 color = ambient + Lo + iblContribution;
 
     // HDR tonemapping (simple Reinhard)
     color = color / (color + float3(1.0, 1.0, 1.0));

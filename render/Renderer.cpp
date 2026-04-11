@@ -420,7 +420,24 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
           1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      const std::array<VkDescriptorSetLayoutBinding, 2> bindings = {textureBinding, cameraBinding};
+      // Binding 2: Prefiltered environment cube map (IBL specular)
+      const VkDescriptorSetLayoutBinding prefilteredMapBinding{
+          2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      // Binding 3: DFG LUT texture (IBL BRDF integration)
+      const VkDescriptorSetLayoutBinding dfgLUTBinding{
+          3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      // Binding 4: Irradiance cube map (IBL diffuse)
+      const VkDescriptorSetLayoutBinding irradianceMapBinding{
+          4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+          textureBinding, cameraBinding, prefilteredMapBinding, dfgLUTBinding, irradianceMapBinding
+      };
 
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -948,7 +965,31 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .range  = sizeof(shaderio::CameraUniforms),
   };
 
-  const std::array<VkWriteDescriptorSet, 2> writes = {
+  // IBL texture bindings (bindings 2, 3, 4)
+  IBLResources& ibl = m_iblResources;
+
+  // Prefiltered environment cube map (binding 2)
+  const VkDescriptorImageInfo prefilteredInfo{
+      .sampler     = ibl.getCubeMapSampler(),
+      .imageView   = ibl.getPrefilteredMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  // DFG LUT texture (binding 3)
+  const VkDescriptorImageInfo dfgLutInfo{
+      .sampler     = ibl.getLUTSampler(),
+      .imageView   = ibl.getDFGLUTView(),
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  // Irradiance cube map (binding 4)
+  const VkDescriptorImageInfo irradianceInfo{
+      .sampler     = ibl.getCubeMapSampler(),
+      .imageView   = ibl.getIrradianceMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  const std::array<VkWriteDescriptorSet, 5> writes = {
       // Texture array (binding 0, 4 textures)
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -968,6 +1009,36 @@ void Renderer::updateGBufferTextureDescriptorSet()
           .descriptorCount = 1,
           .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
           .pBufferInfo     = &cameraBufferInfo,
+      },
+      // Prefiltered environment map (binding 2)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 2,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo      = &prefilteredInfo,
+      },
+      // DFG LUT (binding 3)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 3,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo      = &dfgLutInfo,
+      },
+      // Irradiance map (binding 4)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 4,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo      = &irradianceInfo,
       },
   };
 
