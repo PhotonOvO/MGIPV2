@@ -29,6 +29,18 @@ Sampler2D dfgLUT;
 [[vk::binding(4, 0)]]
 SamplerCube irradianceMap;
 
+// Binding 5: Shadow map texture (2D array for CSM cascades)
+[[vk::binding(5, 0)]]
+Texture2DArray<float> shadowMap;
+
+// Binding 6: Shadow comparison sampler (for PCF filtering)
+[[vk::binding(6, 0)]]
+SamplerComparisonState shadowSampler;
+
+// Binding 7: Shadow uniforms buffer (cascade matrices and parameters)
+[[vk::binding(7, 0)]]
+ConstantBuffer<ShadowUniforms> shadowUniforms;
+
 //------------------------------------------------------------------------------
 // GBuffer Texture Indices
 //------------------------------------------------------------------------------
@@ -96,6 +108,88 @@ float Geometry_Smith(float NdotV, float NdotL, float roughness)
 vec3 Fresnel_Schlick(float cosTheta, vec3 F0)
 {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+//------------------------------------------------------------------------------
+// Shadow Mapping Functions (CSM with PCF)
+//------------------------------------------------------------------------------
+
+// Select cascade based on view-space depth
+uint selectCascade(float viewDepth)
+{
+    // viewDepth is negative in view space (Z axis points away from camera)
+    // Split depths are stored as positive values
+    for(uint i = 0; i < LCascadeCount; ++i)
+    {
+        if(-viewDepth <= shadowUniforms.cascades[i].splitDepth.x)
+            return i;
+    }
+    return LCascadeCount - 1;
+}
+
+// Sample shadow with PCF filtering
+float sampleShadowPCF(vec3 shadowCoord, uint cascadeIndex)
+{
+    float shadow = 0.0;
+    const uint kernelSize = shadowUniforms.pcfKernelSize;
+    const float texelSize = 1.0 / float(shadowUniforms.shadowMapSize);
+
+    // PCF kernel filtering
+    const float halfKernel = float(kernelSize) / 2.0;
+    for(uint y = 0; y < kernelSize; ++y)
+    {
+        for(uint x = 0; x < kernelSize; ++x)
+        {
+            vec2 offset = vec2(float(x) - halfKernel + 0.5, float(y) - halfKernel + 0.5) * texelSize;
+            shadow += shadowMap.SampleCmpLevelZero(
+                shadowSampler,
+                vec3(shadowCoord.xy + offset, float(cascadeIndex)),
+                shadowCoord.z - shadowUniforms.shadowBias
+            );
+        }
+    }
+
+    return shadow / float(kernelSize * kernelSize);
+}
+
+// Calculate shadow factor for a pixel
+float calculateShadow(vec3 worldPos, vec3 normal, vec3 lightDir)
+{
+    // Check if shadow is enabled
+    if(shadowUniforms.shadowIntensity <= 0.0)
+        return 1.0;
+
+    // Transform to view space to get depth
+    vec4 viewPos = mul(camera.view, vec4(worldPos, 1.0));
+    float viewDepth = viewPos.z;
+
+    // Select cascade based on depth
+    uint cascadeIndex = selectCascade(viewDepth);
+
+    // Apply normal-based offset to reduce shadow acne
+    // Move the position slightly along the normal direction
+    vec3 biasedPos = worldPos + normal * shadowUniforms.normalBias;
+
+    // Transform to light space
+    vec4 lightSpacePos = mul(shadowUniforms.cascades[cascadeIndex].viewProjectionMatrix, vec4(biasedPos, 1.0));
+    vec3 shadowCoord = lightSpacePos.xyz / lightSpacePos.w;
+
+    // Check if fragment is outside shadow map bounds
+    if(shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
+       shadowCoord.y < 0.0 || shadowCoord.y > 1.0)
+        return 1.0;  // Outside shadow map, fully lit
+
+    // Transform to [0,1] range for texture sampling
+    shadowCoord = shadowCoord * 0.5 + 0.5;
+
+    // Clamp depth to avoid sampling artifacts
+    shadowCoord.z = clamp(shadowCoord.z, 0.0, 1.0);
+
+    // Sample shadow with PCF
+    float shadowVisibility = sampleShadowPCF(shadowCoord, cascadeIndex);
+
+    // Apply shadow intensity (blend between lit and shadowed)
+    return 1.0 - shadowUniforms.shadowIntensity * (1.0 - shadowVisibility);
 }
 
 //------------------------------------------------------------------------------
@@ -199,8 +293,11 @@ vec3 computePBRLighting(
     // Diffuse term (Lambertian)
     vec3 diffuse = kD * baseColor / PI;
 
-    // Final lighting (direct)
-    vec3 Lo = (diffuse + specular) * radiance * NdotL;
+    // Calculate shadow factor for this pixel
+    float shadowFactor = calculateShadow(worldPos, N, L);
+
+    // Final lighting (direct) - apply shadow to direct lighting only
+    vec3 Lo = (diffuse + specular) * radiance * NdotL * shadowFactor;
 
     // IBL contribution
     // Sample irradiance cube map for diffuse IBL

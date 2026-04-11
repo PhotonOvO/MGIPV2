@@ -442,8 +442,24 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
           4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
-          textureBinding, cameraBinding, prefilteredMapBinding, dfgLUTBinding, irradianceMapBinding
+      // Binding 5: Shadow map texture (2D array for CSM cascades)
+      const VkDescriptorSetLayoutBinding shadowMapBinding{
+          5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      // Binding 6: Shadow comparison sampler (for PCF filtering)
+      const VkDescriptorSetLayoutBinding shadowSamplerBinding{
+          6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      // Binding 7: Shadow uniforms buffer (cascade matrices and parameters)
+      const VkDescriptorSetLayoutBinding shadowUniformsBinding{
+          7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
+          textureBinding, cameraBinding, prefilteredMapBinding, dfgLUTBinding, irradianceMapBinding,
+          shadowMapBinding, shadowSamplerBinding, shadowUniformsBinding
       };
 
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
@@ -999,7 +1015,42 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
 
-  const std::array<VkWriteDescriptorSet, 5> writes = {
+  // Shadow resources (bindings 5, 6, 7)
+  ShadowResources& shadow = m_shadowResources;
+
+  // Shadow map texture (binding 5) - sampled image, not combined sampler
+  const VkDescriptorImageInfo shadowMapInfo{
+      .sampler     = VK_NULL_HANDLE,  // Sampler is separate binding
+      .imageView   = shadow.getShadowMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+  };
+
+  // Create shadow comparison sampler for PCF filtering (binding 6)
+  const VkSampler shadowSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
+      .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter   = VK_FILTER_LINEAR,
+      .minFilter   = VK_FILTER_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .compareEnable = VK_TRUE,
+      .compareOp    = VK_COMPARE_OP_LESS,
+      .maxLod      = VK_LOD_CLAMP_NONE,
+  });
+  const VkDescriptorImageInfo shadowSamplerInfo{
+      .sampler     = shadowSampler,
+      .imageView   = VK_NULL_HANDLE,
+      .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+
+  // Shadow uniforms buffer (binding 7)
+  const VkDescriptorBufferInfo shadowUniformsBufferInfo{
+      .buffer = shadow.getShadowUniformBuffer(),
+      .offset = 0,
+      .range  = sizeof(shaderio::ShadowUniforms),
+  };
+
+  const std::array<VkWriteDescriptorSet, 8> writes = {
       // Texture array (binding 0, 4 textures)
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1049,6 +1100,36 @@ void Renderer::updateGBufferTextureDescriptorSet()
           .descriptorCount = 1,
           .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo      = &irradianceInfo,
+      },
+      // Shadow map texture (binding 5)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 5,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+          .pImageInfo      = &shadowMapInfo,
+      },
+      // Shadow comparison sampler (binding 6)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 6,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
+          .pImageInfo      = &shadowSamplerInfo,
+      },
+      // Shadow uniforms buffer (binding 7)
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gbufferTextureSet,
+          .dstBinding      = 7,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo     = &shadowUniformsBufferInfo,
       },
   };
 
