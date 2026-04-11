@@ -540,6 +540,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
+  m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
   m_forwardPass         = std::make_unique<ForwardPass>(this);
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
@@ -547,6 +548,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
+  m_passExecutor.addPass(*m_lightCullingPass);
   m_passExecutor.addPass(*m_lightPass);
   // m_passExecutor.addPass(*m_forwardPass); 
   m_passExecutor.addPass(*m_presentPass);

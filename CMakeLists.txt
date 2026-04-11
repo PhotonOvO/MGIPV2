@@ -244,6 +244,8 @@ add_library(demo_core STATIC
   render/passes/GBufferPass.cpp
   render/passes/LightPass.h
   render/passes/LightPass.cpp
+  render/passes/LightCullingPass.h
+  render/passes/LightCullingPass.cpp
   render/passes/ForwardPass.h
   render/passes/ForwardPass.cpp
   render/passes/SceneOpaquePass.h
