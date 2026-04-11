@@ -133,7 +133,15 @@ bool lightIntersectsTile(const LightData light, uint2 tileCoord, float2 depthBou
 void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     const uint2 tileCoord = dispatchThreadId.xy;
-    const uint tileIndex = tileCoord.y * (cullingParams.screenWidth / TILE_SIZE_X) + tileCoord.x;
+
+    // Bounds check: ensure tile is within valid range
+    const uint numTilesX = (cullingParams.screenWidth + TILE_SIZE_X - 1) / TILE_SIZE_X;
+    const uint numTilesY = (cullingParams.screenHeight + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+
+    if(tileCoord.x >= numTilesX || tileCoord.y >= numTilesY)
+        return;  // Out of bounds tile - no work
+
+    const uint tileIndex = tileCoord.y * numTilesX + tileCoord.x;
 
     // Get depth bounds for this tile
     float2 depthBounds = getTileDepthBounds(tileCoord);
