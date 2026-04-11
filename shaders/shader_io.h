@@ -180,6 +180,32 @@ struct VertexGltfTangent
   vec4 tangent;  // xyz = tangent direction, w = handedness
 };
 
+// Shadow cascade configuration
+STATIC_CONST int LCascadeCount = 4;  // Standard CSM: 4 cascades
+
+struct ShadowCascadeData
+{
+  mat4 viewProjectionMatrix;  // Light-space matrix for this cascade
+  vec4 splitDepth;            // Depth split points (cascade boundaries)
+  vec4 cascadeScale;          // Scale factors for cascade texel density
+  vec4 cascadeOffset;         // Offset for cascade atlas sampling
+  float cascadeBlendRegion;   // Blend region between cascades
+  float texelSize;            // Shadow map texel size for filtering
+  uint cascadeIndex;          // Active cascade for current pixel
+  float _padding;
+};
+
+struct ShadowUniforms
+{
+  ShadowCascadeData cascades[LCascadeCount];
+  vec3 lightDirection;
+  float shadowIntensity;
+  float shadowBias;
+  float normalBias;
+  uint shadowMapSize;
+  uint pcfKernelSize;
+};
+
 // Push constant for GBuffer pass with PBR material params (legacy)
 struct PushConstantGBuffer
 {

@@ -280,6 +280,8 @@ add_library(demo_core STATIC
   render/LightResources.cpp
   render/IBLResources.h
   render/IBLResources.cpp
+  render/ShadowResources.h
+  render/ShadowResources.cpp
   render/Camera.h
   render/Camera.cpp
 )
