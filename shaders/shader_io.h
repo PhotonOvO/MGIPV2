@@ -158,6 +158,11 @@ STATIC_CONST int LTileSizeX = 16;
 STATIC_CONST int LTileSizeY = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
 
+// IBL texture indices (for bindless access)
+STATIC_CONST int kIBLPrefilteredMapIndex = 10;  // Environment cube map
+STATIC_CONST int kIBLDFGLUTIndex = 11;           // DFG LUT texture
+STATIC_CONST int kIBLIrradianceMapIndex = 12;   // Irradiance cube map
+
 // Light parameters for PBR lighting pass (push constants)
 struct LightParams
 {
