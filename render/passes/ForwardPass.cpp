@@ -37,12 +37,10 @@ void ForwardPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("ForwardPass");
 
-    // Get output texture view and fixed extent
+    // Get output texture view and extent (follows screen size)
     const VkImageView outputImageView = m_renderer->getOutputTextureView();
-    const rhi::Extent2D outputExtent = {
-        SceneResources::kOutputTextureWidth,
-        SceneResources::kOutputTextureHeight
-    };
+    const VkExtent2D vkExtent = m_renderer->getSceneResources().getSize();
+    const rhi::Extent2D outputExtent = {vkExtent.width, vkExtent.height};
 
     if(outputImageView == VK_NULL_HANDLE)
     {

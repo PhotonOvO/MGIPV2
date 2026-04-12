@@ -250,12 +250,14 @@ add_library(demo_core STATIC
   render/passes/ForwardPass.cpp
   render/passes/SceneOpaquePass.h
   render/passes/SceneOpaquePass.cpp
-  render/passes/PresentPass.h
+  render/passes/PresentPass.h  
   render/passes/PresentPass.cpp
   render/passes/ImguiPass.h
   render/passes/ImguiPass.cpp
   render/passes/ShadowPass.h
   render/passes/ShadowPass.cpp
+  render/passes/ShadowDebugPass.h
+  render/passes/ShadowDebugPass.cpp
   render/BindGroups.h
   render/Pass.h
   render/TransientAllocator.cpp
@@ -284,6 +286,7 @@ add_library(demo_core STATIC
   render/IBLResources.cpp
   render/ShadowResources.h
   render/ShadowResources.cpp
+  render/ClipSpaceConvention.h
   render/Camera.h
   render/Camera.cpp
 )

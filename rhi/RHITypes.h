@@ -143,6 +143,7 @@ enum class DynamicState : uint8_t
 {
   viewport = 0,
   scissor,
+  depthBias,
 };
 
 enum class PrimitiveTopology : uint8_t
@@ -286,6 +287,7 @@ struct RasterState
   FrontFace         frontFace{FrontFace::counterClockwise};
   float             lineWidth{1.0f};
   SampleCount       sampleCount{SampleCount::count1};
+  bool              depthBiasEnable{false};
 };
 
 struct DepthState

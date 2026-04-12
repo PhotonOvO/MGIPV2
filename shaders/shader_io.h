@@ -167,8 +167,11 @@ STATIC_CONST int kIBLIrradianceMapIndex = 12;   // Irradiance cube map
 struct LightParams
 {
   vec3 lightDirection;      // Direction TO light source (normalized)
+  float _pad0;              // Padding for vec4 alignment
   vec3 lightColor;          // RGB light intensity
+  float _pad1;              // Padding for vec4 alignment
   vec3 ambientColor;        // Ambient contribution
+  int debugMode;            // 0=normal, 1=shadow, 2=cascade, 3=depth, 4=lightSpaceXY, 5=lightSpaceZ
 };
 
 // Vertex with tangent for GBuffer pass
@@ -180,30 +183,13 @@ struct VertexGltfTangent
   vec4 tangent;  // xyz = tangent direction, w = handedness
 };
 
-// Shadow cascade configuration
-STATIC_CONST int LCascadeCount = 4;  // Standard CSM: 4 cascades
-
-struct ShadowCascadeData
-{
-  mat4 viewProjectionMatrix;  // Light-space matrix for this cascade
-  vec4 splitDepth;            // Depth split points (cascade boundaries)
-  vec4 cascadeScale;          // Scale factors for cascade texel density
-  vec4 cascadeOffset;         // Offset for cascade atlas sampling
-  float cascadeBlendRegion;   // Blend region between cascades
-  float texelSize;            // Shadow map texel size for filtering
-  uint cascadeIndex;          // Active cascade for current pixel
-  float _padding;
-};
-
 struct ShadowUniforms
 {
-  ShadowCascadeData cascades[LCascadeCount];
-  vec3 lightDirection;
-  float shadowIntensity;
-  float shadowBias;
-  float normalBias;
-  uint shadowMapSize;
-  uint pcfKernelSize;
+  mat4 lightViewProjectionMatrix;   // Light clip-space matrix for the shadow pass
+  mat4 worldToShadowTextureMatrix;  // World-space -> shadow UV/depth in [0, 1]
+  vec4 lightDirectionAndIntensity;  // xyz = light direction FROM light TO scene, w = shadow intensity
+  vec4 shadowMapMetrics;            // x = texel size, y = max shadow distance, z = receiver bias, w = reserved
+  vec4 shadowBiasAndKernel;         // x = depth bias constant, y = depth bias slope, z = map size, w = PCF radius
 };
 
 // Push constant for GBuffer pass with PBR material params (legacy)

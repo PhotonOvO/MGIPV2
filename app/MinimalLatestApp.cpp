@@ -15,8 +15,8 @@ int main()
 {
 #ifdef _WIN32
   // Pause at startup to allow debugger attachment
-  printf("Press any key to continue...\n");
-  getchar();
+  // printf("Press any key to continue...\n");
+  // getchar();
 #endif
 
   // Get the logger instance

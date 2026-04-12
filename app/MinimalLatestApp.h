@@ -35,6 +35,7 @@ public:
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
 
     // Initialize camera
+    m_camera.setClipSpaceConvention(demo::clipspace::BackendConvention::vulkan);
     m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
     m_camera.setPosition(glm::vec3(8.0f, 1.5f, 0.0f));
     m_camera.setYawPitch(180.0, 0.0);
@@ -42,6 +43,11 @@ public:
 
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
+
+    // Start loading default scene immediately
+    std::string path = m_presetModels[0].path;
+    path = "resources/Dragon/DragonDispersion.gltf";
+    loadModelAsync(path);
   }
 
   ~MinimalLatestApp()
@@ -160,7 +166,7 @@ public:
       {
         m_viewportSize = requestedViewportSize;
         m_renderer.resize(m_viewportSize);
-        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
+        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 500.0f);
       }
 
       const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
@@ -203,6 +209,30 @@ public:
         ImGui::Text("  X: %.2f", camPos.x);
         ImGui::Text("  Y: %.2f", camPos.y);
         ImGui::Text("  Z: %.2f", camPos.z);
+
+        // Light direction controls
+        ImGui::Separator();
+        ImGui::Text("Light Direction:");
+        ImGui::SliderFloat("Yaw", &m_lightYaw, -180.0f, 180.0f, "%.1f deg");
+        ImGui::SliderFloat("Pitch", &m_lightPitch, -90.0f, 90.0f, "%.1f deg");
+
+        // Display computed light direction
+        const glm::vec3 lightDir = computeLightDirection();
+        ImGui::Text("  Dir: (%.2f, %.2f, %.2f)", lightDir.x, lightDir.y, lightDir.z);
+
+        // Shadow debug mode
+        ImGui::Separator();
+        ImGui::Text("Shadow Debug:");
+        const char* debugModes[] = {"Normal", "Shadow Factor", "Shadow UV", "View Depth", "Light Clip XY", "Shadow Depth"};
+        ImGui::Combo("Mode", &m_shadowDebugMode, debugModes, IM_ARRAYSIZE(debugModes));
+
+        // Info text for current mode
+        if(m_shadowDebugMode == 2)
+            ImGui::TextColored(ImVec4(1,1,0,1), "Shadow UV: sampled coordinates inside the shadow map");
+        else if(m_shadowDebugMode == 4)
+            ImGui::TextColored(ImVec4(1,1,0,1), "Light Clip XY: light-space projection in clip coordinates");
+        else if(m_shadowDebugMode == 5)
+            ImGui::TextColored(ImVec4(1,1,0,1), "Shadow Depth: stored compare depth in the shadow texture");
       }
       ImGui::End();
 
@@ -218,6 +248,8 @@ public:
       frameParams.clearColor     = m_clearColor;
       frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
       frameParams.cameraUniforms = &m_cameraUniforms;
+      frameParams.lightDirection = computeLightDirection();
+      frameParams.shadowDebugMode = m_shadowDebugMode;
       frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
@@ -259,6 +291,13 @@ private:
   glm::vec2 m_lastMousePos{0.0f};
   shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
 
+  // Light direction (angles in degrees for UI)
+  float m_lightYaw{0.0f};      // Rotation around Y axis
+  float m_lightPitch{-90.0f};  // Angle from horizontal (default: pointing down)
+
+  // Shadow debug mode
+  int m_shadowDebugMode{0};  // 0=normal, 1=shadow, 2=shadow UV, 3=view depth, 4=light clip XY, 5=shadow depth
+
   // UI state
   char m_modelPathBuffer[512] = "resources/GLTF_Sponza/sponza.gltf";
 
@@ -285,6 +324,18 @@ private:
   void unloadModel();
   void drawModelLoaderUI();
   void updateAsyncLoading();
+
+  // Compute light direction from yaw/pitch angles
+  glm::vec3 computeLightDirection() const {
+    const float yawRad = glm::radians(m_lightYaw);
+    const float pitchRad = glm::radians(m_lightPitch);
+    // Direction FROM light TO scene (pointing downward by default)
+    return glm::normalize(glm::vec3(
+      std::sin(yawRad) * std::cos(pitchRad),
+      std::sin(pitchRad),
+      std::cos(yawRad) * std::cos(pitchRad)
+    ));
+  }
 };
 
 inline void MinimalLatestApp::loadModelAsync(const std::string& path)
@@ -412,7 +463,6 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     {
       ImGui::InputText("Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
     }
-
     // Load button
     if(ImGui::Button(m_isLoading ? "Loading..." : "Load Model", ImVec2(120, 0)))
     {

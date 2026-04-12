@@ -38,13 +38,11 @@ void LightPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("LightPass");
 
-    // Get output texture view and fixed extent
+    // Get output texture view and extent (follows screen size)
     rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(
         m_renderer->getOutputTextureView());
-    const rhi::Extent2D extent = {
-        SceneResources::kOutputTextureWidth,
-        SceneResources::kOutputTextureHeight
-    };
+    const VkExtent2D vkExtent = m_renderer->getSceneResources().getSize();
+    const rhi::Extent2D extent = {vkExtent.width, vkExtent.height};
 
     if(outputViewHandle.isNull())
     {
@@ -111,12 +109,23 @@ void LightPass::execute(const PassContext& context) const
 
     // Setup light parameters via push constants
     shaderio::LightParams lightParams;
-    // Direction TO the light source (sun direction, pointing towards the scene)
-    lightParams.lightDirection = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
+    // Direction TO the light source (FROM scene TO light)
+    // ShadowParams.lightDirection is FROM light TO scene, so we negate it
+    if(context.params != nullptr)
+    {
+        lightParams.lightDirection = -context.params->lightDirection;  // Negate: TO light
+    }
+    else
+    {
+        // Fallback: default light direction (from above, TO light = up)
+        lightParams.lightDirection = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
+    }
     // Light color (warm sunlight)
     lightParams.lightColor = glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f;  // Bright enough
     // Ambient color (sky ambient)
     lightParams.ambientColor = glm::vec3(0.1f, 0.12f, 0.15f);
+    // Debug mode from render params
+    lightParams.debugMode = (context.params != nullptr) ? context.params->shadowDebugMode : 0;
 
     // Push constants for light parameters
     vkCmdPushConstants(rhi::vulkan::getNativeCommandBuffer(*context.cmd),

@@ -1,5 +1,5 @@
 // LightPass shader: Full PBR lighting from GBuffer
-// Implements Cook-Torrance BRDF with directional light and IBL
+// Implements Cook-Torrance BRDF with a single directional shadow map.
 
 #include "shader_io.h"
 #include "shader_ibl.h"
@@ -8,36 +8,27 @@
 // Resource Bindings
 //------------------------------------------------------------------------------
 
-// Set 0: Combined descriptor set for LightPass
-// Binding 0: Bindless textures (GBuffer + Depth)
 [[vk::binding(0, 0)]]
 Sampler2D inTexture[];
 
-// Binding 1: Camera uniform buffer (for inverse projection)
 [[vk::binding(1, 0)]]
 ConstantBuffer<CameraUniforms> camera;
 
-// Binding 2: Prefiltered environment cube map (IBL specular)
 [[vk::binding(2, 0)]]
 SamplerCube prefilteredMap;
 
-// Binding 3: DFG LUT texture (IBL BRDF integration)
 [[vk::binding(3, 0)]]
 Sampler2D dfgLUT;
 
-// Binding 4: Irradiance cube map (IBL diffuse)
 [[vk::binding(4, 0)]]
 SamplerCube irradianceMap;
 
-// Binding 5: Shadow map texture (2D array for CSM cascades)
 [[vk::binding(5, 0)]]
-Texture2DArray<float> shadowMap;
+Texture2D<float> shadowMap;
 
-// Binding 6: Shadow comparison sampler (for PCF filtering)
 [[vk::binding(6, 0)]]
 SamplerComparisonState shadowSampler;
 
-// Binding 7: Shadow uniforms buffer (cascade matrices and parameters)
 [[vk::binding(7, 0)]]
 ConstantBuffer<ShadowUniforms> shadowUniforms;
 
@@ -54,15 +45,8 @@ STATIC_CONST int kGBufferDepthIndex     = 3;
 // Push Constants for Light Parameters
 //------------------------------------------------------------------------------
 
-// LightParams struct defined in shader_io.h
-
-// Push constant binding (binding 0, range 0-48 bytes)
 [[vk::push_constant]]
 LightParams lightParams;
-
-//------------------------------------------------------------------------------
-// Constants
-//------------------------------------------------------------------------------
 
 STATIC_CONST float PI = 3.14159265359;
 
@@ -70,7 +54,6 @@ STATIC_CONST float PI = 3.14159265359;
 // PBR Helper Functions
 //------------------------------------------------------------------------------
 
-// Normal distribution function (Trowbridge-Reitz GGX)
 float NDF_GGX(float NdotH, float roughness)
 {
     float a = roughness * roughness;
@@ -84,7 +67,6 @@ float NDF_GGX(float NdotH, float roughness)
     return num / denom;
 }
 
-// Geometry function (Smith's method with GGX)
 float Geometry_SchlickGGX(float NdotV, float roughness)
 {
     float r = roughness + 1.0;
@@ -104,92 +86,61 @@ float Geometry_Smith(float NdotV, float NdotL, float roughness)
     return ggx1 * ggx2;
 }
 
-// Fresnel function (Schlick approximation)
 vec3 Fresnel_Schlick(float cosTheta, vec3 F0)
 {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 //------------------------------------------------------------------------------
-// Shadow Mapping Functions (CSM with PCF)
+// Shadow Mapping
 //------------------------------------------------------------------------------
 
-// Select cascade based on view-space depth
-uint selectCascade(float viewDepth)
+float sampleShadowPCF(vec3 shadowCoord)
 {
-    // viewDepth is negative in view space (Z axis points away from camera)
-    // Split depths are stored as positive values
-    for(uint i = 0; i < LCascadeCount; ++i)
-    {
-        if(-viewDepth <= shadowUniforms.cascades[i].splitDepth.x)
-            return i;
-    }
-    return LCascadeCount - 1;
-}
+    int radius = int(shadowUniforms.shadowBiasAndKernel.w + 0.5);
+    float visibility = 0.0;
+    int taps = 0;
 
-// Sample shadow with PCF filtering
-float sampleShadowPCF(vec3 shadowCoord, uint cascadeIndex)
-{
-    float shadow = 0.0;
-    const uint kernelSize = shadowUniforms.pcfKernelSize;
-    const float texelSize = 1.0 / float(shadowUniforms.shadowMapSize);
-
-    // PCF kernel filtering
-    const float halfKernel = float(kernelSize) / 2.0;
-    for(uint y = 0; y < kernelSize; ++y)
+    for(int y = -radius; y <= radius; ++y)
     {
-        for(uint x = 0; x < kernelSize; ++x)
+        for(int x = -radius; x <= radius; ++x)
         {
-            vec2 offset = vec2(float(x) - halfKernel + 0.5, float(y) - halfKernel + 0.5) * texelSize;
-            shadow += shadowMap.SampleCmpLevelZero(
-                shadowSampler,
-                vec3(shadowCoord.xy + offset, float(cascadeIndex)),
-                shadowCoord.z - shadowUniforms.shadowBias
-            );
+            float2 offset = float2(x, y) * shadowUniforms.shadowMapMetrics.x;
+            visibility += shadowMap.SampleCmpLevelZero(shadowSampler, shadowCoord.xy + offset, shadowCoord.z);
+            taps++;
         }
     }
 
-    return shadow / float(kernelSize * kernelSize);
+    return visibility / max(1, taps);
 }
 
-// Calculate shadow factor for a pixel
-float calculateShadow(vec3 worldPos, vec3 normal, vec3 lightDir)
+float calculateShadow(vec3 worldPos, vec3 normal)
 {
-    // Check if shadow is enabled
-    if(shadowUniforms.shadowIntensity <= 0.0)
+    float shadowIntensity = shadowUniforms.lightDirectionAndIntensity.w;
+    if(shadowIntensity <= 0.0)
+    {
         return 1.0;
+    }
 
-    // Transform to view space to get depth
-    vec4 viewPos = mul(camera.view, vec4(worldPos, 1.0));
-    float viewDepth = viewPos.z;
+    float cameraDistance = length(camera.cameraPosition - worldPos);
+    if(cameraDistance > shadowUniforms.shadowMapMetrics.y)
+    {
+        return 1.0;
+    }
 
-    // Select cascade based on depth
-    uint cascadeIndex = selectCascade(viewDepth);
+    vec3 biasedWorldPos = worldPos + normal * shadowUniforms.shadowMapMetrics.z;
+    vec4 shadowTexPos = mul(shadowUniforms.worldToShadowTextureMatrix, vec4(biasedWorldPos, 1.0));
+    vec3 shadowCoord = shadowTexPos.xyz / max(shadowTexPos.w, 1e-5);
 
-    // Apply normal-based offset to reduce shadow acne
-    // Move the position slightly along the normal direction
-    vec3 biasedPos = worldPos + normal * shadowUniforms.normalBias;
-
-    // Transform to light space
-    vec4 lightSpacePos = mul(shadowUniforms.cascades[cascadeIndex].viewProjectionMatrix, vec4(biasedPos, 1.0));
-    vec3 shadowCoord = lightSpacePos.xyz / lightSpacePos.w;
-
-    // Check if fragment is outside shadow map bounds
     if(shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
-       shadowCoord.y < 0.0 || shadowCoord.y > 1.0)
-        return 1.0;  // Outside shadow map, fully lit
+       shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+       shadowCoord.z < 0.0 || shadowCoord.z > 1.0)
+    {
+        return 1.0;
+    }
 
-    // Transform to [0,1] range for texture sampling
-    shadowCoord = shadowCoord * 0.5 + 0.5;
-
-    // Clamp depth to avoid sampling artifacts
-    shadowCoord.z = clamp(shadowCoord.z, 0.0, 1.0);
-
-    // Sample shadow with PCF
-    float shadowVisibility = sampleShadowPCF(shadowCoord, cascadeIndex);
-
-    // Apply shadow intensity (blend between lit and shadowed)
-    return 1.0 - shadowUniforms.shadowIntensity * (1.0 - shadowVisibility);
+    float visibility = sampleShadowPCF(shadowCoord);
+    return lerp(1.0, visibility, shadowIntensity);
 }
 
 //------------------------------------------------------------------------------
@@ -198,41 +149,21 @@ float calculateShadow(vec3 worldPos, vec3 normal, vec3 lightDir)
 
 vec3 reconstructWorldPosition(float2 uv, float depth)
 {
-    // Convert UV to NDC coordinates
     float ndcX = uv.x * 2.0 - 1.0;
     float ndcY = uv.y * 2.0 - 1.0;
 
-    // For perspective projection with GLM_FORCE_DEPTH_ZERO_TO_ONE:
-    // ndcZ = P20 + P32/viewZ
-    // viewZ = P32 / (ndcZ - P20)
-    // Where P20 = projection[2][2], P32 = projection[3][2]
-    float P20 = camera.projection[2][2];  // far/(far-near) for [0,1] depth
-    float P32 = camera.projection[3][2];  // -near*far/(far-near)
+    float P20 = camera.projection[2][2];
+    float P32 = camera.projection[3][2];
 
     float viewZ = P32 / (depth - P20);
-
-    // Reconstruct view position from NDC and viewZ
-    // viewX = ndcX * viewZ / projection[0][0]
-    // viewY = ndcY * viewZ / projection[1][1]
     float viewX = ndcX * viewZ / camera.projection[0][0];
     float viewY = ndcY * viewZ / camera.projection[1][1];
 
-    // Transform to world position using inverse view matrix
-    // view matrix transforms world -> view: viewPos = view * worldPos
-    // inverse: worldPos = view^T * viewPos + cameraPosition
-    // (view is rotation + translation: view = [R | -R*camPos])
-
-    // Extract rotation from view matrix (column-major in GLM)
-    // view[0] = right (column 0), view[1] = up (column 1), view[2] = forward (column 2)
-    // These are the columns of R, so R^T has them as rows
     float3 right   = float3(camera.view[0][0], camera.view[1][0], camera.view[2][0]);
     float3 up      = float3(camera.view[0][1], camera.view[1][1], camera.view[2][1]);
     float3 forward = float3(camera.view[0][2], camera.view[1][2], camera.view[2][2]);
 
-    // worldPos = R^T * viewPos + cameraPosition
-    float3 worldPos = right * viewX + up * viewY + forward * viewZ + camera.cameraPosition;
-
-    return worldPos;
+    return right * viewX + up * viewY + forward * viewZ + camera.cameraPosition;
 }
 
 //------------------------------------------------------------------------------
@@ -248,81 +179,47 @@ vec3 computePBRLighting(
     float ao
 )
 {
-    // Light direction (already normalized, pointing TO light)
     vec3 L = lightParams.lightDirection;
-
-    // View direction (from world position to camera)
     vec3 V = normalize(camera.cameraPosition - worldPos);
-
-    // Normal (decode from [0,1] to [-1,1])
     vec3 N = normalize(normal * 2.0 - 1.0);
-
-    // Half vector
     vec3 H = normalize(V + L);
 
-    // Calculate dot products
     float NdotV = max(dot(N, V), 0.001);
     float NdotL = max(dot(N, L), 0.001);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
 
-    // F0 (surface reflection at normal incidence)
-    // For metals, F0 = baseColor (colored Fresnel)
-    // For non-metals, F0 = 0.04 (approximate for most dielectrics)
     vec3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
-
-    // Light radiance (assuming directional light with constant intensity)
     vec3 radiance = lightParams.lightColor;
 
-    // Cook-Torrance BRDF
     float D = NDF_GGX(NdotH, roughness);
     vec3 F = Fresnel_Schlick(VdotH, F0);
     float G = Geometry_Smith(NdotV, NdotL, roughness);
 
-    // Specular term
     vec3 numerator = D * G * F;
     float denominator = 4.0 * NdotV * NdotL + 0.001;
     vec3 specular = numerator / denominator;
 
-    // Energy conservation: kS + kD = 1
-    // kS = F (Fresnel), kD = (1 - F) * (1 - metallic)
-    // For metals, diffuse contribution is minimal
     vec3 kS = F;
     vec3 kD = (1.0 - kS) * (1.0 - metallic);
-
-    // Diffuse term (Lambertian)
     vec3 diffuse = kD * baseColor / PI;
 
-    // Calculate shadow factor for this pixel
-    float shadowFactor = calculateShadow(worldPos, N, L);
-
-    // Final lighting (direct) - apply shadow to direct lighting only
+    float shadowFactor = calculateShadow(worldPos, N);
     vec3 Lo = (diffuse + specular) * radiance * NdotL * shadowFactor;
 
-    // IBL contribution
-    // Sample irradiance cube map for diffuse IBL
     vec3 irradiance = irradianceMap.Sample(N).rgb;
-
-    // Compute IBL contribution using helper from shader_ibl.h
-    // maxMipLevel = 5 (from IBLResources configuration)
     vec3 iblContribution = computeIBLContribution(
         N, V, baseColor, metallic, roughness,
         prefilteredMap, dfgLUT,
-        5,  // maxMipLevel
+        5,
         irradiance
     );
 
-    // Ambient term (reduced when IBL is active)
     vec3 ambient = lightParams.ambientColor * baseColor * ao * 0.1;
-
-    // Final color: direct lighting + IBL + ambient
     vec3 color = ambient + Lo + iblContribution;
 
-    // HDR tonemapping (simple Reinhard)
     color = color / (color + float3(1.0, 1.0, 1.0));
-
-    // Gamma correction
-    color = pow(color, float3(1.0/2.2, 1.0/2.2, 1.0/2.2));
+    color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 
     return color;
 }
@@ -331,16 +228,17 @@ vec3 computePBRLighting(
 // Vertex Shader
 //------------------------------------------------------------------------------
 
-struct VSOutput {
+struct VSOutput
+{
     float4 position : SV_Position;
     float2 uv       : TEXCOORD0;
 };
 
 [shader("vertex")]
-VSOutput vertexMain(uint vertexIndex : SV_VertexID) {
+VSOutput vertexMain(uint vertexIndex : SV_VertexID)
+{
     VSOutput output;
 
-    // Fullscreen triangle vertices
     float2 positions[3] = {
         float2(-1.0, -1.0),
         float2( 3.0, -1.0),
@@ -349,7 +247,6 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID) {
 
     output.position = float4(positions[vertexIndex], 0.0, 1.0);
     output.uv = positions[vertexIndex] * 0.5 + 0.5;
-    // Note: UV flip removed - Y orientation handled by projection matrix
 
     return output;
 }
@@ -359,33 +256,60 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID) {
 //------------------------------------------------------------------------------
 
 [shader("fragment")]
-float4 fragmentMain(VSOutput input) : SV_Target {
-    // Sample GBuffer textures
+float4 fragmentMain(VSOutput input) : SV_Target
+{
     float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
     float4 normalSample    = inTexture[kGBufferNormalIndex].Sample(input.uv);
     float4 materialSample  = inTexture[kGBufferMaterialIndex].Sample(input.uv);
     float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
 
-    // Check if pixel was written (depth != 1.0 means something was rendered)
-    // For standard depth (1.0 at far plane), depth 1.0 means nothing rendered
     if(depthSample >= 0.9999)
     {
-        // Return ambient color for background
         return float4(lightParams.ambientColor, 1.0);
     }
-     
-    // Extract GBuffer data
+
     vec3 baseColor = baseColorSample.rgb;
     vec3 normal = normalSample.rgb;
     float metallic = materialSample.r;
     float roughness = materialSample.g;
-    float ao       = materialSample.b;
+    float ao = materialSample.b;
 
-    // Reconstruct world position from depth
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
+    vec3 N = normalize(normal * 2.0 - 1.0);
 
-    // Compute PBR lighting
+    float shadowFactor = calculateShadow(worldPos, N);
+
+    if(lightParams.debugMode == 1)
+    {
+        return float4(shadowFactor, shadowFactor, shadowFactor, 1.0);
+    }
+    else if(lightParams.debugMode == 2)
+    {
+        vec4 shadowTexPos = mul(
+            shadowUniforms.worldToShadowTextureMatrix,
+            vec4(worldPos + N * shadowUniforms.shadowMapMetrics.z, 1.0));
+        vec3 shadowCoord = shadowTexPos.xyz / max(shadowTexPos.w, 1e-5);
+        return float4(saturate(shadowCoord.xy), 0.0, 1.0);
+    }
+    else if(lightParams.debugMode == 3)
+    {
+        vec4 viewPos = mul(camera.view, vec4(worldPos, 1.0));
+        float normalizedDepth = (-viewPos.z) / max(1.0, shadowUniforms.shadowMapMetrics.y);
+        return float4(normalizedDepth, normalizedDepth, normalizedDepth, 1.0);
+    }
+    else if(lightParams.debugMode == 4)
+    {
+        vec4 lightClipPos = mul(shadowUniforms.lightViewProjectionMatrix, vec4(worldPos, 1.0));
+        vec2 lightXY = lightClipPos.xy / max(lightClipPos.w, 1e-5);
+        return float4(lightXY * 0.5 + 0.5, 0.0, 1.0);
+    }
+    else if(lightParams.debugMode == 5)
+    {
+        vec4 shadowTexPos = mul(shadowUniforms.worldToShadowTextureMatrix, vec4(worldPos, 1.0));
+        float shadowDepth = shadowTexPos.z / max(shadowTexPos.w, 1e-5);
+        return float4(shadowDepth, shadowDepth, shadowDepth, 1.0);
+    }
+
     vec3 color = computePBRLighting(baseColor, normal, worldPos, metallic, roughness, ao);
-
     return float4(color, 1.0);
 }

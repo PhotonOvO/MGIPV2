@@ -40,9 +40,7 @@ public:
   [[nodiscard]] VkImageView                  getGBufferImageView(uint32_t index) const { return getColorImageView(index); }
   [[nodiscard]] const VkDescriptorImageInfo& getGBufferDescriptor(uint32_t index) const { return getDescriptorImageInfo(index); }
 
-  // Fixed resolution output texture (for PBR lighting result)
-  static constexpr uint32_t kOutputTextureWidth = 1920;
-  static constexpr uint32_t kOutputTextureHeight = 1080;
+  // Output texture for PBR lighting result (follows screen size, like Unity/UE)
   static constexpr uint32_t kOutputTextureIndex = 3;  // After GBuffer[0-2]
 
   [[nodiscard]] VkImageView getOutputTextureView() const;

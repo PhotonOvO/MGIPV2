@@ -146,6 +146,18 @@ bool GltfLoader::processNode(const tinygltf::Model& model, int nodeIndex,
         glm::mat4 r = glm::mat4_cast(rotation);
         glm::mat4 s = glm::scale(glm::mat4(1.0f), scale);
         localTransform = t * r * s;
+
+        // Debug: verify translation is preserved in final matrix
+        static bool printedTRS = false;
+        if(!printedTRS) {
+            printf("GltfLoader: First node TRS debug:\n");
+            printf("  translation: (%f, %f, %f)\n", translation.x, translation.y, translation.z);
+            printf("  scale: (%f, %f, %f)\n", scale.x, scale.y, scale.z);
+            printf("  Result matrix column 3 (should be translation):\n");
+            printf("    [%f, %f, %f, %f]\n",
+                   localTransform[3][0], localTransform[3][1], localTransform[3][2], localTransform[3][3]);
+            printedTRS = true;
+        }
     }
 
     glm::mat4 globalTransform = parentTransform * localTransform;

@@ -1,291 +1,272 @@
 #include "ShadowResources.h"
 
-// GLM matrix functions (not included by default)
-#include <glm/ext/matrix_transform.hpp>
-#include <glm/ext/matrix_clip_space.hpp>
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <limits>
 
-#include <cmath>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace demo {
 
+namespace {
+
+constexpr float kDefaultMaxShadowDistance = 100.0f;
+constexpr float kReceiverBias             = 0.0015f;
+constexpr float kDepthBiasConstant        = 1.25f;
+constexpr float kDepthBiasSlope           = 1.75f;
+constexpr float kShadowIntensity          = 1.0f;
+constexpr float kShadowKernelRadius       = 1.0f;  // 1 => 3x3 PCF
+
+[[nodiscard]] float extractNearPlane(const glm::mat4& projection)
+{
+  const float a = projection[2][2];
+  const float b = projection[3][2];
+  return std::abs(a) > 1e-5f ? b / a : 0.1f;
+}
+
+[[nodiscard]] float extractFarPlane(const glm::mat4& projection)
+{
+  const float a = projection[2][2];
+  const float b = projection[3][2];
+  return std::abs(a + 1.0f) > 1e-5f ? b / (a + 1.0f) : kDefaultMaxShadowDistance;
+}
+
+[[nodiscard]] glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+{
+  const float lengthSq = glm::dot(value, value);
+  return lengthSq > 1e-6f ? value * glm::inversesqrt(lengthSq) : fallback;
+}
+
+[[nodiscard]] std::array<glm::vec3, 8> buildFrustumSliceCornersWorld(
+    const shaderio::CameraUniforms& camera,
+    const clipspace::ProjectionConvention& projectionConvention,
+    float sliceFarDistance)
+{
+  const glm::mat4 invViewProjection = glm::inverse(camera.viewProjection);
+  const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection));
+  const float cameraFar  = std::max(cameraNear + 0.01f, extractFarPlane(camera.projection));
+  const float sliceFar   = glm::clamp(sliceFarDistance, cameraNear + 0.01f, cameraFar);
+  const float sliceLerp  = (sliceFar - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
+
+  const std::array<glm::vec2, 4> ndcCorners = {
+      glm::vec2(-1.0f, -1.0f),
+      glm::vec2(1.0f, -1.0f),
+      glm::vec2(1.0f, 1.0f),
+      glm::vec2(-1.0f, 1.0f),
+  };
+
+  std::array<glm::vec3, 4> nearCorners{};
+  std::array<glm::vec3, 4> farCorners{};
+
+  for(size_t i = 0; i < ndcCorners.size(); ++i)
+  {
+    glm::vec4 nearCorner = invViewProjection * glm::vec4(ndcCorners[i], projectionConvention.ndcNearZ, 1.0f);
+    glm::vec4 farCorner  = invViewProjection * glm::vec4(ndcCorners[i], projectionConvention.ndcFarZ, 1.0f);
+    nearCorner /= nearCorner.w;
+    farCorner /= farCorner.w;
+    nearCorners[i] = glm::vec3(nearCorner);
+    farCorners[i]  = glm::vec3(farCorner);
+  }
+
+  std::array<glm::vec3, 8> sliceCorners{};
+  for(size_t i = 0; i < ndcCorners.size(); ++i)
+  {
+    const glm::vec3 ray = farCorners[i] - nearCorners[i];
+    sliceCorners[i]     = nearCorners[i];
+    sliceCorners[i + 4] = nearCorners[i] + ray * sliceLerp;
+  }
+
+  return sliceCorners;
+}
+
+[[nodiscard]] glm::vec3 computeFrustumCenter(const std::array<glm::vec3, 8>& corners)
+{
+  glm::vec3 center(0.0f);
+  for(const glm::vec3& corner : corners)
+  {
+    center += corner;
+  }
+  return center / static_cast<float>(corners.size());
+}
+
+}  // namespace
+
 void ShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo)
 {
-  m_device = device;
-  m_allocator = allocator;
-  m_shadowMapSize = createInfo.shadowMapSize;
-  m_cascadeCount = createInfo.cascadeCount;
+  m_device               = device;
+  m_allocator            = allocator;
+  m_shadowMapSize        = createInfo.shadowMapSize;
+  m_projectionConvention = createInfo.projectionConvention;
 
   utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
 
-  // Create shadow map image as 2D array (one layer per cascade)
   const VkImageCreateInfo shadowInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = createInfo.shadowFormat,
       .extent = {m_shadowMapSize, m_shadowMapSize, 1},
       .mipLevels = 1,
-      .arrayLayers = m_cascadeCount,
+      .arrayLayers = 1,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
   };
 
   const VmaAllocationCreateInfo imageAllocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-  VK_CHECK(vmaCreateImage(m_allocator, &shadowInfo, &imageAllocInfo,
-      &m_shadowMapImage.image, &m_shadowMapImage.allocation, nullptr));
-  dutil.setObjectName(m_shadowMapImage.image, "Shadow_DepthMap");
+  VK_CHECK(vmaCreateImage(
+      m_allocator, &shadowInfo, &imageAllocInfo, &m_shadowMapImage.image, &m_shadowMapImage.allocation, nullptr));
+  dutil.setObjectName(m_shadowMapImage.image, "Shadow_Map");
 
-  // Create full array view
-  const VkImageViewCreateInfo fullViewInfo{
+  const VkImageViewCreateInfo viewInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = m_shadowMapImage.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
       .format = createInfo.shadowFormat,
-      .subresourceRange = {
-          .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-          .baseMipLevel = 0,
-          .levelCount = 1,
-          .baseArrayLayer = 0,
-          .layerCount = m_cascadeCount
-      },
+      .subresourceRange =
+          {
+              .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+              .baseMipLevel = 0,
+              .levelCount = 1,
+              .baseArrayLayer = 0,
+              .layerCount = 1,
+          },
   };
-  VK_CHECK(vkCreateImageView(m_device, &fullViewInfo, nullptr, &m_shadowMapView));
-  dutil.setObjectName(m_shadowMapView, "Shadow_DepthMapView");
+  VK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_shadowMapView));
+  dutil.setObjectName(m_shadowMapView, "Shadow_MapView");
 
-  // Create per-cascade views
-  m_cascadeViews.resize(m_cascadeCount);
-  for(uint32_t i = 0; i < m_cascadeCount; ++i)
-  {
-    const VkImageViewCreateInfo cascadeViewInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = m_shadowMapImage.image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = createInfo.shadowFormat,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = i,
-            .layerCount = 1
-        },
-    };
-    VK_CHECK(vkCreateImageView(m_device, &cascadeViewInfo, nullptr, &m_cascadeViews[i]));
-    dutil.setObjectName(m_cascadeViews[i], "Shadow_CascadeView_" + std::to_string(i));
-  }
-
-  // Create shadow uniform buffer
   const VkBufferCreateInfo uniformInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = sizeof(shaderio::ShadowUniforms),
-      .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
   };
-  VK_CHECK(vmaCreateBuffer(m_allocator, &uniformInfo, &imageAllocInfo,
-      &m_shadowUniformBuffer.buffer, &m_shadowUniformBuffer.allocation, nullptr));
+  VmaAllocationInfo uniformAllocInfo{};
+  const VmaAllocationCreateInfo uniformCreateInfo{
+      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+      .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
+  };
+  VK_CHECK(vmaCreateBuffer(
+      m_allocator, &uniformInfo, &uniformCreateInfo, &m_shadowUniformBuffer.buffer,
+      &m_shadowUniformBuffer.allocation, &uniformAllocInfo));
+  m_shadowUniformMapped = nullptr;
+  VK_CHECK(vmaMapMemory(m_allocator, m_shadowUniformBuffer.allocation, &m_shadowUniformMapped));
   dutil.setObjectName(m_shadowUniformBuffer.buffer, "Shadow_UniformBuffer");
 
-  // Initialize shadow map image to depth attachment optimal layout
-  utils::cmdInitImageLayout(cmd, m_shadowMapImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
-
-  // Clear depth to 1.0 (far plane)
-  const VkClearDepthStencilValue depthClearValue{1.0f, 0};
-  const VkImageSubresourceRange depthRange{
-      .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-      .baseMipLevel = 0,
-      .levelCount = 1,
-      .baseArrayLayer = 0,
-      .layerCount = m_cascadeCount,
+  const VkImageMemoryBarrier2 initBarrier{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+      .srcAccessMask = VK_ACCESS_2_NONE,
+      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = m_shadowMapImage.image,
+      .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
   };
-  vkCmdClearDepthStencilImage(cmd, m_shadowMapImage.image, VK_IMAGE_LAYOUT_GENERAL, &depthClearValue, 1, &depthRange);
+  const VkDependencyInfo initDepInfo{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers = &initBarrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &initDepInfo);
 }
 
 void ShadowResources::deinit()
 {
-  // Clean up staging buffers
-  for(utils::Buffer& staging : m_stagingBuffers)
+  if(m_shadowUniformMapped != nullptr)
   {
-    if(staging.buffer != VK_NULL_HANDLE)
-      vmaDestroyBuffer(m_allocator, staging.buffer, staging.allocation);
+    vmaUnmapMemory(m_allocator, m_shadowUniformBuffer.allocation);
+    m_shadowUniformMapped = nullptr;
   }
-  m_stagingBuffers.clear();
-
-  // Clean up cascade views
-  for(VkImageView view : m_cascadeViews)
-  {
-    if(view != VK_NULL_HANDLE)
-      vkDestroyImageView(m_device, view, nullptr);
-  }
-  m_cascadeViews.clear();
 
   if(m_shadowMapView != VK_NULL_HANDLE)
+  {
     vkDestroyImageView(m_device, m_shadowMapView, nullptr);
+  }
   if(m_shadowMapImage.image != VK_NULL_HANDLE)
+  {
     vmaDestroyImage(m_allocator, m_shadowMapImage.image, m_shadowMapImage.allocation);
+  }
   if(m_shadowUniformBuffer.buffer != VK_NULL_HANDLE)
+  {
     vmaDestroyBuffer(m_allocator, m_shadowUniformBuffer.buffer, m_shadowUniformBuffer.allocation);
+  }
 
   *this = ShadowResources{};
 }
 
-void ShadowResources::updateCascadeMatrices(VkCommandBuffer cmd, const glm::mat4& cameraView, const glm::mat4& cameraProj, const glm::vec3& lightDir)
+void ShadowResources::updateShadowMatrices(const shaderio::CameraUniforms& camera, const glm::vec3& lightDir)
 {
-  // Create staging buffer for upload
-  const VkBufferCreateInfo stagingInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(shaderio::ShadowUniforms),
-      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-  };
-  const VmaAllocationCreateInfo stagingAllocInfo{.usage = VMA_MEMORY_USAGE_CPU_ONLY};
+  const float cameraFar          = std::max(1.0f, extractFarPlane(camera.projection));
+  const float maxShadowDistance  = std::min(kDefaultMaxShadowDistance, cameraFar);
+  const glm::vec3 lightDirection = safeNormalize(lightDir, glm::vec3(0.0f, -1.0f, 0.0f));
 
-  utils::Buffer stagingBuffer{};
-  VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-      &stagingBuffer.buffer, &stagingBuffer.allocation, nullptr));
+  const std::array<glm::vec3, 8> sliceCorners =
+      buildFrustumSliceCornersWorld(camera, m_projectionConvention, maxShadowDistance);
 
-  // Map and fill staging buffer
-  void* mappedData = nullptr;
-  vmaMapMemory(m_allocator, stagingBuffer.allocation, &mappedData);
-  shaderio::ShadowUniforms* shadowUniforms = static_cast<shaderio::ShadowUniforms*>(mappedData);
+  const glm::vec3 frustumCenter = computeFrustumCenter(sliceCorners);
 
-  // Calculate cascade split distances using practical split scheme
-  // Based on: 0.1 near, 100.0 far, logarithmic + linear blend
-  const float nearPlane = 0.1f;
-  const float farPlane = 100.0f;
-  const float lambda = 0.5f;  // Blend factor (0 = uniform, 1 = logarithmic)
-
-  // Calculate split depths for each cascade
-  for(uint32_t i = 0; i < m_cascadeCount; ++i)
+  float frustumRadius = 0.0f;
+  for(const glm::vec3& corner : sliceCorners)
   {
-    const float p = static_cast<float>(i + 1) / static_cast<float>(m_cascadeCount);
-    const float logSplit = nearPlane * std::pow(farPlane / nearPlane, p);
-    const float uniformSplit = nearPlane + (farPlane - nearPlane) * p;
-    const float splitDepth = lambda * logSplit + (1.0f - lambda) * uniformSplit;
-
-    shadowUniforms->cascades[i].splitDepth = glm::vec4(splitDepth, 0.0f, 0.0f, 0.0f);
+    frustumRadius = std::max(frustumRadius, glm::length(corner - frustumCenter));
   }
 
-  // Calculate light-space view-projection matrices for each cascade
-  // Light direction is assumed to be normalized
-  const glm::vec3 normalizedLightDir = glm::normalize(lightDir);
+  const glm::vec3 worldUp = std::abs(lightDirection.y) > 0.95f
+      ? glm::vec3(0.0f, 0.0f, 1.0f)
+      : glm::vec3(0.0f, 1.0f, 0.0f);
+  const glm::vec3 lightPosition = frustumCenter - lightDirection * (frustumRadius + maxShadowDistance);
+  const glm::mat4 lightView     = glm::lookAt(lightPosition, frustumCenter, worldUp);
 
-  // Inverse camera matrices
-  const glm::mat4 invCameraView = glm::inverse(cameraView);
-  const glm::mat4 invCameraProj = glm::inverse(cameraProj);
-
-  for(uint32_t i = 0; i < m_cascadeCount; ++i)
+  glm::vec3 minLightSpace(std::numeric_limits<float>::max());
+  glm::vec3 maxLightSpace(std::numeric_limits<float>::lowest());
+  for(const glm::vec3& corner : sliceCorners)
   {
-    // Get cascade frustum corners in world space
-    // Start with previous cascade's split depth (or near plane for first)
-    const float prevSplit = (i == 0) ? nearPlane : shadowUniforms->cascades[i - 1].splitDepth.x;
-    const float currSplit = shadowUniforms->cascades[i].splitDepth.x;
-
-    // Calculate frustum corners in NDC space
-    // For simplicity, use the full frustum slice
-    const std::array<glm::vec4, 8> ndcCorners = {
-      // Near plane corners
-      glm::vec4(-1.0f, -1.0f, prevSplit * 2.0f - 1.0f, 1.0f),  // Bottom-left near
-      glm::vec4( 1.0f, -1.0f, prevSplit * 2.0f - 1.0f, 1.0f),  // Bottom-right near
-      glm::vec4(-1.0f,  1.0f, prevSplit * 2.0f - 1.0f, 1.0f),  // Top-left near
-      glm::vec4( 1.0f,  1.0f, prevSplit * 2.0f - 1.0f, 1.0f),  // Top-right near
-      // Far plane corners (at current split)
-      glm::vec4(-1.0f, -1.0f, currSplit * 2.0f - 1.0f, 1.0f),  // Bottom-left far
-      glm::vec4( 1.0f, -1.0f, currSplit * 2.0f - 1.0f, 1.0f),  // Bottom-right far
-      glm::vec4(-1.0f,  1.0f, currSplit * 2.0f - 1.0f, 1.0f),  // Top-left far
-      glm::vec4( 1.0f,  1.0f, currSplit * 2.0f - 1.0f, 1.0f),  // Top-right far
-    };
-
-    // Transform NDC corners to world space
-    glm::vec3 minCorner(std::numeric_limits<float>::max());
-    glm::vec3 maxCorner(std::numeric_limits<float>::lowest());
-
-    for(const glm::vec4& ndc : ndcCorners)
-    {
-      glm::vec4 viewSpace = invCameraProj * ndc;
-      viewSpace /= viewSpace.w;  // Perspective divide
-      glm::vec3 worldSpace = glm::vec3(invCameraView * viewSpace);
-
-      minCorner = glm::min(minCorner, worldSpace);
-      maxCorner = glm::max(maxCorner, worldSpace);
-    }
-
-    // Calculate light-space matrix
-    // Build light view matrix (look from light direction towards center)
-    const glm::vec3 cascadeCenter = (minCorner + maxCorner) * 0.5f;
-    const glm::vec3 lightPos = cascadeCenter - normalizedLightDir * 100.0f;  // Place light far enough
-
-    // Create light view matrix using lookAt
-    // Need to find up vector (perpendicular to light direction)
-    glm::vec3 upVector = glm::vec3(0.0f, 1.0f, 0.0f);
-    if(std::abs(glm::dot(normalizedLightDir, upVector)) > 0.99f)
-    {
-      upVector = glm::vec3(0.0f, 0.0f, 1.0f);  // Use Z-up if light is nearly vertical
-    }
-    const glm::mat4 lightView = glm::lookAt(lightPos, cascadeCenter, upVector);
-
-    // Transform frustum corners to light space
-    glm::vec3 lightSpaceMin(std::numeric_limits<float>::max());
-    glm::vec3 lightSpaceMax(std::numeric_limits<float>::lowest());
-
-    for(const glm::vec4& ndc : ndcCorners)
-    {
-      glm::vec4 viewSpace = invCameraProj * ndc;
-      viewSpace /= viewSpace.w;
-      glm::vec3 worldSpace = glm::vec3(invCameraView * viewSpace);
-      glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(worldSpace, 1.0f));
-
-      lightSpaceMin = glm::min(lightSpaceMin, lightSpace);
-      lightSpaceMax = glm::max(lightSpaceMax, lightSpace);
-    }
-
-    // Build orthographic projection for light
-    const glm::mat4 lightProj = glm::ortho(
-        lightSpaceMin.x, lightSpaceMax.x,
-        lightSpaceMin.y, lightSpaceMax.y,
-        lightSpaceMin.z, lightSpaceMax.z
-    );
-
-    shadowUniforms->cascades[i].viewProjectionMatrix = lightProj * lightView;
-
-    // For non-atlas CSM (each cascade in its own texture layer),
-    // scale and offset are identity - no atlas coordinate transformation needed
-    shadowUniforms->cascades[i].cascadeScale = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-    shadowUniforms->cascades[i].cascadeOffset = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
-
-    // Calculate texel size for filtering
-    shadowUniforms->cascades[i].texelSize = 1.0f / static_cast<float>(m_shadowMapSize);
-    shadowUniforms->cascades[i].cascadeIndex = i;
-    shadowUniforms->cascades[i].cascadeBlendRegion = 0.1f;  // 10% blend region
+    const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+    minLightSpace = glm::min(minLightSpace, lightSpace);
+    maxLightSpace = glm::max(maxLightSpace, lightSpace);
   }
 
-  // Fill shadow uniforms metadata
-  shadowUniforms->lightDirection = normalizedLightDir;
-  shadowUniforms->shadowIntensity = 0.5f;
-  shadowUniforms->shadowBias = 0.0001f;
-  shadowUniforms->normalBias = 0.01f;
-  shadowUniforms->shadowMapSize = m_shadowMapSize;
-  shadowUniforms->pcfKernelSize = 3;  // 3x3 PCF
+  const float halfExtentX       = 0.5f * (maxLightSpace.x - minLightSpace.x);
+  const float halfExtentY       = 0.5f * (maxLightSpace.y - minLightSpace.y);
+  const float halfExtent        = std::max(halfExtentX, halfExtentY) + 4.0f;
+  glm::vec2 lightCenterXY       = 0.5f * glm::vec2(minLightSpace.x + maxLightSpace.x, minLightSpace.y + maxLightSpace.y);
+  const float worldUnitsPerTexel = (halfExtent * 2.0f) / static_cast<float>(m_shadowMapSize);
+  if(worldUnitsPerTexel > 0.0f)
+  {
+    lightCenterXY = glm::floor(lightCenterXY / worldUnitsPerTexel) * worldUnitsPerTexel;
+  }
 
-  vmaUnmapMemory(m_allocator, stagingBuffer.allocation);
+  const float left   = lightCenterXY.x - halfExtent;
+  const float right  = lightCenterXY.x + halfExtent;
+  const float bottom = lightCenterXY.y - halfExtent;
+  const float top    = lightCenterXY.y + halfExtent;
 
-  // Copy to GPU buffer
-  const VkBufferCopy2 copyRegion{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-      .srcOffset = 0,
-      .dstOffset = 0,
-      .size = sizeof(shaderio::ShadowUniforms),
-  };
-  const VkCopyBufferInfo2 copyInfo{
-      .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer = stagingBuffer.buffer,
-      .dstBuffer = m_shadowUniformBuffer.buffer,
-      .regionCount = 1,
-      .pRegions = &copyRegion,
-  };
-  vkCmdCopyBuffer2(cmd, &copyInfo);
+  const float depthPadding = std::max(25.0f, frustumRadius);
+  const float nearPlane    = std::max(0.1f, -maxLightSpace.z - depthPadding);
+  const float farPlane     = std::max(nearPlane + 1.0f, -minLightSpace.z + depthPadding);
 
-  // Add barrier to ensure copy completes before shader reads
-  utils::cmdBufferMemoryBarrier(cmd, m_shadowUniformBuffer.buffer,
-      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+  const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
+      left, right, bottom, top, nearPlane, farPlane, m_projectionConvention);
+  const glm::mat4 lightViewProjection = lightProjection * lightView;
 
-  // Store staging buffer for deferred deletion
-  m_stagingBuffers.push_back(stagingBuffer);
+  m_shadowUniformsData.lightViewProjectionMatrix  = lightViewProjection;
+  m_shadowUniformsData.worldToShadowTextureMatrix =
+      clipspace::makeNdcToShadowTextureMatrix(m_projectionConvention) * lightViewProjection;
+  m_shadowUniformsData.lightDirectionAndIntensity = glm::vec4(lightDirection, kShadowIntensity);
+  m_shadowUniformsData.shadowMapMetrics = glm::vec4(
+      1.0f / static_cast<float>(m_shadowMapSize), maxShadowDistance, kReceiverBias, 0.0f);
+  m_shadowUniformsData.shadowBiasAndKernel = glm::vec4(
+      kDepthBiasConstant, kDepthBiasSlope, static_cast<float>(m_shadowMapSize), kShadowKernelRadius);
+
+  if(m_shadowUniformMapped == nullptr)
+  {
+    VK_CHECK(vmaMapMemory(m_allocator, m_shadowUniformBuffer.allocation, &m_shadowUniformMapped));
+  }
+
+  std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
+  vmaFlushAllocation(m_allocator, m_shadowUniformBuffer.allocation, 0, sizeof(m_shadowUniformsData));
 }
 
 }  // namespace demo

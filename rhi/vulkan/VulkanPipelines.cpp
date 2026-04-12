@@ -263,6 +263,8 @@ VkDynamicState toVkDynamicState(DynamicState dynamicState)
   {
     case DynamicState::scissor:
       return VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT;
+    case DynamicState::depthBias:
+      return VK_DYNAMIC_STATE_DEPTH_BIAS;
     default:
       return VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT;
   }
@@ -473,11 +475,14 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   };
 
   const VkPipelineRasterizationStateCreateInfo rasterizerInfo{
-      .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-      .polygonMode = toVkPolygonMode(desc.rasterState.polygonMode),
-      .cullMode    = toVkCullMode(desc.rasterState.cullMode),
-      .frontFace   = toVkFrontFace(desc.rasterState.frontFace),
-      .lineWidth   = desc.rasterState.lineWidth,
+      .sType               = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable    = VK_FALSE,
+      .rasterizerDiscardEnable = VK_FALSE,
+      .polygonMode         = toVkPolygonMode(desc.rasterState.polygonMode),
+      .cullMode            = toVkCullMode(desc.rasterState.cullMode),
+      .frontFace           = toVkFrontFace(desc.rasterState.frontFace),
+      .depthBiasEnable     = desc.rasterState.depthBiasEnable ? VK_TRUE : VK_FALSE,
+      .lineWidth           = desc.rasterState.lineWidth,
   };
 
   const VkPipelineMultisampleStateCreateInfo multisamplingInfo{

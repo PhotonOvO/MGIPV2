@@ -17,6 +17,7 @@
 #include "passes/ForwardPass.h"
 #include "passes/LightCullingPass.h"
 #include "passes/ShadowPass.h"
+#include "passes/ShadowDebugPass.h"
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
@@ -61,6 +62,10 @@ struct RenderParams
   const GltfUploadResult*                gltfModel{nullptr};
   // Camera data (pointer to App-owned CameraUniforms)
   const shaderio::CameraUniforms*       cameraUniforms{nullptr};
+  // Light direction for shadow pass (normalized, pointing FROM light TO scene)
+  glm::vec3                              lightDirection{0.0f, -1.0f, 0.0f};  // Default: from above
+  // Shadow debug mode: 0=normal, 1=shadow factor, 2=shadow UV, 3=view depth, 4=light clip XY, 5=shadow depth
+  int                                    shadowDebugMode{0};
 };
 
 struct GltfUploadResult
@@ -136,6 +141,22 @@ public:
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
 
+  // ShadowPass support
+  PipelineHandle getShadowPipelineOpaqueHandle() const;
+  PipelineHandle getShadowPipelineAlphaTestHandle() const;
+  uint64_t       getShadowPipelineLayout() const;
+  shaderio::ShadowUniforms* getShadowUniformsData();  // CPU-side shadow uniforms for debug visualization
+  uint64_t       getShadowUniformsDescriptorSet() const;  // GPU descriptor set for shadow uniforms UBO
+  VkImageView    getShadowMapView() const;  // For ImGui visualization
+
+  // LightCullingPass support
+  PipelineHandle getLightCullingPipelineHandle() const;
+  uint64_t       getLightCullingPipelineLayout() const;
+  uint64_t       getLightCullingDescriptorSet() const;
+
+  // DebugLinePass support
+  PipelineHandle getDebugLinePipelineHandle() const;
+
   // Get descriptor set from bind group (for descriptor set binding)
   uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
       return getBindGroupDescriptorSetOpaque(handle, slot);
@@ -183,6 +204,7 @@ public:
   VkImageView getCurrentSwapchainImageView() const;
   VkImage getCurrentSwapchainImage() const;
   VkImageView getOutputTextureView() const;
+  VkImageView getDepthTextureView() const;
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
@@ -280,6 +302,11 @@ private:
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
+    std::unique_ptr<rhi::PipelineLayout>       shadowPipelineLayout;   // Shadow pass layout (depth-only)
+    std::unique_ptr<rhi::PipelineLayout>       lightCullingPipelineLayout;  // Compute pipeline layout
+    VkDescriptorSetLayout                      shadowUniformsSetLayout{nullptr};  // Shadow uniforms UBO layout
+    VkDescriptorSet                            shadowUniformsDescriptorSet{VK_NULL_HANDLE};  // Shadow uniforms UBO set
+    VkDescriptorSetLayout                      lightCullingSetLayout{nullptr};
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
     struct PrebuiltPipelineVariants
@@ -341,6 +368,7 @@ private:
   std::unique_ptr<ForwardPass>         m_forwardPass;
   std::unique_ptr<PresentPass>         m_presentPass;
   std::unique_ptr<ImguiPass>           m_imguiPass;
+  std::unique_ptr<ShadowDebugPass>     m_shadowDebugPass;
   demo::PassExecutor                   m_passExecutor;
 
   // glTF support
@@ -349,7 +377,7 @@ private:
   // IBL support (swapchain-dependent for now)
   IBLResources m_iblResources;
 
-  // Shadow support (CSM cascades)
+  // Shadow support (single directional shadow map)
   ShadowResources m_shadowResources;
 
   // Light pipeline
@@ -357,6 +385,17 @@ private:
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
+
+  // Shadow pipeline (depth-only for CSM)
+  PipelineHandle m_shadowOpaquePipeline{};       // Shadow Opaque variant
+  PipelineHandle m_shadowAlphaTestPipeline{};    // Shadow AlphaTest variant
+
+  // Light culling compute pipeline
+  PipelineHandle m_lightCullingPipeline{};
+  VkDescriptorSet m_lightCullingDescriptorSet{VK_NULL_HANDLE};  // Light buffer + depth + output
+
+  // Debug line pipeline (for visualization)
+  PipelineHandle m_debugLinePipeline{};
 
   // GBuffer uniform buffer bind groups (per-frame)
   // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public

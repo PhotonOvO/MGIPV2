@@ -1,52 +1,33 @@
-// Shadow Pass Shader: Render depth-only for shadow mapping
-// Uses same vertex format as GBuffer pass
+// Shadow map generation shader.
+// Renders a single depth map for a directional light and supports alpha-masked materials.
 
 #include "shader_io.h"
 
-//------------------------------------------------------------------------------
-// Resource Bindings
-//------------------------------------------------------------------------------
+[[vk::constant_id(0)]]
+const bool alphaTestEnabled = false;
 
-// Set 1: Camera uniform (for cascade selection - optional in shadow pass)
-[[vk::binding(LBindCamera, LSetScene)]]
-ConstantBuffer<CameraUniforms> camera;
+// Set 0: bindless material textures
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[];
 
-// Set 2: Per-draw model matrix
+// Set 1: shadow matrices and sampling parameters
+[[vk::binding(0, LSetScene)]]
+ConstantBuffer<ShadowUniforms> shadowUniforms;
+
+// Set 2: per-draw model data
 [[vk::binding(LBindDrawModel, LSetDraw)]]
 ConstantBuffer<DrawUniforms> draw;
-
-//------------------------------------------------------------------------------
-// Push Constants Structure
-//------------------------------------------------------------------------------
-
-struct ShadowPushConstants
-{
-    mat4 lightViewProjection;
-    float depthBias;
-    float normalBias;
-    uint cascadeIndex;
-    float _padding;
-};
-
-// Push constant binding
-[[vk::push_constant]]
-ShadowPushConstants shadowPush;
-
-//------------------------------------------------------------------------------
-// Vertex Shader
-//------------------------------------------------------------------------------
 
 struct VertexInput
 {
     [[vk::location(LVGltfPosition)]] float3 position : POSITION;
-    [[vk::location(LVGltfNormal)]]   float3 normal   : NORMAL;
+    [[vk::location(LVGltfTexCoord)]] float2 texCoord : TEXCOORD0;
 };
 
 struct VertexOutput
 {
     float4 position : SV_Position;
-    float3 worldPos : TEXCOORD0;
-    float3 worldNormal : TEXCOORD1;
+    float2 uv       : TEXCOORD0;
 };
 
 [shader("vertex")]
@@ -54,31 +35,27 @@ VertexOutput vertexMain(VertexInput input)
 {
     VertexOutput output;
 
-    // Transform to world space
     float4 worldPos = mul(draw.modelMatrix, float4(input.position, 1.0));
-
-    // Transform to light's clip space
-    output.position = mul(shadowPush.lightViewProjection, worldPos);
-
-    // Pass world position and normal for potential depth bias calculations
-    output.worldPos = worldPos.xyz;
-    output.worldNormal = normalize(mul(draw.modelMatrix, float4(input.normal, 0.0)).xyz);
+    output.position = mul(shadowUniforms.lightViewProjectionMatrix, worldPos);
+    output.uv = input.texCoord;
 
     return output;
 }
 
-//------------------------------------------------------------------------------
-// Fragment Shader (Depth-only, no color output)
-//------------------------------------------------------------------------------
-
 [shader("fragment")]
 void fragmentMain(VertexOutput input)
 {
-    // No color output - only depth is written to the depth attachment
-    // Depth bias is applied via pipeline dynamic state (depthBiasConstantFactor,
-    // depthBiasClamp, depthBiasSlopeFactor) for more precise control
+    if(alphaTestEnabled)
+    {
+        float alpha = draw.baseColorFactor.a;
+        if(draw.baseColorTextureIndex >= 0)
+        {
+            alpha *= inTexture[draw.baseColorTextureIndex].Sample(input.uv).a;
+        }
 
-    // Alternative: Manual depth bias could be applied here if needed:
-    // gl_FragDepth = input.position.z + shadowPush.depthBias;
-    // However, pipeline depth bias is preferred for hardware optimization
+        if(alpha < draw.alphaCutoff)
+        {
+            discard;
+        }
+    }
 }

@@ -408,10 +408,10 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_iblResources.init(nativeDevice, m_device.allocator, cmd, iblInfo);
 
-    // Initialize Shadow resources for CSM cascades
+    // Initialize a single directional shadow map.
     ShadowResources::CreateInfo shadowInfo{
-        .shadowMapSize = 1024,
-        .cascadeCount = 4,
+        .shadowMapSize = 2048,
+        .projectionConvention = clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan),
     };
     m_shadowResources.init(nativeDevice, m_device.allocator, cmd, shadowInfo);
 
@@ -442,17 +442,17 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
           4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      // Binding 5: Shadow map texture (2D array for CSM cascades)
+      // Binding 5: Shadow map texture
       const VkDescriptorSetLayoutBinding shadowMapBinding{
           5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      // Binding 6: Shadow comparison sampler (for PCF filtering)
+      // Binding 6: Shadow comparison sampler
       const VkDescriptorSetLayoutBinding shadowSamplerBinding{
           6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      // Binding 7: Shadow uniforms buffer (cascade matrices and parameters)
+      // Binding 7: Shadow uniforms buffer
       const VkDescriptorSetLayoutBinding shadowUniformsBinding{
           7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
@@ -592,6 +592,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_forwardPass         = std::make_unique<ForwardPass>(this);
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
+  m_shadowDebugPass     = std::make_unique<ShadowDebugPass>(this);
   m_passExecutor.clear();
   m_passExecutor.addPass(*m_shadowPass);      // Shadow depth FIRST
   m_passExecutor.addPass(*m_gbufferPass);
@@ -599,9 +600,11 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   // m_passExecutor.addPass(*m_sceneOpaquePass);
   m_passExecutor.addPass(*m_lightCullingPass);
   m_passExecutor.addPass(*m_lightPass);
-  // m_passExecutor.addPass(*m_forwardPass); 
+  // m_passExecutor.addPass(*m_forwardPass);
+  m_passExecutor.addPass(*m_shadowDebugPass);  // Debug visualization after lighting
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
+  // Note: ShadowDebugPass UI removed - draws via MinimalLatestApp before ImGui::Render()
 }
 
 void Renderer::shutdown(rhi::Surface& surface)
@@ -670,6 +673,26 @@ void Renderer::shutdown(rhi::Surface& surface)
   {
     m_device.gbufferPipelineLayout->deinit();
     m_device.gbufferPipelineLayout.reset();
+  }
+  if(m_device.shadowPipelineLayout)
+  {
+    m_device.shadowPipelineLayout->deinit();
+    m_device.shadowPipelineLayout.reset();
+  }
+  if(m_device.lightCullingPipelineLayout)
+  {
+    m_device.lightCullingPipelineLayout->deinit();
+    m_device.lightCullingPipelineLayout.reset();
+  }
+  if(m_device.shadowUniformsSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.shadowUniformsSetLayout, nullptr);
+    m_device.shadowUniformsSetLayout = VK_NULL_HANDLE;
+  }
+  if(m_device.lightCullingSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.lightCullingSetLayout, nullptr);
+    m_device.lightCullingSetLayout = VK_NULL_HANDLE;
   }
   // Per-frame bind groups already destroyed by destroyBindGroups() above
   // Just cleanup the transient allocators
@@ -793,6 +816,56 @@ PipelineHandle Renderer::getForwardPipelineHandle() const
   return m_forwardPipeline;
 }
 
+PipelineHandle Renderer::getShadowPipelineOpaqueHandle() const
+{
+  return m_shadowOpaquePipeline;
+}
+
+PipelineHandle Renderer::getShadowPipelineAlphaTestHandle() const
+{
+  return m_shadowAlphaTestPipeline;
+}
+
+uint64_t Renderer::getShadowPipelineLayout() const
+{
+  return m_device.shadowPipelineLayout ? m_device.shadowPipelineLayout->getNativeHandle() : 0;
+}
+
+shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
+{
+  return m_shadowResources.getShadowUniformsData();
+}
+
+uint64_t Renderer::getShadowUniformsDescriptorSet() const
+{
+  return reinterpret_cast<uint64_t>(m_device.shadowUniformsDescriptorSet);
+}
+
+VkImageView Renderer::getShadowMapView() const
+{
+  return m_shadowResources.getShadowMapView();
+}
+
+PipelineHandle Renderer::getLightCullingPipelineHandle() const
+{
+  return m_lightCullingPipeline;
+}
+
+uint64_t Renderer::getLightCullingPipelineLayout() const
+{
+  return m_device.lightCullingPipelineLayout ? m_device.lightCullingPipelineLayout->getNativeHandle() : 0;
+}
+
+uint64_t Renderer::getLightCullingDescriptorSet() const
+{
+  return reinterpret_cast<uint64_t>(m_lightCullingDescriptorSet);
+}
+
+PipelineHandle Renderer::getDebugLinePipelineHandle() const
+{
+  return m_debugLinePipeline;
+}
+
 VkImageView Renderer::getCurrentSwapchainImageView() const
 {
   if(m_swapchainDependent.swapchain == nullptr)
@@ -816,6 +889,11 @@ VkImage Renderer::getCurrentSwapchainImage() const
 VkImageView Renderer::getOutputTextureView() const
 {
   return m_swapchainDependent.sceneResources.getOutputTextureView();
+}
+
+VkImageView Renderer::getDepthTextureView() const
+{
+  return m_swapchainDependent.sceneResources.getDepthImageView();
 }
 
 void Renderer::render(const RenderParams& params)
@@ -1868,6 +1946,88 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                 gbufferLayoutDesc, gbufferLayoutLowering);
     DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
     m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
+
+    // Create Shadow Pipeline Layout (single shadow map, no camera set)
+    {
+      rhi::ShaderReflectionData shadowReflection{};
+      shadowReflection.name = "shader.shadow";
+      shadowReflection.entryPoints = {
+          rhi::ShaderEntryPoint{"vertexMain", rhi::ShaderStageFlagBits::vertex},
+          rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
+      };
+      shadowReflection.resourceBindings = {
+          rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
+                                     rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
+                                     m_materials.maxTextures, 0},
+          rhi::ShaderResourceBinding{"shadowUniforms", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+                                     rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindSceneInfo, 1, 0},
+          rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
+                                     rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
+                                     shaderio::LSetDraw, shaderio::LBindDrawModel, 1, 0},
+      };
+      shadowReflection.pushConstantRanges = {};
+
+      rhi::PipelineLayoutDesc shadowLayoutDesc = rhi::derivePipelineLayoutDesc(shadowReflection);
+      shadowLayoutDesc.debugName = "shadow-layout";
+
+      const VkDescriptorSetLayoutBinding shadowUniformBinding{
+          shaderio::LBindSceneInfo, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutCreateInfo shadowSetLayoutInfo{
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings = &shadowUniformBinding,
+      };
+      VkDescriptorSetLayout shadowSetLayout{};
+      VK_CHECK(vkCreateDescriptorSetLayout(
+          fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &shadowSetLayoutInfo, nullptr,
+          &shadowSetLayout));
+      DBG_VK_NAME(shadowSetLayout);
+      m_device.shadowUniformsSetLayout = shadowSetLayout;
+
+      const VkDescriptorSetAllocateInfo shadowSetAllocInfo{
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = m_device.descriptorPool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &shadowSetLayout,
+      };
+      VkDescriptorSet shadowDescriptorSet{};
+      VK_CHECK(vkAllocateDescriptorSets(
+          fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &shadowSetAllocInfo, &shadowDescriptorSet));
+      DBG_VK_NAME(shadowDescriptorSet);
+      m_device.shadowUniformsDescriptorSet = shadowDescriptorSet;
+
+      const VkDescriptorBufferInfo shadowBufferInfo{
+          .buffer = m_shadowResources.getShadowUniformBuffer(),
+          .offset = 0,
+          .range = sizeof(shaderio::ShadowUniforms),
+      };
+      const VkWriteDescriptorSet shadowWrite{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = shadowDescriptorSet,
+          .dstBinding = shaderio::LBindSceneInfo,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo = &shadowBufferInfo,
+      };
+      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &shadowWrite, 0, nullptr);
+
+      const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> shadowLayoutMappings{
+          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, materialLayoutHandle),
+          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, reinterpret_cast<uint64_t>(shadowSetLayout)),
+          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, drawLayoutHandle),
+      };
+
+      auto shadowPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+      shadowPipelineLayout->init(
+          static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), shadowLayoutDesc,
+          rhi::vulkan::VulkanPipelineLayoutLowering{
+              .setLayouts = shadowLayoutMappings.data(),
+              .setLayoutCount = static_cast<uint32_t>(shadowLayoutMappings.size()),
+          });
+      DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(shadowPipelineLayout->getNativeHandle()));
+      m_device.shadowPipelineLayout = std::move(shadowPipelineLayout);
+    }
   }
 
   // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
@@ -2222,6 +2382,288 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
   }
+
+  // Create Shadow pipelines (depth-only directional shadow map)
+  #ifdef USE_SLANG
+  {
+    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                {shader_shadow_slang, std::size(shader_shadow_slang)});
+    DBG_VK_NAME(shadowShaderModule);
+
+    // Shadow uses Position + TexCoord from the glTF vertex stream.
+    const std::array<rhi::VertexBindingDesc, 1> shadowBindings{{
+        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
+    }};
+    const std::array<rhi::VertexAttributeDesc, 2> shadowAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
+        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat,    .offset = 24},
+    }};
+    const rhi::VertexInputLayoutDesc shadowVertexInput{
+        .bindings       = shadowBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(shadowBindings.size()),
+        .attributes     = shadowAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(shadowAttributes.size()),
+    };
+
+    const std::array<rhi::DynamicState, 3> shadowDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+        rhi::DynamicState::depthBias,
+    }};
+    const std::array<rhi::BlendAttachmentState, 0> shadowBlendStates{};  // No color attachments
+
+    // Depth-only format (D32_SFLOAT)
+    const rhi::TextureFormat depthFormat = rhi::TextureFormat::d32Sfloat;
+
+    std::array<rhi::PipelineShaderStageDesc, 2> shadowShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule),
+            .entryPoint = "vertexMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule),
+            .entryPoint = "fragmentMain",
+        },
+    }};
+
+    // Specialization for alpha test
+    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
+
+    rhi::GraphicsPipelineDesc shadowGraphicsDesc{
+        .layout            = m_device.shadowPipelineLayout.get(),
+        .shaderStages      = shadowShaderStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(shadowShaderStages.size()),
+        .vertexInput       = shadowVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::less},
+        .blendStates       = nullptr,  // No color blending
+        .blendStateCount   = 0,
+        .dynamicStates     = shadowDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size()),
+        .renderingInfo     = {
+            .colorFormats     = nullptr,
+            .colorFormatCount = 0,
+            .depthFormat      = depthFormat,
+        },
+    };
+    shadowGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    shadowGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
+    shadowGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    shadowGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+    shadowGraphicsDesc.rasterState.depthBiasEnable = true;  // Enable depth bias for shadow acne
+
+    // Variant 6: Shadow Opaque (alphaTestEnabled = false)
+    uint32_t alphaTestFalse = VK_FALSE;
+    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
+    shadowShaderStages[1].specializationData = specDataFalse;
+    shadowShaderStages[1].specializationConstants = &specConstantAlphaTest;
+    shadowShaderStages[1].specializationConstantCount = 1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo shadowOpaqueCreateInfo{
+        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 6},
+        .desc = shadowGraphicsDesc,
+    };
+    const VkPipeline shadowOpaquePipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowOpaqueCreateInfo);
+    DBG_VK_NAME(shadowOpaquePipeline);
+    m_shadowOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                               reinterpret_cast<uint64_t>(shadowOpaquePipeline), 6);
+
+    // Variant 7: Shadow AlphaTest (alphaTestEnabled = true)
+    uint32_t alphaTestTrue = VK_TRUE;
+    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
+    shadowShaderStages[1].specializationData = specDataTrue;
+    shadowOpaqueCreateInfo.key.specializationVariant = 7;
+
+    const VkPipeline shadowAlphaTestPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowOpaqueCreateInfo);
+    DBG_VK_NAME(shadowAlphaTestPipeline);
+    m_shadowAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                  reinterpret_cast<uint64_t>(shadowAlphaTestPipeline), 7);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
+  }
+  #endif
+
+  // Create Debug Line pipeline (for visualization)
+  #ifdef USE_SLANG
+  {
+    VkShaderModule debugShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                  {shader_debug_slang, std::size(shader_debug_slang)});
+    DBG_VK_NAME(debugShaderModule);
+
+    // Debug line uses Position + Color (24 bytes stride)
+    const std::array<rhi::VertexBindingDesc, 1> debugBindings{{
+        {.binding = 0, .stride = 28, .inputRate = rhi::VertexInputRate::perVertex}  // float3 pos + float4 color
+    }};
+    const std::array<rhi::VertexAttributeDesc, 2> debugAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
+        {.location = shaderio::LVColor,        .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 12},
+    }};
+    const rhi::VertexInputLayoutDesc debugVertexInput{
+        .bindings       = debugBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(debugBindings.size()),
+        .attributes     = debugAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(debugAttributes.size()),
+    };
+
+    const std::array<rhi::DynamicState, 2> debugDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+    const std::array<rhi::BlendAttachmentState, 1> debugBlendStates{{
+        rhi::BlendAttachmentState{
+            .blendEnable = false,
+            .srcColorBlendFactor = rhi::BlendFactor::one,
+            .dstColorBlendFactor = rhi::BlendFactor::zero,
+            .colorBlendOp = rhi::BlendOp::add,
+            .srcAlphaBlendFactor = rhi::BlendFactor::one,
+            .dstAlphaBlendFactor = rhi::BlendFactor::zero,
+            .alphaBlendOp = rhi::BlendOp::add,
+            .colorWriteMask = rhi::ColorComponentFlags::all,
+        },
+    }};
+
+    const rhi::TextureFormat colorFormat = rhi::TextureFormat::bgra8Unorm;  // Output texture format
+    const rhi::TextureFormat depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat());  // Actual depth format
+
+    std::array<rhi::PipelineShaderStageDesc, 2> debugShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule),
+            .entryPoint = "vertexMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule),
+            .entryPoint = "fragmentMain",
+        },
+    }};
+
+    rhi::GraphicsPipelineDesc debugGraphicsDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),  // Use GBuffer layout (has camera uniforms)
+        .shaderStages      = debugShaderStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(debugShaderStages.size()),
+        .vertexInput       = debugVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::lessOrEqual},  // Read-only depth
+        .blendStates       = debugBlendStates.data(),
+        .blendStateCount   = static_cast<uint32_t>(debugBlendStates.size()),
+        .dynamicStates     = debugDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(debugDynamicStates.size()),
+        .renderingInfo     = {
+            .colorFormats     = &colorFormat,
+            .colorFormatCount = 1,
+            .depthFormat      = depthFormat,
+        },
+    };
+    debugGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;  // Line rendering
+    debugGraphicsDesc.rasterState.cullMode    = rhi::CullMode::none;               // No culling for lines
+    debugGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    debugGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+    debugGraphicsDesc.rasterState.lineWidth   = 2.0f;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo debugCreateInfo{
+        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 8},
+        .desc = debugGraphicsDesc,
+    };
+    const VkPipeline debugPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugCreateInfo);
+    DBG_VK_NAME(debugPipeline);
+    m_debugLinePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                            reinterpret_cast<uint64_t>(debugPipeline), 8);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugShaderModule, nullptr);
+  }
+  #endif
+
+  // Create Light Culling compute pipeline
+  #ifdef USE_SLANG
+  {
+    VkShaderModule lightCullingShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                        {shader_light_culling_slang, std::size(shader_light_culling_slang)});
+    DBG_VK_NAME(lightCullingShaderModule);
+
+    // Light culling uses its own pipeline layout
+    rhi::ShaderReflectionData lightCullingReflection{};
+    lightCullingReflection.name = "shader.light_culling";
+    lightCullingReflection.entryPoints = {
+        rhi::ShaderEntryPoint{"computeMain", rhi::ShaderStageFlagBits::compute},
+    };
+    lightCullingReflection.resourceBindings = {
+        // Light data buffer
+        rhi::ShaderResourceBinding{"lightBuffer", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
+                                   rhi::ShaderStageFlagBits::compute, 0, 0, 1, 0},
+        // Light uniforms
+        rhi::ShaderResourceBinding{"lightUniforms", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
+                                   rhi::ShaderStageFlagBits::compute, 0, 1, 1, 0},
+        // Depth texture
+        rhi::ShaderResourceBinding{"depthTexture", rhi::ShaderResourceType::sampler, rhi::DescriptorType::sampledImage,
+                                   rhi::ShaderStageFlagBits::compute, 0, 2, 1, 0},
+        // Tile light index buffer (output)
+        rhi::ShaderResourceBinding{"tileLightIndexBuffer", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
+                                   rhi::ShaderStageFlagBits::compute, 0, 3, 1, 0},
+    };
+    // Push constants: CullingParams struct (208 bytes: 4 uint/float + 3 mat4)
+    lightCullingReflection.pushConstantRanges = {
+        rhi::PushConstantRange{rhi::ShaderStageFlagBits::compute, 0, 208},
+    };
+
+    rhi::PipelineLayoutDesc lightCullingLayoutDesc = rhi::derivePipelineLayoutDesc(lightCullingReflection);
+    lightCullingLayoutDesc.debugName = "light-culling-layout";
+
+    // Create descriptor set layout for light culling (set 0)
+    const std::array<VkDescriptorSetLayoutBinding, 4> lightCullingBindings{
+        VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // lightBuffer
+        VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // lightUniforms
+        VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},   // depthTexture
+        VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // tileLightIndexBuffer
+    };
+    const VkDescriptorSetLayoutCreateInfo lightCullingSetLayoutInfo{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
+        static_cast<uint32_t>(lightCullingBindings.size()), lightCullingBindings.data()
+    };
+    VkDescriptorSetLayout lightCullingSetLayout{};
+    vkCreateDescriptorSetLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &lightCullingSetLayoutInfo, nullptr, &lightCullingSetLayout);
+    DBG_VK_NAME(lightCullingSetLayout);
+    m_device.lightCullingSetLayout = lightCullingSetLayout;
+
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> lightCullingMappings{
+        rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(lightCullingSetLayout)),
+    };
+
+    auto lightCullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    lightCullingPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                                     lightCullingLayoutDesc, rhi::vulkan::VulkanPipelineLayoutLowering{
+                                         .setLayouts     = lightCullingMappings.data(),
+                                         .setLayoutCount = static_cast<uint32_t>(lightCullingMappings.size()),
+                                     });
+    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(lightCullingPipelineLayout->getNativeHandle()));
+    m_device.lightCullingPipelineLayout = std::move(lightCullingPipelineLayout);
+
+    rhi::ComputePipelineDesc lightCullingDesc{
+        .layout = m_device.lightCullingPipelineLayout.get(),
+        .shaderStage = {
+            .stage        = rhi::ShaderStage::compute,
+            .shaderModule = reinterpret_cast<uint64_t>(lightCullingShaderModule),
+            .entryPoint   = "computeMain",
+        },
+    };
+    rhi::vulkan::ComputePipelineCreateInfo lightCullingCreateInfo{
+        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::compute, .specializationVariant = 1},
+        .desc = lightCullingDesc,
+    };
+    const VkPipeline lightCullingPipeline =
+        rhi::vulkan::createComputePipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCullingCreateInfo);
+    DBG_VK_NAME(lightCullingPipeline);
+    m_lightCullingPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
+                                                reinterpret_cast<uint64_t>(lightCullingPipeline), 1);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCullingShaderModule, nullptr);
+  }
+  #endif
 }
 
 void Renderer::initImGui(GLFWwindow* window)
@@ -2272,10 +2714,13 @@ void Renderer::createDescriptorPool()
     const uint32_t maxDescriptorSets = 20U;
     const uint32_t dynamicUniformCount =
         std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
-    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
+    const std::array<VkDescriptorPoolSize, 6> poolSizes{{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer and shadow uniforms
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2U},   // For shadow map texture and light culling depth texture
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1U},         // For shadow comparison sampler (binding 6)
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2U},  // For light culling buffers (lightBuffer, tileLightIndexBuffer)
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
