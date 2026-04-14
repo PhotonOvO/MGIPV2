@@ -35,18 +35,17 @@ public:
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
 
     // Initialize camera
-    m_camera.setClipSpaceConvention(demo::clipspace::BackendConvention::vulkan);
     m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
     m_camera.setPosition(glm::vec3(8.0f, 1.5f, 0.0f));
     m_camera.setYawPitch(180.0, 0.0);
     m_camera.update();
+    syncLightAnglesFromDirection();
 
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 
-    // Start loading default scene immediately
-    std::string path = m_presetModels[0].path;
-    path = "resources/Dragon/DragonDispersion.gltf";
+    // Load default scene automatically
+    std::string path = "resources/Test/test.gltf";
     loadModelAsync(path);
   }
 
@@ -166,7 +165,7 @@ public:
       {
         m_viewportSize = requestedViewportSize;
         m_renderer.resize(m_viewportSize);
-        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 500.0f);
+        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
       }
 
       const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
@@ -210,29 +209,40 @@ public:
         ImGui::Text("  Y: %.2f", camPos.y);
         ImGui::Text("  Z: %.2f", camPos.z);
 
-        // Light direction controls
         ImGui::Separator();
-        ImGui::Text("Light Direction:");
-        ImGui::SliderFloat("Yaw", &m_lightYaw, -180.0f, 180.0f, "%.1f deg");
-        ImGui::SliderFloat("Pitch", &m_lightPitch, -90.0f, 90.0f, "%.1f deg");
+        ImGui::Text("Directional Light");
+        bool lightDirectionChanged = false;
+        lightDirectionChanged |= ImGui::SliderFloat("Light Azimuth", &m_lightAzimuthDegrees, -180.0f, 180.0f, "%.1f deg");
+        lightDirectionChanged |= ImGui::SliderFloat("Light Elevation", &m_lightElevationDegrees, -89.0f, 89.0f, "%.1f deg");
+        if(ImGui::Button("Reset Light Direction"))
+        {
+          m_lightSettings.direction = glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f));
+          syncLightAnglesFromDirection();
+        }
+        if(lightDirectionChanged)
+        {
+          syncLightDirectionFromAngles();
+        }
+        ImGui::Text("Light Dir: %.3f, %.3f, %.3f",
+                    m_lightSettings.direction.x,
+                    m_lightSettings.direction.y,
+                    m_lightSettings.direction.z);
+        ImGui::ColorEdit3("Light Color", &m_lightSettings.color.x);
+        ImGui::ColorEdit3("Ambient", &m_lightSettings.ambient.x);
+        ImGui::SliderFloat("Shadow Distance", &m_lightSettings.shadowDistance, 5.0f, 80.0f);
+        ImGui::SliderFloat("Shadow Strength", &m_lightSettings.shadowStrength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Normal Bias", &m_lightSettings.normalBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Depth Bias", &m_lightSettings.depthBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
 
-        // Display computed light direction
-        const glm::vec3 lightDir = computeLightDirection();
-        ImGui::Text("  Dir: (%.2f, %.2f, %.2f)", lightDir.x, lightDir.y, lightDir.z);
-
-        // Shadow debug mode
         ImGui::Separator();
-        ImGui::Text("Shadow Debug:");
-        const char* debugModes[] = {"Normal", "Shadow Factor", "Shadow UV", "View Depth", "Light Clip XY", "Shadow Depth"};
-        ImGui::Combo("Mode", &m_shadowDebugMode, debugModes, IM_ARRAYSIZE(debugModes));
-
-        // Info text for current mode
-        if(m_shadowDebugMode == 2)
-            ImGui::TextColored(ImVec4(1,1,0,1), "Shadow UV: sampled coordinates inside the shadow map");
-        else if(m_shadowDebugMode == 4)
-            ImGui::TextColored(ImVec4(1,1,0,1), "Light Clip XY: light-space projection in clip coordinates");
-        else if(m_shadowDebugMode == 5)
-            ImGui::TextColored(ImVec4(1,1,0,1), "Shadow Depth: stored compare depth in the shadow texture");
+        ImGui::Text("Debug Overlay");
+        ImGui::Checkbox("Enable Debug Pass", &m_debugOptions.enabled);
+        ImGui::Checkbox("Scene Bounds", &m_debugOptions.showSceneBounds);
+        ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
+        ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
+        ImGui::Checkbox("Light Direction", &m_debugOptions.showLightDirection);
+        ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
+        ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
       }
       ImGui::End();
 
@@ -248,8 +258,8 @@ public:
       frameParams.clearColor     = m_clearColor;
       frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
       frameParams.cameraUniforms = &m_cameraUniforms;
-      frameParams.lightDirection = computeLightDirection();
-      frameParams.shadowDebugMode = m_shadowDebugMode;
+      frameParams.lightSettings  = m_lightSettings;
+      frameParams.debugOptions   = m_debugOptions;
       frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
@@ -290,13 +300,10 @@ private:
   bool m_cursorCaptured{false};  // Mouse capture state
   glm::vec2 m_lastMousePos{0.0f};
   shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
-
-  // Light direction (angles in degrees for UI)
-  float m_lightYaw{0.0f};      // Rotation around Y axis
-  float m_lightPitch{-90.0f};  // Angle from horizontal (default: pointing down)
-
-  // Shadow debug mode
-  int m_shadowDebugMode{0};  // 0=normal, 1=shadow, 2=shadow UV, 3=view depth, 4=light clip XY, 5=shadow depth
+  demo::DirectionalLightSettings m_lightSettings{};
+  float m_lightAzimuthDegrees{0.0f};
+  float m_lightElevationDegrees{0.0f};
+  demo::DebugPassOptions m_debugOptions{};
 
   // UI state
   char m_modelPathBuffer[512] = "resources/GLTF_Sponza/sponza.gltf";
@@ -324,19 +331,38 @@ private:
   void unloadModel();
   void drawModelLoaderUI();
   void updateAsyncLoading();
-
-  // Compute light direction from yaw/pitch angles
-  glm::vec3 computeLightDirection() const {
-    const float yawRad = glm::radians(m_lightYaw);
-    const float pitchRad = glm::radians(m_lightPitch);
-    // Direction FROM light TO scene (pointing downward by default)
-    return glm::normalize(glm::vec3(
-      std::sin(yawRad) * std::cos(pitchRad),
-      std::sin(pitchRad),
-      std::cos(yawRad) * std::cos(pitchRad)
-    ));
-  }
+  void syncLightAnglesFromDirection();
+  void syncLightDirectionFromAngles();
 };
+
+inline void MinimalLatestApp::syncLightAnglesFromDirection()
+{
+  glm::vec3 direction = m_lightSettings.direction;
+  if(glm::length(direction) < 0.001f)
+  {
+    direction = glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f));
+  }
+  else
+  {
+    direction = glm::normalize(direction);
+  }
+
+  m_lightSettings.direction = direction;
+  m_lightElevationDegrees = glm::degrees(std::asin(glm::clamp(direction.y, -1.0f, 1.0f)));
+  m_lightAzimuthDegrees = glm::degrees(std::atan2(direction.x, direction.z));
+}
+
+inline void MinimalLatestApp::syncLightDirectionFromAngles()
+{
+  const float azimuthRadians = glm::radians(m_lightAzimuthDegrees);
+  const float elevationRadians = glm::radians(m_lightElevationDegrees);
+  const float planarLength = std::cos(elevationRadians);
+
+  m_lightSettings.direction = glm::normalize(glm::vec3(
+      planarLength * std::sin(azimuthRadians),
+      std::sin(elevationRadians),
+      planarLength * std::cos(azimuthRadians)));
+}
 
 inline void MinimalLatestApp::loadModelAsync(const std::string& path)
 {
@@ -463,6 +489,7 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     {
       ImGui::InputText("Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
     }
+
     // Load button
     if(ImGui::Button(m_isLoading ? "Loading..." : "Load Model", ImVec2(120, 0)))
     {

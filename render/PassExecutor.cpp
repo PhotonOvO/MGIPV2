@@ -75,6 +75,17 @@ rhi::ResourceState requiredStateForTexture(const PassExecutor::TextureBinding& b
   return rhi::ResourceState::General;
 }
 
+rhi::ResourceState resolveRequiredTextureState(const PassExecutor::TextureBinding& binding,
+                                               const PassResourceDependency&       dependency)
+{
+  if(dependency.requiredState != rhi::ResourceState::Undefined)
+  {
+    return dependency.requiredState;
+  }
+
+  return requiredStateForTexture(binding, dependency.access);
+}
+
 [[nodiscard]] bool requiresBarrier(ResourceAccess previous, ResourceAccess next)
 {
   return !(previous == ResourceAccess::read && next == ResourceAccess::read);
@@ -225,7 +236,7 @@ void PassExecutor::execute(const PassContext& context) const
                              .first;
       }
 
-      const rhi::ResourceState requiredState = requiredStateForTexture(*binding, dependency.access);
+      const rhi::ResourceState requiredState = resolveRequiredTextureState(*binding, dependency);
       const rhi::ResourceState currentState  = textureStateIt->second.state;
 
       if(currentState != requiredState)
@@ -273,40 +284,6 @@ void PassExecutor::execute(const PassContext& context) const
     pass->execute(scopedContext);
   }
 
-  for(const TextureBinding& binding : m_textureBindings)
-  {
-    if(!binding.isSwapchain || binding.nativeImage == 0)
-    {
-      continue;
-    }
-
-    const uint64_t key = toHandleKey(binding.handle);
-    auto           it  = textureStates.find(key);
-    if(it == textureStates.end())
-    {
-      continue;
-    }
-
-    const rhi::ResourceState presentState = rhi::ResourceState::Present;
-    if(it->second.state != presentState)
-    {
-      context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-          .texture     = toRhiHandle(binding.handle),
-          .nativeImage = binding.nativeImage,
-          .aspect      = binding.aspect,
-          .srcStage    = toPipelineStage(it->second.stageMask),
-          .dstStage    = rhi::PipelineStage::BottomOfPipe,
-          .srcAccess   = toRhiAccess(it->second.access),
-          .dstAccess   = rhi::ResourceAccess::read,
-          .oldState    = it->second.state,
-          .newState    = presentState,
-          .isSwapchain = true,
-      });
-      it->second.state = presentState;
-      context.cmd->setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, binding.handle.index, binding.handle.generation},
-                                    presentState);
-    }
-  }
 }
 
 }  // namespace demo

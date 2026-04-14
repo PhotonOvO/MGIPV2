@@ -16,8 +16,16 @@ PassNode::HandleSlice<PassResourceDependency> SceneOpaquePass::getDependencies()
 {
   static const std::array<PassResourceDependency, 3> dependencies = {
       PassResourceDependency::buffer(kPassVertexBufferHandle, ResourceAccess::read, rhi::ShaderStage::vertex),
-      PassResourceDependency::texture(kPassGBufferColorHandle, ResourceAccess::write, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassGBufferDepthHandle, ResourceAccess::write, rhi::ShaderStage::fragment),
+      PassResourceDependency::texture(
+          kPassGBuffer0Handle,
+          ResourceAccess::write,
+          rhi::ShaderStage::fragment,
+          rhi::ResourceState::ColorAttachment),
+      PassResourceDependency::texture(
+          kPassSceneDepthHandle,
+          ResourceAccess::write,
+          rhi::ShaderStage::fragment,
+          rhi::ResourceState::DepthStencilAttachment),
   };
   return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 }

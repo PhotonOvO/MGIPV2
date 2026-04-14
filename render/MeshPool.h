@@ -21,6 +21,10 @@ struct MeshRecord {
     uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
     glm::mat4 transform = glm::mat4(1.0f);
     int32_t materialIndex = -1;  // -1 = default material
+    glm::vec3 localBoundsMin = glm::vec3(0.0f);
+    glm::vec3 localBoundsMax = glm::vec3(0.0f);
+    glm::vec3 worldBoundsMin = glm::vec3(0.0f);
+    glm::vec3 worldBoundsMax = glm::vec3(0.0f);
 
     // Helper to get native VkBuffer from opaque handle
     VkBuffer getNativeVertexBuffer() const {

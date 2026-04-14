@@ -1,7 +1,9 @@
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 
+#include <array>
 #include <cstring>
+#include <limits>
 
 namespace demo {
 
@@ -39,6 +41,8 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     record.indexCount = static_cast<uint32_t>(meshData.indices.size());
     record.transform = meshData.transform;
     record.materialIndex = meshData.materialIndex;
+    record.localBoundsMin = glm::vec3(std::numeric_limits<float>::max());
+    record.localBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
 
     // Build interleaved vertex buffer: Position(12) + Normal(12) + TexCoord(8) + Tangent(16) = 48 bytes
     std::vector<uint8_t> vertexData(record.vertexCount * 48);
@@ -50,6 +54,10 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         dst[0] = meshData.positions[i * 3 + 0];
         dst[1] = meshData.positions[i * 3 + 1];
         dst[2] = meshData.positions[i * 3 + 2];
+
+        const glm::vec3 position(dst[0], dst[1], dst[2]);
+        record.localBoundsMin = glm::min(record.localBoundsMin, position);
+        record.localBoundsMax = glm::max(record.localBoundsMax, position);
 
         // Normal
         if (!meshData.normals.empty()) {
@@ -84,6 +92,26 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
             dst[10] = 0.0f;
             dst[11] = 1.0f;
         }
+    }
+
+    const std::array<glm::vec3, 8> localCorners{{
+        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMin.z},
+        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMin.z},
+        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMin.z},
+        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMin.z},
+        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMax.z},
+        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMax.z},
+        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMax.z},
+        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMax.z},
+    }};
+
+    record.worldBoundsMin = glm::vec3(std::numeric_limits<float>::max());
+    record.worldBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+    for(const glm::vec3& localCorner : localCorners)
+    {
+        const glm::vec3 worldCorner = glm::vec3(record.transform * glm::vec4(localCorner, 1.0f));
+        record.worldBoundsMin = glm::min(record.worldBoundsMin, worldCorner);
+        record.worldBoundsMax = glm::max(record.worldBoundsMax, worldCorner);
     }
 
     // Create vertex buffer

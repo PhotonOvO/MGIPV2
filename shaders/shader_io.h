@@ -123,55 +123,24 @@ STATIC_CONST int LAlphaOpaque   = 0;
 STATIC_CONST int LAlphaMask     = 1;
 STATIC_CONST int LAlphaBlend    = 2;
 
-// Light types
-STATIC_CONST int LLightTypeDirectional = 0;
-STATIC_CONST int LLightTypePoint       = 1;
-STATIC_CONST int LLightTypeSpot        = 2;
-
-// Single light data (64 bytes aligned)
-struct LightData
-{
-  vec3 positionOrDirection;  // Direction for directional, position for point/spot
-  float intensity;           // Light intensity multiplier
-  vec3 color;                // RGB light color
-  float range;               // Point/spot light range (unused for directional)
-  vec3 spotDirection;        // Spot light direction (unused for point/directional)
-  float spotInnerAngle;      // Spot light inner cone angle (cos)
-  uint32_t lightType;        // 0=directional, 1=point, 2=spot
-  float spotOuterAngle;      // Spot light outer cone angle (cos)
-  float _padding[2];
-};
-
-// Light list uniform buffer
-struct LightListUniforms
-{
-  uint32_t numLights;
-  uint32_t numDirectionalLights;
-  uint32_t numPointLights;
-  uint32_t numSpotLights;
-  vec3 ambientColor;
-  float _padding;
-};
-
-// Tile/Cluster culling config
-STATIC_CONST int LTileSizeX = 16;
-STATIC_CONST int LTileSizeY = 16;
-STATIC_CONST int LMaxLightsPerTile = 32;
-
-// IBL texture indices (for bindless access)
-STATIC_CONST int kIBLPrefilteredMapIndex = 10;  // Environment cube map
-STATIC_CONST int kIBLDFGLUTIndex = 11;           // DFG LUT texture
-STATIC_CONST int kIBLIrradianceMapIndex = 12;   // Irradiance cube map
-
 // Light parameters for PBR lighting pass (push constants)
 struct LightParams
 {
-  vec3 lightDirection;      // Direction TO light source (normalized)
-  float _pad0;              // Padding for vec4 alignment
-  vec3 lightColor;          // RGB light intensity
-  float _pad1;              // Padding for vec4 alignment
-  vec3 ambientColor;        // Ambient contribution
-  int debugMode;            // 0=normal, 1=shadow, 2=cascade, 3=depth, 4=lightSpaceXY, 5=lightSpaceZ
+  mat4 worldToShadow;
+  vec4 lightDirectionAndShadowStrength;  // xyz = direction to light, w = shadow strength
+  vec4 lightColorAndNormalBias;          // rgb = light intensity, w = normal bias
+  vec4 ambientColorAndTexelSize;         // rgb = ambient term, w = 1 / shadow map size
+  vec4 shadowMetrics;                    // x = max shadow distance, y = depth bias
+};
+
+// Debug line vertex format
+STATIC_CONST int LVDebugPosition = 0;
+STATIC_CONST int LVDebugColor    = 1;
+
+struct DebugLineVertex
+{
+  vec3 position;
+  vec4 color;
 };
 
 // Vertex with tangent for GBuffer pass
@@ -181,15 +150,6 @@ struct VertexGltfTangent
   vec3 normal;
   vec2 texCoord;
   vec4 tangent;  // xyz = tangent direction, w = handedness
-};
-
-struct ShadowUniforms
-{
-  mat4 lightViewProjectionMatrix;   // Light clip-space matrix for the shadow pass
-  mat4 worldToShadowTextureMatrix;  // World-space -> shadow UV/depth in [0, 1]
-  vec4 lightDirectionAndIntensity;  // xyz = light direction FROM light TO scene, w = shadow intensity
-  vec4 shadowMapMetrics;            // x = texel size, y = max shadow distance, z = receiver bias, w = reserved
-  vec4 shadowBiasAndKernel;         // x = depth bias constant, y = depth bias slope, z = map size, w = PCF radius
 };
 
 // Push constant for GBuffer pass with PBR material params (legacy)

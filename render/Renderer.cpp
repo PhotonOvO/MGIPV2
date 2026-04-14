@@ -15,7 +15,8 @@ namespace demo {
 
 namespace {
 
-constexpr uint32_t kPerFrameTransientAllocatorSize = 1u << 20;
+constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
+constexpr uint32_t kLightPassTextureCount         = 5;
 
 [[nodiscard]] uint32_t alignUp(uint32_t value, uint32_t alignment)
 {
@@ -105,15 +106,33 @@ static utils::Buffer createBuffer(const VkDevice               device,
                                   const VkDeviceSize           size,
                                   const VkBufferUsageFlags2KHR usage,
                                   const VmaMemoryUsage         memoryUsage = VMA_MEMORY_USAGE_AUTO,
-                                  VmaAllocationCreateFlags     flags       = {})
+                                  VmaAllocationCreateFlags     flags       = {},
+                                  bool                         enableExternalHostMemory = false)
 {
+  const bool hostAccessibleBuffer = memoryUsage == VMA_MEMORY_USAGE_CPU_ONLY || memoryUsage == VMA_MEMORY_USAGE_CPU_TO_GPU
+                                    || memoryUsage == VMA_MEMORY_USAGE_GPU_TO_CPU
+                                    || (flags & (VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                                                 | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                                                 | VMA_ALLOCATION_CREATE_MAPPED_BIT)) != 0;
+
   const VkBufferUsageFlags2CreateInfoKHR usageInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
       .usage = usage | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
   };
+
+  VkExternalMemoryBufferCreateInfo externalMemoryBufferCreateInfo{
+      .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+      .pNext       = &usageInfo,
+      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+  };
+
+  const void* bufferCreatePNext = (enableExternalHostMemory && hostAccessibleBuffer)
+                                      ? static_cast<const void*>(&externalMemoryBufferCreateInfo)
+                                      : static_cast<const void*>(&usageInfo);
+
   const VkBufferCreateInfo bufferInfo{
       .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .pNext       = &usageInfo,
+      .pNext       = bufferCreatePNext,
       .size        = size,
       .usage       = 0,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -146,10 +165,12 @@ static void destroyBuffer(const VmaAllocator allocator, utils::Buffer& buffer)
 static utils::Buffer createStagingBuffer(const VkDevice              device,
                                          const VmaAllocator          allocator,
                                          std::vector<utils::Buffer>& stagingBuffers,
-                                         std::span<const std::byte>  data)
+                                         std::span<const std::byte>  data,
+                                         bool                        enableExternalHostMemory = false)
 {
   utils::Buffer stagingBuffer = createBuffer(device, allocator, data.size_bytes(), VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                                             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                                             enableExternalHostMemory);
 
   void* mappedData{nullptr};
   VK_CHECK(vmaMapMemory(allocator, stagingBuffer.allocation, &mappedData));
@@ -164,9 +185,10 @@ static utils::Buffer createBufferAndUploadData(const VkDevice               devi
                                                std::vector<utils::Buffer>&  stagingBuffers,
                                                const VkCommandBuffer        cmd,
                                                std::span<const std::byte>   data,
-                                               const VkBufferUsageFlags2KHR usage)
+                                               const VkBufferUsageFlags2KHR usage,
+                                               bool                         enableExternalHostMemory = false)
 {
-  utils::Buffer stagingBuffer = createStagingBuffer(device, allocator, stagingBuffers, data);
+  utils::Buffer stagingBuffer = createStagingBuffer(device, allocator, stagingBuffers, data, enableExternalHostMemory);
   utils::Buffer gpuBuffer     = createBuffer(device, allocator, data.size_bytes(),
                                              usage | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR, VMA_MEMORY_USAGE_GPU_ONLY);
 
@@ -328,11 +350,14 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   // Debug utils for event markers (RenderDoc, PIX, etc.)
   deviceCreateInfo.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
   deviceCreateInfo.deviceExtensions.push_back({VK_KHR_SWAPCHAIN_EXTENSION_NAME, true, nullptr});
+  deviceCreateInfo.deviceExtensions.push_back({VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false, nullptr});
   deviceCreateInfo.deviceExtensions.push_back({VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false, &unifiedImageLayoutsFeature});
   deviceCreateInfo.deviceExtensions.push_back({VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false, &dynamicState3Features});
 
   m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
   m_device.device->init(deviceCreateInfo);
+
+  const bool enableExternalHostMemory = m_device.device->isDeviceExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 
   const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
   ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "Renderer::init requires RHI Core capability tier");
@@ -401,25 +426,11 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
 
-    // Initialize IBL resources for PBR rendering
-    IBLResources::CreateInfo iblInfo{
-        .cubeMapSize = 128,
-        .dfgLUTSize = 256,
-    };
-    m_iblResources.init(nativeDevice, m_device.allocator, cmd, iblInfo);
-
-    // Initialize a single directional shadow map.
-    ShadowResources::CreateInfo shadowInfo{
-        .shadowMapSize = 2048,
-        .projectionConvention = clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan),
-    };
-    m_shadowResources.init(nativeDevice, m_device.allocator, cmd, shadowInfo);
-
     // Create GBuffer descriptor set layout and set for LightPass
     {
-      // Binding 0: Array of 4 sampled images (GBuffer0/1/2 + Depth)
+      // Binding 0: Array of 5 sampled images (GBuffer0/1/2 + Depth + Shadow)
       const VkDescriptorSetLayoutBinding textureBinding{
-          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kLightPassTextureCount, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
       // Binding 1: Camera uniform buffer (dynamic, but we'll use fixed offset for LightPass)
@@ -427,40 +438,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
           1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      // Binding 2: Prefiltered environment cube map (IBL specular)
-      const VkDescriptorSetLayoutBinding prefilteredMapBinding{
-          2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      // Binding 3: DFG LUT texture (IBL BRDF integration)
-      const VkDescriptorSetLayoutBinding dfgLUTBinding{
-          3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      // Binding 4: Irradiance cube map (IBL diffuse)
-      const VkDescriptorSetLayoutBinding irradianceMapBinding{
-          4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      // Binding 5: Shadow map texture
-      const VkDescriptorSetLayoutBinding shadowMapBinding{
-          5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      // Binding 6: Shadow comparison sampler
-      const VkDescriptorSetLayoutBinding shadowSamplerBinding{
-          6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      // Binding 7: Shadow uniforms buffer
-      const VkDescriptorSetLayoutBinding shadowUniformsBinding{
-          7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
-          textureBinding, cameraBinding, prefilteredMapBinding, dfgLUTBinding, irradianceMapBinding,
-          shadowMapBinding, shadowSamplerBinding, shadowUniformsBinding
-      };
+      const std::array<VkDescriptorSetLayoutBinding, 2> bindings = {textureBinding, cameraBinding};
 
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -514,11 +492,13 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     VkCommandBuffer cmd = utils::beginSingleTimeCommands(nativeDevice, m_device.transientCmdPool);
     m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
                                                       std::as_bytes(std::span{s_vertices}),
-                                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                      enableExternalHostMemory);
     DBG_VK_NAME(m_device.vertexBuffer.buffer);
 
     m_device.pointsBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
-                                                      std::as_bytes(std::span{s_points}), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                                                      std::as_bytes(std::span{s_points}), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                      enableExternalHostMemory);
     DBG_VK_NAME(m_device.pointsBuffer.buffer);
 
     const std::vector<std::string> searchPaths = {".", "resources", "../resources", "../../resources"};
@@ -583,28 +563,25 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   updateGraphicsDescriptorSet();
 
   // Initialize passes and pass executor
-  m_shadowPass          = std::make_unique<ShadowPass>(this);
   m_gbufferPass         = std::make_unique<GBufferPass>(this);
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
+  m_shadowPass          = std::make_unique<ShadowPass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
-  m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
   m_forwardPass         = std::make_unique<ForwardPass>(this);
+  m_debugPass           = std::make_unique<DebugPass>(this);
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
-  m_shadowDebugPass     = std::make_unique<ShadowDebugPass>(this);
   m_passExecutor.clear();
-  m_passExecutor.addPass(*m_shadowPass);      // Shadow depth FIRST
+  m_passExecutor.addPass(*m_shadowPass);
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
-  m_passExecutor.addPass(*m_lightCullingPass);
   m_passExecutor.addPass(*m_lightPass);
-  // m_passExecutor.addPass(*m_forwardPass);
-  m_passExecutor.addPass(*m_shadowDebugPass);  // Debug visualization after lighting
+  m_passExecutor.addPass(*m_forwardPass);
+  m_passExecutor.addPass(*m_debugPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
-  // Note: ShadowDebugPass UI removed - draws via MinimalLatestApp before ImGui::Render()
 }
 
 void Renderer::shutdown(rhi::Surface& surface)
@@ -674,30 +651,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     m_device.gbufferPipelineLayout->deinit();
     m_device.gbufferPipelineLayout.reset();
   }
-  if(m_device.shadowPipelineLayout)
-  {
-    m_device.shadowPipelineLayout->deinit();
-    m_device.shadowPipelineLayout.reset();
-  }
-  if(m_device.lightCullingPipelineLayout)
-  {
-    m_device.lightCullingPipelineLayout->deinit();
-    m_device.lightCullingPipelineLayout.reset();
-  }
-  if(m_device.shadowUniformsSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.shadowUniformsSetLayout, nullptr);
-    m_device.shadowUniformsSetLayout = VK_NULL_HANDLE;
-  }
-  if(m_device.lightCullingSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.lightCullingSetLayout, nullptr);
-    m_device.lightCullingSetLayout = VK_NULL_HANDLE;
-  }
   // Per-frame bind groups already destroyed by destroyBindGroups() above
   // Just cleanup the transient allocators
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
+    destroyBuffer(m_device.allocator, frameUserData.lightCameraBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -732,8 +690,6 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
 
   m_swapchainDependent.sceneResources.deinit();
-  m_iblResources.deinit();
-  m_shadowResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   if(m_device.allocator != nullptr)
@@ -816,54 +772,14 @@ PipelineHandle Renderer::getForwardPipelineHandle() const
   return m_forwardPipeline;
 }
 
-PipelineHandle Renderer::getShadowPipelineOpaqueHandle() const
+PipelineHandle Renderer::getShadowPipelineHandle() const
 {
-  return m_shadowOpaquePipeline;
+  return m_shadowPipeline;
 }
 
-PipelineHandle Renderer::getShadowPipelineAlphaTestHandle() const
+PipelineHandle Renderer::getDebugPipelineHandle() const
 {
-  return m_shadowAlphaTestPipeline;
-}
-
-uint64_t Renderer::getShadowPipelineLayout() const
-{
-  return m_device.shadowPipelineLayout ? m_device.shadowPipelineLayout->getNativeHandle() : 0;
-}
-
-shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
-{
-  return m_shadowResources.getShadowUniformsData();
-}
-
-uint64_t Renderer::getShadowUniformsDescriptorSet() const
-{
-  return reinterpret_cast<uint64_t>(m_device.shadowUniformsDescriptorSet);
-}
-
-VkImageView Renderer::getShadowMapView() const
-{
-  return m_shadowResources.getShadowMapView();
-}
-
-PipelineHandle Renderer::getLightCullingPipelineHandle() const
-{
-  return m_lightCullingPipeline;
-}
-
-uint64_t Renderer::getLightCullingPipelineLayout() const
-{
-  return m_device.lightCullingPipelineLayout ? m_device.lightCullingPipelineLayout->getNativeHandle() : 0;
-}
-
-uint64_t Renderer::getLightCullingDescriptorSet() const
-{
-  return reinterpret_cast<uint64_t>(m_lightCullingDescriptorSet);
-}
-
-PipelineHandle Renderer::getDebugLinePipelineHandle() const
-{
-  return m_debugLinePipeline;
+  return m_debugPipeline;
 }
 
 VkImageView Renderer::getCurrentSwapchainImageView() const
@@ -891,9 +807,14 @@ VkImageView Renderer::getOutputTextureView() const
   return m_swapchainDependent.sceneResources.getOutputTextureView();
 }
 
-VkImageView Renderer::getDepthTextureView() const
+VkImageView Renderer::getShadowMapView() const
 {
-  return m_swapchainDependent.sceneResources.getDepthImageView();
+  return m_swapchainDependent.sceneResources.getShadowMapView();
+}
+
+VkImage Renderer::getShadowMapImage() const
+{
+  return m_swapchainDependent.sceneResources.getShadowMapImage();
 }
 
 void Renderer::render(const RenderParams& params)
@@ -934,6 +855,31 @@ void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& param
 
 void Renderer::beginPresentPass(rhi::CommandList& cmd)
 {
+  const VkImage swapchainImage = getCurrentSwapchainImage();
+  if(swapchainImage != VK_NULL_HANDLE)
+  {
+    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+    const VkImageMemoryBarrier2 barrier{
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+        .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = swapchainImage,
+        .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    const VkDependencyInfo dependencyInfo{
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &barrier,
+    };
+    vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+  }
+
   beginDynamicRenderingToSwapchain(cmd);
 }
 
@@ -941,23 +887,38 @@ void Renderer::endPresentPass(rhi::CommandList& cmd)
 {
   endDynamicRenderingToSwapchain(cmd);
 
-  // Transition swapchain image to PRESENT_SRC_KHR for presentation
+  // Close the swapchain image layout explicitly at the end of the final UI pass.
+  // This keeps presentation correctness local to the presentation path instead of
+  // relying on PassExecutor's state inference after the pass graph has completed.
   VkImage swapchainImage = getCurrentSwapchainImage();
-  if(swapchainImage != VK_NULL_HANDLE)
+  if(swapchainImage == VK_NULL_HANDLE)
   {
-    cmd.transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(swapchainImage),
-        .aspect      = rhi::TextureAspect::color,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::BottomOfPipe,
-        .srcAccess   = rhi::ResourceAccess::write,
-        .dstAccess   = rhi::ResourceAccess::read,
-        .oldState    = rhi::ResourceState::General,
-        .newState    = rhi::ResourceState::Present,
-        .isSwapchain = true,
-    });
+    return;
   }
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const VkImageMemoryBarrier2 barrier{
+      .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+      .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+      .dstStageMask        = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+      .dstAccessMask       = VK_ACCESS_2_NONE,
+      .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image               = swapchainImage,
+      .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers    = &barrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+
+  cmd.setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
+                       rhi::ResourceState::Present);
 }
 
 void Renderer::createTransientCommandPool()
@@ -986,6 +947,9 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     frameUserData.transientAllocator.init(*m_device.device, m_device.allocator, kPerFrameTransientAllocatorSize);
+    frameUserData.lightCameraBuffer =
+        createBuffer(device, m_device.allocator, sizeof(shaderio::CameraUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
+                     VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   }
 
   m_perFrame.frameCounter = 1;
@@ -1030,6 +994,11 @@ void Renderer::updateGBufferTextureDescriptorSet()
     LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
     return;
   }
+  if(sceneResources.getShadowMapView() == VK_NULL_HANDLE)
+  {
+    LOGW("SceneResources shadow map view is null, skipping GBuffer descriptor update");
+    return;
+  }
 
   const VkSampler linearSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
       .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1041,8 +1010,8 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .maxLod      = VK_LOD_CLAMP_NONE,
   });
 
-  // Write descriptor array for GBuffer textures (indices 0-2) + depth (index 3)
-  std::array<VkDescriptorImageInfo, 4> imageInfos{};
+  // Write descriptor array for GBuffer textures (indices 0-2) + depth (index 3) + shadow (index 4)
+  std::array<VkDescriptorImageInfo, kLightPassTextureCount> imageInfos{};
   for(uint32_t i = 0; i < 3; ++i)
   {
     const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
@@ -1058,6 +1027,11 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .imageView   = sceneResources.getDepthImageView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
+  imageInfos[4] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getShadowMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
 
   // Camera uniform buffer binding (binding 1)
   // We use a fixed buffer for LightPass camera data - allocate from transient allocator
@@ -1069,73 +1043,14 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .range  = sizeof(shaderio::CameraUniforms),
   };
 
-  // IBL texture bindings (bindings 2, 3, 4)
-  IBLResources& ibl = m_iblResources;
-
-  // Prefiltered environment cube map (binding 2)
-  const VkDescriptorImageInfo prefilteredInfo{
-      .sampler     = ibl.getCubeMapSampler(),
-      .imageView   = ibl.getPrefilteredMapView(),
-      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-  };
-
-  // DFG LUT texture (binding 3)
-  const VkDescriptorImageInfo dfgLutInfo{
-      .sampler     = ibl.getLUTSampler(),
-      .imageView   = ibl.getDFGLUTView(),
-      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-  };
-
-  // Irradiance cube map (binding 4)
-  const VkDescriptorImageInfo irradianceInfo{
-      .sampler     = ibl.getCubeMapSampler(),
-      .imageView   = ibl.getIrradianceMapView(),
-      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-  };
-
-  // Shadow resources (bindings 5, 6, 7)
-  ShadowResources& shadow = m_shadowResources;
-
-  // Shadow map texture (binding 5) - sampled image, not combined sampler
-  const VkDescriptorImageInfo shadowMapInfo{
-      .sampler     = VK_NULL_HANDLE,  // Sampler is separate binding
-      .imageView   = shadow.getShadowMapView(),
-      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-  };
-
-  // Create shadow comparison sampler for PCF filtering (binding 6)
-  const VkSampler shadowSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
-      .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter   = VK_FILTER_LINEAR,
-      .minFilter   = VK_FILTER_LINEAR,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .compareEnable = VK_TRUE,
-      .compareOp    = VK_COMPARE_OP_LESS,
-      .maxLod      = VK_LOD_CLAMP_NONE,
-  });
-  const VkDescriptorImageInfo shadowSamplerInfo{
-      .sampler     = shadowSampler,
-      .imageView   = VK_NULL_HANDLE,
-      .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-  };
-
-  // Shadow uniforms buffer (binding 7)
-  const VkDescriptorBufferInfo shadowUniformsBufferInfo{
-      .buffer = shadow.getShadowUniformBuffer(),
-      .offset = 0,
-      .range  = sizeof(shaderio::ShadowUniforms),
-  };
-
-  const std::array<VkWriteDescriptorSet, 8> writes = {
+  const std::array<VkWriteDescriptorSet, 2> writes = {
       // Texture array (binding 0, 4 textures)
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = m_device.gbufferTextureSet,
           .dstBinding      = 0,
           .dstArrayElement = 0,
-          .descriptorCount = 4,
+          .descriptorCount = kLightPassTextureCount,
           .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo      = imageInfos.data(),
       },
@@ -1149,69 +1064,40 @@ void Renderer::updateGBufferTextureDescriptorSet()
           .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
           .pBufferInfo     = &cameraBufferInfo,
       },
-      // Prefiltered environment map (binding 2)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 2,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo      = &prefilteredInfo,
-      },
-      // DFG LUT (binding 3)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 3,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo      = &dfgLutInfo,
-      },
-      // Irradiance map (binding 4)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 4,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo      = &irradianceInfo,
-      },
-      // Shadow map texture (binding 5)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 5,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &shadowMapInfo,
-      },
-      // Shadow comparison sampler (binding 6)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 6,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER,
-          .pImageInfo      = &shadowSamplerInfo,
-      },
-      // Shadow uniforms buffer (binding 7)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 7,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo     = &shadowUniformsBufferInfo,
-      },
   };
 
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+}
+
+void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms)
+{
+  if(m_device.gbufferTextureSet == VK_NULL_HANDLE || frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &cameraUniforms, sizeof(cameraUniforms));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCameraBuffer.allocation, 0, sizeof(cameraUniforms)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation);
+
+  const VkDescriptorBufferInfo cameraBufferInfo{
+      .buffer = frameUserData.lightCameraBuffer.buffer,
+      .offset = 0,
+      .range  = sizeof(shaderio::CameraUniforms),
+  };
+  const VkWriteDescriptorSet cameraWrite{
+      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet          = m_device.gbufferTextureSet,
+      .dstBinding      = 1,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .pBufferInfo     = &cameraBufferInfo,
+  };
+  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &cameraWrite, 0, nullptr);
 }
 
 void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
@@ -1279,6 +1165,10 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   const rhi::ResourceState swapchainInitialState =
       m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
 
+  m_frameLightingState = buildFrameLightingState(params);
+  buildDebugDrawList(params);
+  updateLightPassDescriptorSet(currentFrameIndex, m_frameLightingState.shadowCamera);
+
   // Route through pass executor to orchestrate multi-pass rendering
   m_passExecutor.clearResourceBindings();
   m_passExecutor.bindBuffer({
@@ -1290,15 +1180,36 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
   });
   m_passExecutor.bindTexture({
-      .handle       = kPassGBufferColorHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage()),
+      .handle       = kPassGBuffer0Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(0)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   m_passExecutor.bindTexture({
-      .handle       = kPassGBufferDepthHandle,
+      .handle       = kPassGBuffer1Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(1)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassGBuffer2Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassSceneDepthHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
+      .aspect       = rhi::TextureAspect::depth,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassShadowHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
       .aspect       = rhi::TextureAspect::depth,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
@@ -1347,7 +1258,7 @@ void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) con
   const std::array<VkRenderingAttachmentInfo, 1> colorAttachment{{{
       .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
       .imageView   = swapchainImageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
       .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Preserve LightPass/ForwardPass output
       .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
   }}};
@@ -1396,6 +1307,293 @@ void Renderer::recordComputeCommands(rhi::CommandList& cmd, const RenderParams& 
                                reinterpret_cast<VkPipeline>(getPipelineOpaque(
                                    computePipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
   rhi::vulkan::cmdDispatch(cmd, 1, 1, 1);
+}
+
+void Renderer::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
+{
+  vertices.push_back(shaderio::DebugLineVertex{a, color});
+  vertices.push_back(shaderio::DebugLineVertex{b, color});
+}
+
+void Renderer::DebugDrawList::addAabb(const Aabb& bounds, const glm::vec4& color)
+{
+  if(!bounds.valid)
+  {
+    return;
+  }
+
+  const std::array<glm::vec3, 8> corners{{
+      {bounds.min.x, bounds.min.y, bounds.min.z},
+      {bounds.max.x, bounds.min.y, bounds.min.z},
+      {bounds.min.x, bounds.max.y, bounds.min.z},
+      {bounds.max.x, bounds.max.y, bounds.min.z},
+      {bounds.min.x, bounds.min.y, bounds.max.z},
+      {bounds.max.x, bounds.min.y, bounds.max.z},
+      {bounds.min.x, bounds.max.y, bounds.max.z},
+      {bounds.max.x, bounds.max.y, bounds.max.z},
+  }};
+  addFrustum(corners, color);
+}
+
+void Renderer::DebugDrawList::addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color)
+{
+  static constexpr std::array<std::pair<uint32_t, uint32_t>, 12> kEdges{{
+      {0, 1}, {1, 3}, {3, 2}, {2, 0},
+      {4, 5}, {5, 7}, {7, 6}, {6, 4},
+      {0, 4}, {1, 5}, {2, 6}, {3, 7},
+  }};
+
+  for(const auto& [a, b] : kEdges)
+  {
+    addLine(corners[a], corners[b], color);
+  }
+}
+
+void Renderer::DebugDrawList::addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments)
+{
+  if(radius <= 0.0f || segments < 3)
+  {
+    return;
+  }
+
+  const float delta = 6.28318530718f / static_cast<float>(segments);
+  for(uint32_t i = 0; i < segments; ++i)
+  {
+    const float angle0 = delta * static_cast<float>(i);
+    const float angle1 = delta * static_cast<float>(i + 1);
+    addLine(center + glm::vec3(std::cos(angle0) * radius, 0.0f, std::sin(angle0) * radius),
+            center + glm::vec3(std::cos(angle1) * radius, 0.0f, std::sin(angle1) * radius), color);
+    addLine(center + glm::vec3(0.0f, std::cos(angle0) * radius, std::sin(angle0) * radius),
+            center + glm::vec3(0.0f, std::cos(angle1) * radius, std::sin(angle1) * radius), color);
+    addLine(center + glm::vec3(std::cos(angle0) * radius, std::sin(angle0) * radius, 0.0f),
+            center + glm::vec3(std::cos(angle1) * radius, std::sin(angle1) * radius, 0.0f), color);
+  }
+}
+
+void Renderer::DebugDrawList::addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color)
+{
+  if(length <= 0.0f)
+  {
+    return;
+  }
+
+  const glm::vec3 dir = glm::normalize(direction);
+  const glm::vec3 end = origin + dir * length;
+  addLine(origin, end, color);
+
+  const glm::vec3 reference = std::abs(dir.y) > 0.95f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+  const glm::vec3 tangent = glm::normalize(glm::cross(dir, reference));
+  const glm::vec3 bitangent = glm::normalize(glm::cross(dir, tangent));
+  const float headLength = length * 0.15f;
+  addLine(end, end - dir * headLength + tangent * headLength * 0.5f, color);
+  addLine(end, end - dir * headLength - tangent * headLength * 0.5f, color);
+  addLine(end, end - dir * headLength + bitangent * headLength * 0.5f, color);
+  addLine(end, end - dir * headLength - bitangent * headLength * 0.5f, color);
+}
+
+Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel) const
+{
+  Aabb bounds{};
+  if(gltfModel == nullptr || gltfModel->meshes.empty())
+  {
+    return bounds;
+  }
+
+  bounds.min = glm::vec3(std::numeric_limits<float>::max());
+  bounds.max = glm::vec3(std::numeric_limits<float>::lowest());
+  bounds.valid = false;
+
+  for(const MeshHandle meshHandle : gltfModel->meshes)
+  {
+    const MeshRecord* mesh = m_meshPool.tryGet(meshHandle);
+    if(mesh == nullptr)
+    {
+      continue;
+    }
+
+    bounds.min = glm::min(bounds.min, mesh->worldBoundsMin);
+    bounds.max = glm::max(bounds.max, mesh->worldBoundsMax);
+    bounds.valid = true;
+  }
+
+  return bounds;
+}
+
+std::array<glm::vec3, 8> Renderer::computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
+                                                                    float nearDistance,
+                                                                    float farDistance) const
+{
+  const glm::mat4 inverseView = glm::inverse(cameraUniforms.view);
+  const glm::vec3 position = cameraUniforms.cameraPosition;
+  const glm::vec3 right = glm::normalize(glm::vec3(inverseView[0]));
+  const glm::vec3 up = glm::normalize(glm::vec3(inverseView[1]));
+  const glm::vec3 forward = -glm::normalize(glm::vec3(inverseView[2]));
+
+  const float tanHalfFovX = 1.0f / std::abs(cameraUniforms.projection[0][0]);
+  const float tanHalfFovY = 1.0f / std::abs(cameraUniforms.projection[1][1]);
+
+  const float nearHalfWidth = nearDistance * tanHalfFovX;
+  const float nearHalfHeight = nearDistance * tanHalfFovY;
+  const float farHalfWidth = farDistance * tanHalfFovX;
+  const float farHalfHeight = farDistance * tanHalfFovY;
+
+  const glm::vec3 nearCenter = position + forward * nearDistance;
+  const glm::vec3 farCenter = position + forward * farDistance;
+
+  return {{
+      nearCenter - right * nearHalfWidth - up * nearHalfHeight,
+      nearCenter + right * nearHalfWidth - up * nearHalfHeight,
+      nearCenter - right * nearHalfWidth + up * nearHalfHeight,
+      nearCenter + right * nearHalfWidth + up * nearHalfHeight,
+      farCenter - right * farHalfWidth - up * farHalfHeight,
+      farCenter + right * farHalfWidth - up * farHalfHeight,
+      farCenter - right * farHalfWidth + up * farHalfHeight,
+      farCenter + right * farHalfWidth + up * farHalfHeight,
+  }};
+}
+
+std::array<glm::vec3, 8> Renderer::computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const
+{
+  const std::array<glm::vec3, 8> clipCorners{{
+      {-1.0f, -1.0f, 0.0f},
+      { 1.0f, -1.0f, 0.0f},
+      {-1.0f,  1.0f, 0.0f},
+      { 1.0f,  1.0f, 0.0f},
+      {-1.0f, -1.0f, 1.0f},
+      { 1.0f, -1.0f, 1.0f},
+      {-1.0f,  1.0f, 1.0f},
+      { 1.0f,  1.0f, 1.0f},
+  }};
+
+  std::array<glm::vec3, 8> worldCorners{};
+  for(size_t i = 0; i < clipCorners.size(); ++i)
+  {
+    const glm::vec4 world = inverseViewProjection * glm::vec4(clipCorners[i], 1.0f);
+    worldCorners[i] = glm::vec3(world) / world.w;
+  }
+  return worldCorners;
+}
+
+Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParams& params) const
+{
+  FrameLightingState state{};
+  const shaderio::CameraUniforms fallbackCamera{
+      .view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
+      .projection = [] {
+        glm::mat4 projection = glm::perspective(glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f);
+        projection[1][1] *= -1.0f;
+        return projection;
+      }(),
+      .viewProjection = glm::mat4(1.0f),
+      .cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f),
+  };
+
+  shaderio::CameraUniforms camera = params.cameraUniforms != nullptr ? *params.cameraUniforms : fallbackCamera;
+  if(params.cameraUniforms == nullptr)
+  {
+    camera.viewProjection = camera.projection * camera.view;
+  }
+
+  state.sceneBounds = computeSceneBounds(params.gltfModel);
+
+  const float projection22 = camera.projection[2][2];
+  const float projection32 = camera.projection[3][2];
+  const float cameraNear = std::abs(projection32 / projection22);
+  const float cameraFar = std::abs(projection32 / (projection22 + 1.0f));
+  state.shadowDistance = glm::clamp(params.lightSettings.shadowDistance, cameraNear + 0.5f, std::max(cameraFar, cameraNear + 1.0f));
+  state.viewFrustumCorners = computePerspectiveFrustumCorners(camera, cameraNear, state.shadowDistance);
+
+  glm::vec3 center(0.0f);
+  for(const glm::vec3& corner : state.viewFrustumCorners)
+  {
+    center += corner;
+  }
+  center /= static_cast<float>(state.viewFrustumCorners.size());
+
+  const glm::vec3 lightDir = glm::normalize(params.lightSettings.direction);
+  const glm::vec3 lightForward = -lightDir;
+  const glm::vec3 upReference = std::abs(lightForward.y) > 0.95f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+
+  float radius = 0.0f;
+  for(const glm::vec3& corner : state.viewFrustumCorners)
+  {
+    radius = std::max(radius, glm::length(corner - center));
+  }
+  radius = std::max(radius, 5.0f);
+
+  state.lightAnchor = center;
+  const glm::vec3 lightPosition = center - lightForward * (radius + 10.0f);
+  const glm::mat4 lightView = glm::lookAt(lightPosition, center, upReference);
+
+  glm::vec3 minExtents(std::numeric_limits<float>::max());
+  glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
+  for(const glm::vec3& corner : state.viewFrustumCorners)
+  {
+    const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+    minExtents = glm::min(minExtents, lightSpace);
+    maxExtents = glm::max(maxExtents, lightSpace);
+  }
+
+  const float xyExtent = std::max(maxExtents.x - minExtents.x, maxExtents.y - minExtents.y) * 0.5f + 2.0f;
+  glm::vec2 lightSpaceCenter((minExtents.x + maxExtents.x) * 0.5f, (minExtents.y + maxExtents.y) * 0.5f);
+  const float texelWorldSize = (xyExtent * 2.0f) / static_cast<float>(SceneResources::kShadowMapSize);
+  lightSpaceCenter = glm::floor(lightSpaceCenter / texelWorldSize) * texelWorldSize;
+
+  minExtents.x = lightSpaceCenter.x - xyExtent;
+  maxExtents.x = lightSpaceCenter.x + xyExtent;
+  minExtents.y = lightSpaceCenter.y - xyExtent;
+  maxExtents.y = lightSpaceCenter.y + xyExtent;
+  minExtents.z -= radius * 2.0f + 20.0f;
+  maxExtents.z += 20.0f;
+
+  const glm::mat4 lightProjection = glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y,
+                                               -maxExtents.z, -minExtents.z);
+  state.shadowCamera.view = lightView;
+  state.shadowCamera.projection = lightProjection;
+  state.shadowCamera.viewProjection = lightProjection * lightView;
+  state.shadowCamera.cameraPosition = lightPosition;
+  state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
+
+  state.lightParams.worldToShadow = state.shadowCamera.viewProjection;
+  state.lightParams.lightDirectionAndShadowStrength =
+      glm::vec4(lightDir, params.lightSettings.shadowStrength);
+  state.lightParams.lightColorAndNormalBias = glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
+  state.lightParams.ambientColorAndTexelSize =
+      glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(SceneResources::kShadowMapSize));
+  state.lightParams.shadowMetrics = glm::vec4(state.shadowDistance, params.lightSettings.depthBias, 0.0f, 0.0f);
+  return state;
+}
+
+void Renderer::buildDebugDrawList(const RenderParams& params)
+{
+  m_debugDrawList.clear();
+  if(!params.debugOptions.enabled)
+  {
+    return;
+  }
+
+  if(params.debugOptions.showSceneBounds)
+  {
+    m_debugDrawList.addAabb(m_frameLightingState.sceneBounds, glm::vec4(0.20f, 0.85f, 0.35f, 0.90f));
+  }
+  if(params.debugOptions.showShadowFrustum)
+  {
+    m_debugDrawList.addFrustum(m_frameLightingState.shadowFrustumCorners, glm::vec4(0.95f, 0.75f, 0.20f, 0.90f));
+  }
+  if(params.debugOptions.showViewFrustum)
+  {
+    m_debugDrawList.addFrustum(m_frameLightingState.viewFrustumCorners, glm::vec4(0.25f, 0.65f, 1.00f, 0.85f));
+  }
+  if(params.debugOptions.showLightDirection)
+  {
+    m_debugDrawList.addArrow(m_frameLightingState.lightAnchor, glm::normalize(params.lightSettings.direction), 6.0f,
+                             glm::vec4(1.00f, 0.55f, 0.10f, 0.95f));
+  }
+  if(params.debugOptions.showCullDistance && params.cameraUniforms != nullptr)
+  {
+    m_debugDrawList.addSphere(params.cameraUniforms->cameraPosition, params.debugOptions.cullDistance,
+                              glm::vec4(0.95f, 0.20f, 0.30f, 0.70f), 48);
+  }
 }
 
 rhi::ResourceIndex Renderer::resolveMaterialResourceIndex(MaterialHandle handle) const
@@ -1946,88 +2144,6 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                 gbufferLayoutDesc, gbufferLayoutLowering);
     DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
     m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
-
-    // Create Shadow Pipeline Layout (single shadow map, no camera set)
-    {
-      rhi::ShaderReflectionData shadowReflection{};
-      shadowReflection.name = "shader.shadow";
-      shadowReflection.entryPoints = {
-          rhi::ShaderEntryPoint{"vertexMain", rhi::ShaderStageFlagBits::vertex},
-          rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
-      };
-      shadowReflection.resourceBindings = {
-          rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
-                                     rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                     m_materials.maxTextures, 0},
-          rhi::ShaderResourceBinding{"shadowUniforms", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
-                                     rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindSceneInfo, 1, 0},
-          rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                     rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
-                                     shaderio::LSetDraw, shaderio::LBindDrawModel, 1, 0},
-      };
-      shadowReflection.pushConstantRanges = {};
-
-      rhi::PipelineLayoutDesc shadowLayoutDesc = rhi::derivePipelineLayoutDesc(shadowReflection);
-      shadowLayoutDesc.debugName = "shadow-layout";
-
-      const VkDescriptorSetLayoutBinding shadowUniformBinding{
-          shaderio::LBindSceneInfo, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutCreateInfo shadowSetLayoutInfo{
-          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .bindingCount = 1,
-          .pBindings = &shadowUniformBinding,
-      };
-      VkDescriptorSetLayout shadowSetLayout{};
-      VK_CHECK(vkCreateDescriptorSetLayout(
-          fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &shadowSetLayoutInfo, nullptr,
-          &shadowSetLayout));
-      DBG_VK_NAME(shadowSetLayout);
-      m_device.shadowUniformsSetLayout = shadowSetLayout;
-
-      const VkDescriptorSetAllocateInfo shadowSetAllocInfo{
-          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-          .descriptorPool = m_device.descriptorPool,
-          .descriptorSetCount = 1,
-          .pSetLayouts = &shadowSetLayout,
-      };
-      VkDescriptorSet shadowDescriptorSet{};
-      VK_CHECK(vkAllocateDescriptorSets(
-          fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &shadowSetAllocInfo, &shadowDescriptorSet));
-      DBG_VK_NAME(shadowDescriptorSet);
-      m_device.shadowUniformsDescriptorSet = shadowDescriptorSet;
-
-      const VkDescriptorBufferInfo shadowBufferInfo{
-          .buffer = m_shadowResources.getShadowUniformBuffer(),
-          .offset = 0,
-          .range = sizeof(shaderio::ShadowUniforms),
-      };
-      const VkWriteDescriptorSet shadowWrite{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = shadowDescriptorSet,
-          .dstBinding = shaderio::LBindSceneInfo,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo = &shadowBufferInfo,
-      };
-      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &shadowWrite, 0, nullptr);
-
-      const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> shadowLayoutMappings{
-          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, materialLayoutHandle),
-          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, reinterpret_cast<uint64_t>(shadowSetLayout)),
-          rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, drawLayoutHandle),
-      };
-
-      auto shadowPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-      shadowPipelineLayout->init(
-          static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), shadowLayoutDesc,
-          rhi::vulkan::VulkanPipelineLayoutLowering{
-              .setLayouts = shadowLayoutMappings.data(),
-              .setLayoutCount = static_cast<uint32_t>(shadowLayoutMappings.size()),
-          });
-      DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(shadowPipelineLayout->getNativeHandle()));
-      m_device.shadowPipelineLayout = std::move(shadowPipelineLayout);
-    }
   }
 
   // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
@@ -2283,6 +2399,76 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferShaderModule, nullptr);
   }
 
+  // Create Shadow pipeline
+  {
+    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                                  {shader_shadow_slang, std::size(shader_shadow_slang)});
+    DBG_VK_NAME(shadowShaderModule);
+
+    const std::array<rhi::VertexBindingDesc, 1> shadowBindings{{
+        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
+    }};
+    const std::array<rhi::VertexAttributeDesc, 4> shadowAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
+        {.location = shaderio::LVGltfNormal,   .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 12},
+        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat, .offset = 24},
+        {.location = shaderio::LVGltfTangent,  .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 32},
+    }};
+    const rhi::VertexInputLayoutDesc shadowVertexInput{
+        .bindings       = shadowBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(shadowBindings.size()),
+        .attributes     = shadowAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(shadowAttributes.size()),
+    };
+    const std::array<rhi::DynamicState, 2> shadowDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+    const std::array<rhi::PipelineShaderStageDesc, 2> shadowStages{{
+        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMain"},
+    }};
+    rhi::GraphicsPipelineDesc shadowDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),
+        .shaderStages      = shadowStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(shadowStages.size()),
+        .vertexInput       = shadowVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::lessOrEqual},
+        .blendStates       = nullptr,
+        .blendStateCount   = 0,
+        .dynamicStates     = shadowDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = nullptr,
+                .colorFormatCount = 0,
+                .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+            },
+    };
+    shadowDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    shadowDesc.rasterState.cullMode    = rhi::CullMode::back;
+    shadowDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    shadowDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo shadowCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 6,
+            },
+        .desc = shadowDesc,
+    };
+    const VkPipeline shadowPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowCreateInfo);
+    DBG_VK_NAME(shadowPipeline);
+    m_shadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                        reinterpret_cast<uint64_t>(shadowPipeline),
+                                        shadowCreateInfo.key.specializationVariant);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
+  }
+
   // Create Forward pipeline for transparent objects
   {
     VkShaderModule forwardShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
@@ -2383,124 +2569,20 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
   }
 
-  // Create Shadow pipelines (depth-only directional shadow map)
-  #ifdef USE_SLANG
-  {
-    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                                {shader_shadow_slang, std::size(shader_shadow_slang)});
-    DBG_VK_NAME(shadowShaderModule);
-
-    // Shadow uses Position + TexCoord from the glTF vertex stream.
-    const std::array<rhi::VertexBindingDesc, 1> shadowBindings{{
-        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
-    }};
-    const std::array<rhi::VertexAttributeDesc, 2> shadowAttributes{{
-        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
-        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat,    .offset = 24},
-    }};
-    const rhi::VertexInputLayoutDesc shadowVertexInput{
-        .bindings       = shadowBindings.data(),
-        .bindingCount   = static_cast<uint32_t>(shadowBindings.size()),
-        .attributes     = shadowAttributes.data(),
-        .attributeCount = static_cast<uint32_t>(shadowAttributes.size()),
-    };
-
-    const std::array<rhi::DynamicState, 3> shadowDynamicStates{{
-        rhi::DynamicState::viewport,
-        rhi::DynamicState::scissor,
-        rhi::DynamicState::depthBias,
-    }};
-    const std::array<rhi::BlendAttachmentState, 0> shadowBlendStates{};  // No color attachments
-
-    // Depth-only format (D32_SFLOAT)
-    const rhi::TextureFormat depthFormat = rhi::TextureFormat::d32Sfloat;
-
-    std::array<rhi::PipelineShaderStageDesc, 2> shadowShaderStages{{
-        rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule),
-            .entryPoint = "vertexMain",
-        },
-        rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule),
-            .entryPoint = "fragmentMain",
-        },
-    }};
-
-    // Specialization for alpha test
-    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
-
-    rhi::GraphicsPipelineDesc shadowGraphicsDesc{
-        .layout            = m_device.shadowPipelineLayout.get(),
-        .shaderStages      = shadowShaderStages.data(),
-        .shaderStageCount  = static_cast<uint32_t>(shadowShaderStages.size()),
-        .vertexInput       = shadowVertexInput,
-        .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::less},
-        .blendStates       = nullptr,  // No color blending
-        .blendStateCount   = 0,
-        .dynamicStates     = shadowDynamicStates.data(),
-        .dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size()),
-        .renderingInfo     = {
-            .colorFormats     = nullptr,
-            .colorFormatCount = 0,
-            .depthFormat      = depthFormat,
-        },
-    };
-    shadowGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
-    shadowGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
-    shadowGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
-    shadowGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
-    shadowGraphicsDesc.rasterState.depthBiasEnable = true;  // Enable depth bias for shadow acne
-
-    // Variant 6: Shadow Opaque (alphaTestEnabled = false)
-    uint32_t alphaTestFalse = VK_FALSE;
-    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
-    shadowShaderStages[1].specializationData = specDataFalse;
-    shadowShaderStages[1].specializationConstants = &specConstantAlphaTest;
-    shadowShaderStages[1].specializationConstantCount = 1;
-
-    rhi::vulkan::GraphicsPipelineCreateInfo shadowOpaqueCreateInfo{
-        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 6},
-        .desc = shadowGraphicsDesc,
-    };
-    const VkPipeline shadowOpaquePipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowOpaqueCreateInfo);
-    DBG_VK_NAME(shadowOpaquePipeline);
-    m_shadowOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                               reinterpret_cast<uint64_t>(shadowOpaquePipeline), 6);
-
-    // Variant 7: Shadow AlphaTest (alphaTestEnabled = true)
-    uint32_t alphaTestTrue = VK_TRUE;
-    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
-    shadowShaderStages[1].specializationData = specDataTrue;
-    shadowOpaqueCreateInfo.key.specializationVariant = 7;
-
-    const VkPipeline shadowAlphaTestPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowOpaqueCreateInfo);
-    DBG_VK_NAME(shadowAlphaTestPipeline);
-    m_shadowAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                  reinterpret_cast<uint64_t>(shadowAlphaTestPipeline), 7);
-
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
-  }
-  #endif
-
-  // Create Debug Line pipeline (for visualization)
-  #ifdef USE_SLANG
+  // Create Debug line pipeline
   {
     VkShaderModule debugShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                                  {shader_debug_slang, std::size(shader_debug_slang)});
+                                                                 {shader_debug_slang, std::size(shader_debug_slang)});
     DBG_VK_NAME(debugShaderModule);
 
-    // Debug line uses Position + Color (24 bytes stride)
     const std::array<rhi::VertexBindingDesc, 1> debugBindings{{
-        {.binding = 0, .stride = 28, .inputRate = rhi::VertexInputRate::perVertex}  // float3 pos + float4 color
+        {.binding = 0, .stride = sizeof(shaderio::DebugLineVertex), .inputRate = rhi::VertexInputRate::perVertex}
     }};
     const std::array<rhi::VertexAttributeDesc, 2> debugAttributes{{
-        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
-        {.location = shaderio::LVColor,        .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 12},
+        {.location = shaderio::LVDebugPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat,
+         .offset = static_cast<uint32_t>(offsetof(shaderio::DebugLineVertex, position))},
+        {.location = shaderio::LVDebugColor, .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat,
+         .offset = static_cast<uint32_t>(offsetof(shaderio::DebugLineVertex, color))},
     }};
     const rhi::VertexInputLayoutDesc debugVertexInput{
         .bindings       = debugBindings.data(),
@@ -2508,162 +2590,65 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         .attributes     = debugAttributes.data(),
         .attributeCount = static_cast<uint32_t>(debugAttributes.size()),
     };
-
     const std::array<rhi::DynamicState, 2> debugDynamicStates{{
         rhi::DynamicState::viewport,
         rhi::DynamicState::scissor,
     }};
-    const std::array<rhi::BlendAttachmentState, 1> debugBlendStates{{
-        rhi::BlendAttachmentState{
-            .blendEnable = false,
-            .srcColorBlendFactor = rhi::BlendFactor::one,
-            .dstColorBlendFactor = rhi::BlendFactor::zero,
-            .colorBlendOp = rhi::BlendOp::add,
-            .srcAlphaBlendFactor = rhi::BlendFactor::one,
-            .dstAlphaBlendFactor = rhi::BlendFactor::zero,
-            .alphaBlendOp = rhi::BlendOp::add,
-            .colorWriteMask = rhi::ColorComponentFlags::all,
-        },
+    const rhi::BlendAttachmentState debugBlend{
+        .blendEnable         = true,
+        .srcColorBlendFactor = rhi::BlendFactor::srcAlpha,
+        .dstColorBlendFactor = rhi::BlendFactor::oneMinusSrcAlpha,
+        .colorBlendOp        = rhi::BlendOp::add,
+        .srcAlphaBlendFactor = rhi::BlendFactor::one,
+        .dstAlphaBlendFactor = rhi::BlendFactor::oneMinusSrcAlpha,
+        .alphaBlendOp        = rhi::BlendOp::add,
+        .colorWriteMask      = rhi::ColorComponentFlags::all,
+    };
+    const std::array<rhi::PipelineShaderStageDesc, 2> debugStages{{
+        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
     }};
-
-    const rhi::TextureFormat colorFormat = rhi::TextureFormat::bgra8Unorm;  // Output texture format
-    const rhi::TextureFormat depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat());  // Actual depth format
-
-    std::array<rhi::PipelineShaderStageDesc, 2> debugShaderStages{{
-        rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule),
-            .entryPoint = "vertexMain",
-        },
-        rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule),
-            .entryPoint = "fragmentMain",
-        },
-    }};
-
-    rhi::GraphicsPipelineDesc debugGraphicsDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),  // Use GBuffer layout (has camera uniforms)
-        .shaderStages      = debugShaderStages.data(),
-        .shaderStageCount  = static_cast<uint32_t>(debugShaderStages.size()),
+    const rhi::TextureFormat outputFormat = toPortableTextureFormat(VK_FORMAT_B8G8R8A8_UNORM);
+    rhi::GraphicsPipelineDesc debugDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),
+        .shaderStages      = debugStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(debugStages.size()),
         .vertexInput       = debugVertexInput,
         .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::lessOrEqual},  // Read-only depth
-        .blendStates       = debugBlendStates.data(),
-        .blendStateCount   = static_cast<uint32_t>(debugBlendStates.size()),
+        .depthState        = rhi::DepthState{false, false, rhi::CompareOp::always},
+        .blendStates       = &debugBlend,
+        .blendStateCount   = 1,
         .dynamicStates     = debugDynamicStates.data(),
         .dynamicStateCount = static_cast<uint32_t>(debugDynamicStates.size()),
-        .renderingInfo     = {
-            .colorFormats     = &colorFormat,
-            .colorFormatCount = 1,
-            .depthFormat      = depthFormat,
-        },
+        .renderingInfo =
+            {
+                .colorFormats     = &outputFormat,
+                .colorFormatCount = 1,
+                .depthFormat      = rhi::TextureFormat::undefined,
+            },
     };
-    debugGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;  // Line rendering
-    debugGraphicsDesc.rasterState.cullMode    = rhi::CullMode::none;               // No culling for lines
-    debugGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
-    debugGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
-    debugGraphicsDesc.rasterState.lineWidth   = 2.0f;
+    debugDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;
+    debugDesc.rasterState.cullMode    = rhi::CullMode::none;
+    debugDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    debugDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
     rhi::vulkan::GraphicsPipelineCreateInfo debugCreateInfo{
-        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 8},
-        .desc = debugGraphicsDesc,
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 7,
+            },
+        .desc = debugDesc,
     };
     const VkPipeline debugPipeline =
         rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugCreateInfo);
     DBG_VK_NAME(debugPipeline);
-    m_debugLinePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                            reinterpret_cast<uint64_t>(debugPipeline), 8);
+    m_debugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                       reinterpret_cast<uint64_t>(debugPipeline),
+                                       debugCreateInfo.key.specializationVariant);
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugShaderModule, nullptr);
   }
-  #endif
-
-  // Create Light Culling compute pipeline
-  #ifdef USE_SLANG
-  {
-    VkShaderModule lightCullingShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                                        {shader_light_culling_slang, std::size(shader_light_culling_slang)});
-    DBG_VK_NAME(lightCullingShaderModule);
-
-    // Light culling uses its own pipeline layout
-    rhi::ShaderReflectionData lightCullingReflection{};
-    lightCullingReflection.name = "shader.light_culling";
-    lightCullingReflection.entryPoints = {
-        rhi::ShaderEntryPoint{"computeMain", rhi::ShaderStageFlagBits::compute},
-    };
-    lightCullingReflection.resourceBindings = {
-        // Light data buffer
-        rhi::ShaderResourceBinding{"lightBuffer", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
-                                   rhi::ShaderStageFlagBits::compute, 0, 0, 1, 0},
-        // Light uniforms
-        rhi::ShaderResourceBinding{"lightUniforms", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBuffer,
-                                   rhi::ShaderStageFlagBits::compute, 0, 1, 1, 0},
-        // Depth texture
-        rhi::ShaderResourceBinding{"depthTexture", rhi::ShaderResourceType::sampler, rhi::DescriptorType::sampledImage,
-                                   rhi::ShaderStageFlagBits::compute, 0, 2, 1, 0},
-        // Tile light index buffer (output)
-        rhi::ShaderResourceBinding{"tileLightIndexBuffer", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
-                                   rhi::ShaderStageFlagBits::compute, 0, 3, 1, 0},
-    };
-    // Push constants: CullingParams struct (208 bytes: 4 uint/float + 3 mat4)
-    lightCullingReflection.pushConstantRanges = {
-        rhi::PushConstantRange{rhi::ShaderStageFlagBits::compute, 0, 208},
-    };
-
-    rhi::PipelineLayoutDesc lightCullingLayoutDesc = rhi::derivePipelineLayoutDesc(lightCullingReflection);
-    lightCullingLayoutDesc.debugName = "light-culling-layout";
-
-    // Create descriptor set layout for light culling (set 0)
-    const std::array<VkDescriptorSetLayoutBinding, 4> lightCullingBindings{
-        VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // lightBuffer
-        VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // lightUniforms
-        VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},   // depthTexture
-        VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // tileLightIndexBuffer
-    };
-    const VkDescriptorSetLayoutCreateInfo lightCullingSetLayoutInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0,
-        static_cast<uint32_t>(lightCullingBindings.size()), lightCullingBindings.data()
-    };
-    VkDescriptorSetLayout lightCullingSetLayout{};
-    vkCreateDescriptorSetLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &lightCullingSetLayoutInfo, nullptr, &lightCullingSetLayout);
-    DBG_VK_NAME(lightCullingSetLayout);
-    m_device.lightCullingSetLayout = lightCullingSetLayout;
-
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> lightCullingMappings{
-        rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(lightCullingSetLayout)),
-    };
-
-    auto lightCullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    lightCullingPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                     lightCullingLayoutDesc, rhi::vulkan::VulkanPipelineLayoutLowering{
-                                         .setLayouts     = lightCullingMappings.data(),
-                                         .setLayoutCount = static_cast<uint32_t>(lightCullingMappings.size()),
-                                     });
-    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(lightCullingPipelineLayout->getNativeHandle()));
-    m_device.lightCullingPipelineLayout = std::move(lightCullingPipelineLayout);
-
-    rhi::ComputePipelineDesc lightCullingDesc{
-        .layout = m_device.lightCullingPipelineLayout.get(),
-        .shaderStage = {
-            .stage        = rhi::ShaderStage::compute,
-            .shaderModule = reinterpret_cast<uint64_t>(lightCullingShaderModule),
-            .entryPoint   = "computeMain",
-        },
-    };
-    rhi::vulkan::ComputePipelineCreateInfo lightCullingCreateInfo{
-        .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::compute, .specializationVariant = 1},
-        .desc = lightCullingDesc,
-    };
-    const VkPipeline lightCullingPipeline =
-        rhi::vulkan::createComputePipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCullingCreateInfo);
-    DBG_VK_NAME(lightCullingPipeline);
-    m_lightCullingPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
-                                                reinterpret_cast<uint64_t>(lightCullingPipeline), 1);
-
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightCullingShaderModule, nullptr);
-  }
-  #endif
 }
 
 void Renderer::initImGui(GLFWwindow* window)
@@ -2714,13 +2699,10 @@ void Renderer::createDescriptorPool()
     const uint32_t maxDescriptorSets = 20U;
     const uint32_t dynamicUniformCount =
         std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
-    const std::array<VkDescriptorPoolSize, 6> poolSizes{{
+    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer and shadow uniforms
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2U},   // For shadow map texture and light culling depth texture
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 1U},         // For shadow comparison sampler (binding 6)
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2U},  // For light culling buffers (lightBuffer, tileLightIndexBuffer)
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -3132,6 +3114,12 @@ void Renderer::destroyPipelines()
   m_device.prebuiltPipelines.compute             = kNullPipelineHandle;
   m_device.prebuiltPipelines.graphicsTextured    = kNullPipelineHandle;
   m_device.prebuiltPipelines.graphicsNonTextured = kNullPipelineHandle;
+  m_lightPipeline = kNullPipelineHandle;
+  m_gbufferOpaquePipeline = kNullPipelineHandle;
+  m_gbufferAlphaTestPipeline = kNullPipelineHandle;
+  m_shadowPipeline = kNullPipelineHandle;
+  m_forwardPipeline = kNullPipelineHandle;
+  m_debugPipeline = kNullPipelineHandle;
 }
 
 PipelineHandle Renderer::selectComputePipelineHandle() const

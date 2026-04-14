@@ -15,15 +15,11 @@
 #include "passes/GBufferPass.h"
 #include "passes/LightPass.h"
 #include "passes/ForwardPass.h"
-#include "passes/LightCullingPass.h"
 #include "passes/ShadowPass.h"
-#include "passes/ShadowDebugPass.h"
+#include "passes/DebugPass.h"
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
-#include "LightResources.h"
-#include "IBLResources.h"
-#include "ShadowResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
@@ -50,6 +46,28 @@ struct BindTableWrite;
 
 struct GltfUploadResult;
 
+struct DirectionalLightSettings
+{
+  glm::vec3 direction{glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f))};
+  float     shadowDistance{35.0f};
+  glm::vec3 color{glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f};
+  float     shadowStrength{0.9f};
+  glm::vec3 ambient{0.1f, 0.12f, 0.15f};
+  float     normalBias{0.0025f};
+  float     depthBias{0.0015f};
+};
+
+struct DebugPassOptions
+{
+  bool  enabled{true};
+  bool  showSceneBounds{true};
+  bool  showShadowFrustum{true};
+  bool  showViewFrustum{false};
+  bool  showLightDirection{true};
+  bool  showCullDistance{false};
+  float cullDistance{25.0f};
+};
+
 struct RenderParams
 {
   rhi::Extent2D                          viewportSize{};
@@ -62,10 +80,8 @@ struct RenderParams
   const GltfUploadResult*                gltfModel{nullptr};
   // Camera data (pointer to App-owned CameraUniforms)
   const shaderio::CameraUniforms*       cameraUniforms{nullptr};
-  // Light direction for shadow pass (normalized, pointing FROM light TO scene)
-  glm::vec3                              lightDirection{0.0f, -1.0f, 0.0f};  // Default: from above
-  // Shadow debug mode: 0=normal, 1=shadow factor, 2=shadow UV, 3=view depth, 4=light clip XY, 5=shadow depth
-  int                                    shadowDebugMode{0};
+  DirectionalLightSettings               lightSettings{};
+  DebugPassOptions                       debugOptions{};
 };
 
 struct GltfUploadResult
@@ -125,8 +141,6 @@ public:
 
   MeshPool& getMeshPool() { return m_meshPool; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
-  IBLResources& getIBLResources() { return m_iblResources; }
-  ShadowResources& getShadowResources() { return m_shadowResources; }
   void      waitForIdle();
 
   // LightPass support
@@ -134,28 +148,17 @@ public:
   PipelineHandle getGBufferOpaquePipelineHandle() const;
   PipelineHandle getGBufferAlphaTestPipelineHandle() const;
   PipelineHandle getForwardPipelineHandle() const;
+  PipelineHandle getShadowPipelineHandle() const;
+  PipelineHandle getDebugPipelineHandle() const;
+  const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
+  const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
+  const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
-
-  // ShadowPass support
-  PipelineHandle getShadowPipelineOpaqueHandle() const;
-  PipelineHandle getShadowPipelineAlphaTestHandle() const;
-  uint64_t       getShadowPipelineLayout() const;
-  shaderio::ShadowUniforms* getShadowUniformsData();  // CPU-side shadow uniforms for debug visualization
-  uint64_t       getShadowUniformsDescriptorSet() const;  // GPU descriptor set for shadow uniforms UBO
-  VkImageView    getShadowMapView() const;  // For ImGui visualization
-
-  // LightCullingPass support
-  PipelineHandle getLightCullingPipelineHandle() const;
-  uint64_t       getLightCullingPipelineLayout() const;
-  uint64_t       getLightCullingDescriptorSet() const;
-
-  // DebugLinePass support
-  PipelineHandle getDebugLinePipelineHandle() const;
 
   // Get descriptor set from bind group (for descriptor set binding)
   uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
@@ -204,7 +207,8 @@ public:
   VkImageView getCurrentSwapchainImageView() const;
   VkImage getCurrentSwapchainImage() const;
   VkImageView getOutputTextureView() const;
-  VkImageView getDepthTextureView() const;
+  VkImageView getShadowMapView() const;
+  VkImage getShadowMapImage() const;
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
@@ -302,11 +306,6 @@ private:
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
-    std::unique_ptr<rhi::PipelineLayout>       shadowPipelineLayout;   // Shadow pass layout (depth-only)
-    std::unique_ptr<rhi::PipelineLayout>       lightCullingPipelineLayout;  // Compute pipeline layout
-    VkDescriptorSetLayout                      shadowUniformsSetLayout{nullptr};  // Shadow uniforms UBO layout
-    VkDescriptorSet                            shadowUniformsDescriptorSet{VK_NULL_HANDLE};  // Shadow uniforms UBO set
-    VkDescriptorSetLayout                      lightCullingSetLayout{nullptr};
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
     struct PrebuiltPipelineVariants
@@ -344,6 +343,7 @@ private:
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
       BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
+      utils::Buffer      lightCameraBuffer{};
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -359,43 +359,27 @@ private:
   };
 
   // Per-frame passes
-  std::unique_ptr<ShadowPass>          m_shadowPass;
   std::unique_ptr<GBufferPass>         m_gbufferPass;
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
+  std::unique_ptr<ShadowPass>          m_shadowPass;
   std::unique_ptr<LightPass>           m_lightPass;
-  std::unique_ptr<LightCullingPass>    m_lightCullingPass;
   std::unique_ptr<ForwardPass>         m_forwardPass;
+  std::unique_ptr<DebugPass>           m_debugPass;
   std::unique_ptr<PresentPass>         m_presentPass;
   std::unique_ptr<ImguiPass>           m_imguiPass;
-  std::unique_ptr<ShadowDebugPass>     m_shadowDebugPass;
   demo::PassExecutor                   m_passExecutor;
 
   // glTF support
   MeshPool m_meshPool;
 
-  // IBL support (swapchain-dependent for now)
-  IBLResources m_iblResources;
-
-  // Shadow support (single directional shadow map)
-  ShadowResources m_shadowResources;
-
   // Light pipeline
   PipelineHandle m_lightPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
+  PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
-
-  // Shadow pipeline (depth-only for CSM)
-  PipelineHandle m_shadowOpaquePipeline{};       // Shadow Opaque variant
-  PipelineHandle m_shadowAlphaTestPipeline{};    // Shadow AlphaTest variant
-
-  // Light culling compute pipeline
-  PipelineHandle m_lightCullingPipeline{};
-  VkDescriptorSet m_lightCullingDescriptorSet{VK_NULL_HANDLE};  // Light buffer + depth + output
-
-  // Debug line pipeline (for visualization)
-  PipelineHandle m_debugLinePipeline{};
+  PipelineHandle m_debugPipeline{};              // Debug line overlay pass
 
   // GBuffer uniform buffer bind groups (per-frame)
   // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public
@@ -405,6 +389,36 @@ private:
   // Lifetime trigger: rebuilt per draw packet emission/consumption; currently no persistent owner fields.
   struct PerDrawData
   {
+  };
+
+  struct Aabb
+  {
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
+    bool      valid{false};
+  };
+
+  struct FrameLightingState
+  {
+    shaderio::CameraUniforms shadowCamera{};
+    shaderio::LightParams    lightParams{};
+    Aabb                     sceneBounds{};
+    std::array<glm::vec3, 8> viewFrustumCorners{};
+    std::array<glm::vec3, 8> shadowFrustumCorners{};
+    glm::vec3                lightAnchor{0.0f};
+    float                    shadowDistance{0.0f};
+  };
+
+  struct DebugDrawList
+  {
+    std::vector<shaderio::DebugLineVertex> vertices;
+
+    void clear() { vertices.clear(); }
+    void addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color);
+    void addAabb(const Aabb& bounds, const glm::vec4& color);
+    void addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color);
+    void addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments);
+    void addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color);
   };
 
   // Material/texture domain resources.
@@ -489,6 +503,7 @@ private:
   void              endFrame(rhi::CommandList& cmd);
   void              beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const;
   void              endDynamicRenderingToSwapchain(const rhi::CommandList& cmd);
+  void              updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms);
   void              recordComputeCommands(rhi::CommandList& cmd, const RenderParams& params) const;
   void recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream);
   void                 prebuildRequiredPipelineVariants();
@@ -518,6 +533,13 @@ private:
   uint64_t                 getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
+  [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel) const;
+  [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
+  [[nodiscard]] std::array<glm::vec3, 8> computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
+                                                                          float nearDistance,
+                                                                          float farDistance) const;
+  [[nodiscard]] std::array<glm::vec3, 8> computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const;
+  void              buildDebugDrawList(const RenderParams& params);
 
   DeviceLifetimeResources     m_device;
   SwapchainDependentResources m_swapchainDependent;
@@ -526,6 +548,8 @@ private:
   PerDrawData                 m_perDraw;
   MaterialResources           m_materials;
   DrawStreamDecoder           m_drawStreamDecoder;
+  FrameLightingState          m_frameLightingState;
+  DebugDrawList               m_debugDrawList;
 };
 
 }  // namespace demo

@@ -1,11 +1,10 @@
 #include "LightPass.h"
 #include "../Renderer.h"
 #include "../SceneResources.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
+#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
-#include <cstring>
 
 namespace demo {
 
@@ -16,16 +15,37 @@ LightPass::LightPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> LightPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 2> dependencies = {
+    static const std::array<PassResourceDependency, 6> dependencies = {
         PassResourceDependency::texture(
-            kPassGBufferColorHandle,
+            kPassGBuffer0Handle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassGBuffer1Handle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassGBuffer2Handle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassSceneDepthHandle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassShadowHandle,
             ResourceAccess::read,
             rhi::ShaderStage::fragment
         ),
         PassResourceDependency::texture(
             kPassOutputHandle,
             ResourceAccess::write,
-            rhi::ShaderStage::fragment
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::ColorAttachment
         ),
     };
     return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
@@ -38,11 +58,13 @@ void LightPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("LightPass");
 
-    // Get output texture view and extent (follows screen size)
+    // Get output texture view and fixed extent
     rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(
         m_renderer->getOutputTextureView());
-    const VkExtent2D vkExtent = m_renderer->getSceneResources().getSize();
-    const rhi::Extent2D extent = {vkExtent.width, vkExtent.height};
+    const rhi::Extent2D extent = {
+        SceneResources::kOutputTextureWidth,
+        SceneResources::kOutputTextureHeight
+    };
 
     if(outputViewHandle.isNull())
     {
@@ -50,11 +72,10 @@ void LightPass::execute(const PassContext& context) const
         return;
     }
 
-    // Setup color attachment for dynamic rendering
     rhi::RenderTargetDesc colorTarget = {
         .texture = {},  // Not used when view carries native pointer
         .view = outputViewHandle,
-        .state = rhi::ResourceState::general,
+        .state = rhi::ResourceState::ColorAttachment,
         .loadOp = rhi::LoadOp::clear,  // Clear output texture
         .storeOp = rhi::StoreOp::store,
         .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},  // Black background
@@ -86,6 +107,18 @@ void LightPass::execute(const PassContext& context) const
     if(lightPipeline.isNull())
     {
         context.cmd->endRenderPass();
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::write,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::ColorAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
         context.cmd->endEvent();
         return;
     }
@@ -94,40 +127,16 @@ void LightPass::execute(const PassContext& context) const
         m_renderer->getPipelineOpaque(lightPipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS)));
     rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
 
-    // Get pipeline layout for descriptor binding
-    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
         m_renderer->getLightPipelineLayout());
 
-    // Bind GBuffer texture descriptor set (set 0)
-    // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
     const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getGBufferTextureDescriptorSet());
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    // Setup light parameters via push constants
-    shaderio::LightParams lightParams;
-    // Direction TO the light source (FROM scene TO light)
-    // ShadowParams.lightDirection is FROM light TO scene, so we negate it
-    if(context.params != nullptr)
-    {
-        lightParams.lightDirection = -context.params->lightDirection;  // Negate: TO light
-    }
-    else
-    {
-        // Fallback: default light direction (from above, TO light = up)
-        lightParams.lightDirection = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
-    }
-    // Light color (warm sunlight)
-    lightParams.lightColor = glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f;  // Bright enough
-    // Ambient color (sky ambient)
-    lightParams.ambientColor = glm::vec3(0.1f, 0.12f, 0.15f);
-    // Debug mode from render params
-    lightParams.debugMode = (context.params != nullptr) ? context.params->shadowDebugMode : 0;
-
-    // Push constants for light parameters
+    const shaderio::LightParams& lightParams = m_renderer->getLightPassParams();
     vkCmdPushConstants(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                        pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -140,6 +149,19 @@ void LightPass::execute(const PassContext& context) const
 
     // End render pass using RHI interface
     context.cmd->endRenderPass();
+
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+        .aspect      = rhi::TextureAspect::color,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::ColorAttachment,
+        .newState    = rhi::ResourceState::General,
+        .isSwapchain = false,
+    });
 
     context.cmd->endEvent();
 }

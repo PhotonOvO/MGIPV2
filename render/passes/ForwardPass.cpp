@@ -112,10 +112,23 @@ void ForwardPass::execute(const PassContext& context) const
         [](const auto& a, const auto& b) { return a.second > b.second; });
 
     // Setup color attachment with LOAD loadOp (preserve LightPass output)
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getOutputTextureImage()),
+        .aspect      = rhi::TextureAspect::color,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::read,
+        .dstAccess   = rhi::ResourceAccess::write,
+        .oldState    = rhi::ResourceState::General,
+        .newState    = rhi::ResourceState::ColorAttachment,
+        .isSwapchain = false,
+    });
+
     rhi::RenderTargetDesc colorTarget = {
         .texture = {},  // Not used when view carries native pointer
         .view = rhi::TextureViewHandle::fromNative(outputImageView),
-        .state = rhi::ResourceState::general,
+        .state = rhi::ResourceState::ColorAttachment,
         .loadOp = rhi::LoadOp::load,  // Preserve existing content
         .storeOp = rhi::StoreOp::store,
     };
@@ -150,6 +163,18 @@ void ForwardPass::execute(const PassContext& context) const
     if(forwardPipeline.isNull())
     {
         context.cmd->endRenderPass();
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::write,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::ColorAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
         context.cmd->endEvent();
         return;
     }
@@ -286,6 +311,19 @@ void ForwardPass::execute(const PassContext& context) const
 
     // End render pass using RHI interface
     context.cmd->endRenderPass();
+
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+        .aspect      = rhi::TextureAspect::color,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::ColorAttachment,
+        .newState    = rhi::ResourceState::General,
+        .isSwapchain = false,
+    });
 
     context.cmd->endEvent();
 }

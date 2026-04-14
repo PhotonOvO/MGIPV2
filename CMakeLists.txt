@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Demo VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)  
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 #====================================================================================
 # SHADER AUTHORITY POLICY
@@ -27,7 +27,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(USE_SLANG "Use Slang shaders instead of GLSL" ON)
 
 if(USE_SLANG)
-  message(STATUS "Shader Authority: Slang is the single source of truth") 
+  message(STATUS "Shader Authority: Slang is the single source of truth")
   message(STATUS "  - Slang compilation: ENABLED")
   message(STATUS "  - Reflection metadata: ENABLED")
   message(STATUS "  - GLSL compilation: DISABLED (compatibility mode only)")
@@ -38,13 +38,13 @@ else()
   message(WARNING "  - This mode is for testing only, not for authoritative shader contracts")
 endif()
 
-option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF) 
+option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
 
 include(FetchContent)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")        
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CompilerSlangShader)
 include(CompilerGlslShader)
 include(DownloadPackage)
@@ -164,7 +164,7 @@ if(USE_SLANG)
   # For v1, we establish the contract structure; actual extraction is a follow-on task
 else()
   set(GENERATED_SHADER_SLANG_HEADERS "")
-  set(GENERATED_SHADER_SPV_BINARIES "") 
+  set(GENERATED_SHADER_SPV_BINARIES "")
 endif()
 
 compile_glsl(
@@ -244,20 +244,18 @@ add_library(demo_core STATIC
   render/passes/GBufferPass.cpp
   render/passes/LightPass.h
   render/passes/LightPass.cpp
-  render/passes/LightCullingPass.h
-  render/passes/LightCullingPass.cpp
+  render/passes/ShadowPass.h
+  render/passes/ShadowPass.cpp
   render/passes/ForwardPass.h
   render/passes/ForwardPass.cpp
+  render/passes/DebugPass.h
+  render/passes/DebugPass.cpp
   render/passes/SceneOpaquePass.h
   render/passes/SceneOpaquePass.cpp
-  render/passes/PresentPass.h  
+  render/passes/PresentPass.h
   render/passes/PresentPass.cpp
   render/passes/ImguiPass.h
   render/passes/ImguiPass.cpp
-  render/passes/ShadowPass.h
-  render/passes/ShadowPass.cpp
-  render/passes/ShadowDebugPass.h
-  render/passes/ShadowDebugPass.cpp
   render/BindGroups.h
   render/Pass.h
   render/TransientAllocator.cpp
@@ -280,18 +278,11 @@ add_library(demo_core STATIC
   loader/GltfLoader.cpp
   render/MeshPool.h
   render/MeshPool.cpp
-  render/LightResources.h
-  render/LightResources.cpp
-  render/IBLResources.h
-  render/IBLResources.cpp
-  render/ShadowResources.h
-  render/ShadowResources.cpp
-  render/ClipSpaceConvention.h
   render/Camera.h
   render/Camera.cpp
 )
 
-target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES) 
+target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
 endif()
@@ -339,9 +330,17 @@ endif()
 add_executable(Demo app/MinimalLatestApp.cpp)
 target_link_libraries(Demo PRIVATE demo_core)
 
-file(GLOB IMAGE_FILE "${CMAKE_CURRENT_LIST_DIR}/resources/*.jpg")
+#====================================================================================
+# RESOURCE COPYING - Copy all resources to build output directory
+#====================================================================================
+file(GLOB RESOURCE_FILES "${CMAKE_CURRENT_LIST_DIR}/resources/*")
+
 add_custom_command(
   TARGET Demo POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    "$<TARGET_FILE_DIR:Demo>/resources"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-  ${IMAGE_FILE} $<TARGET_FILE_DIR:Demo>
+    ${RESOURCE_FILES}
+    $<TARGET_FILE_DIR:Demo>/resources
+  COMMENT "Copying resources to build directory..."
 )

@@ -17,21 +17,35 @@ GBufferPass::GBufferPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 3> dependencies = {
+    static const std::array<PassResourceDependency, 5> dependencies = {
         PassResourceDependency::buffer(
             kPassVertexBufferHandle,
             ResourceAccess::read,
             rhi::ShaderStage::vertex
         ),
         PassResourceDependency::texture(
-            kPassGBufferColorHandle,
+            kPassGBuffer0Handle,
             ResourceAccess::write,
-            rhi::ShaderStage::fragment
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::ColorAttachment
         ),
         PassResourceDependency::texture(
-            kPassGBufferDepthHandle,
+            kPassGBuffer1Handle,
             ResourceAccess::write,
-            rhi::ShaderStage::fragment
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::ColorAttachment
+        ),
+        PassResourceDependency::texture(
+            kPassGBuffer2Handle,
+            ResourceAccess::write,
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::ColorAttachment
+        ),
+        PassResourceDependency::texture(
+            kPassSceneDepthHandle,
+            ResourceAccess::write,
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::DepthStencilAttachment
         ),
     };
     return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
@@ -60,7 +74,7 @@ void GBufferPass::execute(const PassContext& context) const
         colorTargets[i] = {
             .texture = {},  // Not used when view carries native pointer
             .view = rhi::TextureViewHandle::fromNative(sceneResources.getGBufferImageView(i)),
-            .state = rhi::ResourceState::general,
+            .state = rhi::ResourceState::ColorAttachment,
             .loadOp = rhi::LoadOp::clear,
             .storeOp = rhi::StoreOp::store,
             .clearColor = {0.0f, 0.0f, 0.0f, 0.0f},
@@ -71,7 +85,7 @@ void GBufferPass::execute(const PassContext& context) const
     const rhi::DepthTargetDesc depthTarget{
         .texture = {},  // Not used when view carries native pointer
         .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
-        .state = rhi::ResourceState::general,
+        .state = rhi::ResourceState::DepthStencilAttachment,
         .loadOp = rhi::LoadOp::clear,
         .storeOp = rhi::StoreOp::store,
         .clearValue = {1.0f, 0},
@@ -281,6 +295,40 @@ void GBufferPass::execute(const PassContext& context) const
 
     // End render pass using RHI interface
     context.cmd->endRenderPass();
+
+    const std::array<std::pair<TextureHandle, VkImage>, 3> colorImages{{
+        {kPassGBuffer0Handle, sceneResources.getColorImage(0)},
+        {kPassGBuffer1Handle, sceneResources.getColorImage(1)},
+        {kPassGBuffer2Handle, sceneResources.getColorImage(2)},
+    }};
+    for(const auto& [handle, image] : colorImages)
+    {
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{handle.index, handle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(image),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::write,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::ColorAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
+    }
+
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+        .aspect      = rhi::TextureAspect::depth,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::DepthStencilAttachment,
+        .newState    = rhi::ResourceState::General,
+        .isSwapchain = false,
+    });
 
     context.cmd->endEvent();
 }

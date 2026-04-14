@@ -156,6 +156,32 @@ void SceneResources::create(VkCommandBuffer cmd)
     dutil.setObjectName(m_resources.outputTextureView, "OutputTextureView");
   }
 
+  // Create fixed-resolution shadow map
+  {
+    const VkImageCreateInfo shadowInfo{
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = m_createInfo.depth,
+        .extent      = {kShadowMapSize, kShadowMapSize, 1},
+        .mipLevels   = 1,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    };
+    m_resources.shadowMapImage = createImage(shadowInfo);
+    dutil.setObjectName(m_resources.shadowMapImage.image, "ShadowMap");
+
+    const VkImageViewCreateInfo shadowViewInfo{
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = m_resources.shadowMapImage.image,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = m_createInfo.depth,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1},
+    };
+    VK_CHECK(vkCreateImageView(m_device, &shadowViewInfo, nullptr, &m_resources.shadowMapView));
+    dutil.setObjectName(m_resources.shadowMapView, "ShadowMapView");
+  }
+
   if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
   {
     const VkImageCreateInfo depthInfo{
@@ -201,6 +227,7 @@ void SceneResources::create(VkCommandBuffer cmd)
   if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
   {
     utils::cmdInitImageLayout(cmd, m_resources.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
+    utils::cmdInitImageLayout(cmd, m_resources.shadowMapImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
   }
 
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -239,6 +266,17 @@ void SceneResources::destroy()
   {
     vkDestroyImageView(m_device, m_resources.outputTextureView, nullptr);
     m_resources.outputTextureView = VK_NULL_HANDLE;
+  }
+
+  if(m_resources.shadowMapView != VK_NULL_HANDLE)
+  {
+    vkDestroyImageView(m_device, m_resources.shadowMapView, nullptr);
+    m_resources.shadowMapView = VK_NULL_HANDLE;
+  }
+  if(m_resources.shadowMapImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.shadowMapImage.image, m_resources.shadowMapImage.allocation);
+    m_resources.shadowMapImage = {};
   }
 
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -311,6 +349,21 @@ ImTextureID SceneResources::getOutputTextureImID() const
 VkImage SceneResources::getOutputTextureImage() const
 {
   return m_resources.outputTextureImage.image;
+}
+
+VkImage SceneResources::getShadowMapImage() const
+{
+  return m_resources.shadowMapImage.image;
+}
+
+VkImageView SceneResources::getShadowMapView() const
+{
+  return m_resources.shadowMapView;
+}
+
+VkExtent2D SceneResources::getShadowMapExtent() const
+{
+  return {kShadowMapSize, kShadowMapSize};
 }
 
 }  // namespace demo

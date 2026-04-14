@@ -49,15 +49,18 @@ struct PassResourceDependency
   PassResourceType type{PassResourceType::buffer};
   ResourceAccess   access{ResourceAccess::read};
   rhi::ShaderStage stageMask{rhi::ShaderStage::none};
+  rhi::ResourceState requiredState{rhi::ResourceState::Undefined};
   TextureHandle    textureHandle{};
   BufferHandle     bufferHandle{};
 
-  static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages)
+  static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages,
+                                        rhi::ResourceState textureState = rhi::ResourceState::Undefined)
   {
     PassResourceDependency dependency{};
     dependency.type          = PassResourceType::texture;
     dependency.access        = accessMode;
     dependency.stageMask     = stages;
+    dependency.requiredState = textureState;
     dependency.textureHandle = handle;
     return dependency;
   }
@@ -74,9 +77,12 @@ struct PassResourceDependency
 };
 
 inline constexpr BufferHandle  kPassVertexBufferHandle{0xF001u, 1u};
-inline constexpr TextureHandle kPassGBufferColorHandle{0xF101u, 1u};
-inline constexpr TextureHandle kPassGBufferDepthHandle{0xF102u, 1u};
-inline constexpr TextureHandle kPassOutputHandle{0xF103u, 1u};      // OutputTexture (PBR result)
+inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
+inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
+inline constexpr TextureHandle kPassGBuffer2Handle{0xF103u, 1u};
+inline constexpr TextureHandle kPassSceneDepthHandle{0xF104u, 1u};
+inline constexpr TextureHandle kPassShadowHandle{0xF105u, 1u};
+inline constexpr TextureHandle kPassOutputHandle{0xF106u, 1u};      // OutputTexture (PBR result)
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

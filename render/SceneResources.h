@@ -47,6 +47,12 @@ public:
   [[nodiscard]] ImTextureID getOutputTextureImID() const;
   [[nodiscard]] VkImage getOutputTextureImage() const;
 
+  static constexpr uint32_t kShadowMapSize = 2048;
+
+  [[nodiscard]] VkImage getShadowMapImage() const;
+  [[nodiscard]] VkImageView getShadowMapView() const;
+  [[nodiscard]] VkExtent2D getShadowMapExtent() const;
+
 private:
   struct Resources
   {
@@ -58,6 +64,8 @@ private:
     utils::Image                       outputTextureImage{};  // Fixed-res output for PBR result
     VkImageView                        outputTextureView{};
     ImTextureID                        outputTextureImID{};
+    utils::Image                       shadowMapImage{};
+    VkImageView                        shadowMapView{};
   };
 
   void                       create(VkCommandBuffer cmd);
