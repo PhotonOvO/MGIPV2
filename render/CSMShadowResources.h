@@ -47,6 +47,7 @@ public:
   // Uniform buffer access
   [[nodiscard]] VkBuffer getShadowUniformBuffer() const { return m_shadowUniformBuffer.buffer; }
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return &m_shadowUniformsData; }
+  [[nodiscard]] const shaderio::ShadowUniforms* getShadowUniformsData() const { return &m_shadowUniformsData; }
 
 private:
   VkDevice                        m_device{VK_NULL_HANDLE};

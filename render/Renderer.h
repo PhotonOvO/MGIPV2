@@ -15,7 +15,6 @@
 #include "passes/GBufferPass.h"
 #include "passes/LightPass.h"
 #include "passes/ForwardPass.h"
-#include "passes/ShadowPass.h"
 #include "passes/CSMShadowPass.h"
 #include "passes/DebugPass.h"
 #include "MeshPool.h"
@@ -214,6 +213,7 @@ public:
   VkImageView getOutputTextureView() const;
   VkImageView getShadowMapView() const;
   VkImage getShadowMapImage() const;
+  shaderio::ShadowUniforms* getShadowUniformsData();
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
@@ -367,7 +367,7 @@ private:
   std::unique_ptr<GBufferPass>         m_gbufferPass;
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
-  std::unique_ptr<ShadowPass>          m_shadowPass;
+  std::unique_ptr<CSMShadowPass>        m_csmShadowPass;
   std::unique_ptr<LightPass>           m_lightPass;
   std::unique_ptr<ForwardPass>         m_forwardPass;
   std::unique_ptr<DebugPass>           m_debugPass;

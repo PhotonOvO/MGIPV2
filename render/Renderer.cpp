@@ -6,6 +6,7 @@
 #include "../rhi/vulkan/VulkanFrameContext.h"
 #include "FrameSubmission.h"
 #include "ClipSpaceConvention.h"
+#include "CSMShadowResources.h"
 
 #include <cstring>
 #include <type_traits>
@@ -427,6 +428,14 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
 
+    // Initialize CSM shadow cascade resources
+    CSMShadowResources::CreateInfo csmInfo{
+        .cascadeCount      = 4,
+        .cascadeResolution = 1024,
+        .shadowFormat      = VK_FORMAT_D32_SFLOAT,
+    };
+    m_csmShadowResources.init(nativeDevice, m_device.allocator, cmd, csmInfo);
+
     // Create per-frame GBuffer descriptor sets for LightPass.
     {
       // Binding 0: Array of 5 sampled images (GBuffer0/1/2 + Depth + Shadow)
@@ -574,14 +583,14 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_gbufferPass         = std::make_unique<GBufferPass>(this);
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
-  m_shadowPass          = std::make_unique<ShadowPass>(this);
+  m_csmShadowPass        = std::make_unique<CSMShadowPass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
   m_forwardPass         = std::make_unique<ForwardPass>(this);
   m_debugPass           = std::make_unique<DebugPass>(this);
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
   m_passExecutor.clear();
-  m_passExecutor.addPass(*m_shadowPass);
+  m_passExecutor.addPass(*m_csmShadowPass);
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
@@ -697,6 +706,7 @@ void Renderer::shutdown(rhi::Surface& surface)
     m_materials.materialPool.destroy(handle);
   }
 
+  m_csmShadowResources.deinit();
   m_swapchainDependent.sceneResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
@@ -824,12 +834,17 @@ VkImageView Renderer::getOutputTextureView() const
 
 VkImageView Renderer::getShadowMapView() const
 {
-  return m_swapchainDependent.sceneResources.getShadowMapView();
+  return m_csmShadowResources.getCascadeView();
 }
 
 VkImage Renderer::getShadowMapImage() const
 {
-  return m_swapchainDependent.sceneResources.getShadowMapImage();
+  return m_csmShadowResources.getCascadeImage();
+}
+
+shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
+{
+  return m_csmShadowResources.getShadowUniformsData();
 }
 
 void Renderer::render(const RenderParams& params)
@@ -1009,9 +1024,9 @@ void Renderer::updateGBufferTextureDescriptorSet()
     LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
     return;
   }
-  if(sceneResources.getShadowMapView() == VK_NULL_HANDLE)
+  if(m_csmShadowResources.getCascadeView() == VK_NULL_HANDLE)
   {
-    LOGW("SceneResources shadow map view is null, skipping GBuffer descriptor update");
+    LOGW("CSM cascade shadow view is null, skipping GBuffer descriptor update");
     return;
   }
 
@@ -1044,7 +1059,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
   };
   imageInfos[4] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getShadowMapView(),
+      .imageView   = m_csmShadowResources.getCascadeView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -1162,6 +1177,12 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   }
   const rhi::ResourceState swapchainInitialState =
       m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
+
+  // Update CSM cascade matrices based on current camera and light direction
+  if(params.cameraUniforms != nullptr)
+  {
+    m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+  }
 
   m_frameLightingState = buildFrameLightingState(params);
   buildDebugDrawList(params);
@@ -1586,13 +1607,23 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   state.shadowCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, params.lightSettings.normalBias);
   state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
 
-  state.lightParams.worldToShadow = state.shadowCamera.viewProjection;
+  // Populate CSM cascade matrices and split distances for LightParams
+  const shaderio::ShadowUniforms* shadowData = m_csmShadowResources.getShadowUniformsData();
+  for(int i = 0; i < shaderio::LCascadeCount; ++i)
+  {
+    state.lightParams.worldToShadow[i] = shadowData->cascadeWorldToShadowTexture[i];
+  }
+  state.lightParams.cascadeSplitDistances = shadowData->cascadeSplitDistances;
   state.lightParams.lightDirectionAndShadowStrength =
       glm::vec4(dirToLight, params.lightSettings.shadowStrength);
   state.lightParams.lightColorAndNormalBias = glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
   state.lightParams.ambientColorAndTexelSize =
-      glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(SceneResources::kShadowMapSize));
-  state.lightParams.shadowMetrics = glm::vec4(state.shadowDistance, params.lightSettings.depthBias, 0.0f, 0.0f);
+      glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(m_csmShadowResources.getCascadeResolution()));
+  state.lightParams.shadowMetrics = glm::vec4(
+      1.0f / static_cast<float>(m_csmShadowResources.getCascadeResolution()),
+      shadowData->cascadeBiasScale.x,  // baseConstantBias
+      shadowData->cascadeBiasScale.y,  // baseSlopeBias
+      static_cast<float>(shaderio::LCascadeCount));
   return state;
 }
 
