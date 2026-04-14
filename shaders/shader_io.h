@@ -135,6 +135,16 @@ STATIC_CONST int LTileSizeX        = 16;
 STATIC_CONST int LTileSizeY        = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
 
+// CSM (Cascaded Shadow Maps) constants
+STATIC_CONST int LCascadeCount = 4;  // Number of shadow cascades
+STATIC_CONST float LCascadeSplitLambda = 0.5f;  // Practical split (log + linear mix)
+STATIC_CONST float LCascadeBlendRegion = 0.0f;  // Hard boundaries (no blending)
+
+// Cascade debug overlay mode
+STATIC_CONST int LCascadeOverlayModeOff = 0;
+STATIC_CONST int LCascadeOverlayModeFrustum = 1;
+STATIC_CONST int LCascadeOverlayModeScreen = 2;
+
 struct LightData
 {
   vec3     positionOrDirection;  // Directional: direction to light, others: position
@@ -170,11 +180,21 @@ struct LightParams
 
 struct ShadowUniforms
 {
-  mat4 lightViewProjectionMatrix;
-  mat4 worldToShadowTextureMatrix;
+  // Per-cascade matrices
+  mat4 cascadeViewProjection[LCascadeCount];
+  mat4 cascadeWorldToShadowTexture[LCascadeCount];
+
+  // Cascade split distances (view-space depth)
+  vec4 cascadeSplitDistances;  // x=c0 far, y=c1 far, z=c2 far, w=c3 far
+
+  // Light parameters (unchanged)
   vec4 lightDirectionAndIntensity;
-  vec4 shadowMapMetrics;
-  vec4 shadowBiasAndKernel;
+
+  // Shadow parameters
+  vec4 shadowMapMetrics;  // x=1/shadowSize, y=maxShadowDistance, z=unused, w=cascadeCount
+
+  // Per-cascade bias (scaled)
+  vec4 cascadeBiasScale;  // x=baseConstantBias, y=baseSlopeBias, z=scaleFactor(0.5), w=normalBias
 };
 
 // Debug line vertex format
