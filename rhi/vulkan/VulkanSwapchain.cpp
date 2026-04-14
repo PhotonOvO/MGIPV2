@@ -113,9 +113,10 @@ PresentResult VulkanSwapchain::present()
 {
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::present requires VkQueue");
   ensure(m_swapchain != VK_NULL_HANDLE, "VulkanSwapchain::present requires initialized swapchain");
-  ensure(m_frameImageIndex < m_frameResources.size(), "VulkanSwapchain::present invalid frame image index");
+  ensure(m_frameResourceIndex < m_frameResources.size(), "VulkanSwapchain::present invalid frame resource index");
+  ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::present invalid swapchain image index");
 
-  auto&                  frame = m_frameResources[m_frameImageIndex];
+  auto&                  frame = m_frameResources[m_frameResourceIndex];
   const VkPresentInfoKHR presentInfo{
       .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .waitSemaphoreCount = 1,
@@ -211,13 +212,13 @@ VkSemaphore VulkanSwapchain::imageAvailableSemaphoreForCurrentFrame() const
   return m_frameResources[m_frameResourceIndex].imageAvailableSemaphore;
 }
 
-VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentImage() const
+VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentFrame() const
 {
-  if(m_frameResources.empty() || m_frameImageIndex >= m_frameResources.size())
+  if(m_frameResources.empty() || m_frameResourceIndex >= m_frameResources.size())
   {
     return VK_NULL_HANDLE;
   }
-  return m_frameResources[m_frameImageIndex].renderFinishedSemaphore;
+  return m_frameResources[m_frameResourceIndex].renderFinishedSemaphore;
 }
 
 Extent2D VulkanSwapchain::createResources(bool vSync)

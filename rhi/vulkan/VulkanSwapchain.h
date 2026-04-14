@@ -31,7 +31,7 @@ public:
   [[nodiscard]] VkImageView    nativeImageView(uint32_t imageIndex) const;
   [[nodiscard]] VkImage        nativeImage(uint32_t imageIndex) const;
   [[nodiscard]] VkSemaphore    imageAvailableSemaphoreForCurrentFrame() const;
-  [[nodiscard]] VkSemaphore    renderFinishedSemaphoreForCurrentImage() const;
+  [[nodiscard]] VkSemaphore    renderFinishedSemaphoreForCurrentFrame() const;
 
 private:
   struct ImageResource

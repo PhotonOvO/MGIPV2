@@ -14,6 +14,8 @@ public:
 
   void setCommandBuffer(VkCommandBuffer commandBuffer) { m_commandBuffer = commandBuffer; }
 
+  void clearResourceStates() { m_resourceStates.clear(); }
+
   [[nodiscard]] VkCommandBuffer nativeHandle() const { return m_commandBuffer; }
 
   void begin() override;

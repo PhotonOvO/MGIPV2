@@ -1,5 +1,6 @@
 #include "VulkanFrameContext.h"
 #include "VulkanSwapchain.h"
+#include "VulkanCommandList.h"
 #include "../../common/Common.h"
 
 #include <array>
@@ -117,6 +118,9 @@ void VulkanFrameContext::beginFrame()
   assert((frame.commandList != nullptr) && "VulkanFrameContext::beginFrame missing command list");
 
   frame.commandPool->reset();
+
+  // Clear tracked resource states from previous frame
+  static_cast<VulkanCommandList*>(frame.commandList)->clearResourceStates();
 
   const VkCommandBuffer          commandBuffer = getNativeCommandBuffer(*frame.commandList);
   const VkCommandBufferBeginInfo beginInfo{
@@ -261,7 +265,7 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
 
   auto*      vkSwapchain     = static_cast<VulkanSwapchain*>(m_swapchain);
   const auto waitSemaphore   = vkSwapchain->imageAvailableSemaphoreForCurrentFrame();
-  const auto signalSemaphore = vkSwapchain->renderFinishedSemaphoreForCurrentImage();
+  const auto signalSemaphore = vkSwapchain->renderFinishedSemaphoreForCurrentFrame();
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];
   assert((frame.commandList == &commandList) && "VulkanFrameContext::submitCurrentFrame command list mismatch");

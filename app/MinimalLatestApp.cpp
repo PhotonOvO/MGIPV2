@@ -13,12 +13,7 @@
 
 int main()
 {
-#ifdef _WIN32
-  // Pause at startup to allow debugger attachment
-  // printf("Press any key to continue...\n");
-  // getchar();
-#endif
-
+    getchar();
   // Get the logger instance
   utils::Logger& logger = utils::Logger::getInstance();
   // logger.enableFileOutput(false);  // Don't write log to file

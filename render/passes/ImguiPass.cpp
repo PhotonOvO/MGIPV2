@@ -12,10 +12,12 @@ ImguiPass::ImguiPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> ImguiPass::getDependencies() const
 {
-  static const std::array<PassResourceDependency, 1> dependencies = {
-      PassResourceDependency::texture(kPassSwapchainHandle, ResourceAccess::write, rhi::ShaderStage::fragment),
-  };
-  return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
+  // The swapchain layout for the UI phase is managed explicitly by
+  // Renderer::beginPresentPass()/endPresentPass(). Exposing it as a normal
+  // pass dependency makes PassExecutor inject barriers while dynamic rendering
+  // is active, which is illegal without dynamicRenderingLocalRead.
+  static const std::array<PassResourceDependency, 0> dependencies = {};
+  return {dependencies.data(), 0};
 }
 
 void ImguiPass::execute(const PassContext& context) const

@@ -338,15 +338,8 @@ void VulkanCommandList::transitionTexture(const TextureBarrierDesc& desc)
   // Check tracked state, but use desc.oldState as fallback
   const ResourceState trackedState = getTrackedState(trackedResource, desc.oldState);
 
-  // Resolve oldLayout: use tracked state, but for swapchain images in Present state,
-  // use Undefined to avoid validation errors when actual state differs (e.g., RenderDoc injection)
-  ResourceState resolvedOldState = trackedState;
-  if(desc.isSwapchain && trackedState == ResourceState::Present)
-  {
-    // Swapchain images may have their actual state changed externally (RenderDoc, etc.)
-    // Using Undefined avoids validation errors when actual layout doesn't match tracked state
-    resolvedOldState = ResourceState::Undefined;
-  }
+  // Use the tracked state (or desc.oldState as fallback) directly
+  const ResourceState resolvedOldState = trackedState;
 
   // Derive srcAccess from oldState for specific states, ensuring stage/access compatibility
   const VkAccessFlags2 srcAccess =

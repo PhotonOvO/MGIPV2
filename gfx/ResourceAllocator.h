@@ -77,15 +77,30 @@ public:
                       VmaMemoryUsage           memoryUsage = VMA_MEMORY_USAGE_AUTO,
                       VmaAllocationCreateFlags flags       = {}) const
   {
+    const bool hostAccessibleBuffer = memoryUsage == VMA_MEMORY_USAGE_CPU_ONLY || memoryUsage == VMA_MEMORY_USAGE_CPU_TO_GPU
+                                      || memoryUsage == VMA_MEMORY_USAGE_GPU_TO_CPU
+                                      || (flags & (VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                                                   | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                                                   | VMA_ALLOCATION_CREATE_MAPPED_BIT)) != 0;
+
     // This can be used only with maintenance5
     const VkBufferUsageFlags2CreateInfoKHR bufferUsageFlags2CreateInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
         .usage = usage | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
     };
 
+    VkExternalMemoryBufferCreateInfo externalMemoryBufferCreateInfo{
+        .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .pNext       = &bufferUsageFlags2CreateInfo,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    };
+
+    const void* bufferCreatePNext = hostAccessibleBuffer ? static_cast<const void*>(&externalMemoryBufferCreateInfo)
+                                                         : static_cast<const void*>(&bufferUsageFlags2CreateInfo);
+
     const VkBufferCreateInfo bufferInfo{
         .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .pNext       = &bufferUsageFlags2CreateInfo,
+        .pNext       = bufferCreatePNext,
         .size        = size,
         .usage       = 0,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,  // Only one queue family will access i

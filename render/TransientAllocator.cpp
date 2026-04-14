@@ -21,8 +21,18 @@ void TransientAllocator::init(rhi::Device& device, VmaAllocator allocator, uint3
   m_head                       = 0;
   m_lastLogicalReleaseTimeline = 0;
 
+  const bool enableExternalHostMemory = device.isDeviceExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+
+  const VkExternalMemoryBufferCreateInfo externalMemoryBufferCreateInfo{
+      .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+  };
+
+  const void* bufferCreatePNext = enableExternalHostMemory ? static_cast<const void*>(&externalMemoryBufferCreateInfo) : nullptr;
+
   const VkBufferCreateInfo bufferInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .pNext = bufferCreatePNext,
       .size  = bufferSize,
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
                | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
