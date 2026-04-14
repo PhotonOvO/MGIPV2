@@ -68,6 +68,12 @@ struct DebugPassOptions
   bool  showLightDirection{true};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
+
+  // CSM Shadow cascade debug visualization
+  bool  showShadowCascades{true};      // Show cascade frustum splits
+  int   cascadeIndex{-1};              // -1 = all cascades, 0-3 = specific cascade
+  bool  cascadeOverlayMode{false};     // Screen-space cascade overlay
+  float cascadeOverlayAlpha{0.25f};    // Overlay transparency
 };
 
 struct RenderParams

@@ -246,6 +246,9 @@ public:
         ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
         ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
         ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
+
+        // CSM Shadow debug panel
+        drawCSMDebugPanel();
       }
       ImGui::End();
 
@@ -263,6 +266,11 @@ public:
       frameParams.cameraUniforms = &m_cameraUniforms;
       frameParams.lightSettings  = m_lightSettings;
       frameParams.debugOptions   = m_debugOptions;
+      // Copy CSM debug settings to debugOptions
+      frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
+      frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
+      frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
+      frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
       frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
@@ -308,6 +316,12 @@ private:
   float m_lightElevationDegrees{0.0f};
   demo::DebugPassOptions m_debugOptions{};
 
+  // CSM Shadow debug settings (copied to debugOptions in run())
+  bool  m_showShadowCascades{true};
+  int   m_cascadeIndex{-1};              // -1 = all cascades, 0-3 = specific cascade
+  bool  m_cascadeOverlayMode{false};
+  float m_cascadeOverlayAlpha{0.25f};
+
   // UI state
   char m_modelPathBuffer[512] = "resources/GLTF_Sponza/sponza.gltf";
 
@@ -336,6 +350,7 @@ private:
   void updateAsyncLoading();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
+  void drawCSMDebugPanel();
 };
 
 inline void MinimalLatestApp::syncLightAnglesFromDirection()
@@ -540,4 +555,44 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     }
   }
   ImGui::End();
+}
+
+inline void MinimalLatestApp::drawCSMDebugPanel()
+{
+  if(ImGui::CollapsingHeader("CSM Shadows"))
+  {
+    ImGui::Indent();
+
+    ImGui::Checkbox("Show Cascade Frustums", &m_showShadowCascades);
+
+    if(m_showShadowCascades)
+    {
+      static const char* cascadeNames[] = {
+        "All Cascades", "Cascade 0 (Near)", "Cascade 1", "Cascade 2", "Cascade 3 (Far)"
+      };
+      ImGui::Combo("Cascade Filter", &m_cascadeIndex, cascadeNames, 5);
+
+      ImGui::Checkbox("Cascade Overlay (Screen)", &m_cascadeOverlayMode);
+      if(m_cascadeOverlayMode)
+      {
+        ImGui::SliderFloat("Overlay Alpha", &m_cascadeOverlayAlpha, 0.1f, 0.5f);
+      }
+    }
+
+    // Display split distances from shadow uniforms
+    shaderio::ShadowUniforms* shadowData = m_renderer.getShadowUniformsData();
+    if(shadowData != nullptr)
+    {
+      ImGui::Separator();
+      ImGui::Text("Cascade Split Distances:");
+      const glm::vec4& splits = shadowData->cascadeSplitDistances;
+      ImGui::Text("  C0: %.2f", splits.x);
+      ImGui::Text("  C1: %.2f", splits.y);
+      ImGui::Text("  C2: %.2f", splits.z);
+      ImGui::Text("  C3: %.2f", splits.w);
+      ImGui::Text("  Resolution: %d", m_renderer.getCSMShadowResources().getCascadeResolution());
+    }
+
+    ImGui::Unindent();
+  }
 }
