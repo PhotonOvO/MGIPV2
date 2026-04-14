@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Pass.h"
+#include "../../common/Common.h"  // For VkPipelineLayout forward decl via vulkan.h
 
 namespace demo {
 
@@ -20,7 +21,7 @@ private:
   Renderer* m_renderer{nullptr};
 
   void renderCascadeLayer(const PassContext& context, uint32_t cascadeIndex) const;
-  void drawMeshes(const PassContext& context, VkPipelineLayout pipelineLayout) const;
+  void drawMeshes(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const;
 };
 
 }  // namespace demo

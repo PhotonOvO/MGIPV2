@@ -790,6 +790,13 @@ PipelineHandle Renderer::getDebugPipelineHandle() const
   return m_debugPipeline;
 }
 
+PipelineHandle Renderer::getCSMShadowPipelineHandle() const
+{
+  // TODO(Task 8): Create actual CSM shadow pipeline
+  // For now, reuse regular shadow pipeline
+  return m_shadowPipeline;
+}
+
 VkImageView Renderer::getCurrentSwapchainImageView() const
 {
   if(m_swapchainDependent.swapchain == nullptr)

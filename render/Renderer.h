@@ -16,10 +16,12 @@
 #include "passes/LightPass.h"
 #include "passes/ForwardPass.h"
 #include "passes/ShadowPass.h"
+#include "passes/CSMShadowPass.h"
 #include "passes/DebugPass.h"
 #include "MeshPool.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
+#include "CSMShadowResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
@@ -151,6 +153,8 @@ public:
   PipelineHandle getForwardPipelineHandle() const;
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
+  PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
+  CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
@@ -379,6 +383,8 @@ private:
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
+  PipelineHandle m_csmShadowPipeline{};        // CSM cascade depth pass
+  CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
 

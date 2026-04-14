@@ -39,13 +39,13 @@ constexpr float kCascadeNearPlanePadding     = 25.0f; // Padding for near plane 
 
 // Compute cascade split distances using practical split scheme
 // Lambda blends logarithmic (better for perspective) and uniform (better for uniform distribution)
-void computeCascadeSplits(float* splits, uint32_t count, float near, float far, float lambda)
+void computeCascadeSplits(float* splits, uint32_t count, float nearDist, float farDist, float lambda)
 {
   for(uint32_t i = 0; i < count; ++i)
   {
     const float fraction  = static_cast<float>(i + 1) / static_cast<float>(count);
-    const float uniformSplit = near + (far - near) * fraction;
-    const float logSplit     = near * std::pow(far / near, fraction);
+    const float uniformSplit = nearDist + (farDist - nearDist) * fraction;
+    const float logSplit     = nearDist * std::pow(farDist / nearDist, fraction);
     splits[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
   }
 }
@@ -67,7 +67,7 @@ void computeCascadeSplits(float* splits, uint32_t count, float near, float far, 
 
   // Compute lerp factors for near and far planes of the slice
   const float nearLerp = (sliceNear - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
-  const float farLerp  = (sliceFar - cameraNear) / std::max(0.01f, cameraFar - cameraFar);
+  const float farLerp  = (sliceFar - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
 
   const std::array<glm::vec2, 4> ndcCorners = {
       glm::vec2(-1.0f, -1.0f),
