@@ -265,7 +265,7 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
 
   auto*      vkSwapchain     = static_cast<VulkanSwapchain*>(m_swapchain);
   const auto waitSemaphore   = vkSwapchain->imageAvailableSemaphoreForCurrentFrame();
-  const auto signalSemaphore = vkSwapchain->renderFinishedSemaphoreForCurrentFrame();
+  const auto signalSemaphore = vkSwapchain->renderFinishedSemaphoreForCurrentImage();
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];
   assert((frame.commandList == &commandList) && "VulkanFrameContext::submitCurrentFrame command list mismatch");

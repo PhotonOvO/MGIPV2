@@ -30,10 +30,7 @@ void PresentPass::execute(const PassContext& context) const
   context.cmd->beginEvent("Present");
 
   // Get source (OutputTexture) and destination (swapchain) dimensions
-  const VkExtent2D srcExtent = {
-      SceneResources::kOutputTextureWidth,
-      SceneResources::kOutputTextureHeight
-  };
+  const VkExtent2D srcExtent = m_renderer->getSceneResources().getSize();
   const VkExtent2D dstExtent = m_renderer->getSwapchainExtent();
 
   // Get native Vulkan command buffer for blit operation

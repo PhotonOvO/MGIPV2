@@ -48,7 +48,8 @@ struct GltfUploadResult;
 
 struct DirectionalLightSettings
 {
-  glm::vec3 direction{glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f))};
+  // World-space light travel direction, from the light toward the scene.
+  glm::vec3 direction{glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f))};
   float     shadowDistance{35.0f};
   glm::vec3 color{glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f};
   float     shadowStrength{0.9f};
@@ -301,7 +302,7 @@ private:
     VkDescriptorPool                           descriptorPool{};
     VkDescriptorPool                           uiDescriptorPool{};
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
-    VkDescriptorSet                            gbufferTextureSet{nullptr};
+    std::vector<VkDescriptorSet>               gbufferTextureSets;
     VkPipelineLayout                           lightPipelineLayout{nullptr};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;

@@ -482,6 +482,9 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
       .cullMode            = toVkCullMode(desc.rasterState.cullMode),
       .frontFace           = toVkFrontFace(desc.rasterState.frontFace),
       .depthBiasEnable     = desc.rasterState.depthBiasEnable ? VK_TRUE : VK_FALSE,
+      .depthBiasConstantFactor = desc.rasterState.depthBiasConstantFactor,
+      .depthBiasClamp      = desc.rasterState.depthBiasClamp,
+      .depthBiasSlopeFactor = desc.rasterState.depthBiasSlopeFactor,
       .lineWidth           = desc.rasterState.lineWidth,
   };
 

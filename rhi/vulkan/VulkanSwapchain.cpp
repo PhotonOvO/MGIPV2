@@ -113,14 +113,13 @@ PresentResult VulkanSwapchain::present()
 {
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::present requires VkQueue");
   ensure(m_swapchain != VK_NULL_HANDLE, "VulkanSwapchain::present requires initialized swapchain");
-  ensure(m_frameResourceIndex < m_frameResources.size(), "VulkanSwapchain::present invalid frame resource index");
   ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::present invalid swapchain image index");
 
-  auto&                  frame = m_frameResources[m_frameResourceIndex];
+  auto&                  image = m_images[m_frameImageIndex];
   const VkPresentInfoKHR presentInfo{
       .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores    = &frame.renderFinishedSemaphore,
+      .pWaitSemaphores    = &image.renderFinishedSemaphore,
       .swapchainCount     = 1,
       .pSwapchains        = &m_swapchain,
       .pImageIndices      = &m_frameImageIndex,
@@ -212,13 +211,13 @@ VkSemaphore VulkanSwapchain::imageAvailableSemaphoreForCurrentFrame() const
   return m_frameResources[m_frameResourceIndex].imageAvailableSemaphore;
 }
 
-VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentFrame() const
+VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentImage() const
 {
-  if(m_frameResources.empty() || m_frameResourceIndex >= m_frameResources.size())
+  if(m_images.empty() || m_frameImageIndex >= m_images.size())
   {
     return VK_NULL_HANDLE;
   }
-  return m_frameResources[m_frameResourceIndex].renderFinishedSemaphore;
+  return m_images[m_frameImageIndex].renderFinishedSemaphore;
 }
 
 Extent2D VulkanSwapchain::createResources(bool vSync)
@@ -293,6 +292,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 
   m_maxFramesInFlight = imageCount;
   m_images.resize(imageCount);
+  const VkSemaphoreCreateInfo semaphoreCreateInfo{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 
   VkImageViewCreateInfo imageViewCreateInfo{
       .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -309,16 +309,15 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
     imageViewCreateInfo.image = m_images[i].image;
     checkVk(vkCreateImageView(m_device, &imageViewCreateInfo, nullptr, &m_images[i].imageView),
             "VulkanSwapchain::createResources failed creating image view");
+    checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_images[i].renderFinishedSemaphore),
+            "VulkanSwapchain::createResources failed creating render-finished semaphore");
   }
 
   m_frameResources.resize(imageCount);
-  const VkSemaphoreCreateInfo semaphoreCreateInfo{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
   for(auto& frame : m_frameResources)
   {
     checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &frame.imageAvailableSemaphore),
             "VulkanSwapchain::createResources failed creating image-available semaphore");
-    checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &frame.renderFinishedSemaphore),
-            "VulkanSwapchain::createResources failed creating render-finished semaphore");
   }
 
   return m_extent;
@@ -341,15 +340,15 @@ void VulkanSwapchain::destroyResources()
       vkDestroySemaphore(m_device, frame.imageAvailableSemaphore, nullptr);
       frame.imageAvailableSemaphore = VK_NULL_HANDLE;
     }
-    if(frame.renderFinishedSemaphore != VK_NULL_HANDLE)
-    {
-      vkDestroySemaphore(m_device, frame.renderFinishedSemaphore, nullptr);
-      frame.renderFinishedSemaphore = VK_NULL_HANDLE;
-    }
   }
 
   for(auto& image : m_images)
   {
+    if(image.renderFinishedSemaphore != VK_NULL_HANDLE)
+    {
+      vkDestroySemaphore(m_device, image.renderFinishedSemaphore, nullptr);
+      image.renderFinishedSemaphore = VK_NULL_HANDLE;
+    }
     if(image.imageView != VK_NULL_HANDLE)
     {
       vkDestroyImageView(m_device, image.imageView, nullptr);

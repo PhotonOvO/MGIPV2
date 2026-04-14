@@ -44,8 +44,10 @@ struct CameraUniforms
   mat4 view;
   mat4 projection;
   mat4 viewProjection;
+  mat4 inverseViewProjection;
   vec3 cameraPosition;
-  float _padding;
+  float shadowConstantBias;
+  vec4 shadowDirectionAndSlopeBias;
 };
 
 // Per-draw uniform buffer (dynamic)
@@ -123,14 +125,56 @@ STATIC_CONST int LAlphaOpaque   = 0;
 STATIC_CONST int LAlphaMask     = 1;
 STATIC_CONST int LAlphaBlend    = 2;
 
+// Light type constants
+STATIC_CONST uint32_t LLightTypeDirectional = 0;
+STATIC_CONST uint32_t LLightTypePoint       = 1;
+STATIC_CONST uint32_t LLightTypeSpot        = 2;
+
+// Tiled light culling constants
+STATIC_CONST int LTileSizeX        = 16;
+STATIC_CONST int LTileSizeY        = 16;
+STATIC_CONST int LMaxLightsPerTile = 32;
+
+struct LightData
+{
+  vec3     positionOrDirection;  // Directional: direction to light, others: position
+  float    intensity;
+  vec3     color;
+  float    range;
+  vec3     spotDirection;
+  float    spotInnerAngle;
+  uint32_t lightType;
+  float    spotOuterAngle;
+  float    _padding[2];
+};
+
+struct LightListUniforms
+{
+  uint32_t numLights;
+  uint32_t numDirectionalLights;
+  uint32_t numPointLights;
+  uint32_t numSpotLights;
+  vec3     ambientColor;
+  float    _padding;
+};
+
 // Light parameters for PBR lighting pass (push constants)
 struct LightParams
 {
   mat4 worldToShadow;
-  vec4 lightDirectionAndShadowStrength;  // xyz = direction to light, w = shadow strength
+  vec4 lightDirectionAndShadowStrength;  // xyz = shading direction to light, w = shadow strength
   vec4 lightColorAndNormalBias;          // rgb = light intensity, w = normal bias
   vec4 ambientColorAndTexelSize;         // rgb = ambient term, w = 1 / shadow map size
   vec4 shadowMetrics;                    // x = max shadow distance, y = depth bias
+};
+
+struct ShadowUniforms
+{
+  mat4 lightViewProjectionMatrix;
+  mat4 worldToShadowTextureMatrix;
+  vec4 lightDirectionAndIntensity;
+  vec4 shadowMapMetrics;
+  vec4 shadowBiasAndKernel;
 };
 
 // Debug line vertex format

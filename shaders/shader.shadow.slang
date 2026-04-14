@@ -30,6 +30,13 @@ VertexOutput vertexMain(VertexInput input)
 {
     VertexOutput output;
     float4 worldPos = mul(draw.modelMatrix, float4(input.position, 1.0));
+    float3 worldNormal = normalize(mul((float3x3)draw.modelMatrix, input.normal));
+    float3 dirToLight = normalize(camera.shadowDirectionAndSlopeBias.xyz);
+    float constantBias = camera.shadowConstantBias;
+    float slopeScaleBias = camera.shadowDirectionAndSlopeBias.w;
+    float ndotl = saturate(abs(dot(worldNormal, dirToLight)));
+    float slopeBias = slopeScaleBias * (1.0 - ndotl);
+    worldPos.xyz += worldNormal * (constantBias + slopeBias);
     output.position = mul(camera.viewProjection, worldPos);
     output.uv = input.texCoord;
     return output;

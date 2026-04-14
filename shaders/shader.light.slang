@@ -50,16 +50,9 @@ vec3 reconstructWorldPosition(float2 uv, float depth)
 {
     float ndcX = uv.x * 2.0 - 1.0;
     float ndcY = uv.y * 2.0 - 1.0;
-    float P20 = camera.projection[2][2];
-    float P32 = camera.projection[3][2];
-    float viewZ = P32 / (depth - P20);
-    float viewX = ndcX * viewZ / camera.projection[0][0];
-    float viewY = ndcY * viewZ / camera.projection[1][1];
-
-    float3 right   = float3(camera.view[0][0], camera.view[1][0], camera.view[2][0]);
-    float3 up      = float3(camera.view[0][1], camera.view[1][1], camera.view[2][1]);
-    float3 forward = float3(camera.view[0][2], camera.view[1][2], camera.view[2][2]);
-    return right * viewX + up * viewY + forward * viewZ + camera.cameraPosition;
+    float4 clipPos = float4(ndcX, ndcY, depth, 1.0);
+    float4 worldPos = mul(camera.inverseViewProjection, clipPos);
+    return worldPos.xyz / worldPos.w;
 }
 
 float sampleShadow(vec3 worldPos, vec3 worldNormal)
@@ -67,7 +60,7 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
     float4 shadowClip = mul(lightParams.worldToShadow, float4(worldPos, 1.0));
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
 
-    float2 shadowUv = float2(shadowNdc.x * 0.5 + 0.5, shadowNdc.y * -0.5 + 0.5);
+    float2 shadowUv = float2(shadowNdc.x * 0.5 + 0.5, shadowNdc.y * 0.5 + 0.5);
     if(shadowUv.x < 0.0 || shadowUv.x > 1.0 || shadowUv.y < 0.0 || shadowUv.y > 1.0)
     {
         return 1.0;
@@ -82,7 +75,10 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
     float normalBias = lightParams.lightColorAndNormalBias.w;
     float depthBias = lightParams.shadowMetrics.y;
     float texelSize = lightParams.ambientColorAndTexelSize.w;
-    float bias = max(depthBias, (1.0 - saturate(dot(worldNormal, lightDir))) * normalBias);
+    float cosTheta = saturate(dot(worldNormal, lightDir));
+    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    float slope = sinTheta / max(cosTheta, 0.01);
+    float bias = depthBias + normalBias * slope;
 
     float visibility = 0.0;
     [unroll]
@@ -93,7 +89,8 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
         {
             float2 offset = float2(x, y) * texelSize;
             float shadowDepth = inTexture[kShadowMapIndex].Sample(shadowUv + offset).r;
-            visibility += (shadowNdc.z - bias) <= shadowDepth ? 1.0 : 0.0;
+            float receiverDepth = shadowNdc.z + bias;
+            visibility += receiverDepth >= shadowDepth ? 1.0 : 0.0;
         }
     }
 
@@ -162,20 +159,16 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
 [shader("fragment")]
 float4 fragmentMain(VSOutput input) : SV_Target
 {
-    float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
     float4 normalSample    = inTexture[kGBufferNormalIndex].Sample(input.uv);
-    float4 materialSample  = inTexture[kGBufferMaterialIndex].Sample(input.uv);
     float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
 
-    if(depthSample >= 0.9999)
+    if(depthSample <= 0.0001)
     {
-        return float4(lightParams.ambientColorAndTexelSize.rgb, 1.0);
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
-    float distanceToCamera = length(worldPos - camera.cameraPosition);
-    float shadowFade = distanceToCamera <= lightParams.shadowMetrics.x ? 1.0 : 0.0;
-    vec3 color = computePBRLighting(baseColorSample.rgb, normalSample.rgb, worldPos,
-                                    materialSample.r, materialSample.g, materialSample.b, shadowFade);
-    return float4(color, 1.0);
+    vec3 worldNormal = normalize(normalSample.rgb * 2.0 - 1.0);
+    float shadowVisibility = sampleShadow(worldPos, worldNormal);
+    return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
 }

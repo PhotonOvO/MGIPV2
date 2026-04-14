@@ -288,6 +288,9 @@ struct RasterState
   float             lineWidth{1.0f};
   SampleCount       sampleCount{SampleCount::count1};
   bool              depthBiasEnable{false};
+  float             depthBiasConstantFactor{0.0f};
+  float             depthBiasClamp{0.0f};
+  float             depthBiasSlopeFactor{0.0f};
 };
 
 struct DepthState

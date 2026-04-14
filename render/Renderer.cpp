@@ -5,6 +5,7 @@
 #include "../rhi/vulkan/VulkanDevice.h"
 #include "../rhi/vulkan/VulkanFrameContext.h"
 #include "FrameSubmission.h"
+#include "ClipSpaceConvention.h"
 
 #include <cstring>
 #include <type_traits>
@@ -426,7 +427,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
 
-    // Create GBuffer descriptor set layout and set for LightPass
+    // Create per-frame GBuffer descriptor sets for LightPass.
     {
       // Binding 0: Array of 5 sampled images (GBuffer0/1/2 + Depth + Shadow)
       const VkDescriptorSetLayoutBinding textureBinding{
@@ -448,15 +449,22 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
       VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &layoutInfo, nullptr, &m_device.gbufferTextureSetLayout));
       DBG_VK_NAME(m_device.gbufferTextureSetLayout);
 
-      // Allocate descriptor set
+      const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+      ASSERT(frameCount > 0, "Renderer::init requires per-frame data before allocating LightPass descriptor sets");
+
+      std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.gbufferTextureSetLayout);
+      m_device.gbufferTextureSets.resize(frameCount, VK_NULL_HANDLE);
       const VkDescriptorSetAllocateInfo allocInfo{
           .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
           .descriptorPool     = m_device.descriptorPool,
-          .descriptorSetCount = 1,
-          .pSetLayouts        = &m_device.gbufferTextureSetLayout,
+          .descriptorSetCount = frameCount,
+          .pSetLayouts        = setLayouts.data(),
       };
-      VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, &m_device.gbufferTextureSet));
-      DBG_VK_NAME(m_device.gbufferTextureSet);
+      VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.gbufferTextureSets.data()));
+      for(VkDescriptorSet descriptorSet : m_device.gbufferTextureSets)
+      {
+        DBG_VK_NAME(descriptorSet);
+      }
     }
 
     utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
@@ -612,8 +620,8 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyPipelineLayout(device, m_device.lightPipelineLayout, nullptr);
     m_device.lightPipelineLayout = VK_NULL_HANDLE;
   }
-  // Note: gbufferTextureSet is freed automatically when descriptorPool is destroyed
-  m_device.gbufferTextureSet = VK_NULL_HANDLE;
+  // Note: gbufferTextureSets are freed automatically when descriptorPool is destroyed
+  m_device.gbufferTextureSets.clear();
   if(m_device.gbufferTextureSetLayout != VK_NULL_HANDLE)
   {
     vkDestroyDescriptorSetLayout(device, m_device.gbufferTextureSetLayout, nullptr);
@@ -971,7 +979,7 @@ bool Renderer::prepareFrameResources()
 
 void Renderer::updateGBufferTextureDescriptorSet()
 {
-  if(m_device.gbufferTextureSet == VK_NULL_HANDLE)
+  if(m_device.gbufferTextureSets.empty() || m_perFrame.frameUserData.empty())
   {
     return;
   }
@@ -1033,45 +1041,44 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
-  // Camera uniform buffer binding (binding 1)
-  // We use a fixed buffer for LightPass camera data - allocate from transient allocator
-  // For now, we'll update this per-frame in LightPass using dynamic UBO
-  // Create a dedicated camera buffer for LightPass
-  const VkDescriptorBufferInfo cameraBufferInfo{
-      .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[0].transientAllocator.getBufferOpaque()),
-      .offset = 0,
-      .range  = sizeof(shaderio::CameraUniforms),
-  };
+  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+  ASSERT(m_device.gbufferTextureSets.size() == frameCount, "LightPass descriptor set count must match frame count");
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    const VkDescriptorBufferInfo cameraBufferInfo{
+        .buffer = m_perFrame.frameUserData[frameIndex].lightCameraBuffer.buffer,
+        .offset = 0,
+        .range  = sizeof(shaderio::CameraUniforms),
+    };
 
-  const std::array<VkWriteDescriptorSet, 2> writes = {
-      // Texture array (binding 0, 4 textures)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 0,
-          .dstArrayElement = 0,
-          .descriptorCount = kLightPassTextureCount,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo      = imageInfos.data(),
-      },
-      // Camera uniform buffer (binding 1)
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gbufferTextureSet,
-          .dstBinding      = 1,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo     = &cameraBufferInfo,
-      },
-  };
+    const std::array<VkWriteDescriptorSet, 2> writes = {
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = kLightPassTextureCount,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = imageInfos.data(),
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &cameraBufferInfo,
+        },
+    };
 
-  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  }
 }
 
 void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms)
 {
-  if(m_device.gbufferTextureSet == VK_NULL_HANDLE || frameIndex >= m_perFrame.frameUserData.size())
+  if(frameIndex >= m_perFrame.frameUserData.size())
   {
     return;
   }
@@ -1082,22 +1089,6 @@ void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio:
   std::memcpy(mappedData, &cameraUniforms, sizeof(cameraUniforms));
   VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCameraBuffer.allocation, 0, sizeof(cameraUniforms)));
   vmaUnmapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation);
-
-  const VkDescriptorBufferInfo cameraBufferInfo{
-      .buffer = frameUserData.lightCameraBuffer.buffer,
-      .offset = 0,
-      .range  = sizeof(shaderio::CameraUniforms),
-  };
-  const VkWriteDescriptorSet cameraWrite{
-      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet          = m_device.gbufferTextureSet,
-      .dstBinding      = 1,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .pBufferInfo     = &cameraBufferInfo,
-  };
-  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &cameraWrite, 0, nullptr);
 }
 
 void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
@@ -1167,7 +1158,14 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
   m_frameLightingState = buildFrameLightingState(params);
   buildDebugDrawList(params);
-  updateLightPassDescriptorSet(currentFrameIndex, m_frameLightingState.shadowCamera);
+  if(params.cameraUniforms != nullptr)
+  {
+    updateLightPassDescriptorSet(currentFrameIndex, *params.cameraUniforms);
+  }
+  else
+  {
+    updateLightPassDescriptorSet(currentFrameIndex, m_frameLightingState.shadowCamera);
+  }
 
   // Route through pass executor to orchestrate multi-pass rendering
   m_passExecutor.clearResourceBindings();
@@ -1454,15 +1452,17 @@ std::array<glm::vec3, 8> Renderer::computePerspectiveFrustumCorners(const shader
 
 std::array<glm::vec3, 8> Renderer::computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const
 {
+  const clipspace::ProjectionConvention projectionConvention =
+      clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
   const std::array<glm::vec3, 8> clipCorners{{
-      {-1.0f, -1.0f, 0.0f},
-      { 1.0f, -1.0f, 0.0f},
-      {-1.0f,  1.0f, 0.0f},
-      { 1.0f,  1.0f, 0.0f},
-      {-1.0f, -1.0f, 1.0f},
-      { 1.0f, -1.0f, 1.0f},
-      {-1.0f,  1.0f, 1.0f},
-      { 1.0f,  1.0f, 1.0f},
+      {-1.0f, -1.0f, projectionConvention.ndcNearZ},
+      { 1.0f, -1.0f, projectionConvention.ndcNearZ},
+      {-1.0f,  1.0f, projectionConvention.ndcNearZ},
+      { 1.0f,  1.0f, projectionConvention.ndcNearZ},
+      {-1.0f, -1.0f, projectionConvention.ndcFarZ},
+      { 1.0f, -1.0f, projectionConvention.ndcFarZ},
+      {-1.0f,  1.0f, projectionConvention.ndcFarZ},
+      { 1.0f,  1.0f, projectionConvention.ndcFarZ},
   }};
 
   std::array<glm::vec3, 8> worldCorners{};
@@ -1480,54 +1480,76 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   const shaderio::CameraUniforms fallbackCamera{
       .view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
       .projection = [] {
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f);
-        projection[1][1] *= -1.0f;
-        return projection;
+        return clipspace::makePerspectiveProjection(
+            glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
+            clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
       }(),
       .viewProjection = glm::mat4(1.0f),
+      .inverseViewProjection = glm::mat4(1.0f),
       .cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f),
+      .shadowConstantBias = 0.0f,
+      .shadowDirectionAndSlopeBias = glm::vec4(0.0f),
   };
 
   shaderio::CameraUniforms camera = params.cameraUniforms != nullptr ? *params.cameraUniforms : fallbackCamera;
   if(params.cameraUniforms == nullptr)
   {
     camera.viewProjection = camera.projection * camera.view;
+    camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.shadowConstantBias = 0.0f;
+    camera.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
   }
 
   state.sceneBounds = computeSceneBounds(params.gltfModel);
 
-  const float projection22 = camera.projection[2][2];
-  const float projection32 = camera.projection[3][2];
-  const float cameraNear = std::abs(projection32 / projection22);
-  const float cameraFar = std::abs(projection32 / (projection22 + 1.0f));
+  const clipspace::ProjectionConvention projectionConvention =
+      clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+  const float cameraNear = std::abs(clipspace::extractPerspectiveNearPlane(camera.projection, projectionConvention));
+  const float cameraFar = std::abs(clipspace::extractPerspectiveFarPlane(camera.projection, projectionConvention));
   state.shadowDistance = glm::clamp(params.lightSettings.shadowDistance, cameraNear + 0.5f, std::max(cameraFar, cameraNear + 1.0f));
   state.viewFrustumCorners = computePerspectiveFrustumCorners(camera, cameraNear, state.shadowDistance);
 
+  std::array<glm::vec3, 8> shadowFitCorners = state.viewFrustumCorners;
+  if(state.sceneBounds.valid)
+  {
+    shadowFitCorners = {{
+        {state.sceneBounds.min.x, state.sceneBounds.min.y, state.sceneBounds.min.z},
+        {state.sceneBounds.max.x, state.sceneBounds.min.y, state.sceneBounds.min.z},
+        {state.sceneBounds.min.x, state.sceneBounds.max.y, state.sceneBounds.min.z},
+        {state.sceneBounds.max.x, state.sceneBounds.max.y, state.sceneBounds.min.z},
+        {state.sceneBounds.min.x, state.sceneBounds.min.y, state.sceneBounds.max.z},
+        {state.sceneBounds.max.x, state.sceneBounds.min.y, state.sceneBounds.max.z},
+        {state.sceneBounds.min.x, state.sceneBounds.max.y, state.sceneBounds.max.z},
+        {state.sceneBounds.max.x, state.sceneBounds.max.y, state.sceneBounds.max.z},
+    }};
+  }
+
   glm::vec3 center(0.0f);
-  for(const glm::vec3& corner : state.viewFrustumCorners)
+  for(const glm::vec3& corner : shadowFitCorners)
   {
     center += corner;
   }
-  center /= static_cast<float>(state.viewFrustumCorners.size());
+  center /= static_cast<float>(shadowFitCorners.size());
 
-  const glm::vec3 lightDir = glm::normalize(params.lightSettings.direction);
-  const glm::vec3 lightForward = -lightDir;
-  const glm::vec3 upReference = std::abs(lightForward.y) > 0.95f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+  const glm::vec3 lightTravelDir = glm::normalize(params.lightSettings.direction);
+  const glm::vec3 dirToLight = -lightTravelDir;
+  const glm::vec3 upReference =
+      std::abs(lightTravelDir.y) > 0.95f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
 
   float radius = 0.0f;
-  for(const glm::vec3& corner : state.viewFrustumCorners)
+  for(const glm::vec3& corner : shadowFitCorners)
   {
     radius = std::max(radius, glm::length(corner - center));
   }
   radius = std::max(radius, 5.0f);
 
   state.lightAnchor = center;
-  const glm::vec3 lightPosition = center - lightForward * (radius + 10.0f);
+  const glm::vec3 lightPosition = center - lightTravelDir * (radius + 10.0f);
   const glm::mat4 lightView = glm::lookAt(lightPosition, center, upReference);
 
   glm::vec3 minExtents(std::numeric_limits<float>::max());
   glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
-  for(const glm::vec3& corner : state.viewFrustumCorners)
+  for(const glm::vec3& corner : shadowFitCorners)
   {
     const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
     minExtents = glm::min(minExtents, lightSpace);
@@ -1546,17 +1568,20 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   minExtents.z -= radius * 2.0f + 20.0f;
   maxExtents.z += 20.0f;
 
-  const glm::mat4 lightProjection = glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y,
-                                               -maxExtents.z, -minExtents.z);
+  const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
+      minExtents.x, maxExtents.x, minExtents.y, maxExtents.y, -maxExtents.z, -minExtents.z, projectionConvention);
   state.shadowCamera.view = lightView;
   state.shadowCamera.projection = lightProjection;
   state.shadowCamera.viewProjection = lightProjection * lightView;
+  state.shadowCamera.inverseViewProjection = glm::inverse(state.shadowCamera.viewProjection);
   state.shadowCamera.cameraPosition = lightPosition;
+  state.shadowCamera.shadowConstantBias = params.lightSettings.depthBias;
+  state.shadowCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, params.lightSettings.normalBias);
   state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
 
   state.lightParams.worldToShadow = state.shadowCamera.viewProjection;
   state.lightParams.lightDirectionAndShadowStrength =
-      glm::vec4(lightDir, params.lightSettings.shadowStrength);
+      glm::vec4(dirToLight, params.lightSettings.shadowStrength);
   state.lightParams.lightColorAndNormalBias = glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
   state.lightParams.ambientColorAndTexelSize =
       glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(SceneResources::kShadowMapSize));
@@ -1701,7 +1726,7 @@ void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& 
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
       .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-      .clearValue  = {{{1.0f, 0}}},
+      .clearValue  = {{{0.0f, 0}}},
   };
 
   const VkRenderingInfo renderingInfo{
@@ -1930,7 +1955,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
       .shaderStageCount  = static_cast<uint32_t>(shaderStages.size()),
       .vertexInput       = vertexInput,
       .rasterState       = rhi::RasterState{},
-      .depthState        = rhi::DepthState{true, true, rhi::CompareOp::lessOrEqual},
+      .depthState        = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
       .blendStates       = blendStates.data(),
       .blendStateCount   = static_cast<uint32_t>(blendStates.size()),
       .dynamicStates     = dynamicStates.data(),
@@ -2344,7 +2369,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         .shaderStageCount  = static_cast<uint32_t>(gbufferShaderStages.size()),
         .vertexInput       = gbufferVertexInput,
         .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::less},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::greater},
         .blendStates       = gbufferBlendStates.data(),
         .blendStateCount   = static_cast<uint32_t>(gbufferBlendStates.size()),
         .dynamicStates     = gbufferDynamicStates.data(),
@@ -2434,7 +2459,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         .shaderStageCount  = static_cast<uint32_t>(shadowStages.size()),
         .vertexInput       = shadowVertexInput,
         .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::lessOrEqual},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
         .blendStates       = nullptr,
         .blendStateCount   = 0,
         .dynamicStates     = shadowDynamicStates.data(),
@@ -2447,7 +2472,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             },
     };
     shadowDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
-    shadowDesc.rasterState.cullMode    = rhi::CullMode::back;
+    shadowDesc.rasterState.cullMode    = rhi::CullMode::none;
     shadowDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
     shadowDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
@@ -2534,7 +2559,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         .shaderStageCount  = static_cast<uint32_t>(forwardShaderStages.size()),
         .vertexInput       = forwardVertexInput,
         .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::lessOrEqual},  // Test enabled, write disabled
+        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::greaterOrEqual},  // Test enabled, write disabled
         .blendStates       = &forwardBlend,
         .blendStateCount   = 1,
         .dynamicStates     = forwardDynamicStates.data(),
@@ -3398,7 +3423,21 @@ uint64_t Renderer::getGBufferColorDescriptorSet() const
 
 uint64_t Renderer::getGBufferTextureDescriptorSet() const
 {
-  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSet);
+  if(m_device.gbufferTextureSets.empty())
+  {
+    return 0;
+  }
+
+  uint32_t frameIndex = 0;
+  if(m_perFrame.frameContext != nullptr)
+  {
+    frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  }
+  if(frameIndex >= m_device.gbufferTextureSets.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
 }
 
 BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const

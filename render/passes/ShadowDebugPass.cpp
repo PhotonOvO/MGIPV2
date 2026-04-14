@@ -1,6 +1,7 @@
 #include "ShadowDebugPass.h"
 #include "../Renderer.h"
 #include "../ShadowResources.h"
+#include "../ClipSpaceConvention.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"
 
@@ -36,18 +37,18 @@ void ShadowDebugPass::execute(const PassContext& context) const
     const glm::mat4& lightViewProj = shadowData->lightViewProjectionMatrix;
     const glm::mat4 invLightViewProj = glm::inverse(lightViewProj);
 
-    // NDC corners for ortho projection (Vulkan: Z in [0,1])
+    const clipspace::ProjectionConvention projectionConvention =
+        clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+    // NDC corners for ortho projection under the active clip-space convention.
     const glm::vec4 ndcCorners[8] = {
-        // Near plane (Z=0)
-        glm::vec4(-1.0f, -1.0f, 0.0f, 1.0f),
-        glm::vec4( 1.0f, -1.0f, 0.0f, 1.0f),
-        glm::vec4(-1.0f,  1.0f, 0.0f, 1.0f),
-        glm::vec4( 1.0f,  1.0f, 0.0f, 1.0f),
-        // Far plane (Z=1)
-        glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f),
-        glm::vec4( 1.0f, -1.0f, 1.0f, 1.0f),
-        glm::vec4(-1.0f,  1.0f, 1.0f, 1.0f),
-        glm::vec4( 1.0f,  1.0f, 1.0f, 1.0f),
+        glm::vec4(-1.0f, -1.0f, projectionConvention.ndcNearZ, 1.0f),
+        glm::vec4( 1.0f, -1.0f, projectionConvention.ndcNearZ, 1.0f),
+        glm::vec4(-1.0f,  1.0f, projectionConvention.ndcNearZ, 1.0f),
+        glm::vec4( 1.0f,  1.0f, projectionConvention.ndcNearZ, 1.0f),
+        glm::vec4(-1.0f, -1.0f, projectionConvention.ndcFarZ, 1.0f),
+        glm::vec4( 1.0f, -1.0f, projectionConvention.ndcFarZ, 1.0f),
+        glm::vec4(-1.0f,  1.0f, projectionConvention.ndcFarZ, 1.0f),
+        glm::vec4( 1.0f,  1.0f, projectionConvention.ndcFarZ, 1.0f),
     };
 
     // Transform to world space
@@ -144,10 +145,11 @@ void ShadowDebugPass::execute(const PassContext& context) const
     {
         // Fallback camera
         cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        cameraData.projection = glm::perspective(glm::radians(45.0f),
-            static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 100.0f);
-        cameraData.projection[1][1] *= -1.0f;  // Vulkan Y-flip
+        cameraData.projection = clipspace::makePerspectiveProjection(
+            glm::radians(45.0f), static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 100.0f,
+            projectionConvention);
         cameraData.viewProjection = cameraData.projection * cameraData.view;
+        cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
         cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
     }
 

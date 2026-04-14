@@ -31,20 +31,20 @@ public:
   [[nodiscard]] VkImageView    nativeImageView(uint32_t imageIndex) const;
   [[nodiscard]] VkImage        nativeImage(uint32_t imageIndex) const;
   [[nodiscard]] VkSemaphore    imageAvailableSemaphoreForCurrentFrame() const;
-  [[nodiscard]] VkSemaphore    renderFinishedSemaphoreForCurrentFrame() const;
+  [[nodiscard]] VkSemaphore    renderFinishedSemaphoreForCurrentImage() const;
 
 private:
   struct ImageResource
   {
     VkImage       image{VK_NULL_HANDLE};
     VkImageView   imageView{VK_NULL_HANDLE};
+    VkSemaphore   renderFinishedSemaphore{VK_NULL_HANDLE};
     TextureHandle texture{};
   };
 
   struct FrameResource
   {
     VkSemaphore imageAvailableSemaphore{VK_NULL_HANDLE};
-    VkSemaphore renderFinishedSemaphore{VK_NULL_HANDLE};
   };
 
   Extent2D createResources(bool vSync);

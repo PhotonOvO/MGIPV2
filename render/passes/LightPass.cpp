@@ -61,10 +61,8 @@ void LightPass::execute(const PassContext& context) const
     // Get output texture view and fixed extent
     rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(
         m_renderer->getOutputTextureView());
-    const rhi::Extent2D extent = {
-        SceneResources::kOutputTextureWidth,
-        SceneResources::kOutputTextureHeight
-    };
+    const VkExtent2D outputExtent = m_renderer->getSceneResources().getSize();
+    const rhi::Extent2D extent = {outputExtent.width, outputExtent.height};
 
     if(outputViewHandle.isNull())
     {

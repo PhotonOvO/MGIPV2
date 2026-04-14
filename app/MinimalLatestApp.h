@@ -117,7 +117,10 @@ public:
           m_cameraUniforms.view = m_camera.getViewMatrix();
           m_cameraUniforms.projection = m_camera.getProjectionMatrix();
           m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
+          m_cameraUniforms.inverseViewProjection = glm::inverse(m_cameraUniforms.viewProjection);
           m_cameraUniforms.cameraPosition = m_camera.getPosition();
+          m_cameraUniforms.shadowConstantBias = 0.0f;
+          m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
       }
 
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
@@ -212,18 +215,18 @@ public:
         ImGui::Separator();
         ImGui::Text("Directional Light");
         bool lightDirectionChanged = false;
-        lightDirectionChanged |= ImGui::SliderFloat("Light Azimuth", &m_lightAzimuthDegrees, -180.0f, 180.0f, "%.1f deg");
-        lightDirectionChanged |= ImGui::SliderFloat("Light Elevation", &m_lightElevationDegrees, -89.0f, 89.0f, "%.1f deg");
-        if(ImGui::Button("Reset Light Direction"))
+        lightDirectionChanged |= ImGui::SliderFloat("Travel Azimuth", &m_lightAzimuthDegrees, -180.0f, 180.0f, "%.1f deg");
+        lightDirectionChanged |= ImGui::SliderFloat("Travel Elevation", &m_lightElevationDegrees, -89.0f, 89.0f, "%.1f deg");
+        if(ImGui::Button("Reset Travel Direction"))
         {
-          m_lightSettings.direction = glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f));
+          m_lightSettings.direction = glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f));
           syncLightAnglesFromDirection();
         }
         if(lightDirectionChanged)
         {
           syncLightDirectionFromAngles();
         }
-        ImGui::Text("Light Dir: %.3f, %.3f, %.3f",
+        ImGui::Text("Travel Dir: %.3f, %.3f, %.3f",
                     m_lightSettings.direction.x,
                     m_lightSettings.direction.y,
                     m_lightSettings.direction.z);
@@ -240,7 +243,7 @@ public:
         ImGui::Checkbox("Scene Bounds", &m_debugOptions.showSceneBounds);
         ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
         ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
-        ImGui::Checkbox("Light Direction", &m_debugOptions.showLightDirection);
+        ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
         ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
         ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
       }
@@ -340,7 +343,7 @@ inline void MinimalLatestApp::syncLightAnglesFromDirection()
   glm::vec3 direction = m_lightSettings.direction;
   if(glm::length(direction) < 0.001f)
   {
-    direction = glm::normalize(glm::vec3(0.45f, 0.8f, 0.25f));
+    direction = glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f));
   }
   else
   {

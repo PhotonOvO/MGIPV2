@@ -43,7 +43,7 @@ void ShadowPass::execute(const PassContext& context) const
       .state      = rhi::ResourceState::DepthStencilAttachment,
       .loadOp     = rhi::LoadOp::clear,
       .storeOp    = rhi::StoreOp::store,
-      .clearValue = {1.0f, 0},
+      .clearValue = {0.0f, 0},
   };
 
   const rhi::RenderPassDesc passDesc{

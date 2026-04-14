@@ -490,17 +490,19 @@ struct ValidationSettings
       "WARNING-legacy-gpdp2",
       "VUID-VkPrivateDataSlotCreateInfo-flags-zerobitmask",
       "VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02819",
-      "VUID-vkCmdDraw-None-09600"  // RenderDoc injection: swapchain layout mismatch in captured descriptor
+      "VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820",  // Nsight injection: access/stage mask mismatch
+      "VUID-vkCmdDraw-None-09600",  // RenderDoc injection: swapchain layout mismatch in captured descriptor
+      "VUID-vkBindBufferMemory-memory-02985",  // Nsight injection: external memory import mismatch
+      "VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725",  // Nsight injection: buffer address capture replay
+      "VUID-VkMemoryAllocateInfo-pNext-02806",  // Nsight injection: dedicated buffer + host import conflict
+      "VUID-VkPresentInfoKHR-pImageIndices-01430",  // RenderDoc/Nsight injection: swapchain layout mismatch
+      "76fd6b",  // Nsight: same error in hex format
+      "90590b31",  // Nsight: VUID-vkBindBufferMemory-memory-02985 hex
+      "48a6c111",  // Nsight: VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725 hex
+      "af8d561d",  // Nsight: VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820 hex
+      "48ad24c6"  // RenderDoc/Nsight: VUID-VkPresentInfoKHR-pImageIndices-01430 hex
   };
 
-  ValidationSettings()
-  {
-    if(isRenderDocInjected())
-    {
-      message_id_filter.push_back("VUID-VkPresentInfoKHR-pImageIndices-01430");
-      LOGI("ValidationSettings: RenderDoc detected, filtering VUID-VkPresentInfoKHR-pImageIndices-01430 during capture");
-    }
-  }
 
   VkBaseInStructure* buildPNextChain()
   {
@@ -534,16 +536,6 @@ struct ValidationSettings
   static constexpr const char*   layerName{"VK_LAYER_KHRONOS_validation"};
   std::vector<VkLayerSettingEXT> layerSettings;
   VkLayerSettingsCreateInfoEXT   layerSettingsCreateInfo{};
-
-private:
-  static bool isRenderDocInjected()
-  {
-#ifdef _WIN32
-    return GetModuleHandleA("renderdoc.dll") != nullptr;
-#else
-    return false;
-#endif
-  }
 };
 
 //--- Vulkan Context Configuration ------------------------------------------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 #include "../Renderer.h"
 #include "../MeshPool.h"
 #include "../SceneResources.h"
+#include "../ClipSpaceConvention.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
 
@@ -210,10 +211,11 @@ void ForwardPass::execute(const PassContext& context) const
     else
     {
         cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        cameraData.projection = glm::perspective(glm::radians(45.0f),
-            static_cast<float>(renderExtent.width) / static_cast<float>(renderExtent.height), 0.1f, 100.0f);
-        cameraData.projection[1][1] *= -1.0f;
+        cameraData.projection = clipspace::makePerspectiveProjection(
+            glm::radians(45.0f), static_cast<float>(renderExtent.width) / static_cast<float>(renderExtent.height), 0.1f, 100.0f,
+            clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
         cameraData.viewProjection = cameraData.projection * cameraData.view;
+        cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
         cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
     }
 

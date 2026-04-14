@@ -40,7 +40,8 @@ void DebugPass::execute(const PassContext& context) const
 
   context.cmd->beginEvent("DebugPass");
 
-  const rhi::Extent2D extent{SceneResources::kOutputTextureWidth, SceneResources::kOutputTextureHeight};
+  const VkExtent2D outputExtent = m_renderer->getSceneResources().getSize();
+  const rhi::Extent2D extent{outputExtent.width, outputExtent.height};
 
   rhi::RenderTargetDesc colorTarget{
       .texture   = {},

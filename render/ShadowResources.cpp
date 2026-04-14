@@ -18,18 +18,14 @@ constexpr float kDepthBiasSlope           = 1.75f;
 constexpr float kShadowIntensity          = 1.0f;
 constexpr float kShadowKernelRadius       = 1.0f;  // 1 => 3x3 PCF
 
-[[nodiscard]] float extractNearPlane(const glm::mat4& projection)
+[[nodiscard]] float extractNearPlane(const glm::mat4& projection, const clipspace::ProjectionConvention& convention)
 {
-  const float a = projection[2][2];
-  const float b = projection[3][2];
-  return std::abs(a) > 1e-5f ? b / a : 0.1f;
+  return clipspace::extractPerspectiveNearPlane(projection, convention);
 }
 
-[[nodiscard]] float extractFarPlane(const glm::mat4& projection)
+[[nodiscard]] float extractFarPlane(const glm::mat4& projection, const clipspace::ProjectionConvention& convention)
 {
-  const float a = projection[2][2];
-  const float b = projection[3][2];
-  return std::abs(a + 1.0f) > 1e-5f ? b / (a + 1.0f) : kDefaultMaxShadowDistance;
+  return clipspace::extractPerspectiveFarPlane(projection, convention);
 }
 
 [[nodiscard]] glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
@@ -44,8 +40,8 @@ constexpr float kShadowKernelRadius       = 1.0f;  // 1 => 3x3 PCF
     float sliceFarDistance)
 {
   const glm::mat4 invViewProjection = glm::inverse(camera.viewProjection);
-  const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection));
-  const float cameraFar  = std::max(cameraNear + 0.01f, extractFarPlane(camera.projection));
+  const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection, projectionConvention));
+  const float cameraFar  = std::max(cameraNear + 0.01f, extractFarPlane(camera.projection, projectionConvention));
   const float sliceFar   = glm::clamp(sliceFarDistance, cameraNear + 0.01f, cameraFar);
   const float sliceLerp  = (sliceFar - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
 
@@ -198,7 +194,7 @@ void ShadowResources::deinit()
 
 void ShadowResources::updateShadowMatrices(const shaderio::CameraUniforms& camera, const glm::vec3& lightDir)
 {
-  const float cameraFar          = std::max(1.0f, extractFarPlane(camera.projection));
+  const float cameraFar          = std::max(1.0f, extractFarPlane(camera.projection, m_projectionConvention));
   const float maxShadowDistance  = std::min(kDefaultMaxShadowDistance, cameraFar);
   const glm::vec3 lightDirection = safeNormalize(lightDir, glm::vec3(0.0f, -1.0f, 0.0f));
 

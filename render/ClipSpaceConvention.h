@@ -23,17 +23,22 @@ struct ProjectionConvention
   float ndcFarZ{1.0f};
 };
 
+constexpr bool usesReverseZ(const ProjectionConvention& convention)
+{
+  return convention.ndcNearZ > convention.ndcFarZ;
+}
+
 constexpr ProjectionConvention getProjectionConvention(BackendConvention backend)
 {
   switch(backend)
   {
     case BackendConvention::vulkan:
-      return ProjectionConvention{.flipY = true, .ndcNearZ = 0.0f, .ndcFarZ = 1.0f};
+      return ProjectionConvention{.flipY = true, .ndcNearZ = 1.0f, .ndcFarZ = 0.0f};
     case BackendConvention::d3d12:
     case BackendConvention::metal:
-      return ProjectionConvention{.flipY = false, .ndcNearZ = 0.0f, .ndcFarZ = 1.0f};
+      return ProjectionConvention{.flipY = false, .ndcNearZ = 1.0f, .ndcFarZ = 0.0f};
     default:
-      return ProjectionConvention{.flipY = true, .ndcNearZ = 0.0f, .ndcFarZ = 1.0f};
+      return ProjectionConvention{.flipY = true, .ndcNearZ = 1.0f, .ndcFarZ = 0.0f};
   }
 }
 
@@ -52,7 +57,10 @@ inline glm::mat4 makePerspectiveProjection(float fovRadians,
                                            float farPlane,
                                            const ProjectionConvention& convention)
 {
-  return applyProjectionConvention(glm::perspective(fovRadians, aspectRatio, nearPlane, farPlane), convention);
+  const glm::mat4 projection = usesReverseZ(convention)
+      ? glm::perspective(fovRadians, aspectRatio, farPlane, nearPlane)
+      : glm::perspective(fovRadians, aspectRatio, nearPlane, farPlane);
+  return applyProjectionConvention(projection, convention);
 }
 
 inline glm::mat4 makeOrthographicProjection(float left,
@@ -63,7 +71,32 @@ inline glm::mat4 makeOrthographicProjection(float left,
                                             float farPlane,
                                             const ProjectionConvention& convention)
 {
-  return applyProjectionConvention(glm::ortho(left, right, bottom, top, nearPlane, farPlane), convention);
+  const glm::mat4 projection = usesReverseZ(convention)
+      ? glm::ortho(left, right, bottom, top, farPlane, nearPlane)
+      : glm::ortho(left, right, bottom, top, nearPlane, farPlane);
+  return applyProjectionConvention(projection, convention);
+}
+
+inline float extractPerspectiveNearPlane(const glm::mat4& projection, const ProjectionConvention& convention)
+{
+  const float a = projection[2][2];
+  const float b = projection[3][2];
+  if(usesReverseZ(convention))
+  {
+    return std::abs(a + 1.0f) > 1e-5f ? b / (a + 1.0f) : 0.1f;
+  }
+  return std::abs(a) > 1e-5f ? b / a : 0.1f;
+}
+
+inline float extractPerspectiveFarPlane(const glm::mat4& projection, const ProjectionConvention& convention)
+{
+  const float a = projection[2][2];
+  const float b = projection[3][2];
+  if(usesReverseZ(convention))
+  {
+    return std::abs(a) > 1e-5f ? b / a : 100.0f;
+  }
+  return std::abs(a + 1.0f) > 1e-5f ? b / (a + 1.0f) : 100.0f;
 }
 
 inline glm::mat4 makeNdcToShadowTextureMatrix(const ProjectionConvention& convention)
