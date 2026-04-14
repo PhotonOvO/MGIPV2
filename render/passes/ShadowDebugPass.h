@@ -6,7 +6,8 @@ namespace demo {
 
 class Renderer;
 
-// Debug pass to draw shadow frustum wireframe as 3D lines
+// Debug pass to draw CSM cascade frustum wireframes as 3D lines
+// Draws 4 cascade frustums color-coded: Red (c0), Green (c1), Blue (c2), Cyan (c3)
 class ShadowDebugPass : public RenderPassNode {
 public:
     explicit ShadowDebugPass(Renderer* renderer);
