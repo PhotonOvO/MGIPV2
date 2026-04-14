@@ -1,4 +1,4 @@
-// LightPass shader: Full PBR lighting from GBuffer with a single directional shadow map
+// LightPass shader: Full PBR lighting from GBuffer with cascaded shadow maps (CSM)
 
 #include "shader_io.h"
 
@@ -55,32 +55,71 @@ vec3 reconstructWorldPosition(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
-float sampleShadow(vec3 worldPos, vec3 worldNormal)
+// Reconstruct view-space depth from NDC depth
+float reconstructViewDepth(float ndcDepth)
 {
-    float4 shadowClip = mul(lightParams.worldToShadow, float4(worldPos, 1.0));
+    // NDC depth is in [0,1] for Vulkan. We need view-space Z.
+    // Use projection matrix inverse: viewZ = projection[3][2] / (ndcDepth * 2 - 1 - projection[2][3] / projection[2][2])
+    // Simplified: for perspective projection, viewZ = near / (ndcDepth - A) where A depends on near/far
+    // More accurate: use the projection matrix
+    float4x4 proj = camera.projection;
+    float ndcZ = ndcDepth * 2.0 - 1.0;  // Convert [0,1] to [-1,1]
+    float viewZ = proj[3][2] / (ndcZ - proj[2][2]);
+    return -viewZ;  // View Z is negative in right-handed system
+}
+
+// Select cascade based on view-space depth
+int selectCascadeIndex(float viewDepth)
+{
+    int cascadeIndex = 0;
+    float splits[4] = {
+        lightParams.cascadeSplitDistances.x,
+        lightParams.cascadeSplitDistances.y,
+        lightParams.cascadeSplitDistances.z,
+        lightParams.cascadeSplitDistances.w
+    };
+
+    [unroll]
+    for(int i = 0; i < LCascadeCount - 1; ++i)
+    {
+        if(viewDepth > splits[i])
+            cascadeIndex = i + 1;
+    }
+    return cascadeIndex;
+}
+
+// CSM shadow sampling with adaptive bias
+float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
+{
+    int cascadeIdx = selectCascadeIndex(viewDepth);
+
+    float4 shadowClip = mul(lightParams.worldToShadow[cascadeIdx], float4(worldPos, 1.0));
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    float2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
 
-    float2 shadowUv = float2(shadowNdc.x * 0.5 + 0.5, shadowNdc.y * 0.5 + 0.5);
+    // Bounds check
     if(shadowUv.x < 0.0 || shadowUv.x > 1.0 || shadowUv.y < 0.0 || shadowUv.y > 1.0)
-    {
         return 1.0;
-    }
-
     if(shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
-    {
         return 1.0;
-    }
 
+    // Adaptive bias (cascade-scaled)
     float3 lightDir = normalize(lightParams.lightDirectionAndShadowStrength.xyz);
-    float normalBias = lightParams.lightColorAndNormalBias.w;
-    float depthBias = lightParams.shadowMetrics.y;
-    float texelSize = lightParams.ambientColorAndTexelSize.w;
-    float cosTheta = saturate(dot(worldNormal, lightDir));
+    float cosTheta = saturate(abs(dot(worldNormal, lightDir)));
     float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
     float slope = sinTheta / max(cosTheta, 0.01);
-    float bias = depthBias + normalBias * slope;
 
+    float baseBias = lightParams.shadowMetrics.y;
+    float slopeBias = lightParams.shadowMetrics.z;
+    float cascadeScale = 0.5;  // Scale factor for cascade bias
+
+    float cascadeBias = baseBias * (1.0 + float(cascadeIdx) * cascadeScale);
+    float bias = cascadeBias + slopeBias * (1.0 + float(cascadeIdx) * cascadeScale) * slope;
+
+    // 3x3 PCF
+    float texelSize = lightParams.shadowMetrics.x;
     float visibility = 0.0;
+
     [unroll]
     for(int y = -1; y <= 1; ++y)
     {
@@ -88,17 +127,16 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
         for(int x = -1; x <= 1; ++x)
         {
             float2 offset = float2(x, y) * texelSize;
-            float shadowDepth = inTexture[kShadowMapIndex].Sample(shadowUv + offset).r;
-            float receiverDepth = shadowNdc.z + bias;
-            visibility += receiverDepth >= shadowDepth ? 1.0 : 0.0;
+            float3 sampleCoord = float3(shadowUv + offset, float(cascadeIdx));  // Layer = cascade index
+            float shadowDepth = inTexture[kShadowMapIndex].Sample(sampleCoord.xy).r;
+            visibility += (shadowNdc.z + bias >= shadowDepth) ? 1.0 : 0.0;
         }
     }
-
     return visibility / 9.0;
 }
 
 vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float metallic, float roughness, float ao,
-                        float shadowFade)
+                        float shadowFade, float viewDepth)
 {
     vec3 L = normalize(lightParams.lightDirectionAndShadowStrength.xyz);
     vec3 V = normalize(camera.cameraPosition - worldPos);
@@ -124,7 +162,7 @@ vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float
     vec3 kD = (1.0 - kS) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
 
-    float shadowVisibility = sampleShadow(worldPos, N);
+    float shadowVisibility = sampleCSMShadow(worldPos, N, viewDepth);
     float shadowStrength = lightParams.lightDirectionAndShadowStrength.w * shadowFade;
     float directVisibility = lerp(1.0, shadowVisibility, shadowStrength);
     vec3 Lo = (diffuse + specular) * radiance * NdotL * directVisibility;
@@ -169,6 +207,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
     vec3 worldNormal = normalize(normalSample.rgb * 2.0 - 1.0);
-    float shadowVisibility = sampleShadow(worldPos, worldNormal);
+    float viewDepth = reconstructViewDepth(depthSample);
+    float shadowVisibility = sampleCSMShadow(worldPos, worldNormal, viewDepth);
     return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
 }

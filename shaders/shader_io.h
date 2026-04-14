@@ -171,11 +171,12 @@ struct LightListUniforms
 // Light parameters for PBR lighting pass (push constants)
 struct LightParams
 {
-  mat4 worldToShadow;
-  vec4 lightDirectionAndShadowStrength;  // xyz = shading direction to light, w = shadow strength
-  vec4 lightColorAndNormalBias;          // rgb = light intensity, w = normal bias
-  vec4 ambientColorAndTexelSize;         // rgb = ambient term, w = 1 / shadow map size
-  vec4 shadowMetrics;                    // x = max shadow distance, y = depth bias
+  mat4 worldToShadow[LCascadeCount];      // Per-cascade matrices
+  vec4 cascadeSplitDistances;             // x=c0, y=c1, z=c2, w=c3 far distances
+  vec4 lightDirectionAndShadowStrength;   // xyz = shading direction to light, w = shadow strength
+  vec4 lightColorAndNormalBias;           // rgb = light intensity, w = normal bias
+  vec4 ambientColorAndTexelSize;          // rgb = ambient term, w = 1 / shadow map size
+  vec4 shadowMetrics;                     // x = texelSize, y = baseBias, z = slopeBias, w = cascadeCount
 };
 
 struct ShadowUniforms
