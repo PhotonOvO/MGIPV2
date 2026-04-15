@@ -161,6 +161,7 @@ public:
 
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
       ImGui::Begin("Viewport");
+      glm::vec4 viewportImageRect{0.0f};
       ImVec2              viewportContentSize = ImGui::GetContentRegionAvail();
       demo::rhi::Extent2D requestedViewportSize{uint32_t(viewportContentSize.x), uint32_t(viewportContentSize.y)};
       if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
@@ -173,6 +174,12 @@ public:
 
       const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
       ImGui::Image(m_renderer.getViewportTextureID(viewportTextureHandle), viewportContentSize);
+      const ImVec2 viewportImageMin = ImGui::GetItemRectMin();
+      const ImVec2 viewportImageMax = ImGui::GetItemRectMax();
+      viewportImageRect = glm::vec4(viewportImageMin.x,
+                                    viewportImageMin.y,
+                                    viewportImageMax.x - viewportImageMin.x,
+                                    viewportImageMax.y - viewportImageMin.y);
       ImGui::SetCursorPos(ImVec2(0, 0));
       ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
       ImGui::End();
@@ -244,6 +251,12 @@ public:
         ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
         ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
         ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
+        ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
+        ImGui::Checkbox("Viewport Axis", &m_debugOptions.showViewportAxis);
+        ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
+        ImGui::SliderFloat("Point Max Radius", &m_debugOptions.pointLightMaxRadius, 0.5f, 12.0f, "%.2f");
+        ImGui::SliderFloat("Point Intensity", &m_debugOptions.pointLightIntensityScale, 0.25f, 16.0f, "%.2f",
+                           ImGuiSliderFlags_Logarithmic);
         ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
         ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
       }
@@ -251,19 +264,19 @@ public:
 
       drawModelLoaderUI();
 
-      ImGui::Render();
-
       demo::RenderParams frameParams{};
       frameParams.viewportSize   = m_viewportSize;
       frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
       frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
       frameParams.materialHandle = m_selectedMaterial;
       frameParams.clearColor     = m_clearColor;
+      frameParams.viewportImageRect = viewportImageRect;
       frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
       frameParams.cameraUniforms = &m_cameraUniforms;
       frameParams.lightSettings  = m_lightSettings;
       frameParams.debugOptions   = m_debugOptions;
       frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
+        ImGui::Render();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
 

@@ -2,6 +2,22 @@
 
 namespace demo {
 
+namespace {
+
+uint32_t computeMipCount(VkExtent2D extent)
+{
+  uint32_t mipCount = 1;
+  uint32_t size = std::max(extent.width, extent.height);
+  while(size > 1)
+  {
+    size /= 2u;
+    ++mipCount;
+  }
+  return mipCount;
+}
+
+}  // namespace
+
 void SceneResources::init(rhi::Device& device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo)
 {
   ASSERT(m_createInfo.color.empty(), "Missing deinit()");
@@ -206,6 +222,42 @@ void SceneResources::create(VkCommandBuffer cmd)
     };
     VK_CHECK(vkCreateImageView(m_device, &depthViewInfo, nullptr, &m_resources.depthView));
     dutil.setObjectName(m_resources.depthView, "SceneDepthView");
+
+    m_resources.depthPyramidExtent = {
+        std::max(1u, (m_createInfo.size.width + 1u) / 2u),
+        std::max(1u, (m_createInfo.size.height + 1u) / 2u),
+    };
+    m_resources.depthPyramidMipCount = computeMipCount(m_resources.depthPyramidExtent);
+
+    const VkImageCreateInfo depthPyramidInfo{
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = VK_FORMAT_R32_SFLOAT,
+        .extent      = {m_resources.depthPyramidExtent.width, m_resources.depthPyramidExtent.height, 1},
+        .mipLevels   = m_resources.depthPyramidMipCount,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    };
+    m_resources.depthPyramidImage = createImage(depthPyramidInfo);
+    dutil.setObjectName(m_resources.depthPyramidImage.image, "DepthPyramid");
+
+    m_resources.depthPyramidMipViews.resize(m_resources.depthPyramidMipCount, VK_NULL_HANDLE);
+    for(uint32_t mipLevel = 0; mipLevel < m_resources.depthPyramidMipCount; ++mipLevel)
+    {
+      const VkImageViewCreateInfo mipViewInfo{
+          .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+          .image            = m_resources.depthPyramidImage.image,
+          .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+          .format           = VK_FORMAT_R32_SFLOAT,
+          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .baseMipLevel = mipLevel,
+                               .levelCount = 1,
+                               .layerCount = 1},
+      };
+      VK_CHECK(vkCreateImageView(m_device, &mipViewInfo, nullptr, &m_resources.depthPyramidMipViews[mipLevel]));
+      dutil.setObjectName(m_resources.depthPyramidMipViews[mipLevel], "DepthPyramidMipView" + std::to_string(mipLevel));
+    }
   }
 
   for(uint32_t c = 0; c < numColor; ++c)
@@ -228,6 +280,7 @@ void SceneResources::create(VkCommandBuffer cmd)
   {
     utils::cmdInitImageLayout(cmd, m_resources.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
     utils::cmdInitImageLayout(cmd, m_resources.shadowMapImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
+    utils::cmdInitImageLayout(cmd, m_resources.depthPyramidImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
   }
 
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -307,6 +360,20 @@ void SceneResources::destroy()
     vkDestroyImageView(m_device, m_resources.depthView, nullptr);
   }
 
+  for(VkImageView view : m_resources.depthPyramidMipViews)
+  {
+    if(view != VK_NULL_HANDLE)
+    {
+      vkDestroyImageView(m_device, view, nullptr);
+    }
+  }
+  m_resources.depthPyramidMipViews.clear();
+
+  if(m_resources.depthPyramidImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.depthPyramidImage.image, m_resources.depthPyramidImage.allocation);
+  }
+
   for(const VkDescriptorImageInfo& descriptor : m_resources.descriptors)
   {
     if(descriptor.imageView != VK_NULL_HANDLE)
@@ -364,6 +431,30 @@ VkImageView SceneResources::getShadowMapView() const
 VkExtent2D SceneResources::getShadowMapExtent() const
 {
   return {kShadowMapSize, kShadowMapSize};
+}
+
+VkImage SceneResources::getDepthPyramidImage() const
+{
+  return m_resources.depthPyramidImage.image;
+}
+
+VkImageView SceneResources::getDepthPyramidMipView(uint32_t mipLevel) const
+{
+  if(m_resources.depthPyramidMipViews.empty())
+  {
+    return VK_NULL_HANDLE;
+  }
+  return m_resources.depthPyramidMipViews[std::min<uint32_t>(mipLevel, static_cast<uint32_t>(m_resources.depthPyramidMipViews.size() - 1))];
+}
+
+VkExtent2D SceneResources::getDepthPyramidExtent() const
+{
+  return m_resources.depthPyramidExtent;
+}
+
+uint32_t SceneResources::getDepthPyramidMipCount() const
+{
+  return m_resources.depthPyramidMipCount;
 }
 
 }  // namespace demo

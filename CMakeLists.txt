@@ -238,6 +238,12 @@ add_library(demo_core STATIC
   rhi/d3d12/D3D12FrameContext.cpp
   render/Renderer.cpp
   render/Renderer.h
+  render/ImguiAxis.cpp
+  render/ImguiAxis.h
+  render/passes/DepthPrepass.h
+  render/passes/DepthPrepass.cpp
+  render/passes/DepthPyramidPass.h
+  render/passes/DepthPyramidPass.cpp
   render/passes/AnimateVerticesPass.h
   render/passes/AnimateVerticesPass.cpp
   render/passes/GBufferPass.h
@@ -250,6 +256,8 @@ add_library(demo_core STATIC
   render/passes/ForwardPass.cpp
   render/passes/DebugPass.h
   render/passes/DebugPass.cpp
+  render/passes/LightCullingPass.h
+  render/passes/LightCullingPass.cpp
   render/passes/SceneOpaquePass.h
   render/passes/SceneOpaquePass.cpp
   render/passes/PresentPass.h
@@ -266,6 +274,8 @@ add_library(demo_core STATIC
   render/FrameSubmission.h
   render/SceneResources.cpp
   render/SceneResources.h
+  render/LightResources.cpp
+  render/LightResources.h
   render/DrawStream.h
   render/DrawStreamDecoder.cpp
   render/DrawStreamDecoder.h

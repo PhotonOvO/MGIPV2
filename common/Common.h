@@ -62,9 +62,12 @@
 #include "_autogen/shader.rast.slang.h"
 #include "_autogen/shader.light.slang.h"
 #include "_autogen/shader.gbuffer.slang.h"
+#include "_autogen/shader.depth_prepass.slang.h"
+#include "_autogen/shader.depth_pyramid.slang.h"
 #include "_autogen/shader.forward.slang.h"
 #include "_autogen/shader.shadow.slang.h"
 #include "_autogen/shader.debug.slang.h"
+#include "_autogen/shader.light_culling.slang.h"
 #else
 #include "_autogen/shader.frag.glsl.h"
 #include "_autogen/shader.vert.glsl.h"
@@ -496,11 +499,13 @@ struct ValidationSettings
       "VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725",  // Nsight injection: buffer address capture replay
       "VUID-VkMemoryAllocateInfo-pNext-02806",  // Nsight injection: dedicated buffer + host import conflict
       "VUID-VkPresentInfoKHR-pImageIndices-01430",  // RenderDoc/Nsight injection: swapchain layout mismatch
+      "VUID-vkResetFences-pFences-01123",  // RenderDoc capture: injected fence reset can race captured queue work
       "76fd6b",  // Nsight: same error in hex format
       "90590b31",  // Nsight: VUID-vkBindBufferMemory-memory-02985 hex
       "48a6c111",  // Nsight: VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725 hex
       "af8d561d",  // Nsight: VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820 hex
-      "48ad24c6"  // RenderDoc/Nsight: VUID-VkPresentInfoKHR-pImageIndices-01430 hex
+      "48ad24c6",  // RenderDoc/Nsight: VUID-VkPresentInfoKHR-pImageIndices-01430 hex
+      "68a5074e"  // RenderDoc capture: VUID-vkResetFences-pFences-01123 hex
   };
 
 

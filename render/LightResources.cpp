@@ -1,161 +1,206 @@
 #include "LightResources.h"
 
+#include <algorithm>
 #include <cstring>
+#include <span>
 
 namespace demo {
 
+namespace {
+
+constexpr VkDeviceSize kCoarseBoundsElementSize = sizeof(uint16_t) * 4;
+
+utils::Buffer createStorageBuffer(VkDevice device,
+                                  VmaAllocator allocator,
+                                  VkDeviceSize size,
+                                  VmaMemoryUsage memoryUsage,
+                                  VmaAllocationCreateFlags flags = {})
+{
+  const VkBufferCreateInfo bufferInfo{
+      .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size        = std::max<VkDeviceSize>(size, 16),
+      .usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  const VmaAllocationCreateInfo allocInfo{
+      .flags = flags,
+      .usage = memoryUsage,
+  };
+
+  utils::Buffer buffer{};
+  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr));
+  return buffer;
+}
+
+utils::Buffer createUniformBuffer(VkDevice device,
+                                  VmaAllocator allocator,
+                                  VkDeviceSize size,
+                                  VmaMemoryUsage memoryUsage,
+                                  VmaAllocationCreateFlags flags = {})
+{
+  const VkBufferCreateInfo bufferInfo{
+      .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size        = std::max<VkDeviceSize>(size, 16),
+      .usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  const VmaAllocationCreateInfo allocInfo{
+      .flags = flags,
+      .usage = memoryUsage,
+  };
+
+  utils::Buffer buffer{};
+  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr));
+  return buffer;
+}
+
+void destroyBuffer(VmaAllocator allocator, utils::Buffer& buffer)
+{
+  if(buffer.buffer != VK_NULL_HANDLE)
+  {
+    vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+    buffer = {};
+  }
+}
+
+void updateMappedStorageBuffer(VmaAllocator allocator, utils::Buffer& buffer, std::span<const shaderio::LightData> lights)
+{
+  if(buffer.buffer == VK_NULL_HANDLE || lights.empty())
+  {
+    return;
+  }
+
+  void* mappedData = nullptr;
+  const VkDeviceSize copySize = sizeof(shaderio::LightData) * lights.size();
+  VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+  std::memcpy(mappedData, lights.data(), static_cast<size_t>(copySize));
+  VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, 0, copySize));
+  vmaUnmapMemory(allocator, buffer.allocation);
+}
+
+void updateMappedUniformBuffer(VmaAllocator allocator, utils::Buffer& buffer, const shaderio::LightCoarseCullingUniforms& uniforms)
+{
+  if(buffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+  std::memcpy(mappedData, &uniforms, sizeof(uniforms));
+  VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, 0, sizeof(uniforms)));
+  vmaUnmapMemory(allocator, buffer.allocation);
+}
+
+}  // namespace
+
 void LightResources::init(rhi::Device& device, VmaAllocator allocator, const CreateInfo& createInfo)
 {
+  deinit();
+
   m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getNativeDevice()));
   m_allocator = allocator;
-  m_maxLights = createInfo.maxLights;
-  m_maxLightsPerTile = createInfo.maxLightsPerTile;
+  m_maxPointLights = std::max(1u, createInfo.maxPointLights);
+  m_maxSpotLights = std::max(1u, createInfo.maxSpotLights);
+  m_frames.resize(std::max(1u, createInfo.frameCount));
 
-  // Create light data buffer (storage buffer for compute read)
-  const VkBufferCreateInfo lightBufferInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(shaderio::LightData) * m_maxLights,
-      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  const VmaAllocationCreateInfo lightAllocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-  VK_CHECK(vmaCreateBuffer(m_allocator, &lightBufferInfo, &lightAllocInfo,
-      &m_lightBuffer.buffer, &m_lightBuffer.allocation, nullptr));
+  const VkDeviceSize pointLightBufferSize = sizeof(shaderio::LightData) * m_maxPointLights;
+  const VkDeviceSize spotLightBufferSize = sizeof(shaderio::LightData) * m_maxSpotLights;
+  const VkDeviceSize pointBoundsBufferSize = kCoarseBoundsElementSize * m_maxPointLights;
+  const VkDeviceSize spotBoundsBufferSize = kCoarseBoundsElementSize * m_maxSpotLights;
+  const VkDeviceSize coarseUniformBufferSize = sizeof(shaderio::LightCoarseCullingUniforms);
 
-  // Get device address for light buffer
-  const VkBufferDeviceAddressInfo lightAddrInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = m_lightBuffer.buffer,
-  };
-  m_lightBuffer.address = vkGetBufferDeviceAddress(m_device, &lightAddrInfo);
-
-  // Create light uniforms buffer (UBO for compute/graphic read)
-  const VkBufferCreateInfo uniformBufferInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(shaderio::LightListUniforms),
-      .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  const VmaAllocationCreateInfo uniformAllocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-  VK_CHECK(vmaCreateBuffer(m_allocator, &uniformBufferInfo, &uniformAllocInfo,
-      &m_lightUniformsBuffer.buffer, &m_lightUniformsBuffer.allocation, nullptr));
-
-  // Get device address for uniforms buffer
-  const VkBufferDeviceAddressInfo uniformAddrInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = m_lightUniformsBuffer.buffer,
-  };
-  m_lightUniformsBuffer.address = vkGetBufferDeviceAddress(m_device, &uniformAddrInfo);
-
-  // Create tile light index buffer (compute output)
-  // Size: (maxScreenWidth / TILE_SIZE_X) * (maxScreenHeight / TILE_SIZE_Y) * maxLightsPerTile * sizeof(uint32_t)
-  // We allocate for max resolution 4K (256 * 256 tiles = 65536 tiles)
-  const uint32_t maxTiles = 256 * 256;
-  const VkBufferCreateInfo tileBufferInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = maxTiles * m_maxLightsPerTile * sizeof(uint32_t),
-      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  VK_CHECK(vmaCreateBuffer(m_allocator, &tileBufferInfo, &lightAllocInfo,
-      &m_tileLightIndexBuffer.buffer, &m_tileLightIndexBuffer.allocation, nullptr));
-
-  // Get device address for tile buffer
-  const VkBufferDeviceAddressInfo tileAddrInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = m_tileLightIndexBuffer.buffer,
-  };
-  m_tileLightIndexBuffer.address = vkGetBufferDeviceAddress(m_device, &tileAddrInfo);
+  for(FrameResources& frame : m_frames)
+  {
+    frame.pointLightBuffer =
+        createStorageBuffer(m_device, m_allocator, pointLightBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+    frame.spotLightBuffer =
+        createStorageBuffer(m_device, m_allocator, spotLightBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+    frame.pointCoarseBoundsBuffer =
+        createStorageBuffer(m_device, m_allocator, pointBoundsBufferSize, VMA_MEMORY_USAGE_GPU_ONLY);
+    frame.spotCoarseBoundsBuffer =
+        createStorageBuffer(m_device, m_allocator, spotBoundsBufferSize, VMA_MEMORY_USAGE_GPU_ONLY);
+    frame.coarseCullingUniformBuffer =
+        createUniformBuffer(m_device, m_allocator, coarseUniformBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  }
 }
 
 void LightResources::deinit()
 {
-  // Free any remaining staging buffers
-  for (auto& buffer : m_stagingBuffers)
+  if(m_allocator != nullptr)
   {
-    if (buffer.buffer != VK_NULL_HANDLE)
+    for(FrameResources& frame : m_frames)
     {
-      vmaDestroyBuffer(m_allocator, buffer.buffer, buffer.allocation);
+      destroyBuffer(m_allocator, frame.pointLightBuffer);
+      destroyBuffer(m_allocator, frame.spotLightBuffer);
+      destroyBuffer(m_allocator, frame.pointCoarseBoundsBuffer);
+      destroyBuffer(m_allocator, frame.spotCoarseBoundsBuffer);
+      destroyBuffer(m_allocator, frame.coarseCullingUniformBuffer);
     }
   }
-  m_stagingBuffers.clear();
 
-  // Destroy main buffers
-  if (m_lightBuffer.buffer != VK_NULL_HANDLE)
-    vmaDestroyBuffer(m_allocator, m_lightBuffer.buffer, m_lightBuffer.allocation);
-  if (m_lightUniformsBuffer.buffer != VK_NULL_HANDLE)
-    vmaDestroyBuffer(m_allocator, m_lightUniformsBuffer.buffer, m_lightUniformsBuffer.allocation);
-  if (m_tileLightIndexBuffer.buffer != VK_NULL_HANDLE)
-    vmaDestroyBuffer(m_allocator, m_tileLightIndexBuffer.buffer, m_tileLightIndexBuffer.allocation);
-
-  *this = LightResources{};
+  m_frames.clear();
+  m_device = VK_NULL_HANDLE;
+  m_allocator = nullptr;
+  m_maxPointLights = 256;
+  m_maxSpotLights = 128;
 }
 
-void LightResources::updateLights(VkCommandBuffer cmd, const std::vector<shaderio::LightData>& lights, const shaderio::LightListUniforms& uniforms)
+void LightResources::updatePointLights(uint32_t frameIndex, const std::vector<shaderio::LightData>& lights)
 {
-  // Clamp light count to max
-  const uint32_t lightCount = std::min(static_cast<uint32_t>(lights.size()), m_maxLights);
-  const VkDeviceSize lightDataSize = sizeof(shaderio::LightData) * lightCount;
-  const VkDeviceSize uniformDataSize = sizeof(shaderio::LightListUniforms);
-
-  // Create staging buffer for light data
-  VkBufferCreateInfo stagingInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = lightDataSize + uniformDataSize,  // Combined staging for efficiency
-      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-
-  VmaAllocationCreateInfo stagingAllocInfo{
-      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-      .usage = VMA_MEMORY_USAGE_CPU_ONLY,
-  };
-
-  utils::Buffer stagingBuffer{};
-  VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-      &stagingBuffer.buffer, &stagingBuffer.allocation, nullptr));
-
-  // Map and copy light data
-  void* mappedData = nullptr;
-  VK_CHECK(vmaMapMemory(m_allocator, stagingBuffer.allocation, &mappedData));
-
-  // Copy light data first
-  std::memcpy(mappedData, lights.data(), lightDataSize);
-  // Copy uniforms after
-  std::memcpy(static_cast<char*>(mappedData) + lightDataSize, &uniforms, uniformDataSize);
-
-  vmaUnmapMemory(m_allocator, stagingBuffer.allocation);
-
-  // Copy to GPU buffers
-  if (lightCount > 0)
+  if(frameIndex >= m_frames.size())
   {
-    VkBufferCopy lightCopy{.size = lightDataSize};
-    vkCmdCopyBuffer(cmd, stagingBuffer.buffer, m_lightBuffer.buffer, 1, &lightCopy);
+    return;
   }
-
-  VkBufferCopy uniformCopy{
-      .srcOffset = lightDataSize,
-      .size = uniformDataSize,
-  };
-  vkCmdCopyBuffer(cmd, stagingBuffer.buffer, m_lightUniformsBuffer.buffer, 1, &uniformCopy);
-
-  // Store staging buffer for deferred deletion after GPU sync
-  m_stagingBuffers.push_back(stagingBuffer);
+  const uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(lights.size()), m_maxPointLights);
+  updateMappedStorageBuffer(m_allocator, m_frames[frameIndex].pointLightBuffer, std::span(lights.data(), count));
 }
 
-uint64_t LightResources::getLightBufferAddress() const
+void LightResources::updateSpotLights(uint32_t frameIndex, const std::vector<shaderio::LightData>& lights)
 {
-  return m_lightBuffer.address;
+  if(frameIndex >= m_frames.size())
+  {
+    return;
+  }
+  const uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(lights.size()), m_maxSpotLights);
+  updateMappedStorageBuffer(m_allocator, m_frames[frameIndex].spotLightBuffer, std::span(lights.data(), count));
 }
 
-uint64_t LightResources::getLightUniformsBufferAddress() const
+void LightResources::updateCoarseCullingUniforms(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)
 {
-  return m_lightUniformsBuffer.address;
+  if(frameIndex >= m_frames.size())
+  {
+    return;
+  }
+  updateMappedUniformBuffer(m_allocator, m_frames[frameIndex].coarseCullingUniformBuffer, uniforms);
 }
 
-uint64_t LightResources::getTileLightIndexBufferAddress() const
+VkBuffer LightResources::getPointLightBuffer(uint32_t frameIndex) const
 {
-  return m_tileLightIndexBuffer.address;
+  return frameIndex < m_frames.size() ? m_frames[frameIndex].pointLightBuffer.buffer : VK_NULL_HANDLE;
+}
+
+VkBuffer LightResources::getSpotLightBuffer(uint32_t frameIndex) const
+{
+  return frameIndex < m_frames.size() ? m_frames[frameIndex].spotLightBuffer.buffer : VK_NULL_HANDLE;
+}
+
+VkBuffer LightResources::getPointCoarseBoundsBuffer(uint32_t frameIndex) const
+{
+  return frameIndex < m_frames.size() ? m_frames[frameIndex].pointCoarseBoundsBuffer.buffer : VK_NULL_HANDLE;
+}
+
+VkBuffer LightResources::getSpotCoarseBoundsBuffer(uint32_t frameIndex) const
+{
+  return frameIndex < m_frames.size() ? m_frames[frameIndex].spotCoarseBoundsBuffer.buffer : VK_NULL_HANDLE;
+}
+
+VkBuffer LightResources::getCoarseCullingUniformBuffer(uint32_t frameIndex) const
+{
+  return frameIndex < m_frames.size() ? m_frames[frameIndex].coarseCullingUniformBuffer.buffer : VK_NULL_HANDLE;
 }
 
 }  // namespace demo

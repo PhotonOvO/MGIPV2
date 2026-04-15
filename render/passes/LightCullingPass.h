@@ -11,7 +11,7 @@ public:
     explicit LightCullingPass(Renderer* renderer);
     ~LightCullingPass() override = default;
 
-    [[nodiscard]] const char* getName() const override { return "LightCulling"; }
+    [[nodiscard]] const char* getName() const override { return "LightCoarseCulling"; }
     [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
     void execute(const PassContext& context) const override;
 

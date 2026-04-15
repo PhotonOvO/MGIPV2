@@ -13,8 +13,9 @@ class LightResources
 public:
   struct CreateInfo
   {
-    uint32_t maxLights{256};
-    uint32_t maxLightsPerTile{32};
+    uint32_t maxPointLights{256};
+    uint32_t maxSpotLights{128};
+    uint32_t frameCount{1};
   };
 
   LightResources() = default;
@@ -23,32 +24,35 @@ public:
   void init(rhi::Device& device, VmaAllocator allocator, const CreateInfo& createInfo);
   void deinit();
 
-  // Update light data buffers (requires staging buffer upload)
-  // Call this before light culling compute pass
-  void updateLights(VkCommandBuffer cmd, const std::vector<shaderio::LightData>& lights, const shaderio::LightListUniforms& uniforms);
+  void updatePointLights(uint32_t frameIndex, const std::vector<shaderio::LightData>& lights);
+  void updateSpotLights(uint32_t frameIndex, const std::vector<shaderio::LightData>& lights);
+  void updateCoarseCullingUniforms(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms);
 
-  [[nodiscard]] VkBuffer getLightBuffer() const { return m_lightBuffer.buffer; }
-  [[nodiscard]] VkBuffer getLightUniformsBuffer() const { return m_lightUniformsBuffer.buffer; }
-  [[nodiscard]] VkBuffer getTileLightIndexBuffer() const { return m_tileLightIndexBuffer.buffer; }
-  [[nodiscard]] uint64_t getLightBufferAddress() const;
-  [[nodiscard]] uint64_t getLightUniformsBufferAddress() const;
-  [[nodiscard]] uint64_t getTileLightIndexBufferAddress() const;
-  [[nodiscard]] uint32_t getMaxLights() const { return m_maxLights; }
-  [[nodiscard]] uint32_t getMaxLightsPerTile() const { return m_maxLightsPerTile; }
+  [[nodiscard]] VkBuffer getPointLightBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] VkBuffer getSpotLightBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] VkBuffer getPointCoarseBoundsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] VkBuffer getSpotCoarseBoundsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] VkBuffer getCoarseCullingUniformBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] uint32_t getMaxPointLights() const { return m_maxPointLights; }
+  [[nodiscard]] uint32_t getMaxSpotLights() const { return m_maxSpotLights; }
+  [[nodiscard]] uint32_t getFrameCount() const { return static_cast<uint32_t>(m_frames.size()); }
 
 private:
+  struct FrameResources
+  {
+    utils::Buffer pointLightBuffer{};
+    utils::Buffer spotLightBuffer{};
+    utils::Buffer pointCoarseBoundsBuffer{};
+    utils::Buffer spotCoarseBoundsBuffer{};
+    utils::Buffer coarseCullingUniformBuffer{};
+  };
+
   VkDevice m_device{VK_NULL_HANDLE};
   VmaAllocator m_allocator{nullptr};
 
-  utils::Buffer m_lightBuffer{};          // Light data array (SSBO for compute read)
-  utils::Buffer m_lightUniformsBuffer{};  // Light list uniforms (UBO)
-  utils::Buffer m_tileLightIndexBuffer{}; // Per-tile light index list (compute output)
-
-  uint32_t m_maxLights{256};
-  uint32_t m_maxLightsPerTile{32};
-
-  // Staging buffers for deferred deletion after GPU sync
-  std::vector<utils::Buffer> m_stagingBuffers;
+  std::vector<FrameResources> m_frames;
+  uint32_t m_maxPointLights{256};
+  uint32_t m_maxSpotLights{128};
 };
 
 }  // namespace demo

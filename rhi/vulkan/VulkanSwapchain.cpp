@@ -4,8 +4,10 @@
 #include <array>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "volk.h"
+#include "vulkan/vk_enum_string_helper.h"
 
 namespace demo::rhi::vulkan {
 namespace {
@@ -27,8 +29,17 @@ void checkVk(VkResult result, const char* message)
 {
   if(result != VK_SUCCESS)
   {
-    throw std::runtime_error(message);
+    throw std::runtime_error(std::string(message) + ": " + string_VkResult(result));
   }
+}
+
+bool isSwapchainInvalidPresentResult(VkResult result)
+{
+  return result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR
+#ifdef VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+         || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+#endif
+      ;
 }
 
 }  // namespace
@@ -92,13 +103,16 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   auto&          frame  = m_frameResources[m_frameResourceIndex];
   const VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, (std::numeric_limits<uint64_t>::max)(),
                                                 frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
-  if(result == VK_ERROR_OUT_OF_DATE_KHR)
+  if(isSwapchainInvalidPresentResult(result))
   {
     m_needsRebuild = true;
     return AcquireResult{.texture = {}, .imageIndex = 0, .status = AcquireResult::Status::outOfDate};
   }
 
-  ensure(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "VulkanSwapchain::acquireNextImage failed");
+  if(result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+  {
+    throw std::runtime_error(std::string("VulkanSwapchain::acquireNextImage failed: ") + string_VkResult(result));
+  }
   if(result == VK_SUBOPTIMAL_KHR)
   {
     m_needsRebuild = true;
@@ -127,14 +141,17 @@ PresentResult VulkanSwapchain::present()
 
   const VkResult result = vkQueuePresentKHR(m_queue, &presentInfo);
   PresentResult  presentResult{};
-  if(result == VK_ERROR_OUT_OF_DATE_KHR)
+  if(isSwapchainInvalidPresentResult(result))
   {
     m_needsRebuild       = true;
     presentResult.status = PresentResult::Status::outOfDate;
   }
   else
   {
-    ensure(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "VulkanSwapchain::present failed");
+    if(result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+    {
+      throw std::runtime_error(std::string("VulkanSwapchain::present failed: ") + string_VkResult(result));
+    }
     if(result == VK_SUBOPTIMAL_KHR)
     {
       m_needsRebuild = true;

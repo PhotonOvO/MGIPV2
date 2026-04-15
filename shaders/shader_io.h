@@ -134,6 +134,7 @@ STATIC_CONST uint32_t LLightTypeSpot        = 2;
 STATIC_CONST int LTileSizeX        = 16;
 STATIC_CONST int LTileSizeY        = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
+STATIC_CONST int LDepthPyramidMaxMips = 32;
 
 struct LightData
 {
@@ -156,6 +157,28 @@ struct LightListUniforms
   uint32_t numSpotLights;
   vec3     ambientColor;
   float    _padding;
+};
+
+struct LightCoarseCullingUniforms
+{
+  mat4 viewProjection;
+  vec4 cameraRight;
+  vec4 cameraUp;
+  vec4 screenTileInfo;  // x = width, y = height, z = tileCountX, w = tileCountY
+  vec4 lightCountInfo;  // x = pointLightCount, y = spotLightCount
+  vec4 debugInfo;       // x = show coarse culling heatmap
+};
+
+struct DepthPyramidUniforms
+{
+  uint32_t sourceWidth;
+  uint32_t sourceHeight;
+  uint32_t _padding0;
+  uint32_t _padding1;
+  uint32_t pyramidWidth;
+  uint32_t pyramidHeight;
+  uint32_t mipCount;
+  uint32_t _padding2;
 };
 
 // Light parameters for PBR lighting pass (push constants)

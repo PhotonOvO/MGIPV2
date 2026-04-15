@@ -37,16 +37,48 @@ VkPipelineStageFlags2 toVkStageMask(PipelineStage stage)
   return result == 0 ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : result;
 }
 
-VkAccessFlags2 toVkAccessMask(ResourceAccess access)
+VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
 {
+  const uint32_t stageMask = static_cast<uint32_t>(stage);
+  const bool     shaderStage =
+      (stageMask & (static_cast<uint32_t>(PipelineStage::VertexShader) |
+                    static_cast<uint32_t>(PipelineStage::FragmentShader) |
+                    static_cast<uint32_t>(PipelineStage::Compute))) != 0;
+  const bool transferStage = (stageMask & static_cast<uint32_t>(PipelineStage::Transfer)) != 0;
+
+  VkAccessFlags2 result = VK_ACCESS_2_NONE;
   switch(access)
   {
     case ResourceAccess::read:
-      return VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
+      if(shaderStage)
+      {
+        result |= VK_ACCESS_2_SHADER_READ_BIT;
+      }
+      if(transferStage)
+      {
+        result |= VK_ACCESS_2_TRANSFER_READ_BIT;
+      }
+      return result;
     case ResourceAccess::write:
-      return VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      if(shaderStage)
+      {
+        result |= VK_ACCESS_2_SHADER_WRITE_BIT;
+      }
+      if(transferStage)
+      {
+        result |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      }
+      return result;
     case ResourceAccess::readWrite:
-      return VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      if(shaderStage)
+      {
+        result |= VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+      }
+      if(transferStage)
+      {
+        result |= VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      }
+      return result;
     default:
       return VK_ACCESS_2_NONE;
   }
@@ -313,9 +345,9 @@ void VulkanCommandList::transitionBuffer(const BufferBarrierDesc& desc)
   const VkBufferMemoryBarrier2 barrier{
       .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask        = toVkStageMask(desc.srcStage),
-      .srcAccessMask       = toVkAccessMask(desc.srcAccess),
+      .srcAccessMask       = toVkAccessMask(desc.srcAccess, desc.srcStage),
       .dstStageMask        = toVkStageMask(desc.dstStage),
-      .dstAccessMask       = toVkAccessMask(desc.dstAccess),
+      .dstAccessMask       = toVkAccessMask(desc.dstAccess, desc.dstStage),
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .buffer              = reinterpret_cast<VkBuffer>(desc.nativeBuffer),

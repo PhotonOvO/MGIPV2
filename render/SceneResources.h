@@ -52,6 +52,10 @@ public:
   [[nodiscard]] VkImage getShadowMapImage() const;
   [[nodiscard]] VkImageView getShadowMapView() const;
   [[nodiscard]] VkExtent2D getShadowMapExtent() const;
+  [[nodiscard]] VkImage getDepthPyramidImage() const;
+  [[nodiscard]] VkImageView getDepthPyramidMipView(uint32_t mipLevel) const;
+  [[nodiscard]] VkExtent2D getDepthPyramidExtent() const;
+  [[nodiscard]] uint32_t getDepthPyramidMipCount() const;
 
 private:
   struct Resources
@@ -66,6 +70,10 @@ private:
     ImTextureID                        outputTextureImID{};
     utils::Image                       shadowMapImage{};
     VkImageView                        shadowMapView{};
+    utils::Image                       depthPyramidImage{};
+    std::vector<VkImageView>           depthPyramidMipViews;
+    VkExtent2D                         depthPyramidExtent{};
+    uint32_t                           depthPyramidMipCount{0};
   };
 
   void                       create(VkCommandBuffer cmd);

@@ -6,8 +6,10 @@
 #include "../rhi/vulkan/VulkanFrameContext.h"
 #include "FrameSubmission.h"
 #include "ClipSpaceConvention.h"
+#include "ImguiAxis.h"
 
 #include <cstring>
+#include <random>
 #include <type_traits>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
@@ -18,6 +20,8 @@ namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
 constexpr uint32_t kLightPassTextureCount         = 5;
+constexpr uint32_t kLightCoarseCullingThreadCount = 64;
+constexpr uint32_t kTestPointLightCount           = 128;
 
 [[nodiscard]] uint32_t alignUp(uint32_t value, uint32_t alignment)
 {
@@ -426,6 +430,8 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
         .linearSampler = linearSampler,
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
+    createDepthPyramidResources();
+    createLightCoarseCullingResources();
 
     // Create per-frame GBuffer descriptor sets for LightPass.
     {
@@ -439,7 +445,23 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
           1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
 
-      const std::array<VkDescriptorSetLayoutBinding, 2> bindings = {textureBinding, cameraBinding};
+      const VkDescriptorSetLayoutBinding pointLightBinding{
+          2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutBinding pointCoarseBoundsBinding{
+          3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutBinding lightCoarseCullingUniformBinding{
+          4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+
+      const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+          textureBinding,
+          cameraBinding,
+          pointLightBinding,
+          pointCoarseBoundsBinding,
+          lightCoarseCullingUniformBinding,
+      };
 
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -574,6 +596,9 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_gbufferPass         = std::make_unique<GBufferPass>(this);
   m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
+  m_depthPrepass        = std::make_unique<DepthPrepass>(this);
+  m_depthPyramidPass    = std::make_unique<DepthPyramidPass>(this);
+  m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
   m_shadowPass          = std::make_unique<ShadowPass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
   m_forwardPass         = std::make_unique<ForwardPass>(this);
@@ -581,6 +606,9 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_presentPass         = std::make_unique<PresentPass>(this);
   m_imguiPass           = std::make_unique<ImguiPass>(this);
   m_passExecutor.clear();
+  m_passExecutor.addPass(*m_depthPrepass);
+  m_passExecutor.addPass(*m_depthPyramidPass);
+  m_passExecutor.addPass(*m_lightCullingPass);
   m_passExecutor.addPass(*m_shadowPass);
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
@@ -620,6 +648,30 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyPipelineLayout(device, m_device.lightPipelineLayout, nullptr);
     m_device.lightPipelineLayout = VK_NULL_HANDLE;
   }
+  if(m_device.depthPyramidPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.depthPyramidPipelineLayout, nullptr);
+    m_device.depthPyramidPipelineLayout = VK_NULL_HANDLE;
+  }
+  if(m_device.depthPyramidSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.depthPyramidSetLayout, nullptr);
+    m_device.depthPyramidSetLayout = VK_NULL_HANDLE;
+  }
+  m_device.depthPyramidDescriptorSet = VK_NULL_HANDLE;
+  destroyBuffer(m_device.allocator, m_depthPyramidUniformBuffer);
+  if(m_device.lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.lightCoarseCullingPipelineLayout, nullptr);
+    m_device.lightCoarseCullingPipelineLayout = VK_NULL_HANDLE;
+  }
+  m_device.lightCoarseCullingDescriptorSets.clear();
+  if(m_device.lightCoarseCullingSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.lightCoarseCullingSetLayout, nullptr);
+    m_device.lightCoarseCullingSetLayout = VK_NULL_HANDLE;
+  }
+  m_lightResources.deinit();
   // Note: gbufferTextureSets are freed automatically when descriptorPool is destroyed
   m_device.gbufferTextureSets.clear();
   if(m_device.gbufferTextureSetLayout != VK_NULL_HANDLE)
@@ -765,6 +817,16 @@ PipelineHandle Renderer::getLightPipelineHandle() const
   return m_lightPipeline;
 }
 
+PipelineHandle Renderer::getDepthPrepassOpaquePipelineHandle() const
+{
+  return m_depthPrepassOpaquePipeline;
+}
+
+PipelineHandle Renderer::getDepthPrepassAlphaTestPipelineHandle() const
+{
+  return m_depthPrepassAlphaTestPipeline;
+}
+
 PipelineHandle Renderer::getGBufferOpaquePipelineHandle() const
 {
   return m_gbufferOpaquePipeline;
@@ -855,6 +917,11 @@ void Renderer::executeGraphicsPass(rhi::CommandList& cmd, const RenderParams& pa
 
 void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
 {
+  if(params.debugOptions.showViewportAxis && params.cameraUniforms != nullptr)
+  {
+    ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);
+  }
+
   if(params.recordUi)
   {
     params.recordUi(cmd);
@@ -1050,8 +1117,23 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .offset = 0,
         .range  = sizeof(shaderio::CameraUniforms),
     };
+    const VkDescriptorBufferInfo pointLightBufferInfo{
+        .buffer = m_lightResources.getPointLightBuffer(frameIndex),
+        .offset = 0,
+        .range  = VK_WHOLE_SIZE,
+    };
+    const VkDescriptorBufferInfo pointCoarseBoundsBufferInfo{
+        .buffer = m_lightResources.getPointCoarseBoundsBuffer(frameIndex),
+        .offset = 0,
+        .range  = VK_WHOLE_SIZE,
+    };
+    const VkDescriptorBufferInfo coarseCullingUniformBufferInfo{
+        .buffer = m_lightResources.getCoarseCullingUniformBuffer(frameIndex),
+        .offset = 0,
+        .range  = sizeof(shaderio::LightCoarseCullingUniforms),
+    };
 
-    const std::array<VkWriteDescriptorSet, 2> writes = {
+    const std::array<VkWriteDescriptorSet, 5> writes = {
         VkWriteDescriptorSet{
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_device.gbufferTextureSets[frameIndex],
@@ -1069,6 +1151,33 @@ void Renderer::updateGBufferTextureDescriptorSet()
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo     = &cameraBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 2,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &pointLightBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 3,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &pointCoarseBoundsBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 4,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &coarseCullingUniformBufferInfo,
         },
     };
 
@@ -1089,6 +1198,198 @@ void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio:
   std::memcpy(mappedData, &cameraUniforms, sizeof(cameraUniforms));
   VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCameraBuffer.allocation, 0, sizeof(cameraUniforms)));
   vmaUnmapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation);
+}
+
+void Renderer::createLightCoarseCullingResources()
+{
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
+
+  m_lightResources.init(*m_device.device, m_device.allocator, LightResources::CreateInfo{
+      .maxPointLights = 256,
+      .maxSpotLights  = 128,
+      .frameCount     = frameCount,
+  });
+
+  const std::array<VkDescriptorSetLayoutBinding, 5> bindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+
+  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .pBindings    = bindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.lightCoarseCullingSetLayout));
+  DBG_VK_NAME(m_device.lightCoarseCullingSetLayout);
+
+  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.lightCoarseCullingSetLayout);
+  m_device.lightCoarseCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo allocInfo{
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_device.descriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts        = setLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.lightCoarseCullingDescriptorSets.data()));
+
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    const std::array<VkDescriptorBufferInfo, 5> bufferInfos{{
+        VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getSpotCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getCoarseCullingUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
+    }};
+
+    std::array<VkWriteDescriptorSet, 5> writes{};
+    for(uint32_t binding = 0; binding < static_cast<uint32_t>(writes.size()); ++binding)
+    {
+      writes[binding] = VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.lightCoarseCullingDescriptorSets[frameIndex],
+          .dstBinding      = binding,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = binding == 4 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[binding],
+      };
+    }
+    vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  }
+
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &m_device.lightCoarseCullingSetLayout,
+      .pushConstantRangeCount = 0,
+      .pPushConstantRanges    = nullptr,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.lightCoarseCullingPipelineLayout));
+  DBG_VK_NAME(m_device.lightCoarseCullingPipelineLayout);
+}
+
+void Renderer::createDepthPyramidResources()
+{
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+
+  m_depthPyramidUniformBuffer = createBuffer(nativeDevice,
+                                             m_device.allocator,
+                                             sizeof(shaderio::DepthPyramidUniforms),
+                                             VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
+                                             VMA_MEMORY_USAGE_CPU_TO_GPU,
+                                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  DBG_VK_NAME(m_depthPyramidUniformBuffer.buffer);
+
+  const std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+
+  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .pBindings    = bindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.depthPyramidSetLayout));
+  DBG_VK_NAME(m_device.depthPyramidSetLayout);
+
+  const VkDescriptorSetAllocateInfo allocInfo{
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_device.descriptorPool,
+      .descriptorSetCount = 1,
+      .pSetLayouts        = &m_device.depthPyramidSetLayout,
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, &m_device.depthPyramidDescriptorSet));
+  DBG_VK_NAME(m_device.depthPyramidDescriptorSet);
+
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &m_device.depthPyramidSetLayout,
+      .pushConstantRangeCount = 0,
+      .pPushConstantRanges    = nullptr,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.depthPyramidPipelineLayout));
+  DBG_VK_NAME(m_device.depthPyramidPipelineLayout);
+
+  updateDepthPyramidDescriptorSet();
+}
+
+void Renderer::updateDepthPyramidDescriptorSet()
+{
+  if(m_device.depthPyramidDescriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
+  if(sceneResources.getDepthImageView() == VK_NULL_HANDLE || sceneResources.getDepthPyramidMipCount() == 0)
+  {
+    return;
+  }
+
+  const VkDescriptorImageInfo sourceDepthInfo{
+      .sampler     = VK_NULL_HANDLE,
+      .imageView   = sceneResources.getDepthImageView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+
+  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
+  const uint32_t mipCount = sceneResources.getDepthPyramidMipCount();
+  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
+  {
+    pyramidMipInfos[i] = VkDescriptorImageInfo{
+        .sampler     = VK_NULL_HANDLE,
+        .imageView   = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+  }
+
+  const VkDescriptorBufferInfo uniformInfo{
+      .buffer = m_depthPyramidUniformBuffer.buffer,
+      .offset = 0,
+      .range  = sizeof(shaderio::DepthPyramidUniforms),
+  };
+
+  const std::array<VkWriteDescriptorSet, 3> writes{{
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.depthPyramidDescriptorSet,
+          .dstBinding      = 0,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+          .pImageInfo      = &sourceDepthInfo,
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.depthPyramidDescriptorSet,
+          .dstBinding      = 1,
+          .dstArrayElement = 0,
+          .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+          .pImageInfo      = pyramidMipInfos.data(),
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.depthPyramidDescriptorSet,
+          .dstBinding      = 2,
+          .dstArrayElement = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo     = &uniformInfo,
+      },
+  }};
+
+  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                         static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
@@ -1130,6 +1431,7 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 
   // Update GBuffer texture descriptor set after potential SceneResources resize
   updateGBufferTextureDescriptorSet();
+  updateDepthPyramidDescriptorSet();
 }
 
 rhi::CommandList& Renderer::beginCommandRecording()
@@ -1157,6 +1459,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
 
   m_frameLightingState = buildFrameLightingState(params);
+  ensureTestPointLights(params);
   buildDebugDrawList(params);
   if(params.cameraUniforms != nullptr)
   {
@@ -1176,6 +1479,26 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   m_passExecutor.bindBuffer({
       .handle       = kTransientAllocatorBufferHandle,
       .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassPointLightBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointLightBuffer(currentFrameIndex)),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassSpotLightBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassPointLightCoarseBoundsHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassSpotLightCoarseBoundsHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassLightCoarseCullingUniformHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
   });
   m_passExecutor.bindTexture({
       .handle       = kPassGBuffer0Handle,
@@ -1209,6 +1532,13 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       .handle       = kPassShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
       .aspect       = rhi::TextureAspect::depth,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassDepthPyramidHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthPyramidImage()),
+      .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
@@ -1305,6 +1635,125 @@ void Renderer::recordComputeCommands(rhi::CommandList& cmd, const RenderParams& 
                                reinterpret_cast<VkPipeline>(getPipelineOpaque(
                                    computePipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
   rhi::vulkan::cmdDispatch(cmd, 1, 1, 1);
+}
+
+void Renderer::executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params)
+{
+  if(params.cameraUniforms == nullptr || m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  if(currentFrameIndex >= m_device.lightCoarseCullingDescriptorSets.size())
+  {
+    return;
+  }
+
+  const VkDescriptorSet descriptorSet = m_device.lightCoarseCullingDescriptorSets[currentFrameIndex];
+  if(descriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  m_lightResources.updatePointLights(currentFrameIndex, m_testPointLights);
+  m_lightResources.updateSpotLights(currentFrameIndex, m_testSpotLights);
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_device.lightCoarseCullingPipelineLayout,
+                          0, 1, &descriptorSet, 0, nullptr);
+
+  const shaderio::CameraUniforms& camera = *params.cameraUniforms;
+  const glm::mat4 inverseView = glm::inverse(camera.view);
+  const VkExtent2D extent = m_swapchainDependent.sceneResources.getSize();
+  const uint32_t tileCountX = (extent.width + shaderio::LTileSizeX - 1u) / shaderio::LTileSizeX;
+  const uint32_t tileCountY = (extent.height + shaderio::LTileSizeY - 1u) / shaderio::LTileSizeY;
+  const uint32_t pointLightCount =
+      std::min<uint32_t>(static_cast<uint32_t>(m_testPointLights.size()), m_lightResources.getMaxPointLights());
+  const uint32_t spotLightCount =
+      std::min<uint32_t>(static_cast<uint32_t>(m_testSpotLights.size()), m_lightResources.getMaxSpotLights());
+
+  const shaderio::LightCoarseCullingUniforms coarseCullingUniforms{
+      .viewProjection = camera.viewProjection,
+      .cameraRight = glm::vec4(glm::normalize(glm::vec3(inverseView[0])), 0.0f),
+      .cameraUp = glm::vec4(glm::normalize(glm::vec3(inverseView[1])), 0.0f),
+      .screenTileInfo = glm::vec4(extent.width, extent.height, tileCountX, tileCountY),
+      .lightCountInfo = glm::vec4(pointLightCount, spotLightCount, 0.0f, 0.0f),
+      .debugInfo = glm::vec4(params.debugOptions.showLightCoarseCullingHeatmap ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f),
+  };
+  m_lightResources.updateCoarseCullingUniforms(currentFrameIndex, coarseCullingUniforms);
+
+  const auto dispatchLightKernel = [&](PipelineHandle pipelineHandle, uint32_t lightCount) {
+    if(pipelineHandle.isNull() || lightCount == 0)
+    {
+      return;
+    }
+
+    vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      reinterpret_cast<VkPipeline>(getPipelineOpaque(
+                          pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
+    vkCmdDispatch(vkCmd, (lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1, 1);
+  };
+
+  dispatchLightKernel(m_pointLightCoarseCullingPipeline, pointLightCount);
+  dispatchLightKernel(m_spotLightCoarseCullingPipeline, spotLightCount);
+
+  const VkMemoryBarrier2 memoryBarrier{
+      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers    = &memoryBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+}
+
+void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams&)
+{
+  if(m_depthPyramidPipeline.isNull() || m_device.depthPyramidPipelineLayout == VK_NULL_HANDLE
+     || m_device.depthPyramidDescriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
+  const VkExtent2D sourceExtent = sceneResources.getSize();
+  const VkExtent2D pyramidExtent = sceneResources.getDepthPyramidExtent();
+  const uint32_t mipCount = std::min<uint32_t>(sceneResources.getDepthPyramidMipCount(), shaderio::LDepthPyramidMaxMips);
+  if(sourceExtent.width == 0 || sourceExtent.height == 0 || pyramidExtent.width == 0 || pyramidExtent.height == 0 || mipCount == 0)
+  {
+    return;
+  }
+
+  const shaderio::DepthPyramidUniforms uniforms{
+      .sourceWidth   = sourceExtent.width,
+      .sourceHeight  = sourceExtent.height,
+      ._padding0     = 0u,
+      ._padding1     = 0u,
+      .pyramidWidth  = pyramidExtent.width,
+      .pyramidHeight = pyramidExtent.height,
+      .mipCount      = mipCount,
+      ._padding2     = 0u,
+  };
+
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, m_depthPyramidUniformBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &uniforms, sizeof(uniforms));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, m_depthPyramidUniformBuffer.allocation, 0, sizeof(uniforms)));
+  vmaUnmapMemory(m_device.allocator, m_depthPyramidUniformBuffer.allocation);
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    reinterpret_cast<VkPipeline>(getPipelineOpaque(m_depthPyramidPipeline,
+                                                                    static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_device.depthPyramidPipelineLayout,
+                          0, 1, &m_device.depthPyramidDescriptorSet, 0, nullptr);
+  vkCmdDispatch(vkCmd, (pyramidExtent.width + 7u) / 8u, (pyramidExtent.height + 7u) / 8u, 1u);
 }
 
 void Renderer::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
@@ -1415,6 +1864,112 @@ Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel) c
   }
 
   return bounds;
+}
+
+void Renderer::ensureTestPointLights(const RenderParams& params)
+{
+  glm::vec3 minBounds(-12.0f, 0.5f, -12.0f);
+  glm::vec3 maxBounds(12.0f, 6.0f, 12.0f);
+  if(m_frameLightingState.sceneBounds.valid)
+  {
+    minBounds = m_frameLightingState.sceneBounds.min;
+    maxBounds = m_frameLightingState.sceneBounds.max;
+    const glm::vec3 size = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
+    minBounds += size * 0.08f;
+    maxBounds -= size * 0.08f;
+  }
+
+  const glm::vec3 sceneMinBounds = minBounds;
+  const glm::vec3 sceneMaxBounds = maxBounds;
+  const glm::vec3 sceneBoundsSize = glm::max(sceneMaxBounds - sceneMinBounds, glm::vec3(1.0f));
+  const float sceneBoundsEpsilon = std::max(0.1f, glm::length(sceneBoundsSize) * 0.01f);
+  const bool sceneBoundsChanged =
+      !m_testPointLightSceneBounds.valid ||
+      glm::length(m_testPointLightSceneBounds.min - sceneMinBounds) > sceneBoundsEpsilon ||
+      glm::length(m_testPointLightSceneBounds.max - sceneMaxBounds) > sceneBoundsEpsilon;
+
+  if(sceneBoundsChanged)
+  {
+    m_testPointLights.clear();
+    m_testPointLightMotions.clear();
+    m_testPointLightSceneBounds.min = sceneMinBounds;
+    m_testPointLightSceneBounds.max = sceneMaxBounds;
+    m_testPointLightSceneBounds.valid = true;
+  }
+
+  if(m_frameLightingState.sceneBounds.valid && params.cameraUniforms != nullptr)
+  {
+    const glm::mat4 inverseView = glm::inverse(params.cameraUniforms->view);
+    const glm::vec3 cameraPosition = params.cameraUniforms->cameraPosition;
+    const glm::vec3 cameraForward = -glm::normalize(glm::vec3(inverseView[2]));
+    const float sceneDiagonal = glm::length(sceneBoundsSize);
+    const float focusDistance = glm::clamp(sceneDiagonal * 0.08f, 8.0f, 35.0f);
+    const float fieldRadius = glm::clamp(sceneDiagonal * 0.16f, 14.0f, 70.0f);
+    const glm::vec3 focus = glm::clamp(cameraPosition + cameraForward * focusDistance, sceneMinBounds, sceneMaxBounds);
+    const glm::vec3 halfExtent(fieldRadius, std::max(6.0f, fieldRadius * 0.45f), fieldRadius);
+    const glm::vec3 localMin = glm::max(sceneMinBounds, focus - halfExtent);
+    const glm::vec3 localMax = glm::min(sceneMaxBounds, focus + halfExtent);
+    if(glm::all(glm::greaterThan(localMax - localMin, glm::vec3(0.25f))))
+    {
+      minBounds = localMin;
+      maxBounds = localMax;
+    }
+  }
+
+  std::mt19937 rng(0x5EED1234u);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+  std::uniform_real_distribution<float> phaseDistribution(0.0f, 6.28318530718f);
+  std::uniform_real_distribution<float> speedDistribution(0.25f, 1.2f);
+  std::uniform_real_distribution<float> amplitudeDistribution(0.06f, 0.18f);
+
+  const glm::vec3 boundsSize = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
+  if(m_testPointLights.empty())
+  {
+    m_testPointLights.reserve(kTestPointLightCount);
+    m_testPointLightMotions.reserve(kTestPointLightCount);
+    for(uint32_t i = 0; i < kTestPointLightCount; ++i)
+    {
+      TestPointLightMotion motion{};
+      motion.baseT = glm::vec3(unit(rng), unit(rng), unit(rng));
+      motion.phase = glm::vec3(phaseDistribution(rng), phaseDistribution(rng), phaseDistribution(rng));
+      motion.speed = glm::vec3(speedDistribution(rng), speedDistribution(rng), speedDistribution(rng));
+      motion.amplitude = boundsSize * glm::vec3(amplitudeDistribution(rng), amplitudeDistribution(rng), amplitudeDistribution(rng));
+      motion.radiusT = unit(rng);
+      motion.intensityT = unit(rng);
+      m_testPointLightMotions.push_back(motion);
+
+      shaderio::LightData light{};
+      light.positionOrDirection = glm::mix(minBounds, maxBounds, motion.baseT);
+      light.color = glm::vec3(0.35f + unit(rng) * 0.65f,
+                              0.35f + unit(rng) * 0.65f,
+                              0.35f + unit(rng) * 0.65f);
+      light.spotDirection = glm::vec3(0.0f, -1.0f, 0.0f);
+      light.spotInnerAngle = 0.0f;
+      light.lightType = shaderio::LLightTypePoint;
+      light.spotOuterAngle = 0.0f;
+      m_testPointLights.push_back(light);
+    }
+
+    m_testSpotLights.clear();
+    LOGI("Generated %zu animated random point lights for LightCoarseCulling", m_testPointLights.size());
+  }
+
+  const float time = params.timeSeconds;
+  const float maxRadius = std::max(0.1f, params.debugOptions.pointLightMaxRadius);
+  const float minRadius = std::min(maxRadius, std::max(0.25f, maxRadius * 0.35f));
+  const float intensityScale = std::max(0.0f, params.debugOptions.pointLightIntensityScale);
+  for(size_t i = 0; i < m_testPointLights.size() && i < m_testPointLightMotions.size(); ++i)
+  {
+    const TestPointLightMotion& motion = m_testPointLightMotions[i];
+    const glm::vec3 basePosition = glm::mix(minBounds, maxBounds, motion.baseT);
+    const glm::vec3 offset(
+        std::sin(time * motion.speed.x + motion.phase.x) * motion.amplitude.x,
+        std::sin(time * motion.speed.y + motion.phase.y) * motion.amplitude.y,
+        std::cos(time * motion.speed.z + motion.phase.z) * motion.amplitude.z);
+    m_testPointLights[i].positionOrDirection = glm::clamp(basePosition + offset, minBounds, maxBounds);
+    m_testPointLights[i].range = glm::mix(minRadius, maxRadius, motion.radiusT);
+    m_testPointLights[i].intensity = glm::mix(8.0f, 26.0f, motion.intensityT) * intensityScale;
+  }
 }
 
 std::array<glm::vec3, 8> Renderer::computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
@@ -1613,6 +2168,22 @@ void Renderer::buildDebugDrawList(const RenderParams& params)
   {
     m_debugDrawList.addArrow(m_frameLightingState.lightAnchor, glm::normalize(params.lightSettings.direction), 6.0f,
                              glm::vec4(1.00f, 0.55f, 0.10f, 0.95f));
+  }
+  if(params.debugOptions.showPointLights)
+  {
+    float markerRadius = 0.18f;
+    if(m_frameLightingState.sceneBounds.valid)
+    {
+      const glm::vec3 boundsSize = glm::max(m_frameLightingState.sceneBounds.max - m_frameLightingState.sceneBounds.min,
+                                            glm::vec3(1.0f));
+      markerRadius = glm::clamp(glm::length(boundsSize) * 0.0025f, 0.18f, 1.5f);
+    }
+    for(const shaderio::LightData& light : m_testPointLights)
+    {
+      const glm::vec4 color(light.color, 0.85f);
+      m_debugDrawList.addSphere(light.positionOrDirection, markerRadius, color, 12);
+      m_debugDrawList.addSphere(light.positionOrDirection, light.range, glm::vec4(light.color, 0.22f), 24);
+    }
   }
   if(params.debugOptions.showCullDistance && params.cameraUniforms != nullptr)
   {
@@ -1820,6 +2391,8 @@ void Renderer::prebuildRequiredPipelineVariants()
 {
   createPrebuiltGraphicsPipelineVariants();
   createPrebuiltComputePipelineVariant();
+  createDepthPyramidPipeline();
+  createLightCoarseCullingPipelines();
 }
 
 void Renderer::createPrebuiltGraphicsPipelineVariants()
@@ -2303,6 +2876,100 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   }
 #endif
 
+  // Create depth prepass pipelines (Opaque + AlphaTest variants)
+  {
+    VkShaderModule depthPrepassShaderModule =
+        utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                  {shader_depth_prepass_slang, std::size(shader_depth_prepass_slang)});
+    DBG_VK_NAME(depthPrepassShaderModule);
+
+    const std::array<rhi::VertexBindingDesc, 1> depthBindings{{
+        {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
+    }};
+    const std::array<rhi::VertexAttributeDesc, 4> depthAttributes{{
+        {.location = shaderio::LVGltfPosition, .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 0},
+        {.location = shaderio::LVGltfNormal,   .binding = 0, .format = rhi::VertexFormat::r32g32b32Sfloat, .offset = 12},
+        {.location = shaderio::LVGltfTexCoord, .binding = 0, .format = rhi::VertexFormat::r32g32Sfloat,    .offset = 24},
+        {.location = shaderio::LVGltfTangent,  .binding = 0, .format = rhi::VertexFormat::r32g32b32a32Sfloat, .offset = 32},
+    }};
+    const rhi::VertexInputLayoutDesc depthVertexInput{
+        .bindings       = depthBindings.data(),
+        .bindingCount   = static_cast<uint32_t>(depthBindings.size()),
+        .attributes     = depthAttributes.data(),
+        .attributeCount = static_cast<uint32_t>(depthAttributes.size()),
+    };
+
+    const std::array<rhi::DynamicState, 2> depthDynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+    const std::array<rhi::PipelineShaderStageDesc, 2> depthStages{{
+        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "fragmentMain"},
+    }};
+
+    rhi::GraphicsPipelineDesc depthDesc{
+        .layout            = m_device.gbufferPipelineLayout.get(),
+        .shaderStages      = depthStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(depthStages.size()),
+        .vertexInput       = depthVertexInput,
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::greater},
+        .blendStates       = nullptr,
+        .blendStateCount   = 0,
+        .dynamicStates     = depthDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(depthDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = nullptr,
+                .colorFormatCount = 0,
+                .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+            },
+    };
+    depthDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
+    depthDesc.rasterState.cullMode    = rhi::CullMode::back;
+    depthDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    depthDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
+    std::array<rhi::PipelineShaderStageDesc, 2> depthShaderStages = depthStages;
+    depthDesc.shaderStages = depthShaderStages.data();
+
+    uint32_t alphaTestFalse = VK_FALSE;
+    rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
+    depthShaderStages[1].specializationData = specDataFalse;
+    depthShaderStages[1].specializationConstants = &specConstantAlphaTest;
+    depthShaderStages[1].specializationConstantCount = 1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo depthCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 10,
+            },
+        .desc = depthDesc,
+    };
+    const VkPipeline depthOpaquePipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthCreateInfo);
+    DBG_VK_NAME(depthOpaquePipeline);
+    m_depthPrepassOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                    reinterpret_cast<uint64_t>(depthOpaquePipeline),
+                                                    depthCreateInfo.key.specializationVariant);
+
+    uint32_t alphaTestTrue = VK_TRUE;
+    rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
+    depthShaderStages[1].specializationData = specDataTrue;
+    depthCreateInfo.key.specializationVariant = 11;
+    const VkPipeline depthAlphaTestPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthCreateInfo);
+    DBG_VK_NAME(depthAlphaTestPipeline);
+    m_depthPrepassAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                       reinterpret_cast<uint64_t>(depthAlphaTestPipeline),
+                                                       depthCreateInfo.key.specializationVariant);
+
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthPrepassShaderModule, nullptr);
+  }
+
   // Create GBuffer pipelines (Opaque + AlphaTest variants)
   {
     VkShaderModule gbufferShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
@@ -2369,7 +3036,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
         .shaderStageCount  = static_cast<uint32_t>(gbufferShaderStages.size()),
         .vertexInput       = gbufferVertexInput,
         .rasterState       = rhi::RasterState{},
-        .depthState        = rhi::DepthState{true, true, rhi::CompareOp::greater},
+        .depthState        = rhi::DepthState{true, false, rhi::CompareOp::greaterOrEqual},
         .blendStates       = gbufferBlendStates.data(),
         .blendStateCount   = static_cast<uint32_t>(gbufferBlendStates.size()),
         .dynamicStates     = gbufferDynamicStates.data(),
@@ -2710,7 +3377,7 @@ void Renderer::initImGui(GLFWwindow* window)
 
   ImGui_ImplVulkan_Init(&initInfo);
 
-  ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_ViewportsEnable;
+  ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 }
 
 void Renderer::createDescriptorPool()
@@ -2724,10 +3391,14 @@ void Renderer::createDescriptorPool()
     const uint32_t maxDescriptorSets = 20U;
     const uint32_t dynamicUniformCount =
         std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
-    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
+    const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
+    const std::array<VkDescriptorPoolSize, 6> poolSizes{{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4U},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5U},  // For LightPass camera uniform buffer
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6U + frameCount * 2U},  // LightPass camera + pre-scene UBOs
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 6U},
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -3108,6 +3779,83 @@ void Renderer::createPrebuiltComputePipelineVariant()
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), compute, nullptr);
 }
 
+void Renderer::createLightCoarseCullingPipelines()
+{
+  if(m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  VkShaderModule shaderModule = utils::createShaderModule(nativeDevice, {shader_light_culling_slang, std::size(shader_light_culling_slang)});
+  DBG_VK_NAME(shaderModule);
+
+  const auto createPipeline = [&](const char* entryPoint, uint32_t specializationVariant) {
+    const VkPipelineShaderStageCreateInfo shaderStage{
+        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shaderModule,
+        .pName  = entryPoint,
+    };
+    const VkComputePipelineCreateInfo pipelineInfo{
+        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage  = shaderStage,
+        .layout = m_device.lightCoarseCullingPipelineLayout,
+    };
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+    DBG_VK_NAME(pipeline);
+    return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
+                            reinterpret_cast<uint64_t>(pipeline),
+                            specializationVariant);
+  };
+
+  m_pointLightCoarseCullingPipeline = createPipeline("kernelPointLightCoarseCulling", 8);
+  m_spotLightCoarseCullingPipeline = createPipeline("kernelSpotLightCoarseCulling", 9);
+
+  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+#endif
+}
+
+void Renderer::createDepthPyramidPipeline()
+{
+  if(m_device.depthPyramidPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  VkShaderModule shaderModule =
+      utils::createShaderModule(nativeDevice, {shader_depth_pyramid_slang, std::size(shader_depth_pyramid_slang)});
+  DBG_VK_NAME(shaderModule);
+
+  const VkPipelineShaderStageCreateInfo shaderStage{
+      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module = shaderModule,
+      .pName  = "depthPyramid",
+  };
+
+  const VkComputePipelineCreateInfo pipelineInfo{
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = shaderStage,
+      .layout = m_device.depthPyramidPipelineLayout,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+  DBG_VK_NAME(pipeline);
+  m_depthPyramidPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
+                                            reinterpret_cast<uint64_t>(pipeline),
+                                            12);
+
+  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+#endif
+}
+
 PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
@@ -3140,11 +3888,16 @@ void Renderer::destroyPipelines()
   m_device.prebuiltPipelines.graphicsTextured    = kNullPipelineHandle;
   m_device.prebuiltPipelines.graphicsNonTextured = kNullPipelineHandle;
   m_lightPipeline = kNullPipelineHandle;
+  m_depthPrepassOpaquePipeline = kNullPipelineHandle;
+  m_depthPrepassAlphaTestPipeline = kNullPipelineHandle;
+  m_depthPyramidPipeline = kNullPipelineHandle;
   m_gbufferOpaquePipeline = kNullPipelineHandle;
   m_gbufferAlphaTestPipeline = kNullPipelineHandle;
   m_shadowPipeline = kNullPipelineHandle;
   m_forwardPipeline = kNullPipelineHandle;
   m_debugPipeline = kNullPipelineHandle;
+  m_pointLightCoarseCullingPipeline = kNullPipelineHandle;
+  m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
 
 PipelineHandle Renderer::selectComputePipelineHandle() const

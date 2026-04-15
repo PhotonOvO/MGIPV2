@@ -15,9 +15,13 @@
 #include "passes/GBufferPass.h"
 #include "passes/LightPass.h"
 #include "passes/ForwardPass.h"
+#include "passes/DepthPrepass.h"
+#include "passes/DepthPyramidPass.h"
 #include "passes/ShadowPass.h"
 #include "passes/DebugPass.h"
+#include "passes/LightCullingPass.h"
 #include "MeshPool.h"
+#include "LightResources.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
 #include "TransientAllocator.h"
@@ -65,8 +69,13 @@ struct DebugPassOptions
   bool  showShadowFrustum{true};
   bool  showViewFrustum{false};
   bool  showLightDirection{true};
+  bool  showPointLights{true};
+  bool  showViewportAxis{true};
+  bool  showLightCoarseCullingHeatmap{false};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
+  float pointLightMaxRadius{4.0f};
+  float pointLightIntensityScale{4.0f};
 };
 
 struct RenderParams
@@ -77,6 +86,7 @@ struct RenderParams
   MaterialHandle                         materialHandle{};
   rhi::ClearColorValue                   clearColor{0.2F, 0.2F, 0.3F, 1.0F};
   std::function<void(rhi::CommandList&)> recordUi;
+  glm::vec4                              viewportImageRect{0.0f};  // x, y, width, height in ImGui screen space
   // glTF model data for rendering
   const GltfUploadResult*                gltfModel{nullptr};
   // Camera data (pointer to App-owned CameraUniforms)
@@ -146,11 +156,15 @@ public:
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
+  PipelineHandle getDepthPrepassOpaquePipelineHandle() const;
+  PipelineHandle getDepthPrepassAlphaTestPipelineHandle() const;
   PipelineHandle getGBufferOpaquePipelineHandle() const;
   PipelineHandle getGBufferAlphaTestPipelineHandle() const;
   PipelineHandle getForwardPipelineHandle() const;
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
+  void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
@@ -304,6 +318,12 @@ private:
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gbufferTextureSets;
     VkPipelineLayout                           lightPipelineLayout{nullptr};
+    VkDescriptorSetLayout                      depthPyramidSetLayout{nullptr};
+    VkDescriptorSet                            depthPyramidDescriptorSet{nullptr};
+    VkPipelineLayout                           depthPyramidPipelineLayout{nullptr};
+    VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
+    std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
+    VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
@@ -363,6 +383,9 @@ private:
   std::unique_ptr<GBufferPass>         m_gbufferPass;
   std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
+  std::unique_ptr<DepthPrepass>         m_depthPrepass;
+  std::unique_ptr<DepthPyramidPass>     m_depthPyramidPass;
+  std::unique_ptr<LightCullingPass>     m_lightCullingPass;
   std::unique_ptr<ShadowPass>          m_shadowPass;
   std::unique_ptr<LightPass>           m_lightPass;
   std::unique_ptr<ForwardPass>         m_forwardPass;
@@ -376,11 +399,16 @@ private:
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
+  PipelineHandle m_depthPrepassOpaquePipeline{};
+  PipelineHandle m_depthPrepassAlphaTestPipeline{};
+  PipelineHandle m_depthPyramidPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
+  PipelineHandle m_pointLightCoarseCullingPipeline{};
+  PipelineHandle m_spotLightCoarseCullingPipeline{};
 
   // GBuffer uniform buffer bind groups (per-frame)
   // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public
@@ -420,6 +448,16 @@ private:
     void addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color);
     void addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments);
     void addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color);
+  };
+
+  struct TestPointLightMotion
+  {
+    glm::vec3 baseT{0.5f};
+    glm::vec3 phase{0.0f};
+    glm::vec3 speed{1.0f};
+    glm::vec3 amplitude{0.0f};
+    float     radiusT{1.0f};
+    float     intensityT{1.0f};
   };
 
   // Material/texture domain resources.
@@ -510,6 +548,11 @@ private:
   void                 prebuildRequiredPipelineVariants();
   void                 createPrebuiltGraphicsPipelineVariants();
   void                 createPrebuiltComputePipelineVariant();
+  void                 createLightCoarseCullingResources();
+  void                 createLightCoarseCullingPipelines();
+  void                 createDepthPyramidResources();
+  void                 updateDepthPyramidDescriptorSet();
+  void                 createDepthPyramidPipeline();
   void                 initImGui(GLFWwindow* window);
   void                 createDescriptorPool();
   void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
@@ -536,6 +579,7 @@ private:
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
   [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel) const;
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
+  void              ensureTestPointLights(const RenderParams& params);
   [[nodiscard]] std::array<glm::vec3, 8> computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
                                                                           float nearDistance,
                                                                           float farDistance) const;
@@ -548,6 +592,12 @@ private:
   PerPassResources            m_perPass;
   PerDrawData                 m_perDraw;
   MaterialResources           m_materials;
+  LightResources              m_lightResources;
+  utils::Buffer               m_depthPyramidUniformBuffer{};
+  std::vector<shaderio::LightData> m_testPointLights;
+  std::vector<TestPointLightMotion> m_testPointLightMotions;
+  Aabb                     m_testPointLightSceneBounds{};
+  std::vector<shaderio::LightData> m_testSpotLights;
   DrawStreamDecoder           m_drawStreamDecoder;
   FrameLightingState          m_frameLightingState;
   DebugDrawList               m_debugDrawList;

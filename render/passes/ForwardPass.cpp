@@ -19,11 +19,17 @@ ForwardPass::ForwardPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> ForwardPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 1> dependencies = {
+    static const std::array<PassResourceDependency, 2> dependencies = {
         PassResourceDependency::texture(
             kPassOutputHandle,
             ResourceAccess::readWrite,  // Read existing LightPass output, write blended result
             rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassSceneDepthHandle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::DepthStencilAttachment
         ),
     };
     return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
@@ -38,13 +44,30 @@ void ForwardPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("ForwardPass");
 
+    SceneResources& sceneResources = m_renderer->getSceneResources();
+    const auto restoreDepthForSampling = [&]() {
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+            .aspect      = rhi::TextureAspect::depth,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::read,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::DepthStencilAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
+    };
+
     // Get output texture view and extent (follows screen size)
     const VkImageView outputImageView = m_renderer->getOutputTextureView();
-    const VkExtent2D vkExtent = m_renderer->getSceneResources().getSize();
+    const VkExtent2D vkExtent = sceneResources.getSize();
     const rhi::Extent2D outputExtent = {vkExtent.width, vkExtent.height};
 
     if(outputImageView == VK_NULL_HANDLE)
     {
+        restoreDepthForSampling();
         context.cmd->endEvent();
         return;
     }
@@ -52,16 +75,18 @@ void ForwardPass::execute(const PassContext& context) const
     // Check if we have transparent meshes to render
     if(context.gltfModel == nullptr || context.gltfModel->meshes.empty())
     {
+        restoreDepthForSampling();
         context.cmd->endEvent();
         return;
     }
 
     MeshPool& meshPool = m_renderer->getMeshPool();
-    SceneResources& sceneResources = m_renderer->getSceneResources();
+
     // Use output texture extent for rendering
     const rhi::Extent2D renderExtent = outputExtent;
     if(renderExtent.width == 0 || renderExtent.height == 0)
     {
+        restoreDepthForSampling();
         context.cmd->endEvent();
         return;
     }
@@ -104,6 +129,7 @@ void ForwardPass::execute(const PassContext& context) const
     // No transparent meshes, skip rendering
     if(transparentMeshes.empty())
     {
+        restoreDepthForSampling();
         context.cmd->endEvent();
         return;
     }
@@ -134,16 +160,21 @@ void ForwardPass::execute(const PassContext& context) const
         .storeOp = rhi::StoreOp::store,
     };
 
-    // Note: Not using depth attachment for transparent pass since:
-    // 1. OutputTexture is 1920x1080 but depth buffer is viewport-sized
-    // 2. Transparent objects are sorted back-to-front for proper blending
+    const rhi::DepthTargetDesc depthTarget{
+        .texture = {},
+        .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
+        .state = rhi::ResourceState::DepthStencilAttachment,
+        .loadOp = rhi::LoadOp::load,
+        .storeOp = rhi::StoreOp::store,
+        .clearValue = {0.0f, 0},
+    };
 
     // Begin render pass using RHI interface
     const rhi::RenderPassDesc passDesc = {
         .renderArea = {{0, 0}, renderExtent},
         .colorTargets = &colorTarget,
         .colorTargetCount = 1,
-        .depthTarget = nullptr,
+        .depthTarget = &depthTarget,
     };
     context.cmd->beginRenderPass(passDesc);
 
@@ -176,6 +207,7 @@ void ForwardPass::execute(const PassContext& context) const
             .newState    = rhi::ResourceState::General,
             .isSwapchain = false,
         });
+        restoreDepthForSampling();
         context.cmd->endEvent();
         return;
     }
@@ -326,6 +358,7 @@ void ForwardPass::execute(const PassContext& context) const
         .newState    = rhi::ResourceState::General,
         .isSwapchain = false,
     });
+    restoreDepthForSampling();
 
     context.cmd->endEvent();
 }

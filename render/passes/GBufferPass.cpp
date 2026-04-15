@@ -44,7 +44,7 @@ PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() con
         ),
         PassResourceDependency::texture(
             kPassSceneDepthHandle,
-            ResourceAccess::write,
+            ResourceAccess::read,
             rhi::ShaderStage::fragment,
             rhi::ResourceState::DepthStencilAttachment
         ),
@@ -87,7 +87,7 @@ void GBufferPass::execute(const PassContext& context) const
         .texture = {},  // Not used when view carries native pointer
         .view = rhi::TextureViewHandle::fromNative(sceneResources.getDepthImageView()),
         .state = rhi::ResourceState::DepthStencilAttachment,
-        .loadOp = rhi::LoadOp::clear,
+        .loadOp = rhi::LoadOp::load,
         .storeOp = rhi::StoreOp::store,
         .clearValue = {0.0f, 0},
     };

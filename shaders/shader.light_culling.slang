@@ -1,207 +1,124 @@
-// Tiled Light Culling Compute Shader
-// Culls lights against screen-space tiles using depth bounds
+// Light coarse culling: projects light bounds to screen-space tile ranges.
 
 #include "shader_io.h"
 
-//------------------------------------------------------------------------------
-// Resource Bindings
-//------------------------------------------------------------------------------
-
-// Light data buffer (input)
 [[vk::binding(0, 0)]]
-StructuredBuffer<LightData> lightBuffer;
+StructuredBuffer<LightData> pointLightBuffer;
 
-// Light uniforms (input)
 [[vk::binding(1, 0)]]
-ConstantBuffer<LightListUniforms> lightUniforms;
+StructuredBuffer<LightData> spotLightBuffer;
 
-// Depth buffer (input for depth bounds calculation)
 [[vk::binding(2, 0)]]
-Texture2D<float> depthTexture;
+RWStructuredBuffer<uint16_t4> pointLightXYCoarseCullIndicesBuffer;
 
-// Tile light index list (output)
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> tileLightIndexBuffer;
+RWStructuredBuffer<uint16_t4> spotLightXYCoarseCullIndicesBuffer;
 
-// Culling parameters push constant struct
-struct CullingParams
+[[vk::binding(4, 0)]]
+ConstantBuffer<LightCoarseCullingUniforms> lightCoarseCulling;
+
+STATIC_CONST uint kCoarseCullingThreadCount = 64;
+
+uint16_t4 emptyTileBounds()
 {
-    uint screenWidth;
-    uint screenHeight;
-    float nearPlane;
-    float farPlane;
-    mat4 viewMatrix;
-    mat4 projectionMatrix;
-    mat4 invProjectionMatrix;
-};
-
-// Push constants for culling parameters
-[[vk::push_constant]]
-CullingParams cullingParams;
-
-//------------------------------------------------------------------------------
-// Constants
-//------------------------------------------------------------------------------
-
-STATIC_CONST uint TILE_SIZE_X = 16;
-STATIC_CONST uint TILE_SIZE_Y = 16;
-
-//------------------------------------------------------------------------------
-// Helper Functions
-//------------------------------------------------------------------------------
-
-// Convert screen position to view space depth bounds
-float2 getTileDepthBounds(uint2 tileCoord)
-{
-    uint2 minPixel = tileCoord * uint2(TILE_SIZE_X, TILE_SIZE_Y);
-    uint2 maxPixel = minPixel + uint2(TILE_SIZE_X, TILE_SIZE_Y) - 1;
-
-    float minDepth = 1.0;
-    float maxDepth = 0.0;
-
-    // Sample depth buffer to find min/max depth in tile
-    // Use Load for compute shader (no sampler needed)
-    for (uint y = minPixel.y; y <= maxPixel.y && y < cullingParams.screenHeight; y += 4)
-    {
-        for (uint x = minPixel.x; x <= maxPixel.x && x < cullingParams.screenWidth; x += 4)
-        {
-            float depth = depthTexture.Load(int3(x, y, 0));
-            if (depth < 0.9999)  // Not background
-            {
-                minDepth = min(minDepth, depth);
-                maxDepth = max(maxDepth, depth);
-            }
-        }
-    }
-
-    // If no valid depth, use full range
-    if (minDepth > maxDepth)
-    {
-        minDepth = 0.0;
-        maxDepth = 1.0;
-    }
-
-    return float2(minDepth, maxDepth);
+    return uint16_t4(0, 0, 0, 0);
 }
 
-// Convert NDC depth to view-space Z
-float ndcDepthToViewZ(float ndcDepth)
+bool accumulateProjectedPoint(float3 worldPos, inout float2 minNdc, inout float2 maxNdc, inout bool hasProjectedPoint)
 {
-    // For perspective projection with GLM_FORCE_DEPTH_ZERO_TO_ONE:
-    // ndcZ = P20 + P32/viewZ
-    // viewZ = P32 / (ndcZ - P20)
-    float P20 = cullingParams.projectionMatrix[2][2];
-    float P32 = cullingParams.projectionMatrix[3][2];
-    return P32 / (ndcDepth - P20);
-}
-
-// Check if point light intersects tile frustum
-bool lightIntersectsTile(const LightData light, uint2 tileCoord, float2 depthBounds, float4 frustumPlanes[4])
-{
-    if (light.lightType == LLightTypeDirectional)
-        return true;  // Directional lights always visible
-
-    // Point light sphere-frustum intersection test
-    // Transform light position to view space
-    float4 viewPos = mul(cullingParams.viewMatrix, float4(light.positionOrDirection, 1.0));
-
-    // Convert depth bounds to view space
-    float viewMinZ = ndcDepthToViewZ(depthBounds.y);  // Near = max NDC depth
-    float viewMaxZ = ndcDepthToViewZ(depthBounds.x);  // Far = min NDC depth
-
-    // Check depth bounds (view space Z is negative in front of camera)
-    if (viewPos.z - light.range > viewMinZ || viewPos.z + light.range < viewMaxZ)
+    float4 clip = mul(lightCoarseCulling.viewProjection, float4(worldPos, 1.0));
+    if(clip.w <= 0.0001)
+    {
         return false;
-
-    // Check frustum planes (simplified sphere-plane test)
-    for (uint i = 0; i < 4; ++i)
-    {
-        float dist = dot(frustumPlanes[i], float4(viewPos.xyz, 1.0));
-        if (dist < -light.range)
-            return false;  // Sphere entirely outside plane
     }
 
+    float3 ndc = clip.xyz / clip.w;
+    if(ndc.z < 0.0 || ndc.z > 1.0)
+    {
+        return false;
+    }
+
+    minNdc = hasProjectedPoint ? min(minNdc, ndc.xy) : ndc.xy;
+    maxNdc = hasProjectedPoint ? max(maxNdc, ndc.xy) : ndc.xy;
+    hasProjectedPoint = true;
     return true;
 }
 
-//------------------------------------------------------------------------------
-// Compute Shader
-//------------------------------------------------------------------------------
-
-[numthreads(TILE_SIZE_X, TILE_SIZE_Y, 1)]
-[shader("compute")]
-void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+uint16_t4 projectSphereToTileBounds(float3 center, float radius)
 {
-    const uint2 tileCoord = dispatchThreadId.xy;
+    const uint screenWidth = uint(lightCoarseCulling.screenTileInfo.x);
+    const uint screenHeight = uint(lightCoarseCulling.screenTileInfo.y);
+    const uint tileCountX = uint(lightCoarseCulling.screenTileInfo.z);
+    const uint tileCountY = uint(lightCoarseCulling.screenTileInfo.w);
+    const float3 right = normalize(lightCoarseCulling.cameraRight.xyz);
+    const float3 up = normalize(lightCoarseCulling.cameraUp.xyz);
 
-    // Bounds check: ensure tile is within valid range
-    const uint numTilesX = (cullingParams.screenWidth + TILE_SIZE_X - 1) / TILE_SIZE_X;
-    const uint numTilesY = (cullingParams.screenHeight + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+    float2 minNdc = float2(0.0, 0.0);
+    float2 maxNdc = float2(0.0, 0.0);
+    bool hasProjectedPoint = false;
 
-    if(tileCoord.x >= numTilesX || tileCoord.y >= numTilesY)
-        return;  // Out of bounds tile - no work
+    accumulateProjectedPoint(center, minNdc, maxNdc, hasProjectedPoint);
+    accumulateProjectedPoint(center + right * radius, minNdc, maxNdc, hasProjectedPoint);
+    accumulateProjectedPoint(center - right * radius, minNdc, maxNdc, hasProjectedPoint);
+    accumulateProjectedPoint(center + up * radius, minNdc, maxNdc, hasProjectedPoint);
+    accumulateProjectedPoint(center - up * radius, minNdc, maxNdc, hasProjectedPoint);
 
-    const uint tileIndex = tileCoord.y * numTilesX + tileCoord.x;
-
-    // Get depth bounds for this tile
-    float2 depthBounds = getTileDepthBounds(tileCoord);
-
-    // Build tile frustum planes from projection matrix
-    // Extract frustum planes from inverse projection matrix
-    float4 frustumPlanes[4];
-
-    // Left plane
-    frustumPlanes[0] = float4(
-        cullingParams.invProjectionMatrix[0][3] + cullingParams.invProjectionMatrix[0][0],
-        cullingParams.invProjectionMatrix[1][3] + cullingParams.invProjectionMatrix[1][0],
-        cullingParams.invProjectionMatrix[2][3] + cullingParams.invProjectionMatrix[2][0],
-        cullingParams.invProjectionMatrix[3][3] + cullingParams.invProjectionMatrix[3][0]
-    );
-    // Right plane
-    frustumPlanes[1] = float4(
-        cullingParams.invProjectionMatrix[0][3] - cullingParams.invProjectionMatrix[0][0],
-        cullingParams.invProjectionMatrix[1][3] - cullingParams.invProjectionMatrix[1][0],
-        cullingParams.invProjectionMatrix[2][3] - cullingParams.invProjectionMatrix[2][0],
-        cullingParams.invProjectionMatrix[3][3] - cullingParams.invProjectionMatrix[3][0]
-    );
-    // Top plane
-    frustumPlanes[2] = float4(
-        cullingParams.invProjectionMatrix[0][3] - cullingParams.invProjectionMatrix[0][1],
-        cullingParams.invProjectionMatrix[1][3] - cullingParams.invProjectionMatrix[1][1],
-        cullingParams.invProjectionMatrix[2][3] - cullingParams.invProjectionMatrix[2][1],
-        cullingParams.invProjectionMatrix[3][3] - cullingParams.invProjectionMatrix[3][1]
-    );
-    // Bottom plane
-    frustumPlanes[3] = float4(
-        cullingParams.invProjectionMatrix[0][3] + cullingParams.invProjectionMatrix[0][1],
-        cullingParams.invProjectionMatrix[1][3] + cullingParams.invProjectionMatrix[1][1],
-        cullingParams.invProjectionMatrix[2][3] + cullingParams.invProjectionMatrix[2][1],
-        cullingParams.invProjectionMatrix[3][3] + cullingParams.invProjectionMatrix[3][1]
-    );
-
-    // Normalize planes
-    for (uint i = 0; i < 4; ++i)
+    if(!hasProjectedPoint || maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
     {
-        float len = length(frustumPlanes[i].xyz);
-        frustumPlanes[i] = frustumPlanes[i] / len;
+        return emptyTileBounds();
     }
 
-    // Cull lights against tile
-    uint lightCount = 0;
-    uint baseIndex = tileIndex * LMaxLightsPerTile;
+    minNdc = clamp(minNdc, float2(-1.0, -1.0), float2(1.0, 1.0));
+    maxNdc = clamp(maxNdc, float2(-1.0, -1.0), float2(1.0, 1.0));
 
-    for (uint i = 0; i < lightUniforms.numLights && lightCount < LMaxLightsPerTile; ++i)
+    const float minPixelX = (minNdc.x * 0.5 + 0.5) * float(screenWidth);
+    const float maxPixelX = (maxNdc.x * 0.5 + 0.5) * float(screenWidth);
+    const float minPixelY = (minNdc.y * 0.5 + 0.5) * float(screenHeight);
+    const float maxPixelY = (maxNdc.y * 0.5 + 0.5) * float(screenHeight);
+
+    const uint tileStartX = min(uint(floor(minPixelX)) / LTileSizeX, tileCountX);
+    const uint tileEndX = min((uint(ceil(maxPixelX)) + LTileSizeX - 1) / LTileSizeX, tileCountX);
+    const uint tileStartY = min(uint(floor(minPixelY)) / LTileSizeY, tileCountY);
+    const uint tileEndY = min((uint(ceil(maxPixelY)) + LTileSizeY - 1) / LTileSizeY, tileCountY);
+
+    if(tileEndX <= tileStartX || tileEndY <= tileStartY)
     {
-        if (lightIntersectsTile(lightBuffer[i], tileCoord, depthBounds, frustumPlanes))
-        {
-            tileLightIndexBuffer[baseIndex + lightCount] = i;
-            lightCount++;
-        }
+        return emptyTileBounds();
     }
 
-    // Mark end of list with sentinel (-1)
-    if (lightCount < LMaxLightsPerTile)
+    return uint16_t4(
+        uint16_t(tileStartX),
+        uint16_t(tileEndX - tileStartX),
+        uint16_t(tileStartY),
+        uint16_t(tileEndY - tileStartY));
+}
+
+[numthreads(kCoarseCullingThreadCount, 1, 1)]
+[shader("compute")]
+void kernelPointLightCoarseCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint lightIndex = dispatchThreadId.x;
+    if(lightIndex >= uint(lightCoarseCulling.lightCountInfo.x))
     {
-        tileLightIndexBuffer[baseIndex + lightCount] = 0xFFFFFFFF;
+        return;
     }
+
+    const LightData light = pointLightBuffer[lightIndex];
+    pointLightXYCoarseCullIndicesBuffer[lightIndex] =
+        projectSphereToTileBounds(light.positionOrDirection, max(light.range, 0.0));
+}
+
+[numthreads(kCoarseCullingThreadCount, 1, 1)]
+[shader("compute")]
+void kernelSpotLightCoarseCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint lightIndex = dispatchThreadId.x;
+    if(lightIndex >= uint(lightCoarseCulling.lightCountInfo.y))
+    {
+        return;
+    }
+
+    const LightData light = spotLightBuffer[lightIndex];
+    spotLightXYCoarseCullIndicesBuffer[lightIndex] =
+        projectSphereToTileBounds(light.positionOrDirection, max(light.range, 0.0));
 }
