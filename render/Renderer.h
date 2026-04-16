@@ -27,6 +27,7 @@
 #include "SceneResources.h"
 #include "CSMShadowResources.h"
 #include "TransientAllocator.h"
+#include "UploadUtils.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
 #include "../rhi/RHIDevice.h"
@@ -336,6 +337,7 @@ private:
     std::unique_ptr<rhi::Device> device;
     VmaAllocator                 allocator{nullptr};
     std::vector<utils::Buffer>   stagingBuffers;
+    upload::StaticBufferUploadPolicy staticBufferUploadPolicy{};
     SamplerCache                 samplerPool;
 
     utils::Buffer                              vertexBuffer;

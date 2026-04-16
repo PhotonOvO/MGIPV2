@@ -187,30 +187,6 @@ public:
 
       if(ImGui::Begin("Settings"))
       {
-        const demo::MaterialHandle image1Material = m_renderer.getMaterialHandle(0);
-        const demo::MaterialHandle image2Material = m_renderer.getMaterialHandle(1);
-
-        bool useImage1 = m_selectedMaterial == image1Material;
-        if(ImGui::RadioButton("Image 1", useImage1))
-        {
-          m_selectedMaterial = image1Material;
-        }
-
-        bool useImage2 = m_selectedMaterial == image2Material;
-        if(ImGui::RadioButton("Image 2", useImage2))
-        {
-          m_selectedMaterial = image2Material;
-        }
-
-        ImGui::Separator();
-        float color[3] = {m_clearColor.r, m_clearColor.g, m_clearColor.b};
-        if(ImGui::ColorPicker3("Clear Color", color))
-        {
-          m_clearColor.r = color[0];
-          m_clearColor.g = color[1];
-          m_clearColor.b = color[2];
-        }
-
         // Camera coordinates display
         ImGui::Separator();
         ImGui::Text("Camera Position:");

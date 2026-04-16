@@ -3,6 +3,7 @@
 #include "../common/Common.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
+#include "UploadUtils.h"
 
 #include <cstdint>
 #include <cassert>
@@ -48,7 +49,7 @@ public:
     MeshPool() = default;
     ~MeshPool() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
 
-    void init(VkDevice device, VmaAllocator allocator);
+    void init(VkDevice device, VmaAllocator allocator, upload::StaticBufferUploadPolicy staticUploadPolicy = {});
     void deinit();
 
     MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd);
@@ -68,6 +69,7 @@ public:
 private:
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
+    upload::StaticBufferUploadPolicy m_staticUploadPolicy{};
     HandlePool<MeshHandle, MeshRecord> m_pool;
     std::vector<utils::Buffer> m_stagingBuffers;  // Deferred deletion after GPU sync
 };

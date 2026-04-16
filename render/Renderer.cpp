@@ -237,17 +237,9 @@ static void destroyBuffer(const VmaAllocator allocator, utils::Buffer& buffer)
 static utils::Buffer createStagingBuffer(const VkDevice              device,
                                          const VmaAllocator          allocator,
                                          std::vector<utils::Buffer>& stagingBuffers,
-                                         std::span<const std::byte>  data,
-                                         bool                        enableExternalHostMemory = false)
+                                         std::span<const std::byte>  data)
 {
-  utils::Buffer stagingBuffer = createBuffer(device, allocator, data.size_bytes(), VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-                                             enableExternalHostMemory);
-
-  void* mappedData{nullptr};
-  VK_CHECK(vmaMapMemory(allocator, stagingBuffer.allocation, &mappedData));
-  std::memcpy(mappedData, data.data(), data.size_bytes());
-  vmaUnmapMemory(allocator, stagingBuffer.allocation);
+  utils::Buffer stagingBuffer = upload::createUploadStagingBuffer(device, allocator, data);
   stagingBuffers.push_back(stagingBuffer);
   return stagingBuffer;
 }
@@ -258,15 +250,9 @@ static utils::Buffer createBufferAndUploadData(const VkDevice               devi
                                                const VkCommandBuffer        cmd,
                                                std::span<const std::byte>   data,
                                                const VkBufferUsageFlags2KHR usage,
-                                               bool                         enableExternalHostMemory = false)
+                                               const upload::StaticBufferUploadPolicy& uploadPolicy)
 {
-  utils::Buffer stagingBuffer = createStagingBuffer(device, allocator, stagingBuffers, data, enableExternalHostMemory);
-  utils::Buffer gpuBuffer     = createBuffer(device, allocator, data.size_bytes(),
-                                             usage | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR, VMA_MEMORY_USAGE_GPU_ONLY);
-
-  const VkBufferCopy copyRegion{.size = data.size_bytes()};
-  vkCmdCopyBuffer(cmd, stagingBuffer.buffer, gpuBuffer.buffer, 1, &copyRegion);
-  return gpuBuffer;
+  return upload::createStaticBufferWithUpload(device, allocator, cmd, data, usage, uploadPolicy, &stagingBuffers);
 }
 
 static utils::Image createImage(const VmaAllocator allocator, const VkImageCreateInfo& imageInfo)
@@ -429,8 +415,6 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
   m_device.device->init(deviceCreateInfo);
 
-  const bool enableExternalHostMemory = false;
-
   const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
   ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "Renderer::init requires RHI Core capability tier");
   ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
@@ -446,10 +430,21 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   surface.init(static_cast<void*>(nativeInstance), static_cast<void*>(nativePhysicalDevice), windowHandle);
 
   m_device.allocator = createAllocator(nativePhysicalDevice, nativeDevice, nativeInstance, m_device.device->getApiVersion());
+  m_device.staticBufferUploadPolicy =
+      upload::buildStaticBufferUploadPolicy(m_device.device->getPhysicalMemoryProperties());
+  if(m_device.staticBufferUploadPolicy.allowDirectHostVisibleDeviceLocalUpload)
+  {
+    LOGI("Static buffer upload: staging fallback with ReBAR direct-write for buffers up to %.1f MiB",
+         static_cast<double>(m_device.staticBufferUploadPolicy.directUploadThreshold) / (1024.0 * 1024.0));
+  }
+  else
+  {
+    LOGI("Static buffer upload: host staging to device-local buffers");
+  }
 
   m_device.samplerPool.init(nativeDevice);
 
-  m_meshPool.init(nativeDevice, m_device.allocator);
+  m_meshPool.init(nativeDevice, m_device.allocator, m_device.staticBufferUploadPolicy);
 
   const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
   ASSERT(nativeSurface != VK_NULL_HANDLE, "Renderer::init requires a valid initialized surface");
@@ -585,12 +580,12 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
                                                       std::as_bytes(std::span{s_vertices}),
                                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                      enableExternalHostMemory);
+                                                      m_device.staticBufferUploadPolicy);
     DBG_VK_NAME(m_device.vertexBuffer.buffer);
 
     m_device.pointsBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
                                                       std::as_bytes(std::span{s_points}), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                      enableExternalHostMemory);
+                                                      m_device.staticBufferUploadPolicy);
     DBG_VK_NAME(m_device.pointsBuffer.buffer);
 
     const std::vector<std::string> searchPaths = {".", "resources", "../resources", "../../resources"};
@@ -5117,14 +5112,12 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
         .imageExtent      = imageInfo.extent,
     };
 
-    const size_t       pixelSize     = imageData.pixels.size();
-    utils::Buffer      stagingBuffer = createBuffer(device, m_device.allocator, pixelSize, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
-                                               VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-
-    void* mapped = nullptr;
-    VK_CHECK(vmaMapMemory(m_device.allocator, stagingBuffer.allocation, &mapped));
-    std::memcpy(mapped, imageData.pixels.data(), pixelSize);
-    vmaUnmapMemory(m_device.allocator, stagingBuffer.allocation);
+    const size_t pixelSize = imageData.pixels.size();
+    utils::Buffer stagingBuffer =
+        upload::createUploadStagingBuffer(device,
+                                          m_device.allocator,
+                                          std::span<const std::byte>(reinterpret_cast<const std::byte*>(imageData.pixels.data()),
+                                                                     pixelSize));
 
     vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
 

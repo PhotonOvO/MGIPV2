@@ -137,7 +137,7 @@ target_link_libraries(imgui_demo PUBLIC volk glfw)
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
 set(STB_IMAGE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
 if(NOT EXISTS "${STB_IMAGE_PATH}")
-  message(STATUS "Downloading stb_image.h for Demo...")
+  message(STATUS "Downloading stb_image.h for Demo...") 
   file(DOWNLOAD "${STB_IMAGE_URL}" "${STB_IMAGE_PATH}")
 endif()
 
@@ -285,6 +285,8 @@ add_library(demo_core STATIC
   render/DrawStreamDecoder.h
   render/DrawStreamWriter.cpp
   render/DrawStreamWriter.h
+  render/UploadUtils.cpp
+  render/UploadUtils.h
   common/Common.h
   common/Handles.h
   common/HandlePool.h

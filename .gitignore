@@ -1,3 +1,6 @@
 out/
 .vs/
 resources/
+build/
+.claude/
+imgui.ini

@@ -34,9 +34,10 @@ void updateWorldBounds(MeshRecord& record)
 
 }  // namespace
 
-void MeshPool::init(VkDevice device, VmaAllocator allocator) {
+void MeshPool::init(VkDevice device, VmaAllocator allocator, upload::StaticBufferUploadPolicy staticUploadPolicy) {
     m_device = device;
     m_allocator = allocator;
+    m_staticUploadPolicy = staticUploadPolicy;
 }
 
 void MeshPool::deinit() {
@@ -123,83 +124,31 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
 
     updateWorldBounds(record);
 
-    // Create vertex buffer
-    VkBufferCreateInfo vertexBufferInfo{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = vertexData.size(),
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
+    const std::span<const std::byte> vertexBytes(reinterpret_cast<const std::byte*>(vertexData.data()), vertexData.size());
+    const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()),
+                                                record.indexCount * sizeof(uint32_t));
 
-    VmaAllocationCreateInfo vertexAllocInfo{
-        .usage = VMA_MEMORY_USAGE_GPU_ONLY,
-    };
+    const utils::Buffer vertexBuffer = upload::createStaticBufferWithUpload(
+        m_device,
+        m_allocator,
+        cmd,
+        vertexBytes,
+        VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
+        m_staticUploadPolicy,
+        &m_stagingBuffers);
+    record.vertexAllocation = vertexBuffer.allocation;
+    record.setNativeVertexBuffer(vertexBuffer.buffer);
 
-    VkBuffer vertexStagingBuffer = VK_NULL_HANDLE;
-    VmaAllocation vertexStagingAllocation = nullptr;
-    void* vertexMappedData = nullptr;
-
-    // Create staging buffer
-    VkBufferCreateInfo stagingInfo{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = vertexData.size(),
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    VmaAllocationCreateInfo stagingAllocInfo{
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-        .usage = VMA_MEMORY_USAGE_CPU_ONLY,  // Use system RAM for staging, not device-local heap
-    };
-
-    VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-                    &vertexStagingBuffer, &vertexStagingAllocation, nullptr));
-    VK_CHECK(vmaMapMemory(m_allocator, vertexStagingAllocation, &vertexMappedData));
-    std::memcpy(vertexMappedData, vertexData.data(), vertexData.size());
-    vmaUnmapMemory(m_allocator, vertexStagingAllocation);
-
-    // Create GPU vertex buffer
-    VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VK_CHECK(vmaCreateBuffer(m_allocator, &vertexBufferInfo, &vertexAllocInfo,
-                    &vertexBuffer, &record.vertexAllocation, nullptr));
-    record.setNativeVertexBuffer(vertexBuffer);
-
-    // Copy to GPU
-    VkBufferCopy vertexCopy{.size = vertexData.size()};
-    vkCmdCopyBuffer(cmd, vertexStagingBuffer, vertexBuffer, 1, &vertexCopy);
-
-    // Create index buffer
-    VkBufferCreateInfo indexBufferInfo{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = record.indexCount * sizeof(uint32_t),
-        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-
-    VkBuffer indexStagingBuffer = VK_NULL_HANDLE;
-    VmaAllocation indexStagingAllocation = nullptr;
-    void* indexMappedData = nullptr;
-
-    stagingInfo.size = record.indexCount * sizeof(uint32_t);
-    VK_CHECK(vmaCreateBuffer(m_allocator, &stagingInfo, &stagingAllocInfo,
-                    &indexStagingBuffer, &indexStagingAllocation, nullptr));
-    VK_CHECK(vmaMapMemory(m_allocator, indexStagingAllocation, &indexMappedData));
-    std::memcpy(indexMappedData, meshData.indices.data(), record.indexCount * sizeof(uint32_t));
-    vmaUnmapMemory(m_allocator, indexStagingAllocation);
-
-    // Create GPU index buffer
-    VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VK_CHECK(vmaCreateBuffer(m_allocator, &indexBufferInfo, &vertexAllocInfo,
-                    &indexBuffer, &record.indexAllocation, nullptr));
-    record.setNativeIndexBuffer(indexBuffer);
-
-    // Copy to GPU
-    VkBufferCopy indexCopy{.size = record.indexCount * sizeof(uint32_t)};
-    vkCmdCopyBuffer(cmd, indexStagingBuffer, indexBuffer, 1, &indexCopy);
-
-    // Store staging buffers for deferred deletion after GPU sync
-    m_stagingBuffers.push_back({vertexStagingBuffer, vertexStagingAllocation});
-    m_stagingBuffers.push_back({indexStagingBuffer, indexStagingAllocation});
+    const utils::Buffer indexBuffer = upload::createStaticBufferWithUpload(
+        m_device,
+        m_allocator,
+        cmd,
+        indexBytes,
+        VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
+        m_staticUploadPolicy,
+        &m_stagingBuffers);
+    record.indexAllocation = indexBuffer.allocation;
+    record.setNativeIndexBuffer(indexBuffer.buffer);
 
     return m_pool.emplace(std::move(record));
 }
