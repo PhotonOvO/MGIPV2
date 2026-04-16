@@ -17,6 +17,7 @@
 #include "passes/ForwardPass.h"
 #include "passes/DepthPrepass.h"
 #include "passes/DepthPyramidPass.h"
+#include "passes/GPUCullingPass.h"
 #include "passes/CSMShadowPass.h"
 #include "passes/DebugPass.h"
 #include "passes/LightCullingPass.h"
@@ -73,6 +74,7 @@ struct DebugPassOptions
   bool  showPointLights{true};
   bool  showViewportAxis{true};
   bool  showLightCoarseCullingHeatmap{false};
+  bool  showGPUCullingOverlay{true};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};
@@ -153,6 +155,7 @@ public:
   // glTF model support
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
   void             destroyGltfResources(const GltfUploadResult& result);
+  void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
 
   // Execute upload commands with internal command buffer management
   void executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn);
@@ -172,8 +175,15 @@ public:
   PipelineHandle getDebugPipelineHandle() const;
   void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
   PipelineHandle getLightCullingPipelineHandle() const;
+  [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
+  [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
+  {
+    return static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand));
+  }
+  [[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const { return m_lastGPUCullingStats; }
   CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
@@ -334,6 +344,9 @@ private:
     VkDescriptorSetLayout                      depthPyramidSetLayout{nullptr};
     VkDescriptorSet                            depthPyramidDescriptorSet{nullptr};
     VkPipelineLayout                           depthPyramidPipelineLayout{nullptr};
+    VkDescriptorSetLayout                      gpuCullingSetLayout{nullptr};
+    std::vector<VkDescriptorSet>               gpuCullingDescriptorSets;
+    VkPipelineLayout                           gpuCullingPipelineLayout{nullptr};
     VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
     VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
@@ -379,6 +392,13 @@ private:
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
       utils::Buffer      lightingBuffer{};
       utils::Buffer      lightCullingBuffer{};
+      utils::Buffer      gpuCullingObjectBuffer{};
+      utils::Buffer      gpuCullingIndirectBuffer{};
+      utils::Buffer      gpuCullingStatsBuffer{};
+      utils::Buffer      gpuCullingUniformBuffer{};
+      utils::Buffer      gpuCullingResultBuffer{};
+      uint32_t           gpuCullingMeshCapacity{0};
+      std::vector<uint32_t> gpuCullingResults;
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -399,6 +419,7 @@ private:
   std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
   std::unique_ptr<DepthPrepass>         m_depthPrepass;
   std::unique_ptr<DepthPyramidPass>     m_depthPyramidPass;
+  std::unique_ptr<GPUCullingPass>       m_gpuCullingPass;
   std::unique_ptr<LightCullingPass>     m_lightCullingPass;
   std::unique_ptr<CSMShadowPass>        m_csmShadowPass;
   std::unique_ptr<LightPass>           m_lightPass;
@@ -416,6 +437,7 @@ private:
   PipelineHandle m_depthPrepassOpaquePipeline{};
   PipelineHandle m_depthPrepassAlphaTestPipeline{};
   PipelineHandle m_depthPyramidPipeline{};
+  PipelineHandle m_gpuCullingPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
@@ -464,6 +486,14 @@ private:
     void addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color);
     void addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments);
     void addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color);
+  };
+
+  struct GPUCullOverlayObject
+  {
+    glm::vec3 center{0.0f};
+    float     radius{0.0f};
+    uint32_t  flags{0u};
+    uint32_t  result{shaderio::LGPUCullResultVisible};
   };
 
   struct TestPointLightMotion
@@ -570,6 +600,13 @@ private:
   void                 createDepthPyramidResources();
   void                 updateDepthPyramidDescriptorSet();
   void                 createDepthPyramidPipeline();
+  void                 createGPUCullingResources();
+  void                 updateGPUCullingDescriptorSet(uint32_t frameIndex);
+  void                 createGPUCullingPipeline();
+  void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
+  void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
+  void                 cacheGPUCullingStats(uint32_t frameIndex);
+  void                 drawGPUCullingOverlay(const RenderParams& params) const;
   void                 initImGui(GLFWwindow* window);
   void                 createDescriptorPool();
   void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
@@ -598,6 +635,7 @@ private:
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
   void              ensureTestPointLights(const RenderParams& params);
   [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;
+  [[nodiscard]] shaderio::GPUCullingUniforms buildGPUCullingUniforms(const RenderParams& params, uint32_t objectCount) const;
   [[nodiscard]] std::array<glm::vec3, 8> computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
                                                                           float nearDistance,
                                                                           float farDistance) const;
@@ -619,6 +657,8 @@ private:
   DrawStreamDecoder           m_drawStreamDecoder;
   FrameLightingState          m_frameLightingState;
   DebugDrawList               m_debugDrawList;
+  shaderio::GPUCullStats      m_lastGPUCullingStats{};
+  std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
 };
 
 }  // namespace demo

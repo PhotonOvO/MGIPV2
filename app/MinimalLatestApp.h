@@ -254,6 +254,7 @@ public:
         ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
         ImGui::Checkbox("Viewport Axis", &m_debugOptions.showViewportAxis);
         ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
+        ImGui::Checkbox("GPU Culling Overlay", &m_debugOptions.showGPUCullingOverlay);
         ImGui::SliderFloat("Point Max Radius", &m_debugOptions.pointLightMaxRadius, 0.5f, 12.0f, "%.2f");
         ImGui::SliderFloat("Point Intensity", &m_debugOptions.pointLightIntensityScale, 0.25f, 16.0f, "%.2f",
                            ImGuiSliderFlags_Logarithmic);
@@ -262,10 +263,23 @@ public:
 
         // CSM Shadow debug panel
         drawCSMDebugPanel();
+
+        ImGui::Separator();
+        ImGui::Text("GPU Culling");
+        const shaderio::GPUCullStats& gpuCullStats = m_renderer.getLastGPUCullingStats();
+        const uint32_t totalCullEvaluated = gpuCullStats.totalCount > 0 ? gpuCullStats.totalCount : 1u;
+        ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
+        ImGui::Text("Opaque Visible: %u / %u", gpuCullStats.opaqueVisibleCount, gpuCullStats.opaqueCount);
+        ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
+        ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
+        ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
+        ImGui::Text("Total: %u", gpuCullStats.totalCount);
+        ImGui::Text("Visible Ratio: %.1f%%", 100.0f * static_cast<float>(gpuCullStats.visibleCount) / static_cast<float>(totalCullEvaluated));
       }
       ImGui::End();
 
       drawModelLoaderUI();
+      drawSceneGraphUI();
 
       demo::RenderParams frameParams{};
       frameParams.viewportSize   = m_viewportSize;
@@ -313,6 +327,7 @@ private:
 
   // glTF model loading
   std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
+  std::optional<demo::GltfModel>                  m_sceneModel;
   std::optional<demo::GltfUploadResult>           m_currentModel;
   std::string                                     m_modelPath;
   bool                                            m_modelLoaded = false;
@@ -356,10 +371,16 @@ private:
   bool m_isLoading = false;
   float m_loadProgress = 0.0f;
   std::string m_loadStatus;
+  int m_selectedSceneNode = -1;
 
   void loadModelAsync(const std::string& path);
   void unloadModel();
   void drawModelLoaderUI();
+  void drawSceneGraphUI();
+  void drawSceneNodeTree(int nodeIndex);
+  void drawSelectedSceneNodeInspector();
+  void applySceneGraphTransforms();
+  void updateSceneNodeWorldTransform(int nodeIndex, const glm::mat4& parentTransform);
   void updateAsyncLoading();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
@@ -452,9 +473,12 @@ inline void MinimalLatestApp::updateAsyncLoading()
 
       m_loadProgress = 0.9f;
 
+      m_sceneModel = std::move(*result);
+      m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
+
       // Upload model to GPU
-      m_renderer.executeUploadCommand([this, &result](VkCommandBuffer cmd) {
-        m_currentModel = m_renderer.uploadGltfModel(*result, cmd);
+      m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
+        m_currentModel = m_renderer.uploadGltfModel(*m_sceneModel, cmd);
       });
 
       m_modelPath = m_pendingModelPath;
@@ -463,7 +487,7 @@ inline void MinimalLatestApp::updateAsyncLoading()
       m_loadStatus = "Done!";
 
       LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
-           m_pendingModelPath.c_str(), result->meshes.size(), result->materials.size(), result->images.size());
+           m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
     }
     else
     {
@@ -483,6 +507,8 @@ inline void MinimalLatestApp::unloadModel()
     m_renderer.waitForIdle();
     m_renderer.destroyGltfResources(*m_currentModel);
     m_currentModel.reset();
+    m_sceneModel.reset();
+    m_selectedSceneNode = -1;
     m_modelLoaded = false;
   }
 }
@@ -568,6 +594,172 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     }
   }
   ImGui::End();
+}
+
+inline void MinimalLatestApp::drawSceneGraphUI()
+{
+  if(ImGui::Begin("Scene Graph"))
+  {
+    if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+    {
+      ImGui::TextDisabled("No scene loaded.");
+    }
+    else
+    {
+      ImGui::Text("Model: %s", m_sceneModel->name.c_str());
+      ImGui::Separator();
+
+      const float panelWidth = ImGui::GetContentRegionAvail().x;
+      const float treeWidth = panelWidth * 0.5f;
+
+      ImGui::BeginChild("##SceneTree", ImVec2(treeWidth, 0.0f), true);
+      for(const int rootNodeIndex : m_sceneModel->rootNodes)
+      {
+        drawSceneNodeTree(rootNodeIndex);
+      }
+      ImGui::EndChild();
+
+      ImGui::SameLine();
+
+      ImGui::BeginChild("##SceneInspector", ImVec2(0.0f, 0.0f), true);
+      drawSelectedSceneNodeInspector();
+      ImGui::EndChild();
+    }
+  }
+  ImGui::End();
+}
+
+inline void MinimalLatestApp::drawSceneNodeTree(int nodeIndex)
+{
+  if(!m_sceneModel.has_value() || nodeIndex < 0 || nodeIndex >= static_cast<int>(m_sceneModel->nodes.size()))
+  {
+    return;
+  }
+
+  const demo::GltfNodeData& node = m_sceneModel->nodes[nodeIndex];
+  const bool hasChildren = !node.children.empty();
+  ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick
+                           | ImGuiTreeNodeFlags_SpanAvailWidth;
+  if(!hasChildren)
+  {
+    flags |= ImGuiTreeNodeFlags_Leaf;
+  }
+  if(m_selectedSceneNode == nodeIndex)
+  {
+    flags |= ImGuiTreeNodeFlags_Selected;
+  }
+
+  std::string label = node.name;
+  if(node.meshCount > 0)
+  {
+    label += " (" + std::to_string(node.meshCount) + ")";
+  }
+
+  const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(nodeIndex)), flags, "%s", label.c_str());
+  if(ImGui::IsItemClicked())
+  {
+    m_selectedSceneNode = nodeIndex;
+  }
+
+  if(open)
+  {
+    for(const int childIndex : node.children)
+    {
+      drawSceneNodeTree(childIndex);
+    }
+    ImGui::TreePop();
+  }
+}
+
+inline void MinimalLatestApp::drawSelectedSceneNodeInspector()
+{
+  if(!m_sceneModel.has_value() || m_selectedSceneNode < 0 || m_selectedSceneNode >= static_cast<int>(m_sceneModel->nodes.size()))
+  {
+    ImGui::TextDisabled("Select a node to edit its transform.");
+    return;
+  }
+
+  demo::GltfNodeData& node = m_sceneModel->nodes[m_selectedSceneNode];
+  ImGui::Text("Node");
+  ImGui::Separator();
+  ImGui::TextWrapped("%s", node.name.c_str());
+  ImGui::Text("Children: %d", static_cast<int>(node.children.size()));
+  ImGui::Text("Meshes: %u", node.meshCount);
+  ImGui::Text("Parent: %s",
+              node.parent >= 0 && node.parent < static_cast<int>(m_sceneModel->nodes.size())
+                  ? m_sceneModel->nodes[node.parent].name.c_str()
+                  : "<root>");
+
+  ImGui::Separator();
+  ImGui::Text("Local Transform");
+
+  bool transformChanged = false;
+  transformChanged |= ImGui::DragFloat3("Translation", &node.translation.x, 0.05f);
+  transformChanged |= ImGui::DragFloat3("Rotation", &node.rotationEulerDegrees.x, 0.5f);
+  transformChanged |= ImGui::DragFloat3("Scale", &node.scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
+
+  if(transformChanged)
+  {
+    node.scale = glm::max(node.scale, glm::vec3(0.001f));
+    node.rotation = glm::normalize(glm::quat(glm::radians(node.rotationEulerDegrees)));
+    applySceneGraphTransforms();
+  }
+
+  ImGui::Separator();
+  const glm::vec3 worldPosition = glm::vec3(node.worldTransform[3]);
+  ImGui::Text("World Position");
+  ImGui::Text("  X: %.3f", worldPosition.x);
+  ImGui::Text("  Y: %.3f", worldPosition.y);
+  ImGui::Text("  Z: %.3f", worldPosition.z);
+}
+
+inline void MinimalLatestApp::applySceneGraphTransforms()
+{
+  if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+  {
+    return;
+  }
+
+  for(const int rootNodeIndex : m_sceneModel->rootNodes)
+  {
+    updateSceneNodeWorldTransform(rootNodeIndex, glm::mat4(1.0f));
+  }
+}
+
+inline void MinimalLatestApp::updateSceneNodeWorldTransform(int nodeIndex, const glm::mat4& parentTransform)
+{
+  if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+  {
+    return;
+  }
+  if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_sceneModel->nodes.size()))
+  {
+    return;
+  }
+
+  demo::GltfNodeData& node = m_sceneModel->nodes[nodeIndex];
+  node.localTransform = glm::translate(glm::mat4(1.0f), node.translation)
+                      * glm::mat4_cast(node.rotation)
+                      * glm::scale(glm::mat4(1.0f), node.scale);
+  node.worldTransform = parentTransform * node.localTransform;
+
+  const uint32_t meshEnd = node.firstMeshIndex + node.meshCount;
+  for(uint32_t meshIndex = node.firstMeshIndex; meshIndex < meshEnd; ++meshIndex)
+  {
+    if(meshIndex < m_sceneModel->meshes.size())
+    {
+      m_sceneModel->meshes[meshIndex].transform = node.worldTransform;
+    }
+    if(meshIndex < m_currentModel->meshes.size())
+    {
+      m_renderer.updateMeshTransform(m_currentModel->meshes[meshIndex], node.worldTransform);
+    }
+  }
+
+  for(const int childIndex : node.children)
+  {
+    updateSceneNodeWorldTransform(childIndex, node.worldTransform);
+  }
 }
 
 inline void MinimalLatestApp::drawCSMDebugPanel()

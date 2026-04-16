@@ -46,6 +46,7 @@ public:
   void drawIndexed(uint32_t indexCount, uint32_t instanceCount,
                    uint32_t firstIndex, int32_t vertexOffset,
                    uint32_t firstInstance) override;
+  void drawIndexedIndirect(uint64_t bufferHandle, uint64_t offset, uint32_t drawCount, uint32_t stride) override;
   void dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
 
   void beginEvent(const char* name) override;
@@ -98,6 +99,7 @@ void cmdBindVertexBuffers(const demo::rhi::CommandList& commandList,
 void cmdBindIndexBuffer(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType);
 void cmdDraw(const demo::rhi::CommandList& commandList, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
 void cmdDrawIndexed(const demo::rhi::CommandList& commandList, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
+void cmdDrawIndexedIndirect(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
 void cmdDispatch(const demo::rhi::CommandList& commandList, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
 
 }  // namespace demo::rhi::vulkan

@@ -63,10 +63,26 @@ struct GltfImageData {
     int channels = 0;
 };
 
+struct GltfNodeData {
+    std::string name;
+    int parent = -1;
+    std::vector<int> children;
+    glm::vec3 translation = glm::vec3(0.0f);
+    glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 rotationEulerDegrees = glm::vec3(0.0f);
+    glm::vec3 scale = glm::vec3(1.0f);
+    glm::mat4 localTransform = glm::mat4(1.0f);
+    glm::mat4 worldTransform = glm::mat4(1.0f);
+    uint32_t firstMeshIndex = 0;
+    uint32_t meshCount = 0;
+};
+
 struct GltfModel {
     std::vector<GltfMeshData> meshes;
     std::vector<GltfMaterialData> materials;
     std::vector<GltfImageData> images;
+    std::vector<GltfNodeData> nodes;
+    std::vector<int> rootNodes;
     std::string name;
 };
 
@@ -81,7 +97,11 @@ public:
 private:
     std::string m_lastError;
 
-    bool processNode(const tinygltf::Model& model, int nodeIndex, const glm::mat4& parentTransform, GltfModel& outModel);
+    bool processNode(const tinygltf::Model& model,
+                     int nodeIndex,
+                     int parentNodeIndex,
+                     const glm::mat4& parentTransform,
+                     GltfModel& outModel);
     bool processMesh(const tinygltf::Model& model, int meshIndex, const glm::mat4& transform, GltfModel& outModel);
     void processMaterials(const tinygltf::Model& model, GltfModel& outModel);
     void processImages(const tinygltf::Model& model, GltfModel& outModel);

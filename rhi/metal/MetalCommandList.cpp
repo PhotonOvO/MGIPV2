@@ -234,6 +234,11 @@ void MetalCommandList::drawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32
   //                                baseInstance:firstInstance]
 }
 
+void MetalCommandList::drawIndexedIndirect(uint64_t, uint64_t, uint32_t, uint32_t)
+{
+  // TODO: Metal implementation
+}
+
 void MetalCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   // TODO: Metal implementation

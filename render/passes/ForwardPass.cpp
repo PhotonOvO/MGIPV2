@@ -81,6 +81,8 @@ void ForwardPass::execute(const PassContext& context) const
     }
 
     MeshPool& meshPool = m_renderer->getMeshPool();
+    const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+    const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
 
     // Use output texture extent for rendering
     const rhi::Extent2D renderExtent = outputExtent;
@@ -275,6 +277,7 @@ void ForwardPass::execute(const PassContext& context) const
     // Render transparent meshes (sorted back to front)
     for(const auto& [meshIndex, distance] : transparentMeshes)
     {
+        (void)distance;
         MeshHandle meshHandle = context.gltfModel->meshes[meshIndex];
         const MeshRecord* mesh = meshPool.tryGet(meshHandle);
         if(mesh == nullptr) continue;
@@ -339,8 +342,17 @@ void ForwardPass::execute(const PassContext& context) const
         const uint64_t indexHandle = mesh->indexBufferHandle;
         context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
 
-        // Draw indexed using RHI interface
-        context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+        if(indirectBufferHandle != 0)
+        {
+            context.cmd->drawIndexedIndirect(indirectBufferHandle,
+                                             static_cast<uint64_t>(meshIndex) * indirectCommandStride,
+                                             1,
+                                             indirectCommandStride);
+        }
+        else
+        {
+            context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+        }
     }
 
     // End render pass using RHI interface

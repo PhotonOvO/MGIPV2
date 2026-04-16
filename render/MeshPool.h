@@ -53,6 +53,7 @@ public:
 
     MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd);
     void destroyMesh(MeshHandle handle);
+    void updateTransform(MeshHandle handle, const glm::mat4& transform);
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
 

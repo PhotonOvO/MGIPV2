@@ -1,4 +1,4 @@
-// LightPass shader: GBuffer lighting with coarse point-light culling and cascaded shadow maps.
+// LightPass shader: deferred PBR lighting with coarse point-light culling and cascaded shadow maps.
 
 #include "shader_io.h"
 
@@ -29,22 +29,25 @@ STATIC_CONST int kGBufferMaterialIndex  = 2;
 STATIC_CONST int kGBufferDepthIndex     = 3;
 STATIC_CONST float PI                   = 3.14159265359;
 
+float saturateRoughness(float roughness)
+{
+    return clamp(roughness, 0.045, 1.0);
+}
+
 float NDF_GGX(float NdotH, float roughness)
 {
     float a = roughness * roughness;
     float a2 = a * a;
     float NdotH2 = NdotH * NdotH;
-    float num = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    return num / denom;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * denom * denom, 1e-5);
 }
 
 float Geometry_SchlickGGX(float NdotV, float roughness)
 {
     float r = roughness + 1.0;
     float k = (r * r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
+    return NdotV / lerp(NdotV, 1.0, k);
 }
 
 float Geometry_Smith(float NdotV, float NdotL, float roughness)
@@ -137,37 +140,6 @@ vec3 computeCoarseCullHeatmap(float2 uv, vec3 baseColor, bool hasGeometry)
     return hasGeometry ? lerp(baseColor * 0.18, heatColor, 0.88) : heatColor;
 }
 
-vec3 computeCoarseCulledPointLighting(float2 uv, vec3 baseColor, vec3 worldPos, vec3 worldNormal)
-{
-    const uint2 tileCoord = computeLightTileCoord(uv);
-
-    vec3 pointLighting = baseColor * 0.035;
-    const uint pointLightCount = uint(lightCoarseCulling.lightCountInfo.x);
-    for(uint lightIndex = 0; lightIndex < pointLightCount; ++lightIndex)
-    {
-        const uint16_t4 bounds = pointLightXYCoarseCullIndicesBuffer[lightIndex];
-        if(!tileContainsLight(bounds, tileCoord))
-        {
-            continue;
-        }
-
-        const LightData light = pointLightBuffer[lightIndex];
-        const vec3 toLight = light.positionOrDirection - worldPos;
-        const float distanceToLight = length(toLight);
-        if(distanceToLight <= 0.0001 || distanceToLight >= light.range)
-        {
-            continue;
-        }
-
-        const vec3 L = toLight / distanceToLight;
-        const float attenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
-        const float diffuse = saturate(dot(worldNormal, L));
-        pointLighting += baseColor * light.color * light.intensity * diffuse * attenuation;
-    }
-
-    return pointLighting;
-}
-
 float computeViewDepth(vec3 worldPos)
 {
     float4 viewPos = mul(camera.view, float4(worldPos, 1.0));
@@ -237,39 +209,84 @@ float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
     return visibility / 9.0;
 }
 
-vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float metallic, float roughness, float ao,
-                        float shadowFade, float viewDepth)
+vec3 evaluateDirectBRDF(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 baseColor, float metallic, float roughness)
 {
-    vec3 L = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
-    vec3 V = normalize(camera.cameraPosition - worldPos);
-    vec3 N = normalize(normalEncoded * 2.0 - 1.0);
     vec3 H = normalize(V + L);
 
     float NdotV = max(dot(N, V), 0.001);
-    float NdotL = max(dot(N, L), 0.001);
+    float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
 
-    vec3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
-    vec3 radiance = lighting.light.lightColorAndNormalBias.rgb;
+    if(NdotL <= 0.0)
+    {
+        return vec3(0.0);
+    }
 
+    vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
     float D = NDF_GGX(NdotH, roughness);
     vec3 F = Fresnel_Schlick(VdotH, F0);
     float G = Geometry_Smith(NdotV, NdotL, roughness);
 
     vec3 numerator = D * G * F;
-    float denominator = 4.0 * NdotV * NdotL + 0.001;
+    float denominator = max(4.0 * NdotV * NdotL, 0.001);
     vec3 specular = numerator / denominator;
+
     vec3 kS = F;
     vec3 kD = (1.0 - kS) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
 
+    return (diffuse + specular) * radiance * NdotL;
+}
+
+vec3 evaluateDirectionalLight(vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness, float viewDepth)
+{
+    vec3 L = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
+    vec3 radiance = lighting.light.lightColorAndNormalBias.rgb;
+    vec3 direct = evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
+
     float shadowVisibility = sampleCSMShadow(worldPos, N, viewDepth);
-    float shadowStrength = lighting.light.lightDirectionAndShadowStrength.w * shadowFade;
+    float shadowStrength = lighting.light.lightDirectionAndShadowStrength.w;
     float directVisibility = lerp(1.0, shadowVisibility, shadowStrength);
-    vec3 Lo = (diffuse + specular) * radiance * NdotL * directVisibility;
-    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
-    return ambient + Lo;
+    return direct * directVisibility;
+}
+
+vec3 evaluatePointLights(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    const uint2 tileCoord = computeLightTileCoord(uv);
+    vec3 accumulated = vec3(0.0);
+    const uint pointLightCount = uint(lightCoarseCulling.lightCountInfo.x);
+
+    for(uint lightIndex = 0; lightIndex < pointLightCount; ++lightIndex)
+    {
+        const uint16_t4 bounds = pointLightXYCoarseCullIndicesBuffer[lightIndex];
+        if(!tileContainsLight(bounds, tileCoord))
+        {
+            continue;
+        }
+
+        const LightData light = pointLightBuffer[lightIndex];
+        const vec3 toLight = light.positionOrDirection - worldPos;
+        const float distanceToLight = length(toLight);
+        if(distanceToLight <= 0.0001 || distanceToLight >= light.range)
+        {
+            continue;
+        }
+
+        const vec3 L = toLight / distanceToLight;
+        const float invDistanceSq = 1.0 / max(distanceToLight * distanceToLight, 0.01);
+        const float rangeAttenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
+        const vec3 radiance = light.color * light.intensity * invDistanceSq * light.range * light.range * rangeAttenuation;
+        accumulated += evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
+    }
+
+    return accumulated;
+}
+
+vec3 toneMap(vec3 color)
+{
+    color = color / (color + vec3(1.0, 1.0, 1.0));
+    return pow(color, vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 }
 
 struct VSOutput
@@ -311,15 +328,18 @@ float4 fragmentMain(VSOutput input) : SV_Target
     }
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
-    vec3 worldNormal = normalize(normalSample.rgb * 2.0 - 1.0);
-    float metallic = materialSample.r;
-    float roughness = materialSample.g;
-    float ao = materialSample.b;
+    vec3 N = normalize(normalSample.rgb * 2.0 - 1.0);
+    vec3 V = normalize(camera.cameraPosition - worldPos);
+    vec3 baseColor = saturate(baseColorSample.rgb);
+    float metallic = saturate(materialSample.r);
+    float roughness = saturateRoughness(materialSample.g);
+    float ao = saturate(materialSample.b);
     float viewDepth = computeViewDepth(worldPos);
 
-    vec3 color = computePBRLighting(baseColorSample.rgb, normalSample.rgb, worldPos, metallic, roughness, ao, 1.0, viewDepth);
-    color += computeCoarseCulledPointLighting(input.uv, baseColorSample.rgb, worldPos, worldNormal);
-    color = color / (color + float3(1.0, 1.0, 1.0));
-    color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    return float4(color, 1.0);
+    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
+    vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
+
+    vec3 color = ambient + directional + pointLights;
+    return float4(toneMap(color), 1.0);
 }

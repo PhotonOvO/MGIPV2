@@ -9,6 +9,7 @@
 #include "ImguiAxis.h"
 #include "CSMShadowResources.h"
 
+#include <cstdio>
 #include <cstring>
 #include <random>
 #include <type_traits>
@@ -29,6 +30,71 @@ constexpr uint32_t kTestPointLightCount           = 128;
   const uint32_t safeAlignment = alignment == 0 ? 1u : alignment;
   const uint32_t mask          = safeAlignment - 1u;
   return (value + mask) & ~mask;
+}
+
+[[nodiscard]] glm::vec4 normalizePlane(glm::vec4 plane)
+{
+  const float length = glm::length(glm::vec3(plane));
+  return length > 0.0f ? plane / length : plane;
+}
+
+[[nodiscard]] std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> extractFrustumPlanes(const glm::mat4& viewProjection)
+{
+  const glm::mat4 transposed = glm::transpose(viewProjection);
+  return {
+      normalizePlane(transposed[3] + transposed[0]),
+      normalizePlane(transposed[3] - transposed[0]),
+      normalizePlane(transposed[3] + transposed[1]),
+      normalizePlane(transposed[3] - transposed[1]),
+      normalizePlane(transposed[3] + transposed[2]),
+      normalizePlane(transposed[3] - transposed[2]),
+  };
+}
+
+struct OverlayCircle
+{
+  ImVec2 center{};
+  float  radius{0.0f};
+};
+
+[[nodiscard]] bool projectWorldToViewportCircle(const shaderio::CameraUniforms& camera,
+                                                const glm::vec4&               viewportRect,
+                                                const glm::vec3&               worldCenter,
+                                                float                          worldRadius,
+                                                OverlayCircle&                 outCircle)
+{
+  if(viewportRect.z <= 1.0f || viewportRect.w <= 1.0f)
+  {
+    return false;
+  }
+
+  const glm::mat4 inverseView = glm::inverse(camera.view);
+  const glm::vec3 right = glm::normalize(glm::vec3(inverseView[0]));
+
+  const auto projectPoint = [&](const glm::vec3& point, ImVec2& screenPoint) -> bool {
+    const glm::vec4 clip = camera.viewProjection * glm::vec4(point, 1.0f);
+    if(std::abs(clip.w) <= 1e-5f)
+    {
+      return false;
+    }
+
+    const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    screenPoint.x = viewportRect.x + (ndc.x * 0.5f + 0.5f) * viewportRect.z;
+    screenPoint.y = viewportRect.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * viewportRect.w;
+    return true;
+  };
+
+  ImVec2 centerPoint{};
+  ImVec2 radiusPoint{};
+  if(!projectPoint(worldCenter, centerPoint) || !projectPoint(worldCenter + right * worldRadius, radiusPoint))
+  {
+    return false;
+  }
+
+  outCircle.center = centerPoint;
+  outCircle.radius = std::max(1.0f, std::sqrt((radiusPoint.x - centerPoint.x) * (radiusPoint.x - centerPoint.x)
+                                              + (radiusPoint.y - centerPoint.y) * (radiusPoint.y - centerPoint.y)));
+  return true;
 }
 
 }  // namespace
@@ -432,6 +498,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
     createDepthPyramidResources();
+    createGPUCullingResources();
     createLightCoarseCullingResources();
 
     // Initialize CSM shadow cascade resources
@@ -593,6 +660,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
   m_depthPrepass        = std::make_unique<DepthPrepass>(this);
   m_depthPyramidPass    = std::make_unique<DepthPyramidPass>(this);
+  m_gpuCullingPass      = std::make_unique<GPUCullingPass>(this);
   m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
   m_csmShadowPass       = std::make_unique<CSMShadowPass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
@@ -603,6 +671,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.clear();
   m_passExecutor.addPass(*m_depthPrepass);
   m_passExecutor.addPass(*m_depthPyramidPass);
+  m_passExecutor.addPass(*m_gpuCullingPass);
   m_passExecutor.addPass(*m_lightCullingPass);
   m_passExecutor.addPass(*m_csmShadowPass);
   m_passExecutor.addPass(*m_gbufferPass);
@@ -655,6 +724,17 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
   m_device.depthPyramidDescriptorSet = VK_NULL_HANDLE;
   destroyBuffer(m_device.allocator, m_depthPyramidUniformBuffer);
+  if(m_device.gpuCullingPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.gpuCullingPipelineLayout, nullptr);
+    m_device.gpuCullingPipelineLayout = VK_NULL_HANDLE;
+  }
+  m_device.gpuCullingDescriptorSets.clear();
+  if(m_device.gpuCullingSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.gpuCullingSetLayout, nullptr);
+    m_device.gpuCullingSetLayout = VK_NULL_HANDLE;
+  }
   if(m_device.lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.lightCoarseCullingPipelineLayout, nullptr);
@@ -712,6 +792,11 @@ void Renderer::shutdown(rhi::Surface& surface)
   {
     destroyBuffer(m_device.allocator, frameUserData.lightingBuffer);
     destroyBuffer(m_device.allocator, frameUserData.lightCullingBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -913,6 +998,8 @@ void Renderer::render(const RenderParams& params)
   if(!prepareFrameResources())
     return;
 
+  cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex());
+
   rhi::CommandList& cmd = beginCommandRecording();
   drawFrame(cmd, params);
   endFrame(cmd);
@@ -934,6 +1021,11 @@ void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& param
   if(params.debugOptions.showViewportAxis && params.cameraUniforms != nullptr)
   {
     ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);
+  }
+
+  if(params.debugOptions.showGPUCullingOverlay)
+  {
+    drawGPUCullingOverlay(params);
   }
 
   if(params.recordUi)
@@ -1041,6 +1133,9 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
                      VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
     frameUserData.lightCullingBuffer =
         createBuffer(device, m_device.allocator, sizeof(shaderio::LightCullingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
+                     VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+    frameUserData.gpuCullingUniformBuffer =
+        createBuffer(device, m_device.allocator, sizeof(shaderio::GPUCullingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
                      VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   }
 
@@ -1225,6 +1320,446 @@ void Renderer::updateLightCullingUniformBuffer(uint32_t frameIndex, const shader
   std::memcpy(mappedData, &cullingUniforms, sizeof(cullingUniforms));
   VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCullingBuffer.allocation, 0, sizeof(cullingUniforms)));
   vmaUnmapMemory(m_device.allocator, frameUserData.lightCullingBuffer.allocation);
+}
+
+void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
+{
+  const uint32_t requiredCapacity = std::max(requiredMeshCount, 1u);
+  if(frameUserData.gpuCullingMeshCapacity >= requiredCapacity)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
+
+  frameUserData.gpuCullingObjectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullObject) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.gpuCullingIndirectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.gpuCullingStatsBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullStats),
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.gpuCullingResultBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(uint32_t) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.gpuCullingMeshCapacity = requiredCapacity;
+  frameUserData.gpuCullingResults.resize(requiredCapacity, shaderio::LGPUCullResultVisible);
+}
+
+void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  const uint32_t objectCount =
+      params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u;
+
+  ensureGPUCullingBuffers(frameUserData, objectCount);
+  updateGPUCullingDescriptorSet(frameIndex);
+
+  if(frameUserData.gpuCullingObjectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  std::vector<shaderio::GPUCullObject> objects(objectCount);
+  if(params.gltfModel != nullptr)
+  {
+    for(uint32_t meshIndex = 0; meshIndex < objectCount; ++meshIndex)
+    {
+      const MeshRecord* meshRecord = m_meshPool.tryGet(params.gltfModel->meshes[meshIndex]);
+      if(meshRecord == nullptr)
+      {
+        continue;
+      }
+
+      const glm::vec3 center = 0.5f * (meshRecord->worldBoundsMin + meshRecord->worldBoundsMax);
+      const float radius = glm::length(meshRecord->worldBoundsMax - center);
+
+      uint32_t flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagOcclusionCulling;
+      if(meshRecord->materialIndex >= 0 && meshRecord->materialIndex < static_cast<int32_t>(params.gltfModel->materials.size()))
+      {
+        const MaterialHandle materialHandle = params.gltfModel->materials[meshRecord->materialIndex];
+        if(getMaterialTextureIndices(materialHandle, params.gltfModel).alphaMode == shaderio::LAlphaBlend)
+        {
+          flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
+        }
+      }
+
+      objects[meshIndex] = shaderio::GPUCullObject{
+          .sphereCenterRadius = glm::vec4(center, radius),
+          .indexCount         = meshRecord->indexCount,
+          .firstIndex         = 0u,
+          .vertexOffset       = 0,
+          .flags              = flags,
+      };
+    }
+  }
+
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingObjectBuffer.allocation, &mappedData));
+  if(!objects.empty())
+  {
+    std::memcpy(mappedData, objects.data(), sizeof(shaderio::GPUCullObject) * objects.size());
+  }
+  VK_CHECK(vmaFlushAllocation(m_device.allocator,
+                              frameUserData.gpuCullingObjectBuffer.allocation,
+                              0,
+                              sizeof(shaderio::GPUCullObject) * std::max<size_t>(objects.size(), 1u)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingObjectBuffer.allocation);
+
+  const shaderio::GPUCullStats zeroStats{};
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &zeroStats, sizeof(zeroStats));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(zeroStats)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation);
+
+  if(frameUserData.gpuCullingResultBuffer.allocation != nullptr)
+  {
+    VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingResultBuffer.allocation, &mappedData));
+    std::memset(mappedData, 0, sizeof(uint32_t) * objectCount);
+    VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.gpuCullingResultBuffer.allocation, 0, sizeof(uint32_t) * std::max<uint32_t>(objectCount, 1u)));
+    vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingResultBuffer.allocation);
+  }
+
+  const shaderio::GPUCullingUniforms uniforms = buildGPUCullingUniforms(params, objectCount);
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingUniformBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &uniforms, sizeof(uniforms));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.gpuCullingUniformBuffer.allocation, 0, sizeof(uniforms)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingUniformBuffer.allocation);
+}
+
+void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  if(frameUserData.gpuCullingStatsBuffer.allocation == nullptr)
+  {
+    return;
+  }
+
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, &mappedData));
+  VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
+  std::memcpy(&m_lastGPUCullingStats, mappedData, sizeof(m_lastGPUCullingStats));
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation);
+
+  m_lastGPUCullingOverlayObjects.clear();
+  if(frameUserData.gpuCullingResultBuffer.allocation == nullptr || frameUserData.gpuCullingResults.empty())
+  {
+    return;
+  }
+
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingResultBuffer.allocation, &mappedData));
+  VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
+                                   frameUserData.gpuCullingResultBuffer.allocation,
+                                   0,
+                                   sizeof(uint32_t) * frameUserData.gpuCullingResults.size()));
+  std::memcpy(frameUserData.gpuCullingResults.data(),
+              mappedData,
+              sizeof(uint32_t) * frameUserData.gpuCullingResults.size());
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingResultBuffer.allocation);
+
+  const size_t objectCount = std::min<size_t>(m_lastGPUCullingStats.totalCount, frameUserData.gpuCullingResults.size());
+  m_lastGPUCullingOverlayObjects.reserve(objectCount);
+  if(objectCount == 0 || frameUserData.gpuCullingObjectBuffer.allocation == nullptr)
+  {
+    return;
+  }
+
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.gpuCullingObjectBuffer.allocation, &mappedData));
+  VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
+                                   frameUserData.gpuCullingObjectBuffer.allocation,
+                                   0,
+                                   sizeof(shaderio::GPUCullObject) * objectCount));
+  const auto* objectData = static_cast<const shaderio::GPUCullObject*>(mappedData);
+  for(size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+  {
+    const shaderio::GPUCullObject& object = objectData[objectIndex];
+    if(object.indexCount == 0u && object.sphereCenterRadius.w == 0.0f)
+    {
+      continue;
+    }
+
+    m_lastGPUCullingOverlayObjects.push_back(GPUCullOverlayObject{
+        .center = glm::vec3(object.sphereCenterRadius),
+        .radius = object.sphereCenterRadius.w,
+        .flags  = object.flags,
+        .result = frameUserData.gpuCullingResults[objectIndex],
+    });
+  }
+  vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingObjectBuffer.allocation);
+}
+
+void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
+{
+  if(params.cameraUniforms == nullptr || params.viewportImageRect.z <= 1.0f || params.viewportImageRect.w <= 1.0f)
+  {
+    return;
+  }
+
+  ImDrawList* drawList = ImGui::GetForegroundDrawList();
+  if(drawList == nullptr)
+  {
+    return;
+  }
+
+  const ImVec2 panelMin(params.viewportImageRect.x + 12.0f, params.viewportImageRect.y + 12.0f);
+  const ImVec2 panelMax(panelMin.x + 250.0f, panelMin.y + 150.0f);
+  drawList->AddRectFilled(panelMin, panelMax, IM_COL32(12, 14, 18, 176), 6.0f);
+  drawList->AddRect(panelMin, panelMax, IM_COL32(255, 255, 255, 28), 6.0f);
+
+  char lineBuffer[128];
+  ImVec2 textPos(panelMin.x + 10.0f, panelMin.y + 8.0f);
+  drawList->AddText(textPos, IM_COL32(235, 240, 245, 255), "GPU Culling");
+  textPos.y += 20.0f;
+
+  std::snprintf(lineBuffer,
+                sizeof(lineBuffer),
+                "Visible %u / %u",
+                m_lastGPUCullingStats.visibleCount,
+                m_lastGPUCullingStats.totalCount);
+  drawList->AddText(textPos, IM_COL32(200, 230, 255, 255), lineBuffer);
+  textPos.y += 16.0f;
+
+  std::snprintf(lineBuffer,
+                sizeof(lineBuffer),
+                "Opaque %u / %u   Transparent %u / %u",
+                m_lastGPUCullingStats.opaqueVisibleCount,
+                m_lastGPUCullingStats.opaqueCount,
+                m_lastGPUCullingStats.transparentVisibleCount,
+                m_lastGPUCullingStats.transparentCount);
+  drawList->AddText(textPos, IM_COL32(210, 215, 220, 255), lineBuffer);
+  textPos.y += 16.0f;
+
+  std::snprintf(lineBuffer,
+                sizeof(lineBuffer),
+                "Frustum Culled %u   Occlusion Culled %u",
+                m_lastGPUCullingStats.frustumCulledCount,
+                m_lastGPUCullingStats.occlusionCulledCount);
+  drawList->AddText(textPos, IM_COL32(210, 215, 220, 255), lineBuffer);
+  textPos.y += 22.0f;
+
+  const struct LegendEntry
+  {
+    const char* label;
+    ImU32       color;
+  } legends[] = {
+      {"Visible Opaque", IM_COL32(92, 220, 120, 210)},
+      {"Visible Transparent", IM_COL32(92, 210, 255, 210)},
+      {"Frustum Culled", IM_COL32(255, 92, 92, 210)},
+      {"Occlusion Culled", IM_COL32(255, 176, 92, 210)},
+  };
+
+  ImVec2 legendPos(panelMin.x + 10.0f, panelMin.y + 78.0f);
+  for(const LegendEntry& entry : legends)
+  {
+    drawList->AddCircleFilled(ImVec2(legendPos.x + 4.0f, legendPos.y + 6.0f), 4.0f, entry.color);
+    drawList->AddText(ImVec2(legendPos.x + 14.0f, legendPos.y), IM_COL32(220, 225, 230, 220), entry.label);
+    legendPos.y += 16.0f;
+  }
+
+  for(const GPUCullOverlayObject& object : m_lastGPUCullingOverlayObjects)
+  {
+    OverlayCircle projectedCircle{};
+    if(!projectWorldToViewportCircle(*params.cameraUniforms, params.viewportImageRect, object.center, object.radius, projectedCircle))
+    {
+      continue;
+    }
+
+    ImU32 color = IM_COL32(92, 220, 120, 160);
+    float thickness = 1.5f;
+    if(object.result == shaderio::LGPUCullResultFrustumCulled)
+    {
+      color = IM_COL32(255, 92, 92, 180);
+      thickness = 2.0f;
+    }
+    else if(object.result == shaderio::LGPUCullResultOcclusionCulled)
+    {
+      color = IM_COL32(255, 176, 92, 180);
+      thickness = 2.0f;
+    }
+    else if((object.flags & shaderio::LGPUCullFlagTransparent) != 0u)
+    {
+      color = IM_COL32(92, 210, 255, 170);
+    }
+
+    drawList->AddCircle(projectedCircle.center, projectedCircle.radius, color, 24, thickness);
+  }
+}
+
+void Renderer::createGPUCullingResources()
+{
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
+
+  const std::array<VkDescriptorSetLayoutBinding, 6> bindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+
+  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .pBindings    = bindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.gpuCullingSetLayout));
+  DBG_VK_NAME(m_device.gpuCullingSetLayout);
+
+  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.gpuCullingSetLayout);
+  m_device.gpuCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo allocInfo{
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_device.descriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts        = setLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.gpuCullingDescriptorSets.data()));
+
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+      .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts    = &m_device.gpuCullingSetLayout,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.gpuCullingPipelineLayout));
+  DBG_VK_NAME(m_device.gpuCullingPipelineLayout);
+
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    updateGPUCullingDescriptorSet(frameIndex);
+  }
+}
+
+void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingDescriptorSets.size()
+     || m_device.gpuCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  if(frameUserData.gpuCullingObjectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingUniformBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingResultBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
+  const uint32_t mipCount = sceneResources.getDepthPyramidMipCount();
+  if(mipCount == 0)
+  {
+    return;
+  }
+
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const std::array<VkDescriptorBufferInfo, 5> bufferInfos{{
+      VkDescriptorBufferInfo{frameUserData.gpuCullingObjectBuffer.buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameUserData.gpuCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameUserData.gpuCullingStatsBuffer.buffer, 0, sizeof(shaderio::GPUCullStats)},
+      VkDescriptorBufferInfo{frameUserData.gpuCullingResultBuffer.buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameUserData.gpuCullingUniformBuffer.buffer, 0, sizeof(shaderio::GPUCullingUniforms)},
+  }};
+
+  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
+  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
+  {
+    pyramidMipInfos[i] = VkDescriptorImageInfo{
+        .sampler     = VK_NULL_HANDLE,
+        .imageView   = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+  }
+
+  const std::array<VkWriteDescriptorSet, 6> writes{{
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[0],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 1,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[1],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 2,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[2],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 3,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[3],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 4,
+          .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+          .pImageInfo      = pyramidMipInfos.data(),
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 5,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo     = &bufferInfos[4],
+      },
+  }};
+  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::createLightCoarseCullingResources()
@@ -1459,6 +1994,10 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
   // Update GBuffer texture descriptor set after potential SceneResources resize
   updateGBufferTextureDescriptorSet();
   updateDepthPyramidDescriptorSet();
+  for(uint32_t frameIndex = 0; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
+  {
+    updateGPUCullingDescriptorSet(frameIndex);
+  }
 }
 
 rhi::CommandList& Renderer::beginCommandRecording()
@@ -1496,6 +2035,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   buildDebugDrawList(params);
   updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
   updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
+  updateGPUCullingBuffers(currentFrameIndex, params);
 
   // Route through pass executor to orchestrate multi-pass rendering
   m_passExecutor.clearResourceBindings();
@@ -1526,6 +2066,26 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   m_passExecutor.bindBuffer({
       .handle       = kPassLightCoarseCullingUniformHandle,
       .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassGPUCullObjectBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassGPUCullIndirectBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassGPUCullStatsBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassGPUCullUniformBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
+  });
+  m_passExecutor.bindBuffer({
+      .handle       = kPassGPUCullResultBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
   });
   m_passExecutor.bindTexture({
       .handle       = kPassGBuffer0Handle,
@@ -1788,6 +2348,62 @@ void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams
   vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_device.depthPyramidPipelineLayout,
                           0, 1, &m_device.depthPyramidDescriptorSet, 0, nullptr);
   vkCmdDispatch(vkCmd, (pyramidExtent.width + 7u) / 8u, (pyramidExtent.height + 7u) / 8u, 1u);
+}
+
+void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params)
+{
+  if(params.cameraUniforms == nullptr || params.gltfModel == nullptr || m_gpuCullingPipeline.isNull()
+     || m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  if(currentFrameIndex >= m_device.gpuCullingDescriptorSets.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
+  const uint32_t objectCount = static_cast<uint32_t>(params.gltfModel->meshes.size());
+  if(objectCount == 0 || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkDescriptorSet descriptorSet = m_device.gpuCullingDescriptorSets[currentFrameIndex];
+  if(descriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  vkCmdBindPipeline(vkCmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    reinterpret_cast<VkPipeline>(getPipelineOpaque(m_gpuCullingPipeline,
+                                                                    static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_device.gpuCullingPipelineLayout, 0, 1, &descriptorSet, 0,
+                          nullptr);
+  vkCmdDispatch(vkCmd, (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount, 1u, 1u);
+
+  const VkBufferMemoryBarrier2 indirectBarrier{
+      .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+      .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer              = frameUserData.gpuCullingIndirectBuffer.buffer,
+      .offset              = 0,
+      .size                = VK_WHOLE_SIZE,
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers    = &indirectBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
 
 void Renderer::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
@@ -2097,6 +2713,51 @@ shaderio::LightCullingUniforms Renderer::buildLightCullingUniforms(const RenderP
   uniforms.viewMatrix = camera.view;
   uniforms.projectionMatrix = camera.projection;
   uniforms.invProjectionMatrix = glm::inverse(camera.projection);
+  return uniforms;
+}
+
+shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParams& params, uint32_t objectCount) const
+{
+  shaderio::GPUCullingUniforms uniforms{};
+  const VkExtent2D screenExtent = m_swapchainDependent.sceneResources.getSize();
+  const VkExtent2D pyramidExtent = m_swapchainDependent.sceneResources.getDepthPyramidExtent();
+  const uint32_t mipCount =
+      std::min<uint32_t>(m_swapchainDependent.sceneResources.getDepthPyramidMipCount(), shaderio::LDepthPyramidMaxMips);
+
+  shaderio::CameraUniforms camera{};
+  if(params.cameraUniforms != nullptr)
+  {
+    camera = *params.cameraUniforms;
+  }
+  else
+  {
+    camera.view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    camera.projection = clipspace::makePerspectiveProjection(
+        glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
+        clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+    camera.viewProjection = camera.projection * camera.view;
+    camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f);
+  }
+
+  const glm::mat4 inverseView = glm::inverse(camera.view);
+  const auto frustumPlanes = extractFrustumPlanes(camera.viewProjection);
+
+  uniforms.viewMatrix = camera.view;
+  uniforms.projectionMatrix = camera.projection;
+  uniforms.viewProjectionMatrix = camera.viewProjection;
+  for(uint32_t planeIndex = 0; planeIndex < shaderio::LGPUCullingFrustumPlaneCount; ++planeIndex)
+  {
+    uniforms.frustumPlanes[planeIndex] = frustumPlanes[planeIndex];
+  }
+  uniforms.cameraRight = glm::vec4(glm::normalize(glm::vec3(inverseView[0])), 0.0f);
+  uniforms.cameraUp = glm::vec4(glm::normalize(glm::vec3(inverseView[1])), 0.0f);
+  uniforms.screenSizeAndPyramidSize =
+      glm::vec4(static_cast<float>(screenExtent.width),
+                static_cast<float>(screenExtent.height),
+                static_cast<float>(pyramidExtent.width),
+                static_cast<float>(pyramidExtent.height));
+  uniforms.cullingInfo = glm::vec4(static_cast<float>(objectCount), static_cast<float>(mipCount), 1.0f, 1e-4f);
   return uniforms;
 }
 
@@ -2473,6 +3134,7 @@ void Renderer::prebuildRequiredPipelineVariants()
   createPrebuiltGraphicsPipelineVariants();
   createPrebuiltComputePipelineVariant();
   createDepthPyramidPipeline();
+  createGPUCullingPipeline();
   createLightCoarseCullingPipelines();
 }
 
@@ -3529,17 +4191,17 @@ void Renderer::createDescriptorPool()
 
   {
     m_materials.maxTextures = std::min(m_materials.maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages);
-    const uint32_t maxDescriptorSets = 20U;
+    const uint32_t maxDescriptorSets = 32U;
     const uint32_t dynamicUniformCount =
         std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
     const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
     const std::array<VkDescriptorPoolSize, 6> poolSizes{{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4U},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4U + frameCount * shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6U + frameCount * 2U},  // LightPass camera + pre-scene UBOs
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 6U},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6U + frameCount * 3U},  // LightPass camera + pre-scene UBOs + GPU culling UBOs
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 10U},
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -3997,6 +4659,41 @@ void Renderer::createDepthPyramidPipeline()
 #endif
 }
 
+void Renderer::createGPUCullingPipeline()
+{
+  if(m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  VkShaderModule shaderModule =
+      utils::createShaderModule(nativeDevice, {shader_gpu_culling_slang, std::size(shader_gpu_culling_slang)});
+  DBG_VK_NAME(shaderModule);
+
+  const VkPipelineShaderStageCreateInfo shaderStage{
+      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module = shaderModule,
+      .pName  = "gpuCullingMain",
+  };
+  const VkComputePipelineCreateInfo pipelineInfo{
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = shaderStage,
+      .layout = m_device.gpuCullingPipelineLayout,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+  DBG_VK_NAME(pipeline);
+  m_gpuCullingPipeline =
+      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 13);
+
+  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+#endif
+}
+
 PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
@@ -4032,6 +4729,7 @@ void Renderer::destroyPipelines()
   m_depthPrepassOpaquePipeline = kNullPipelineHandle;
   m_depthPrepassAlphaTestPipeline = kNullPipelineHandle;
   m_depthPyramidPipeline = kNullPipelineHandle;
+  m_gpuCullingPipeline = kNullPipelineHandle;
   m_gbufferOpaquePipeline = kNullPipelineHandle;
   m_gbufferAlphaTestPipeline = kNullPipelineHandle;
   m_shadowPipeline = kNullPipelineHandle;
@@ -4295,6 +4993,11 @@ void Renderer::destroyGltfResources(const GltfUploadResult& result)
   }
 }
 
+void Renderer::updateMeshTransform(MeshHandle handle, const glm::mat4& transform)
+{
+  m_meshPool.updateTransform(handle, transform);
+}
+
 uint64_t Renderer::getLightPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
@@ -4342,6 +5045,15 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
 uint64_t Renderer::getLightCullingDescriptorSet() const
 {
   return 0;
+}
+
+uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
 BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const

@@ -7,6 +7,33 @@
 
 namespace demo {
 
+namespace {
+
+void updateWorldBounds(MeshRecord& record)
+{
+    const std::array<glm::vec3, 8> localCorners{{
+        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMin.z},
+        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMin.z},
+        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMin.z},
+        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMin.z},
+        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMax.z},
+        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMax.z},
+        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMax.z},
+        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMax.z},
+    }};
+
+    record.worldBoundsMin = glm::vec3(std::numeric_limits<float>::max());
+    record.worldBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+    for(const glm::vec3& localCorner : localCorners)
+    {
+        const glm::vec3 worldCorner = glm::vec3(record.transform * glm::vec4(localCorner, 1.0f));
+        record.worldBoundsMin = glm::min(record.worldBoundsMin, worldCorner);
+        record.worldBoundsMax = glm::max(record.worldBoundsMax, worldCorner);
+    }
+}
+
+}  // namespace
+
 void MeshPool::init(VkDevice device, VmaAllocator allocator) {
     m_device = device;
     m_allocator = allocator;
@@ -94,25 +121,7 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         }
     }
 
-    const std::array<glm::vec3, 8> localCorners{{
-        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMin.z},
-        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMin.z},
-        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMin.z},
-        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMin.z},
-        {record.localBoundsMin.x, record.localBoundsMin.y, record.localBoundsMax.z},
-        {record.localBoundsMax.x, record.localBoundsMin.y, record.localBoundsMax.z},
-        {record.localBoundsMin.x, record.localBoundsMax.y, record.localBoundsMax.z},
-        {record.localBoundsMax.x, record.localBoundsMax.y, record.localBoundsMax.z},
-    }};
-
-    record.worldBoundsMin = glm::vec3(std::numeric_limits<float>::max());
-    record.worldBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
-    for(const glm::vec3& localCorner : localCorners)
-    {
-        const glm::vec3 worldCorner = glm::vec3(record.transform * glm::vec4(localCorner, 1.0f));
-        record.worldBoundsMin = glm::min(record.worldBoundsMin, worldCorner);
-        record.worldBoundsMax = glm::max(record.worldBoundsMax, worldCorner);
-    }
+    updateWorldBounds(record);
 
     // Create vertex buffer
     VkBufferCreateInfo vertexBufferInfo{
@@ -213,6 +222,18 @@ void MeshPool::destroyMesh(MeshHandle handle) {
     }
 
     m_pool.destroy(handle);
+}
+
+void MeshPool::updateTransform(MeshHandle handle, const glm::mat4& transform)
+{
+    MeshRecord* record = m_pool.tryGet(handle);
+    if(record == nullptr)
+    {
+        return;
+    }
+
+    record->transform = transform;
+    updateWorldBounds(*record);
 }
 
 const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {

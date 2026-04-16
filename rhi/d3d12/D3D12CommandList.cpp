@@ -196,6 +196,11 @@ void D3D12CommandList::drawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32
   // Call: m_commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertexLocation, startInstanceLocation)
 }
 
+void D3D12CommandList::drawIndexedIndirect(uint64_t, uint64_t, uint32_t, uint32_t)
+{
+  // TODO: D3D12 implementation
+}
+
 void D3D12CommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   // TODO: D3D12 implementation

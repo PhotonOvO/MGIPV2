@@ -202,6 +202,59 @@ struct LightCullingUniforms
   mat4 invProjectionMatrix;
 };
 
+STATIC_CONST uint32_t LGPUCullingThreadCount       = 64;
+STATIC_CONST uint32_t LGPUCullingFrustumPlaneCount = 6;
+
+struct GPUCullObject
+{
+  vec4 sphereCenterRadius;  // xyz = world-space center, w = world-space radius
+  uint32_t indexCount;
+  uint32_t firstIndex;
+  int32_t  vertexOffset;
+  uint32_t flags;
+};
+
+struct GPUCullIndirectCommand
+{
+  uint32_t indexCount;
+  uint32_t instanceCount;
+  uint32_t firstIndex;
+  int32_t  vertexOffset;
+  uint32_t firstInstance;
+};
+
+struct GPUCullStats
+{
+  uint32_t visibleCount;
+  uint32_t frustumCulledCount;
+  uint32_t occlusionCulledCount;
+  uint32_t totalCount;
+  uint32_t opaqueVisibleCount;
+  uint32_t transparentVisibleCount;
+  uint32_t opaqueCount;
+  uint32_t transparentCount;
+};
+
+STATIC_CONST uint32_t LGPUCullFlagFrustumCulling = 0x1u;
+STATIC_CONST uint32_t LGPUCullFlagOcclusionCulling = 0x2u;
+STATIC_CONST uint32_t LGPUCullFlagTransparent = 0x4u;
+
+STATIC_CONST uint32_t LGPUCullResultVisible = 0u;
+STATIC_CONST uint32_t LGPUCullResultFrustumCulled = 1u;
+STATIC_CONST uint32_t LGPUCullResultOcclusionCulled = 2u;
+
+struct GPUCullingUniforms
+{
+  mat4 viewMatrix;
+  mat4 projectionMatrix;
+  mat4 viewProjectionMatrix;
+  vec4 frustumPlanes[LGPUCullingFrustumPlaneCount];
+  vec4 cameraRight;
+  vec4 cameraUp;
+  vec4 screenSizeAndPyramidSize;  // xy = screen size, zw = depth pyramid size
+  vec4 cullingInfo;               // x = object count, y = mip count, z = use occlusion, w = depth epsilon
+};
+
 // Light parameters for PBR lighting pass (scene-level UBO)
 struct LightParams
 {

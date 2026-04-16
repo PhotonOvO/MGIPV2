@@ -82,14 +82,19 @@ inline constexpr BufferHandle  kPassSpotLightBufferHandle{0xF003u, 1u};
 inline constexpr BufferHandle  kPassPointLightCoarseBoundsHandle{0xF004u, 1u};
 inline constexpr BufferHandle  kPassSpotLightCoarseBoundsHandle{0xF005u, 1u};
 inline constexpr BufferHandle  kPassLightCoarseCullingUniformHandle{0xF006u, 1u};
+inline constexpr BufferHandle  kPassGPUCullObjectBufferHandle{0xF007u, 1u};
+inline constexpr BufferHandle  kPassGPUCullIndirectBufferHandle{0xF008u, 1u};
+inline constexpr BufferHandle  kPassGPUCullStatsBufferHandle{0xF009u, 1u};
+inline constexpr BufferHandle  kPassGPUCullUniformBufferHandle{0xF00Au, 1u};
+inline constexpr BufferHandle  kPassGPUCullResultBufferHandle{0xF00Bu, 1u};
 inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
 inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
 inline constexpr TextureHandle kPassGBuffer2Handle{0xF103u, 1u};
 inline constexpr TextureHandle kPassSceneDepthHandle{0xF104u, 1u};
 inline constexpr TextureHandle kPassShadowHandle{0xF105u, 1u};
-inline constexpr TextureHandle kPassCSMShadowHandle{0xF107u, 1u};  // CSM cascade array
 inline constexpr TextureHandle kPassOutputHandle{0xF106u, 1u};      // OutputTexture (PBR result)
-inline constexpr TextureHandle kPassDepthPyramidHandle{0xF107u, 1u};
+inline constexpr TextureHandle kPassCSMShadowHandle{0xF107u, 1u};    // CSM cascade array
+inline constexpr TextureHandle kPassDepthPyramidHandle{0xF108u, 1u};
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

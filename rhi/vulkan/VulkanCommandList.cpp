@@ -475,6 +475,13 @@ void VulkanCommandList::drawIndexed(uint32_t indexCount, uint32_t instanceCount,
   vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
+void VulkanCommandList::drawIndexedIndirect(uint64_t bufferHandle, uint64_t offset, uint32_t drawCount, uint32_t stride)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkBuffer nativeBuffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(bufferHandle));
+  vkCmdDrawIndexedIndirect(m_commandBuffer, nativeBuffer, offset, drawCount, stride);
+}
+
 void VulkanCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   ensureCommandBuffer(m_commandBuffer);
@@ -593,6 +600,11 @@ void cmdBindIndexBuffer(const demo::rhi::CommandList& commandList, VkBuffer buff
 void cmdDrawIndexed(const demo::rhi::CommandList& commandList, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
   vkCmdDrawIndexed(getNativeCommandBuffer(commandList), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+void cmdDrawIndexedIndirect(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
+{
+  vkCmdDrawIndexedIndirect(getNativeCommandBuffer(commandList), buffer, offset, drawCount, stride);
 }
 
 void cmdDispatch(const demo::rhi::CommandList& commandList, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)

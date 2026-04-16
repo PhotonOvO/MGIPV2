@@ -116,6 +116,8 @@ void GBufferPass::execute(const PassContext& context) const
     if(context.gltfModel != nullptr && !context.gltfModel->meshes.empty() && context.drawStream != nullptr)
     {
         MeshPool& meshPool = m_renderer->getMeshPool();
+        const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+        const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
 
         // Allocate CameraUniforms from transient allocator
         const uint32_t cameraAlignment = 256;  // Standard UBO alignment
@@ -288,8 +290,17 @@ void GBufferPass::execute(const PassContext& context) const
             const uint64_t indexHandle = mesh->indexBufferHandle;
             context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
 
-            // Draw indexed using RHI interface
-            context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+            if(indirectBufferHandle != 0)
+            {
+                context.cmd->drawIndexedIndirect(indirectBufferHandle,
+                                                 static_cast<uint64_t>(i) * indirectCommandStride,
+                                                 1,
+                                                 indirectCommandStride);
+            }
+            else
+            {
+                context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+            }
         }
     }
     // No fallback triangle - if no model, only clear

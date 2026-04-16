@@ -5,13 +5,36 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <tiny_gltf.h>
 
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <cstring>
+#include <cmath>
 #include <iostream>
 
 namespace demo {
+
+namespace {
+
+glm::mat4 composeTransform(const glm::vec3& translation, const glm::quat& rotation, const glm::vec3& scale)
+{
+    return glm::translate(glm::mat4(1.0f), translation)
+         * glm::mat4_cast(rotation)
+         * glm::scale(glm::mat4(1.0f), scale);
+}
+
+glm::vec3 sanitizeEulerDegrees(const glm::vec3& radians)
+{
+    const glm::vec3 degrees = glm::degrees(radians);
+    return glm::vec3(
+        std::isfinite(degrees.x) ? degrees.x : 0.0f,
+        std::isfinite(degrees.y) ? degrees.y : 0.0f,
+        std::isfinite(degrees.z) ? degrees.z : 0.0f);
+}
+
+}  // namespace
 
 // Forward declarations for tangent generation
 static std::vector<float> computeTangents(
@@ -31,6 +54,8 @@ static bool readFloatAccessor(
 );
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
+    outModel = {};
+
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err;
@@ -86,14 +111,14 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
 
         // Traverse all root nodes in the scene
         for (int nodeIndex : scene.nodes) {
-            if (!processNode(model, nodeIndex, glm::mat4(1.0f), outModel)) {
+            if (!processNode(model, nodeIndex, -1, glm::mat4(1.0f), outModel)) {
                 return false;
             }
         }
     } else {
         // No scenes - try processing all nodes directly
         for (int i = 0; i < static_cast<int>(model.nodes.size()); ++i) {
-            if (!processNode(model, i, glm::mat4(1.0f), outModel)) {
+            if (!processNode(model, i, -1, glm::mat4(1.0f), outModel)) {
                 return false;
             }
         }
@@ -102,8 +127,11 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     return true;
 }
 
-bool GltfLoader::processNode(const tinygltf::Model& model, int nodeIndex,
-                              const glm::mat4& parentTransform, GltfModel& outModel) {
+bool GltfLoader::processNode(const tinygltf::Model& model,
+                             int nodeIndex,
+                             int parentNodeIndex,
+                             const glm::mat4& parentTransform,
+                             GltfModel& outModel) {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(model.nodes.size())) {
         m_lastError = "Invalid node index: " + std::to_string(nodeIndex);
         return false;
@@ -113,16 +141,22 @@ bool GltfLoader::processNode(const tinygltf::Model& model, int nodeIndex,
 
     // Compute local transform
     glm::mat4 localTransform(1.0f);
+    glm::vec3 translation(0.0f);
+    glm::quat rotation(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 scale(1.0f);
 
     if (node.matrix.size() == 16) {
         // Use matrix if provided
         localTransform = glm::make_mat4(node.matrix.data());
+        glm::vec3 skew(0.0f);
+        glm::vec4 perspective(0.0f);
+        if(!glm::decompose(localTransform, scale, rotation, translation, skew, perspective)) {
+            translation = glm::vec3(localTransform[3]);
+            rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            scale = glm::vec3(1.0f);
+        }
     } else {
         // Build from TRS components
-        glm::vec3 translation(0.0f);
-        glm::quat rotation(1.0f, 0.0f, 0.0f, 0.0f);
-        glm::vec3 scale(1.0f);
-
         if (node.translation.size() == 3) {
             translation = glm::vec3(node.translation[0], node.translation[1], node.translation[2]);
         }
@@ -142,10 +176,7 @@ bool GltfLoader::processNode(const tinygltf::Model& model, int nodeIndex,
         }
 
         // Compose TRS: T * R * S
-        glm::mat4 t = glm::translate(glm::mat4(1.0f), translation);
-        glm::mat4 r = glm::mat4_cast(rotation);
-        glm::mat4 s = glm::scale(glm::mat4(1.0f), scale);
-        localTransform = t * r * s;
+        localTransform = composeTransform(translation, rotation, scale);
 
         // Debug: verify translation is preserved in final matrix
         static bool printedTRS = false;
@@ -160,18 +191,43 @@ bool GltfLoader::processNode(const tinygltf::Model& model, int nodeIndex,
         }
     }
 
-    glm::mat4 globalTransform = parentTransform * localTransform;
+    if(glm::length(rotation) < 0.0001f) {
+        rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        rotation = glm::normalize(rotation);
+    }
+
+    GltfNodeData nodeData;
+    nodeData.name = node.name.empty() ? ("Node " + std::to_string(nodeIndex)) : node.name;
+    nodeData.parent = parentNodeIndex;
+    nodeData.translation = translation;
+    nodeData.rotation = rotation;
+    nodeData.rotationEulerDegrees = sanitizeEulerDegrees(glm::eulerAngles(rotation));
+    nodeData.scale = scale;
+    nodeData.localTransform = composeTransform(nodeData.translation, nodeData.rotation, nodeData.scale);
+    nodeData.worldTransform = parentTransform * nodeData.localTransform;
+    nodeData.firstMeshIndex = static_cast<uint32_t>(outModel.meshes.size());
+
+    const int currentNodeIndex = static_cast<int>(outModel.nodes.size());
+    outModel.nodes.push_back(nodeData);
+    if(parentNodeIndex >= 0) {
+        outModel.nodes[parentNodeIndex].children.push_back(currentNodeIndex);
+    } else {
+        outModel.rootNodes.push_back(currentNodeIndex);
+    }
 
     // Process mesh if present
     if (node.mesh >= 0) {
-        if (!processMesh(model, node.mesh, globalTransform, outModel)) {
+        if (!processMesh(model, node.mesh, outModel.nodes[currentNodeIndex].worldTransform, outModel)) {
             return false;
         }
     }
+    outModel.nodes[currentNodeIndex].meshCount =
+        static_cast<uint32_t>(outModel.meshes.size()) - outModel.nodes[currentNodeIndex].firstMeshIndex;
 
     // Recursively process children
     for (int childIndex : node.children) {
-        if (!processNode(model, childIndex, globalTransform, outModel)) {
+        if (!processNode(model, childIndex, currentNodeIndex, outModel.nodes[currentNodeIndex].worldTransform, outModel)) {
             return false;
         }
     }

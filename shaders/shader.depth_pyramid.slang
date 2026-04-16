@@ -1,4 +1,4 @@
-// Single-dispatch min-depth pyramid generation.
+// Single-dispatch max-depth pyramid generation for reversed-Z Hi-Z queries.
 
 #include "shader_io.h"
 
@@ -32,15 +32,15 @@ float reduceSourceRegion(uint2 mipCoord, uint mipLevel)
     const uint2 sourceSize = uint2(depthPyramidUniforms.sourceWidth, depthPyramidUniforms.sourceHeight);
     const uint2 sourceEnd = min(sourceStart + uint2(sourceFootprint, sourceFootprint), sourceSize);
 
-    float minDepth = 1.0;
+    float maxDepth = 0.0;
     for(uint y = sourceStart.y; y < sourceEnd.y; ++y)
     {
         for(uint x = sourceStart.x; x < sourceEnd.x; ++x)
         {
-            minDepth = min(minDepth, loadSourceDepth(uint2(x, y)));
+            maxDepth = max(maxDepth, loadSourceDepth(uint2(x, y)));
         }
     }
-    return minDepth;
+    return maxDepth;
 }
 
 [numthreads(kDepthPyramidThreadSize, kDepthPyramidThreadSize, 1)]

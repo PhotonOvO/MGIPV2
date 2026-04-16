@@ -244,6 +244,8 @@ add_library(demo_core STATIC
   render/passes/DepthPrepass.cpp
   render/passes/DepthPyramidPass.h
   render/passes/DepthPyramidPass.cpp
+  render/passes/GPUCullingPass.h
+  render/passes/GPUCullingPass.cpp
   render/passes/AnimateVerticesPass.h
   render/passes/AnimateVerticesPass.cpp
   render/passes/GBufferPass.h
@@ -313,7 +315,7 @@ target_include_directories(demo_core
     ${vulkanmemoryallocator_SOURCE_DIR}/include
 )
 
-
+   
 target_sources(demo_core PRIVATE
   ${vulkanmemoryallocator_SOURCE_DIR}/include/vk_mem_alloc.h
   ${STB_IMAGE_PATH}
