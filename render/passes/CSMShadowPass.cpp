@@ -76,7 +76,7 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
       .state      = rhi::ResourceState::DepthStencilAttachment,
       .loadOp     = rhi::LoadOp::clear,
       .storeOp    = rhi::StoreOp::store,
-      .clearValue = {1.0f, 0},  // Clear to far depth (1.0 in NDC)
+      .clearValue = {0.0f, 0},  // Reverse-Z far depth, matching the shadow pipeline compare op.
   };
 
   const rhi::RenderPassDesc passDesc{
@@ -116,6 +116,14 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   cascadeCamera.view = glm::mat4(1.0f);
   cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
   cascadeCamera.cameraPosition = glm::vec3(0.0f);
+  const float baseConstantBias = context.params->lightSettings.depthBias;
+  const float baseSlopeBias = context.params->lightSettings.normalBias;
+  const float biasScale = shadowData->cascadeBiasScale.z;
+  const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
+  const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
+  const glm::vec3 dirToLight = -lightTravelDir;
+  cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
+  cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
 
   std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
   context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
@@ -138,19 +146,9 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
 
 void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const
 {
-  CSMShadowResources& csm = m_renderer->getCSMShadowResources();
-  shaderio::ShadowUniforms* shadowData = csm.getShadowUniformsData();
-
   const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
   MeshPool& meshPool = m_renderer->getMeshPool();
-
-  // Calculate cascade-specific bias scale
-  // Formula: baseBias * (1 + cascadeIndex * scaleFactor.z)
-  const float baseConstantBias = shadowData->cascadeBiasScale.x;
-  const float baseSlopeBias = shadowData->cascadeBiasScale.y;
-  const float scaleFactor = shadowData->cascadeBiasScale.z;
-  const float cascadeConstantBias = baseConstantBias * (1.0f + cascadeIndex * scaleFactor);
-  const float cascadeSlopeBias = baseSlopeBias * (1.0f + cascadeIndex * scaleFactor);
+  (void)cascadeIndex;
 
   if(context.gltfModel != nullptr)
   {

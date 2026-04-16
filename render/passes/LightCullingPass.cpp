@@ -17,7 +17,7 @@ PassNode::HandleSlice<PassResourceDependency> LightCullingPass::getDependencies(
     // Depends on depth buffer from GBufferPass (read-only for culling)
     static const std::array<PassResourceDependency, 1> deps = {
         PassResourceDependency::texture(
-            kPassGBufferDepthHandle,
+            kPassSceneDepthHandle,
             ResourceAccess::read,
             rhi::ShaderStage::compute
         ),
@@ -63,45 +63,24 @@ void LightCullingPass::execute(const PassContext& context) const
 
     VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightCullingPipelineLayout());
 
-    // Bind descriptor set (light buffer + depth texture + tile output)
+    // Set 0: pass-local light buffers, depth input, and tile output.
     VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(descriptorSetOpaque);
     vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout,
                              0, 1, &descriptorSet, 0, nullptr);
 
-    // Push constants: screen dimensions and camera matrices
-    struct CullingParams
+    // Set 1: scene-level UBOs. Light culling reads LBindLightCulling from the
+    // same scene bind group used by graphics passes.
+    const BindGroupHandle sceneBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
+    if(sceneBindGroupHandle.isNull())
     {
-        uint32_t screenWidth;
-        uint32_t screenHeight;
-        float nearPlane;
-        float farPlane;
-        glm::mat4 viewMatrix;
-        glm::mat4 projectionMatrix;
-        glm::mat4 invProjectionMatrix;
-    };
-
-    CullingParams cullingParams;
-    cullingParams.screenWidth = extent.width;
-    cullingParams.screenHeight = extent.height;
-    cullingParams.nearPlane = 0.1f;   // TODO: Get from camera
-    cullingParams.farPlane = 100.0f;  // TODO: Get from camera
-
-    if(context.params->cameraUniforms != nullptr)
-    {
-        cullingParams.viewMatrix = context.params->cameraUniforms->view;
-        cullingParams.projectionMatrix = context.params->cameraUniforms->projection;
-        cullingParams.invProjectionMatrix = glm::inverse(context.params->cameraUniforms->projection);
+        context.cmd->endEvent();
+        return;
     }
-    else
-    {
-        // Default matrices if camera not available
-        cullingParams.viewMatrix = glm::mat4(1.0f);
-        cullingParams.projectionMatrix = glm::mat4(1.0f);
-        cullingParams.invProjectionMatrix = glm::mat4(1.0f);
-    }
-
-    vkCmdPushConstants(vkCmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(cullingParams), &cullingParams);
+    VkDescriptorSet sceneDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+        m_renderer->getBindGroupDescriptorSet(sceneBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+    const uint32_t cameraDynamicOffset = 0;
+    vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout,
+                            shaderio::LSetScene, 1, &sceneDescriptorSet, 1, &cameraDynamicOffset);
 
     // Dispatch compute shader
     vkCmdDispatch(vkCmd, tileCountX, tileCountY, 1);

@@ -39,6 +39,7 @@ public:
 
   [[nodiscard]] uint32_t getCascadeCount() const { return m_cascadeCount; }
   [[nodiscard]] uint32_t getCascadeResolution() const { return m_cascadeResolution; }
+  [[nodiscard]] VkFormat getShadowFormat() const { return m_shadowFormat; }
   [[nodiscard]] VkExtent2D getCascadeExtent() const
   {
     return {m_cascadeResolution, m_cascadeResolution};
@@ -65,6 +66,7 @@ private:
 
   uint32_t m_cascadeCount{4};
   uint32_t m_cascadeResolution{1024};
+  VkFormat m_shadowFormat{VK_FORMAT_D32_SFLOAT};
 };
 
 }  // namespace demo

@@ -159,15 +159,18 @@ public:
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
+  PipelineHandle getLightCullingPipelineHandle() const;
   CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
+  uint64_t       getLightCullingPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
+  uint64_t       getLightCullingDescriptorSet() const;
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
 
   // Get descriptor set from bind group (for descriptor set binding)
@@ -354,7 +357,8 @@ private:
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
       BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
-      utils::Buffer      lightCameraBuffer{};
+      utils::Buffer      lightingBuffer{};
+      utils::Buffer      lightCullingBuffer{};
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -516,7 +520,8 @@ private:
   void              endFrame(rhi::CommandList& cmd);
   void              beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const;
   void              endDynamicRenderingToSwapchain(const rhi::CommandList& cmd);
-  void              updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms);
+  void              updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms);
+  void              updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms);
   void              recordComputeCommands(rhi::CommandList& cmd, const RenderParams& params) const;
   void recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream);
   void                 prebuildRequiredPipelineVariants();
@@ -548,6 +553,7 @@ private:
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
   [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel) const;
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
+  [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;
   [[nodiscard]] std::array<glm::vec3, 8> computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
                                                                           float nearDistance,
                                                                           float farDistance) const;

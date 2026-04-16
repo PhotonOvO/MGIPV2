@@ -5,6 +5,7 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
+#include <cstring>
 
 namespace demo {
 
@@ -53,7 +54,7 @@ PassNode::HandleSlice<PassResourceDependency> LightPass::getDependencies() const
 
 void LightPass::execute(const PassContext& context) const
 {
-    if(m_renderer == nullptr)
+    if(m_renderer == nullptr || context.transientAllocator == nullptr)
         return;
 
     context.cmd->beginEvent("LightPass");
@@ -134,13 +135,30 @@ void LightPass::execute(const PassContext& context) const
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    const shaderio::LightParams& lightParams = m_renderer->getLightPassParams();
-    vkCmdPushConstants(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                       pipelineLayout,
-                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0,
-                       sizeof(shaderio::LightParams),
-                       &lightParams);
+    const TransientAllocator::Allocation cameraAlloc =
+        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
+    shaderio::CameraUniforms cameraData =
+        context.params != nullptr && context.params->cameraUniforms != nullptr
+            ? *context.params->cameraUniforms
+            : m_renderer->getShadowCameraUniforms();
+    std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
+    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
+
+    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
+    if(!cameraBindGroupHandle.isNull())
+    {
+      VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+          m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+      const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                              VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipelineLayout,
+                              shaderio::LSetScene,
+                              1,
+                              &cameraDescriptorSet,
+                              1,
+                              &cameraDynamicOffset);
+    }
 
     // Draw fullscreen triangle using RHI interface
     context.cmd->draw(3, 1, 0, 0);

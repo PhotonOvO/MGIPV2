@@ -23,21 +23,9 @@ Texture2D<float> depthTexture;
 [[vk::binding(3, 0)]]
 RWStructuredBuffer<uint> tileLightIndexBuffer;
 
-// Culling parameters push constant struct
-struct CullingParams
-{
-    uint screenWidth;
-    uint screenHeight;
-    float nearPlane;
-    float farPlane;
-    mat4 viewMatrix;
-    mat4 projectionMatrix;
-    mat4 invProjectionMatrix;
-};
-
-// Push constants for culling parameters
-[[vk::push_constant]]
-CullingParams cullingParams;
+// Scene-level culling parameters
+[[vk::binding(LBindLightCulling, LSetScene)]]
+ConstantBuffer<LightCullingUniforms> lightCulling;
 
 //------------------------------------------------------------------------------
 // Constants
@@ -61,9 +49,9 @@ float2 getTileDepthBounds(uint2 tileCoord)
 
     // Sample depth buffer to find min/max depth in tile
     // Use Load for compute shader (no sampler needed)
-    for (uint y = minPixel.y; y <= maxPixel.y && y < cullingParams.screenHeight; y += 4)
+    for (uint y = minPixel.y; y <= maxPixel.y && y < uint(lightCulling.screenSizeAndClipPlanes.y); y += 4)
     {
-        for (uint x = minPixel.x; x <= maxPixel.x && x < cullingParams.screenWidth; x += 4)
+        for (uint x = minPixel.x; x <= maxPixel.x && x < uint(lightCulling.screenSizeAndClipPlanes.x); x += 4)
         {
             float depth = depthTexture.Load(int3(x, y, 0));
             if (depth < 0.9999)  // Not background
@@ -90,8 +78,8 @@ float ndcDepthToViewZ(float ndcDepth)
     // For perspective projection with GLM_FORCE_DEPTH_ZERO_TO_ONE:
     // ndcZ = P20 + P32/viewZ
     // viewZ = P32 / (ndcZ - P20)
-    float P20 = cullingParams.projectionMatrix[2][2];
-    float P32 = cullingParams.projectionMatrix[3][2];
+    float P20 = lightCulling.projectionMatrix[2][2];
+    float P32 = lightCulling.projectionMatrix[3][2];
     return P32 / (ndcDepth - P20);
 }
 
@@ -103,7 +91,7 @@ bool lightIntersectsTile(const LightData light, uint2 tileCoord, float2 depthBou
 
     // Point light sphere-frustum intersection test
     // Transform light position to view space
-    float4 viewPos = mul(cullingParams.viewMatrix, float4(light.positionOrDirection, 1.0));
+    float4 viewPos = mul(lightCulling.viewMatrix, float4(light.positionOrDirection, 1.0));
 
     // Convert depth bounds to view space
     float viewMinZ = ndcDepthToViewZ(depthBounds.y);  // Near = max NDC depth
@@ -135,8 +123,10 @@ void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint2 tileCoord = dispatchThreadId.xy;
 
     // Bounds check: ensure tile is within valid range
-    const uint numTilesX = (cullingParams.screenWidth + TILE_SIZE_X - 1) / TILE_SIZE_X;
-    const uint numTilesY = (cullingParams.screenHeight + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+    const uint screenWidth = uint(lightCulling.screenSizeAndClipPlanes.x);
+    const uint screenHeight = uint(lightCulling.screenSizeAndClipPlanes.y);
+    const uint numTilesX = (screenWidth + TILE_SIZE_X - 1) / TILE_SIZE_X;
+    const uint numTilesY = (screenHeight + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
 
     if(tileCoord.x >= numTilesX || tileCoord.y >= numTilesY)
         return;  // Out of bounds tile - no work
@@ -152,31 +142,31 @@ void computeMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     // Left plane
     frustumPlanes[0] = float4(
-        cullingParams.invProjectionMatrix[0][3] + cullingParams.invProjectionMatrix[0][0],
-        cullingParams.invProjectionMatrix[1][3] + cullingParams.invProjectionMatrix[1][0],
-        cullingParams.invProjectionMatrix[2][3] + cullingParams.invProjectionMatrix[2][0],
-        cullingParams.invProjectionMatrix[3][3] + cullingParams.invProjectionMatrix[3][0]
+        lightCulling.invProjectionMatrix[0][3] + lightCulling.invProjectionMatrix[0][0],
+        lightCulling.invProjectionMatrix[1][3] + lightCulling.invProjectionMatrix[1][0],
+        lightCulling.invProjectionMatrix[2][3] + lightCulling.invProjectionMatrix[2][0],
+        lightCulling.invProjectionMatrix[3][3] + lightCulling.invProjectionMatrix[3][0]
     );
     // Right plane
     frustumPlanes[1] = float4(
-        cullingParams.invProjectionMatrix[0][3] - cullingParams.invProjectionMatrix[0][0],
-        cullingParams.invProjectionMatrix[1][3] - cullingParams.invProjectionMatrix[1][0],
-        cullingParams.invProjectionMatrix[2][3] - cullingParams.invProjectionMatrix[2][0],
-        cullingParams.invProjectionMatrix[3][3] - cullingParams.invProjectionMatrix[3][0]
+        lightCulling.invProjectionMatrix[0][3] - lightCulling.invProjectionMatrix[0][0],
+        lightCulling.invProjectionMatrix[1][3] - lightCulling.invProjectionMatrix[1][0],
+        lightCulling.invProjectionMatrix[2][3] - lightCulling.invProjectionMatrix[2][0],
+        lightCulling.invProjectionMatrix[3][3] - lightCulling.invProjectionMatrix[3][0]
     );
     // Top plane
     frustumPlanes[2] = float4(
-        cullingParams.invProjectionMatrix[0][3] - cullingParams.invProjectionMatrix[0][1],
-        cullingParams.invProjectionMatrix[1][3] - cullingParams.invProjectionMatrix[1][1],
-        cullingParams.invProjectionMatrix[2][3] - cullingParams.invProjectionMatrix[2][1],
-        cullingParams.invProjectionMatrix[3][3] - cullingParams.invProjectionMatrix[3][1]
+        lightCulling.invProjectionMatrix[0][3] - lightCulling.invProjectionMatrix[0][1],
+        lightCulling.invProjectionMatrix[1][3] - lightCulling.invProjectionMatrix[1][1],
+        lightCulling.invProjectionMatrix[2][3] - lightCulling.invProjectionMatrix[2][1],
+        lightCulling.invProjectionMatrix[3][3] - lightCulling.invProjectionMatrix[3][1]
     );
     // Bottom plane
     frustumPlanes[3] = float4(
-        cullingParams.invProjectionMatrix[0][3] + cullingParams.invProjectionMatrix[0][1],
-        cullingParams.invProjectionMatrix[1][3] + cullingParams.invProjectionMatrix[1][1],
-        cullingParams.invProjectionMatrix[2][3] + cullingParams.invProjectionMatrix[2][1],
-        cullingParams.invProjectionMatrix[3][3] + cullingParams.invProjectionMatrix[3][1]
+        lightCulling.invProjectionMatrix[0][3] + lightCulling.invProjectionMatrix[0][1],
+        lightCulling.invProjectionMatrix[1][3] + lightCulling.invProjectionMatrix[1][1],
+        lightCulling.invProjectionMatrix[2][3] + lightCulling.invProjectionMatrix[2][1],
+        lightCulling.invProjectionMatrix[3][3] + lightCulling.invProjectionMatrix[3][1]
     );
 
     // Normalize planes

@@ -23,11 +23,14 @@ using mat4 = glm::mat4;
 // Set 0: Pass-global textures (bindless)
 STATIC_CONST int LSetTextures  = 0;
 STATIC_CONST int LBindTextures = 0;
+STATIC_CONST int LBindShadowMap = 1;
 
 // Set 1: Scene-level uniform buffers
 STATIC_CONST int LSetScene      = 1;
 STATIC_CONST int LBindSceneInfo = 0;      // SceneInfo for compute
 STATIC_CONST int LBindCamera    = 1;      // Camera uniform buffer
+STATIC_CONST int LBindLighting  = 2;      // Scene lighting/shadow data
+STATIC_CONST int LBindLightCulling = 3;   // Scene light-culling data
 
 // Set 2: Draw-level dynamic uniforms
 STATIC_CONST int LSetDraw       = 2;
@@ -168,7 +171,15 @@ struct LightListUniforms
   float    _padding;
 };
 
-// Light parameters for PBR lighting pass (push constants)
+struct LightCullingUniforms
+{
+  vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane
+  mat4 viewMatrix;
+  mat4 projectionMatrix;
+  mat4 invProjectionMatrix;
+};
+
+// Light parameters for PBR lighting pass (scene-level UBO)
 struct LightParams
 {
   mat4 worldToShadow[LCascadeCount];      // Per-cascade matrices
@@ -177,6 +188,11 @@ struct LightParams
   vec4 lightColorAndNormalBias;           // rgb = light intensity, w = normal bias
   vec4 ambientColorAndTexelSize;          // rgb = ambient term, w = 1 / shadow map size
   vec4 shadowMetrics;                     // x = texelSize, y = baseBias, z = slopeBias, w = cascadeCount
+};
+
+struct LightingUniforms
+{
+  LightParams light;
 };
 
 struct ShadowUniforms

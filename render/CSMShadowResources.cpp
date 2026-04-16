@@ -152,6 +152,7 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
   m_allocator            = allocator;
   m_cascadeCount         = createInfo.cascadeCount;
   m_cascadeResolution    = createInfo.cascadeResolution;
+  m_shadowFormat         = createInfo.shadowFormat;
   m_projectionConvention = createInfo.projectionConvention;
 
   assert(m_cascadeCount <= shaderio::LCascadeCount && "Cascade count exceeds maximum");
@@ -162,7 +163,7 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
   const VkImageCreateInfo cascadeArrayInfo{
       .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType     = VK_IMAGE_TYPE_2D,
-      .format        = createInfo.shadowFormat,
+      .format        = m_shadowFormat,
       .extent        = {m_cascadeResolution, m_cascadeResolution, 1},
       .mipLevels     = 1,
       .arrayLayers   = m_cascadeCount,
@@ -180,7 +181,7 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
       .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image      = m_cascadeArray.image,
       .viewType   = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-      .format     = createInfo.shadowFormat,
+      .format     = m_shadowFormat,
       .subresourceRange =
           {
               .aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -200,7 +201,7 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
         .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image      = m_cascadeArray.image,
         .viewType   = VK_IMAGE_VIEW_TYPE_2D,
-        .format     = createInfo.shadowFormat,
+        .format     = m_shadowFormat,
         .subresourceRange =
             {
                 .aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT,
