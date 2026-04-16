@@ -75,6 +75,7 @@ struct DebugPassOptions
   bool  showViewportAxis{true};
   bool  showLightCoarseCullingHeatmap{false};
   bool  showGPUCullingOverlay{true};
+  bool  showPassGpuProfile{true};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};
@@ -173,6 +174,7 @@ public:
   PipelineHandle getForwardPipelineHandle() const;
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
+  PipelineHandle getGPUCullingDebugPipelineHandle() const;
   void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
@@ -190,12 +192,15 @@ public:
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
   uint64_t       getLightCullingPipelineLayout() const;
+  uint64_t       getDebugPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getLightCullingDescriptorSet() const;
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
+  [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
+  [[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
 
   // Get descriptor set from bind group (for descriptor set binding)
   uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
@@ -352,6 +357,7 @@ private:
     VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
+    std::unique_ptr<rhi::PipelineLayout>       debugPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
@@ -445,6 +451,7 @@ private:
   CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
+  PipelineHandle m_gpuCullingDebugPipeline{};    // Current-frame GPU culling visualization
   PipelineHandle m_pointLightCoarseCullingPipeline{};
   PipelineHandle m_spotLightCoarseCullingPipeline{};
 
@@ -606,7 +613,14 @@ private:
   void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 cacheGPUCullingStats(uint32_t frameIndex);
+  void                 drawGPUInfoOverlay(const RenderParams& params) const;
   void                 drawGPUCullingOverlay(const RenderParams& params) const;
+  void                 createPassGpuProfileResources();
+  void                 destroyPassGpuProfileResources();
+  void                 resolvePassGpuProfileResults(uint32_t frameIndex);
+  void                 resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex);
+  void                 writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const;
+  void                 drawPassGpuProfileOverlay(const RenderParams& params) const;
   void                 initImGui(GLFWwindow* window);
   void                 createDescriptorPool();
   void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
@@ -642,6 +656,37 @@ private:
   [[nodiscard]] std::array<glm::vec3, 8> computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const;
   void              buildDebugDrawList(const RenderParams& params);
 
+  struct PassGpuProfileFrame
+  {
+    VkQueryPool         queryPool{VK_NULL_HANDLE};
+    std::vector<double> passDurationsMs;
+    bool                valid{false};
+    bool                hasRecordedQueries{false};
+  };
+
+  struct PassGpuProfileState
+  {
+    float                         timestampPeriodNs{0.0f};
+    uint32_t                      queryCount{0};
+    std::vector<std::string>      passNames;
+    std::vector<double>           latestPassDurationsMs;
+    bool                          latestValid{false};
+    std::vector<PassGpuProfileFrame> frames;
+  };
+
+  struct PassProfilingHooks final : PassExecutor::ExecutionHooks
+  {
+    explicit PassProfilingHooks(Renderer* owner)
+        : renderer(owner)
+    {
+    }
+
+    void beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const override;
+    void afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const override;
+
+    Renderer* renderer{nullptr};
+  };
+
   DeviceLifetimeResources     m_device;
   SwapchainDependentResources m_swapchainDependent;
   PerFrameResources           m_perFrame;
@@ -659,6 +704,8 @@ private:
   DebugDrawList               m_debugDrawList;
   shaderio::GPUCullStats      m_lastGPUCullingStats{};
   std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
+  PassGpuProfileState         m_passGpuProfile;
+  PassProfilingHooks          m_passProfilingHooks{this};
 };
 
 }  // namespace demo

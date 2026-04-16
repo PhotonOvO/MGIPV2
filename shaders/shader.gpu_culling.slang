@@ -32,55 +32,54 @@ bool isInsideFrustum(float3 center, float radius)
     return true;
 }
 
-bool accumulateProjectedPoint(float3 worldPos, inout float2 minNdc, inout float2 maxNdc, inout bool hasProjectedPoint)
-{
-    float4 clip = mul(gpuCullingUniforms.viewProjectionMatrix, float4(worldPos, 1.0));
-    if(abs(clip.w) <= 1e-5)
-    {
-        return false;
-    }
-
-    float3 ndc = clip.xyz / clip.w;
-    minNdc = hasProjectedPoint ? min(minNdc, ndc.xy) : ndc.xy;
-    maxNdc = hasProjectedPoint ? max(maxNdc, ndc.xy) : ndc.xy;
-    hasProjectedPoint = true;
-    return true;
-}
-
 uint selectMip(float2 pixelMin, float2 pixelMax, uint mipCount)
 {
     float2 extentPixels = max(pixelMax - pixelMin, float2(1.0, 1.0));
     float footprint = max(extentPixels.x, extentPixels.y);
-    uint mip = footprint > 1.0 ? uint(floor(log2(footprint))) : 0u;
-    return min(mip, max(mipCount, 1u) - 1u);
+    uint mip = footprint > 8.0 ? uint(floor(log2(footprint))) - 3u : 0u;
+    const uint maxAvailableMip = max(mipCount, 1u) - 1u;
+    const uint maxAllowedMip = min(maxAvailableMip, 1u);
+    return min(mip, maxAllowedMip);
 }
 
-float sampleHiZMaxDepth(uint mipLevel, int2 minCoord, int2 maxCoord)
+float sampleHiZCenterClusterDepth(uint mipLevel, int2 centerCoord, int2 mipExtent)
 {
-    float maxDepth = 0.0;
-    maxDepth = max(maxDepth, depthPyramidTexture[mipLevel].Load(int3(minCoord, 0)));
-    maxDepth = max(maxDepth, depthPyramidTexture[mipLevel].Load(int3(maxCoord.x, minCoord.y, 0)));
-    maxDepth = max(maxDepth, depthPyramidTexture[mipLevel].Load(int3(minCoord.x, maxCoord.y, 0)));
-    maxDepth = max(maxDepth, depthPyramidTexture[mipLevel].Load(int3(maxCoord, 0)));
-    return maxDepth;
+    const int2 leftCoord = clamp(centerCoord + int2(-1, 0), int2(0, 0), mipExtent - int2(1, 1));
+    const int2 rightCoord = clamp(centerCoord + int2(1, 0), int2(0, 0), mipExtent - int2(1, 1));
+    const int2 upCoord = clamp(centerCoord + int2(0, -1), int2(0, 0), mipExtent - int2(1, 1));
+    const int2 downCoord = clamp(centerCoord + int2(0, 1), int2(0, 0), mipExtent - int2(1, 1));
+
+    float representativeDepth = depthPyramidTexture[mipLevel].Load(int3(centerCoord, 0));
+    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(leftCoord, 0)));
+    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(rightCoord, 0)));
+    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(upCoord, 0)));
+    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(downCoord, 0)));
+    return representativeDepth;
 }
 
 bool isOccluded(float3 center, float radius)
 {
-    float2 minNdc = float2(0.0, 0.0);
-    float2 maxNdc = float2(0.0, 0.0);
-    bool hasProjection = false;
+    const float3 centerView = mul(gpuCullingUniforms.viewMatrix, float4(center, 1.0)).xyz;
+    const float nearestPositiveZ = -centerView.z - radius;
+    if(nearestPositiveZ <= 1e-4)
+    {
+        return false;
+    }
 
-    const float3 cameraRight = normalize(gpuCullingUniforms.cameraRight.xyz);
-    const float3 cameraUp = normalize(gpuCullingUniforms.cameraUp.xyz);
+    const float4 clipCenter = mul(gpuCullingUniforms.projectionMatrix, float4(centerView, 1.0));
+    if(abs(clipCenter.w) <= 1e-5)
+    {
+        return false;
+    }
 
-    accumulateProjectedPoint(center, minNdc, maxNdc, hasProjection);
-    accumulateProjectedPoint(center + cameraRight * radius, minNdc, maxNdc, hasProjection);
-    accumulateProjectedPoint(center - cameraRight * radius, minNdc, maxNdc, hasProjection);
-    accumulateProjectedPoint(center + cameraUp * radius, minNdc, maxNdc, hasProjection);
-    accumulateProjectedPoint(center - cameraUp * radius, minNdc, maxNdc, hasProjection);
+    const float2 centerNdc = clipCenter.xy / clipCenter.w;
+    const float2 projectionScale = float2(abs(gpuCullingUniforms.projectionMatrix[0][0]),
+                                          abs(gpuCullingUniforms.projectionMatrix[1][1]));
+    const float2 radiusNdc = projectionScale * (radius / nearestPositiveZ);
 
-    if(!hasProjection || maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
+    float2 minNdc = centerNdc - radiusNdc;
+    float2 maxNdc = centerNdc + radiusNdc;
+    if(maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
     {
         return false;
     }
@@ -95,23 +94,28 @@ bool isOccluded(float3 center, float radius)
     const float2 minPixel = (minNdc * 0.5 + 0.5) * screenSize;
     const float2 maxPixel = (maxNdc * 0.5 + 0.5) * screenSize;
     const uint mipLevel = selectMip(minPixel, maxPixel, mipCount);
-    const float mipScale = exp2(float(mipLevel));
+    const float sourceFootprint = exp2(float(mipLevel + 1u));
 
     const int2 mipExtent = max(int2(1, 1), int2(pyramidSize) >> int(mipLevel));
-    const int2 minCoord = clamp(int2(floor(minPixel / mipScale)), int2(0, 0), mipExtent - int2(1, 1));
-    const int2 maxCoord = clamp(int2(ceil(maxPixel / mipScale)) - int2(1, 1), int2(0, 0), mipExtent - int2(1, 1));
-    const float hizDepth = sampleHiZMaxDepth(mipLevel, minCoord, maxCoord);
+    const float2 centerPixel = 0.5 * (minPixel + maxPixel);
+    const int2 centerCoord = clamp(int2(centerPixel / sourceFootprint), int2(0, 0), mipExtent - int2(1, 1));
+    const float hizDepth = sampleHiZCenterClusterDepth(mipLevel, centerCoord, mipExtent);
 
-    const float3 centerView = mul(gpuCullingUniforms.viewMatrix, float4(center, 1.0)).xyz;
-    const float4 farthestClip = mul(gpuCullingUniforms.projectionMatrix, float4(centerView.xy, centerView.z - radius, 1.0));
-    if(abs(farthestClip.w) <= 1e-5)
+    const float nearestViewZ = centerView.z + radius;
+    if(nearestViewZ >= -1e-4)
     {
         return false;
     }
 
-    const float farthestDepth = saturate(farthestClip.z / farthestClip.w);
+    const float4 nearestClip = mul(gpuCullingUniforms.projectionMatrix, float4(centerView.xy, nearestViewZ, 1.0));
+    if(abs(nearestClip.w) <= 1e-5)
+    {
+        return false;
+    }
+
+    const float nearestDepth = saturate(nearestClip.z / nearestClip.w);
     const float depthEpsilon = gpuCullingUniforms.cullingInfo.w;
-    return hizDepth > farthestDepth + depthEpsilon;
+    return nearestDepth < hizDepth - depthEpsilon;
 }
 
 [numthreads(LGPUCullingThreadCount, 1, 1)]

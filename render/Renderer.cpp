@@ -80,7 +80,7 @@ struct OverlayCircle
 
     const glm::vec3 ndc = glm::vec3(clip) / clip.w;
     screenPoint.x = viewportRect.x + (ndc.x * 0.5f + 0.5f) * viewportRect.z;
-    screenPoint.y = viewportRect.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * viewportRect.w;
+    screenPoint.y = viewportRect.y + (ndc.y * 0.5f + 0.5f) * viewportRect.w;
     return true;
   };
 
@@ -429,7 +429,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
   m_device.device->init(deviceCreateInfo);
 
-  const bool enableExternalHostMemory = m_device.device->isDeviceExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+  const bool enableExternalHostMemory = false;
 
   const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
   ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "Renderer::init requires RHI Core capability tier");
@@ -682,6 +682,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_debugPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
+  createPassGpuProfileResources();
 }
 
 void Renderer::shutdown(rhi::Surface& surface)
@@ -746,6 +747,7 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyDescriptorSetLayout(device, m_device.lightCoarseCullingSetLayout, nullptr);
     m_device.lightCoarseCullingSetLayout = VK_NULL_HANDLE;
   }
+  destroyPassGpuProfileResources();
   m_lightResources.deinit();
   // Note: gbufferTextureSets are freed automatically when descriptorPool is destroyed
   m_device.gbufferTextureSets.clear();
@@ -780,6 +782,11 @@ void Renderer::shutdown(rhi::Surface& surface)
   {
     m_device.computePipelineLayout->deinit();
     m_device.computePipelineLayout.reset();
+  }
+  if(m_device.debugPipelineLayout)
+  {
+    m_device.debugPipelineLayout->deinit();
+    m_device.debugPipelineLayout.reset();
   }
   if(m_device.gbufferPipelineLayout)
   {
@@ -934,6 +941,11 @@ PipelineHandle Renderer::getDebugPipelineHandle() const
   return m_debugPipeline;
 }
 
+PipelineHandle Renderer::getGPUCullingDebugPipelineHandle() const
+{
+  return m_gpuCullingDebugPipeline;
+}
+
 PipelineHandle Renderer::getCSMShadowPipelineHandle() const
 {
   // TODO(Task 8): Create actual CSM shadow pipeline
@@ -1023,9 +1035,9 @@ void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& param
     ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);
   }
 
-  if(params.debugOptions.showGPUCullingOverlay)
+  if(params.debugOptions.showGPUCullingOverlay || params.debugOptions.showPassGpuProfile)
   {
-    drawGPUCullingOverlay(params);
+    drawGPUInfoOverlay(params);
   }
 
   if(params.recordUi)
@@ -1151,6 +1163,7 @@ bool Renderer::prepareFrameResources()
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
+  resolvePassGpuProfileResults(currentFrameIndex);
   m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
 
   return acquireSwapchainImage(*m_swapchainDependent.swapchain, m_swapchainDependent.currentImageIndex);
@@ -1348,8 +1361,7 @@ void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUs
                    m_device.allocator,
                    sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
-                   VMA_MEMORY_USAGE_CPU_TO_GPU,
-                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                   VMA_MEMORY_USAGE_GPU_ONLY);
   frameUserData.gpuCullingStatsBuffer =
       createBuffer(device,
                    m_device.allocator,
@@ -1524,53 +1536,15 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
 
 void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
 {
-  if(params.cameraUniforms == nullptr || params.viewportImageRect.z <= 1.0f || params.viewportImageRect.w <= 1.0f)
-  {
-    return;
-  }
+  ImGui::Text("Visible %u / %u", m_lastGPUCullingStats.visibleCount, m_lastGPUCullingStats.totalCount);
+  ImGui::Text("Opaque %u / %u", m_lastGPUCullingStats.opaqueVisibleCount, m_lastGPUCullingStats.opaqueCount);
+  ImGui::Text("Transparent %u / %u",
+              m_lastGPUCullingStats.transparentVisibleCount,
+              m_lastGPUCullingStats.transparentCount);
+  ImGui::Text("Frustum Culled %u", m_lastGPUCullingStats.frustumCulledCount);
+  ImGui::Text("Occlusion Culled %u", m_lastGPUCullingStats.occlusionCulledCount);
 
-  ImDrawList* drawList = ImGui::GetForegroundDrawList();
-  if(drawList == nullptr)
-  {
-    return;
-  }
-
-  const ImVec2 panelMin(params.viewportImageRect.x + 12.0f, params.viewportImageRect.y + 12.0f);
-  const ImVec2 panelMax(panelMin.x + 250.0f, panelMin.y + 150.0f);
-  drawList->AddRectFilled(panelMin, panelMax, IM_COL32(12, 14, 18, 176), 6.0f);
-  drawList->AddRect(panelMin, panelMax, IM_COL32(255, 255, 255, 28), 6.0f);
-
-  char lineBuffer[128];
-  ImVec2 textPos(panelMin.x + 10.0f, panelMin.y + 8.0f);
-  drawList->AddText(textPos, IM_COL32(235, 240, 245, 255), "GPU Culling");
-  textPos.y += 20.0f;
-
-  std::snprintf(lineBuffer,
-                sizeof(lineBuffer),
-                "Visible %u / %u",
-                m_lastGPUCullingStats.visibleCount,
-                m_lastGPUCullingStats.totalCount);
-  drawList->AddText(textPos, IM_COL32(200, 230, 255, 255), lineBuffer);
-  textPos.y += 16.0f;
-
-  std::snprintf(lineBuffer,
-                sizeof(lineBuffer),
-                "Opaque %u / %u   Transparent %u / %u",
-                m_lastGPUCullingStats.opaqueVisibleCount,
-                m_lastGPUCullingStats.opaqueCount,
-                m_lastGPUCullingStats.transparentVisibleCount,
-                m_lastGPUCullingStats.transparentCount);
-  drawList->AddText(textPos, IM_COL32(210, 215, 220, 255), lineBuffer);
-  textPos.y += 16.0f;
-
-  std::snprintf(lineBuffer,
-                sizeof(lineBuffer),
-                "Frustum Culled %u   Occlusion Culled %u",
-                m_lastGPUCullingStats.frustumCulledCount,
-                m_lastGPUCullingStats.occlusionCulledCount);
-  drawList->AddText(textPos, IM_COL32(210, 215, 220, 255), lineBuffer);
-  textPos.y += 22.0f;
-
+  ImGui::SeparatorText("Legend");
   const struct LegendEntry
   {
     const char* label;
@@ -1582,40 +1556,261 @@ void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
       {"Occlusion Culled", IM_COL32(255, 176, 92, 210)},
   };
 
-  ImVec2 legendPos(panelMin.x + 10.0f, panelMin.y + 78.0f);
   for(const LegendEntry& entry : legends)
   {
-    drawList->AddCircleFilled(ImVec2(legendPos.x + 4.0f, legendPos.y + 6.0f), 4.0f, entry.color);
-    drawList->AddText(ImVec2(legendPos.x + 14.0f, legendPos.y), IM_COL32(220, 225, 230, 220), entry.label);
-    legendPos.y += 16.0f;
+    ImGui::ColorButton(entry.label,
+                       ImGui::ColorConvertU32ToFloat4(entry.color),
+                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                       ImVec2(12.0f, 12.0f));
+    ImGui::SameLine();
+    ImGui::TextUnformatted(entry.label);
+  }
+}
+
+void Renderer::createPassGpuProfileResources()
+{
+  destroyPassGpuProfileResources();
+
+  if(m_device.device == nullptr)
+  {
+    return;
   }
 
-  for(const GPUCullOverlayObject& object : m_lastGPUCullingOverlayObjects)
+  VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
+
+  m_passGpuProfile.timestampPeriodNs = deviceProperties2.properties.limits.timestampPeriod;
+  m_passGpuProfile.queryCount = static_cast<uint32_t>(m_passExecutor.getPassCount() * 2);
+  m_passGpuProfile.passNames.clear();
+  m_passGpuProfile.latestPassDurationsMs.clear();
+  m_passGpuProfile.latestValid = false;
+  m_passGpuProfile.frames.clear();
+
+  if(m_passGpuProfile.queryCount == 0 || m_perFrame.frameUserData.empty())
   {
-    OverlayCircle projectedCircle{};
-    if(!projectWorldToViewportCircle(*params.cameraUniforms, params.viewportImageRect, object.center, object.radius, projectedCircle))
+    return;
+  }
+
+  m_passGpuProfile.passNames.reserve(m_passExecutor.getPassCount());
+  for(size_t passIndex = 0; passIndex < m_passExecutor.getPassCount(); ++passIndex)
+  {
+    const PassNode* pass = m_passExecutor.getPass(passIndex);
+    m_passGpuProfile.passNames.push_back(pass != nullptr ? pass->getName() : "Unknown");
+  }
+  m_passGpuProfile.latestPassDurationsMs.assign(m_passExecutor.getPassCount(), 0.0);
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  m_passGpuProfile.frames.resize(m_perFrame.frameUserData.size());
+  for(PassGpuProfileFrame& frame : m_passGpuProfile.frames)
+  {
+    const VkQueryPoolCreateInfo queryPoolInfo{
+        .sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType  = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = m_passGpuProfile.queryCount,
+    };
+    VK_CHECK(vkCreateQueryPool(device, &queryPoolInfo, nullptr, &frame.queryPool));
+    DBG_VK_NAME(frame.queryPool);
+    frame.passDurationsMs.assign(m_passExecutor.getPassCount(), 0.0);
+    frame.valid = false;
+    frame.hasRecordedQueries = false;
+  }
+}
+
+void Renderer::destroyPassGpuProfileResources()
+{
+  if(m_device.device != nullptr)
+  {
+    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+    for(PassGpuProfileFrame& frame : m_passGpuProfile.frames)
     {
+      if(frame.queryPool != VK_NULL_HANDLE)
+      {
+        vkDestroyQueryPool(device, frame.queryPool, nullptr);
+        frame.queryPool = VK_NULL_HANDLE;
+      }
+      frame.passDurationsMs.clear();
+      frame.valid = false;
+      frame.hasRecordedQueries = false;
+    }
+  }
+
+  m_passGpuProfile.frames.clear();
+  m_passGpuProfile.passNames.clear();
+  m_passGpuProfile.latestPassDurationsMs.clear();
+  m_passGpuProfile.latestValid = false;
+  m_passGpuProfile.queryCount = 0;
+  m_passGpuProfile.timestampPeriodNs = 0.0f;
+}
+
+void Renderer::resolvePassGpuProfileResults(uint32_t frameIndex)
+{
+  if(frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
+  {
+    return;
+  }
+
+  PassGpuProfileFrame& frame = m_passGpuProfile.frames[frameIndex];
+  if(frame.queryPool == VK_NULL_HANDLE || !frame.hasRecordedQueries)
+  {
+    return;
+  }
+
+  std::vector<uint64_t> queryData(static_cast<size_t>(m_passGpuProfile.queryCount) * 2u, 0ull);
+  const VkResult result = vkGetQueryPoolResults(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                                frame.queryPool,
+                                                0,
+                                                m_passGpuProfile.queryCount,
+                                                sizeof(uint64_t) * queryData.size(),
+                                                queryData.data(),
+                                                sizeof(uint64_t) * 2u,
+                                                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+  if(result != VK_SUCCESS)
+  {
+    frame.valid = false;
+    return;
+  }
+
+  bool anyValidPass = false;
+  for(size_t passIndex = 0; passIndex < frame.passDurationsMs.size(); ++passIndex)
+  {
+    const size_t beginIndex = passIndex * 4u;
+    const size_t endIndex = beginIndex + 2u;
+    const bool beginAvailable = queryData[beginIndex + 1u] != 0ull;
+    const bool endAvailable = queryData[endIndex + 1u] != 0ull;
+    if(!beginAvailable || !endAvailable || queryData[endIndex] < queryData[beginIndex])
+    {
+      frame.passDurationsMs[passIndex] = 0.0;
       continue;
     }
 
-    ImU32 color = IM_COL32(92, 220, 120, 160);
-    float thickness = 1.5f;
-    if(object.result == shaderio::LGPUCullResultFrustumCulled)
-    {
-      color = IM_COL32(255, 92, 92, 180);
-      thickness = 2.0f;
-    }
-    else if(object.result == shaderio::LGPUCullResultOcclusionCulled)
-    {
-      color = IM_COL32(255, 176, 92, 180);
-      thickness = 2.0f;
-    }
-    else if((object.flags & shaderio::LGPUCullFlagTransparent) != 0u)
-    {
-      color = IM_COL32(92, 210, 255, 170);
-    }
+    const uint64_t delta = queryData[endIndex] - queryData[beginIndex];
+    frame.passDurationsMs[passIndex] = static_cast<double>(delta) * static_cast<double>(m_passGpuProfile.timestampPeriodNs) * 1e-6;
+    anyValidPass = true;
+  }
 
-    drawList->AddCircle(projectedCircle.center, projectedCircle.radius, color, 24, thickness);
+  frame.valid = anyValidPass;
+  if(anyValidPass)
+  {
+    m_passGpuProfile.latestPassDurationsMs = frame.passDurationsMs;
+    m_passGpuProfile.latestValid = true;
+  }
+}
+
+void Renderer::resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex)
+{
+  if(frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
+  {
+    return;
+  }
+
+  const VkQueryPool queryPool = m_passGpuProfile.frames[frameIndex].queryPool;
+  if(queryPool == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  vkCmdResetQueryPool(rhi::vulkan::getNativeCommandBuffer(cmd), queryPool, 0, m_passGpuProfile.queryCount);
+  m_passGpuProfile.frames[frameIndex].valid = false;
+  m_passGpuProfile.frames[frameIndex].hasRecordedQueries = false;
+}
+
+void Renderer::writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const
+{
+  if(context.cmd == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
+  {
+    return;
+  }
+
+  const VkQueryPool queryPool = m_passGpuProfile.frames[context.frameIndex].queryPool;
+  if(queryPool == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const uint32_t queryIndex = passIndex * 2u + (isBegin ? 0u : 1u);
+  if(queryIndex >= m_passGpuProfile.queryCount)
+  {
+    return;
+  }
+
+  vkCmdWriteTimestamp2(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                       isBegin ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                       queryPool,
+                       queryIndex);
+}
+
+void Renderer::drawPassGpuProfileOverlay(const RenderParams& params) const
+{
+  if(!m_passGpuProfile.latestValid || m_passGpuProfile.latestPassDurationsMs.empty())
+  {
+    ImGui::TextUnformatted("Waiting for GPU timestamps...");
+    return;
+  }
+
+  double totalMs = 0.0;
+  for(double durationMs : m_passGpuProfile.latestPassDurationsMs)
+  {
+    totalMs += durationMs;
+  }
+
+  ImGui::Text("Tracked Passes: %d", static_cast<int>(m_passGpuProfile.passNames.size()));
+  ImGui::Text("Total: %.3f ms", totalMs);
+  ImGui::Separator();
+  for(size_t passIndex = 0; passIndex < m_passGpuProfile.passNames.size()
+                         && passIndex < m_passGpuProfile.latestPassDurationsMs.size();
+      ++passIndex)
+  {
+    ImGui::Text("%-18s %.3f ms", m_passGpuProfile.passNames[passIndex].c_str(),
+                m_passGpuProfile.latestPassDurationsMs[passIndex]);
+  }
+}
+
+void Renderer::drawGPUInfoOverlay(const RenderParams& params) const
+{
+  ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize;
+  if(params.viewportImageRect.z > 1.0f && params.viewportImageRect.w > 1.0f)
+  {
+    ImGui::SetNextWindowPos(ImVec2(params.viewportImageRect.x + params.viewportImageRect.z - 360.0f,
+                                   params.viewportImageRect.y + 12.0f),
+                            ImGuiCond_Always);
+  }
+  ImGui::SetNextWindowBgAlpha(0.78f);
+  if(!ImGui::Begin("GPU Info", nullptr, flags))
+  {
+    ImGui::End();
+    return;
+  }
+
+  if(params.debugOptions.showGPUCullingOverlay
+     && ImGui::CollapsingHeader("GPU Culling", ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    drawGPUCullingOverlay(params);
+  }
+
+  if(params.debugOptions.showPassGpuProfile
+     && ImGui::CollapsingHeader("GPU Pass Profile", ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    drawPassGpuProfileOverlay(params);
+  }
+
+  ImGui::End();
+}
+
+void Renderer::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+{
+  (void)pass;
+  if(renderer != nullptr)
+  {
+    renderer->writePassGpuProfileTimestamp(context, passIndex, true);
+  }
+}
+
+void Renderer::PassProfilingHooks::afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+{
+  (void)pass;
+  if(renderer != nullptr)
+  {
+    renderer->writePassGpuProfileTimestamp(context, passIndex, false);
   }
 }
 
@@ -2155,7 +2350,12 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
       m_materials.materialBindGroup};
-  m_passExecutor.execute(context);
+  resetPassGpuProfileQueries(cmd, currentFrameIndex);
+  m_passExecutor.execute(context, &m_passProfilingHooks);
+  if(currentFrameIndex < m_passGpuProfile.frames.size())
+  {
+    m_passGpuProfile.frames[currentFrameIndex].hasRecordedQueries = true;
+  }
 
   // Update swapchain image state after rendering
   m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex] = rhi::ResourceState::Present;
@@ -3527,6 +3727,38 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                 gbufferLayoutDesc, gbufferLayoutLowering);
     DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
     m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
+
+    rhi::ShaderReflectionData debugReflection{};
+    debugReflection.name = "shader.debug.gpu-cull";
+    debugReflection.entryPoints = {
+        rhi::ShaderEntryPoint{"vertexCullMain", rhi::ShaderStageFlagBits::vertex},
+        rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
+    };
+    debugReflection.resourceBindings = {
+        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
+                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
+    };
+    debugReflection.pushConstantRanges = {
+        rhi::PushConstantRange{rhi::ShaderStageFlagBits::vertex, 0, sizeof(shaderio::PushConstantGPUCullDebug)},
+    };
+
+    rhi::PipelineLayoutDesc debugLayoutDesc = rhi::derivePipelineLayoutDesc(debugReflection);
+    debugLayoutDesc.debugName = "debug-layout";
+
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 2> debugLayoutMappings{
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
+    };
+    const rhi::vulkan::VulkanPipelineLayoutLowering debugLayoutLowering{
+        .setLayouts     = debugLayoutMappings.data(),
+        .setLayoutCount = static_cast<uint32_t>(debugLayoutMappings.size()),
+    };
+
+    auto debugPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    debugPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                              debugLayoutDesc, debugLayoutLowering);
+    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(debugPipelineLayout->getNativeHandle()));
+    m_device.debugPipelineLayout = std::move(debugPipelineLayout);
   }
 
   // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
@@ -4142,6 +4374,48 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                        reinterpret_cast<uint64_t>(debugPipeline),
                                        debugCreateInfo.key.specializationVariant);
 
+    const std::array<rhi::PipelineShaderStageDesc, 2> debugCullStages{{
+        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexCullMain"},
+        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
+    }};
+    rhi::GraphicsPipelineDesc debugCullDesc{
+        .layout            = m_device.debugPipelineLayout.get(),
+        .shaderStages      = debugCullStages.data(),
+        .shaderStageCount  = static_cast<uint32_t>(debugCullStages.size()),
+        .vertexInput       = {},
+        .rasterState       = rhi::RasterState{},
+        .depthState        = rhi::DepthState{false, false, rhi::CompareOp::always},
+        .blendStates       = &debugBlend,
+        .blendStateCount   = 1,
+        .dynamicStates     = debugDynamicStates.data(),
+        .dynamicStateCount = static_cast<uint32_t>(debugDynamicStates.size()),
+        .renderingInfo =
+            {
+                .colorFormats     = &outputFormat,
+                .colorFormatCount = 1,
+                .depthFormat      = rhi::TextureFormat::undefined,
+            },
+    };
+    debugCullDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;
+    debugCullDesc.rasterState.cullMode    = rhi::CullMode::none;
+    debugCullDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
+    debugCullDesc.rasterState.sampleCount = rhi::SampleCount::count1;
+
+    rhi::vulkan::GraphicsPipelineCreateInfo debugCullCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 8,
+            },
+        .desc = debugCullDesc,
+    };
+    const VkPipeline debugCullPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugCullCreateInfo);
+    DBG_VK_NAME(debugCullPipeline);
+    m_gpuCullingDebugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                 reinterpret_cast<uint64_t>(debugCullPipeline),
+                                                 debugCullCreateInfo.key.specializationVariant);
+
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugShaderModule, nullptr);
   }
 }
@@ -4735,6 +5009,7 @@ void Renderer::destroyPipelines()
   m_shadowPipeline = kNullPipelineHandle;
   m_forwardPipeline = kNullPipelineHandle;
   m_debugPipeline = kNullPipelineHandle;
+  m_gpuCullingDebugPipeline = kNullPipelineHandle;
   m_pointLightCoarseCullingPipeline = kNullPipelineHandle;
   m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
@@ -5008,6 +5283,11 @@ uint64_t Renderer::getLightCullingPipelineLayout() const
   return 0;
 }
 
+uint64_t Renderer::getDebugPipelineLayout() const
+{
+  return m_device.debugPipelineLayout ? m_device.debugPipelineLayout->getNativeHandle() : 0;
+}
+
 uint64_t Renderer::getGraphicsPipelineLayout() const
 {
   return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
@@ -5045,6 +5325,24 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
 uint64_t Renderer::getLightCullingDescriptorSet() const
 {
   return 0;
+}
+
+uint64_t Renderer::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return static_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingObjectBuffer.address);
+}
+
+uint64_t Renderer::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return static_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer.address);
 }
 
 uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const

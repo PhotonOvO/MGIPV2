@@ -500,12 +500,14 @@ struct ValidationSettings
       "VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725",  // Nsight injection: buffer address capture replay
       "VUID-VkMemoryAllocateInfo-pNext-02806",  // Nsight injection: dedicated buffer + host import conflict
       "VUID-VkPresentInfoKHR-pImageIndices-01430",  // RenderDoc/Nsight injection: swapchain layout mismatch
+      "VUID-vkCmdCopyBuffer-renderpass",  // Nsight capture: injected staging copy during active dynamic rendering
       "VUID-vkResetFences-pFences-01123",  // RenderDoc capture: injected fence reset can race captured queue work
       "76fd6b",  // Nsight: same error in hex format
       "90590b31",  // Nsight: VUID-vkBindBufferMemory-memory-02985 hex
       "48a6c111",  // Nsight: VUID-vkGetBufferOpaqueCaptureAddress-pInfo-10725 hex
       "af8d561d",  // Nsight: VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820 hex
       "48ad24c6",  // RenderDoc/Nsight: VUID-VkPresentInfoKHR-pImageIndices-01430 hex
+      "7cb9a424",  // Nsight: VUID-vkCmdCopyBuffer-renderpass hex
       "68a5074e"  // RenderDoc capture: VUID-vkResetFences-pFences-01123 hex
   };
 

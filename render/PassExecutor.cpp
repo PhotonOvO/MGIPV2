@@ -161,7 +161,12 @@ size_t PassExecutor::getPassCount() const
   return m_passes.size();
 }
 
-void PassExecutor::execute(const PassContext& context) const
+const PassNode* PassExecutor::getPass(size_t index) const
+{
+  return index < m_passes.size() ? m_passes[index] : nullptr;
+}
+
+void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks) const
 {
   std::unordered_map<uint64_t, BufferUsageState>  bufferStates;
   std::unordered_map<uint64_t, TextureUsageState> textureStates;
@@ -182,6 +187,10 @@ void PassExecutor::execute(const PassContext& context) const
   {
     const PassNode* pass = m_passes[passIndex];
     assert(pass != nullptr);
+    if(hooks != nullptr)
+    {
+      hooks->beforePass(context, *pass, passIndex);
+    }
 
     const PassNode::HandleSlice<PassResourceDependency> dependencies = pass->getDependencies();
     for(uint32_t i = 0; i < dependencies.count; ++i)
@@ -282,6 +291,10 @@ void PassExecutor::execute(const PassContext& context) const
     PassContext scopedContext = context;
     scopedContext.passIndex   = passIndex;
     pass->execute(scopedContext);
+    if(hooks != nullptr)
+    {
+      hooks->afterPass(scopedContext, *pass, passIndex);
+    }
   }
 
 }

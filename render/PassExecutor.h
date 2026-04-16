@@ -11,6 +11,23 @@ namespace demo {
 class PassExecutor
 {
 public:
+  struct ExecutionHooks
+  {
+    virtual ~ExecutionHooks() = default;
+    virtual void beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+    {
+      (void)context;
+      (void)pass;
+      (void)passIndex;
+    }
+    virtual void afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+    {
+      (void)context;
+      (void)pass;
+      (void)passIndex;
+    }
+  };
+
   struct TextureBinding
   {
     TextureHandle      handle{};
@@ -32,7 +49,8 @@ public:
   void                 bindTexture(TextureBinding binding);
   void                 bindBuffer(BufferBinding binding);
   [[nodiscard]] size_t getPassCount() const;
-  void                 execute(const PassContext& context) const;
+  [[nodiscard]] const PassNode* getPass(size_t index) const;
+  void                 execute(const PassContext& context, const ExecutionHooks* hooks = nullptr) const;
 
 private:
   [[nodiscard]] const TextureBinding* findTextureBinding(TextureHandle handle) const;

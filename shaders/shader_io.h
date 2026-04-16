@@ -300,6 +300,16 @@ struct DebugLineVertex
   vec4 color;
 };
 
+struct PushConstantGPUCullDebug
+{
+  uint64_t objectBufferAddress;
+  uint64_t resultBufferAddress;
+  uint32_t objectCount;
+  uint32_t segmentCount;
+  uint32_t _padding0;
+  uint32_t _padding1;
+};
+
 // Vertex with tangent for GBuffer pass
 struct VertexGltfTangent
 {

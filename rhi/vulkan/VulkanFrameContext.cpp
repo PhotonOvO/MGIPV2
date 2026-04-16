@@ -6,6 +6,9 @@
 #include <array>
 #include <cassert>
 #include <vulkan/vulkan.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace demo {
 namespace rhi {
@@ -25,6 +28,15 @@ namespace {
 void checkVk(VkResult result, const char* message)
 {
   assert((result == VK_SUCCESS) && message);
+}
+
+bool isRenderDocInjected()
+{
+#ifdef _WIN32
+  return GetModuleHandleA("renderdoc.dll") != nullptr;
+#else
+  return false;
+#endif
 }
 
 }  // namespace
@@ -111,6 +123,10 @@ void VulkanFrameContext::beginFrame()
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::beginFrame invalid frame index");
 
   waitCurrentFrame();
+  if(isRenderDocInjected() && m_graphicsQueue != VK_NULL_HANDLE)
+  {
+    checkVk(vkQueueWaitIdle(m_graphicsQueue), "VulkanFrameContext::beginFrame vkQueueWaitIdle failed");
+  }
   processRetirements(m_timelineSemaphore->getCurrentValue());
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];

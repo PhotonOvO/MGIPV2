@@ -21,7 +21,7 @@ void TransientAllocator::init(rhi::Device& device, VmaAllocator allocator, uint3
   m_head                       = 0;
   m_lastLogicalReleaseTimeline = 0;
 
-  const bool enableExternalHostMemory = device.isDeviceExtensionSupported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+  const bool enableExternalHostMemory = false;
 
   const VkExternalMemoryBufferCreateInfo externalMemoryBufferCreateInfo{
       .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
