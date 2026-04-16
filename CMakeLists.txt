@@ -250,8 +250,10 @@ add_library(demo_core STATIC
   render/passes/GBufferPass.cpp
   render/passes/LightPass.h
   render/passes/LightPass.cpp
-  render/passes/ShadowPass.h
-  render/passes/ShadowPass.cpp
+  render/passes/LightCullingPass.h
+  render/passes/LightCullingPass.cpp
+  render/passes/CSMShadowPass.h
+  render/passes/CSMShadowPass.cpp
   render/passes/ForwardPass.h
   render/passes/ForwardPass.cpp
   render/passes/DebugPass.h
@@ -290,6 +292,8 @@ add_library(demo_core STATIC
   render/MeshPool.cpp
   render/Camera.h
   render/Camera.cpp
+  render/CSMShadowResources.h
+  render/CSMShadowResources.cpp
 )
 
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)

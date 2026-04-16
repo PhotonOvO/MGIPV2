@@ -1,12 +1,12 @@
-// LightPass shader: Full PBR lighting from GBuffer with a single directional shadow map
+// LightPass shader: GBuffer lighting with coarse point-light culling and cascaded shadow maps.
 
 #include "shader_io.h"
 
 [[vk::binding(0, 0)]]
 Sampler2D inTexture[];
 
-[[vk::binding(1, 0)]]
-ConstantBuffer<CameraUniforms> camera;
+[[vk::binding(LBindShadowMap, LSetTextures)]]
+Sampler2DArray shadowMap;
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<LightData> pointLightBuffer;
@@ -17,14 +17,16 @@ StructuredBuffer<uint16_t4> pointLightXYCoarseCullIndicesBuffer;
 [[vk::binding(4, 0)]]
 ConstantBuffer<LightCoarseCullingUniforms> lightCoarseCulling;
 
-[[vk::push_constant]]
-LightParams lightParams;
+[[vk::binding(LBindCamera, LSetScene)]]
+ConstantBuffer<CameraUniforms> camera;
+
+[[vk::binding(LBindLighting, LSetScene)]]
+ConstantBuffer<LightingUniforms> lighting;
 
 STATIC_CONST int kGBufferBaseColorIndex = 0;
 STATIC_CONST int kGBufferNormalIndex    = 1;
 STATIC_CONST int kGBufferMaterialIndex  = 2;
 STATIC_CONST int kGBufferDepthIndex     = 3;
-STATIC_CONST int kShadowMapIndex        = 4;
 STATIC_CONST float PI                   = 3.14159265359;
 
 float NDF_GGX(float NdotH, float roughness)
@@ -139,7 +141,7 @@ vec3 computeCoarseCulledPointLighting(float2 uv, vec3 baseColor, vec3 worldPos, 
 {
     const uint2 tileCoord = computeLightTileCoord(uv);
 
-    vec3 lighting = baseColor * 0.035;
+    vec3 pointLighting = baseColor * 0.035;
     const uint pointLightCount = uint(lightCoarseCulling.lightCountInfo.x);
     for(uint lightIndex = 0; lightIndex < pointLightCount; ++lightIndex)
     {
@@ -160,38 +162,65 @@ vec3 computeCoarseCulledPointLighting(float2 uv, vec3 baseColor, vec3 worldPos, 
         const vec3 L = toLight / distanceToLight;
         const float attenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
         const float diffuse = saturate(dot(worldNormal, L));
-        lighting += baseColor * light.color * light.intensity * diffuse * attenuation;
+        pointLighting += baseColor * light.color * light.intensity * diffuse * attenuation;
     }
 
-    return lighting;
+    return pointLighting;
 }
 
-float sampleShadow(vec3 worldPos, vec3 worldNormal)
+float computeViewDepth(vec3 worldPos)
 {
-    float4 shadowClip = mul(lightParams.worldToShadow, float4(worldPos, 1.0));
+    float4 viewPos = mul(camera.view, float4(worldPos, 1.0));
+    return abs(viewPos.z);
+}
+
+int selectCascadeIndex(float viewDepth)
+{
+    int cascadeIndex = 0;
+    float splits[4] = {
+        lighting.light.cascadeSplitDistances.x,
+        lighting.light.cascadeSplitDistances.y,
+        lighting.light.cascadeSplitDistances.z,
+        lighting.light.cascadeSplitDistances.w
+    };
+
+    [unroll]
+    for(int i = 0; i < LCascadeCount - 1; ++i)
+    {
+        if(viewDepth > splits[i])
+            cascadeIndex = i + 1;
+    }
+    return cascadeIndex;
+}
+
+float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
+{
+    int cascadeIdx = selectCascadeIndex(viewDepth);
+
+    float4 shadowClip = mul(lighting.light.worldToShadow[cascadeIdx], float4(worldPos, 1.0));
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    float2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
 
-    float2 shadowUv = float2(shadowNdc.x * 0.5 + 0.5, shadowNdc.y * 0.5 + 0.5);
     if(shadowUv.x < 0.0 || shadowUv.x > 1.0 || shadowUv.y < 0.0 || shadowUv.y > 1.0)
-    {
         return 1.0;
-    }
-
     if(shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
-    {
         return 1.0;
-    }
 
-    float3 lightDir = normalize(lightParams.lightDirectionAndShadowStrength.xyz);
-    float normalBias = lightParams.lightColorAndNormalBias.w;
-    float depthBias = lightParams.shadowMetrics.y;
-    float texelSize = lightParams.ambientColorAndTexelSize.w;
-    float cosTheta = saturate(dot(worldNormal, lightDir));
+    float3 lightDir = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
+    float cosTheta = saturate(abs(dot(worldNormal, lightDir)));
     float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
     float slope = sinTheta / max(cosTheta, 0.01);
-    float bias = depthBias + normalBias * slope;
 
+    float baseBias = lighting.light.shadowMetrics.y;
+    float slopeBias = lighting.light.shadowMetrics.z;
+    float cascadeScale = 0.5;
+
+    float cascadeBias = baseBias * (1.0 + float(cascadeIdx) * cascadeScale);
+    float bias = cascadeBias + slopeBias * (1.0 + float(cascadeIdx) * cascadeScale) * slope;
+
+    float texelSize = lighting.light.shadowMetrics.x;
     float visibility = 0.0;
+
     [unroll]
     for(int y = -1; y <= 1; ++y)
     {
@@ -199,9 +228,9 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
         for(int x = -1; x <= 1; ++x)
         {
             float2 offset = float2(x, y) * texelSize;
-            float shadowDepth = inTexture[kShadowMapIndex].Sample(shadowUv + offset).r;
-            float receiverDepth = shadowNdc.z + bias;
-            visibility += receiverDepth >= shadowDepth ? 1.0 : 0.0;
+            float3 sampleCoord = float3(shadowUv + offset, float(cascadeIdx));
+            float shadowDepth = shadowMap.Sample(sampleCoord).r;
+            visibility += (shadowNdc.z + bias >= shadowDepth) ? 1.0 : 0.0;
         }
     }
 
@@ -209,9 +238,9 @@ float sampleShadow(vec3 worldPos, vec3 worldNormal)
 }
 
 vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float metallic, float roughness, float ao,
-                        float shadowFade)
+                        float shadowFade, float viewDepth)
 {
-    vec3 L = normalize(lightParams.lightDirectionAndShadowStrength.xyz);
+    vec3 L = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
     vec3 V = normalize(camera.cameraPosition - worldPos);
     vec3 N = normalize(normalEncoded * 2.0 - 1.0);
     vec3 H = normalize(V + L);
@@ -222,7 +251,7 @@ vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float
     float VdotH = max(dot(V, H), 0.0);
 
     vec3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor, metallic);
-    vec3 radiance = lightParams.lightColorAndNormalBias.rgb;
+    vec3 radiance = lighting.light.lightColorAndNormalBias.rgb;
 
     float D = NDF_GGX(NdotH, roughness);
     vec3 F = Fresnel_Schlick(VdotH, F0);
@@ -235,16 +264,12 @@ vec3 computePBRLighting(vec3 baseColor, vec3 normalEncoded, vec3 worldPos, float
     vec3 kD = (1.0 - kS) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
 
-    float shadowVisibility = sampleShadow(worldPos, N);
-    float shadowStrength = lightParams.lightDirectionAndShadowStrength.w * shadowFade;
+    float shadowVisibility = sampleCSMShadow(worldPos, N, viewDepth);
+    float shadowStrength = lighting.light.lightDirectionAndShadowStrength.w * shadowFade;
     float directVisibility = lerp(1.0, shadowVisibility, shadowStrength);
     vec3 Lo = (diffuse + specular) * radiance * NdotL * directVisibility;
-    vec3 ambient = lightParams.ambientColorAndTexelSize.rgb * baseColor * ao;
-
-    vec3 color = ambient + Lo;
-    color = color / (color + float3(1.0, 1.0, 1.0));
-    color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    return color;
+    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    return ambient + Lo;
 }
 
 struct VSOutput
@@ -272,6 +297,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
 {
     float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
     float4 normalSample    = inTexture[kGBufferNormalIndex].Sample(input.uv);
+    float4 materialSample  = inTexture[kGBufferMaterialIndex].Sample(input.uv);
     float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
 
     if(lightCoarseCulling.debugInfo.x > 0.5)
@@ -286,7 +312,13 @@ float4 fragmentMain(VSOutput input) : SV_Target
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
     vec3 worldNormal = normalize(normalSample.rgb * 2.0 - 1.0);
-    vec3 color = computeCoarseCulledPointLighting(input.uv, baseColorSample.rgb, worldPos, worldNormal);
+    float metallic = materialSample.r;
+    float roughness = materialSample.g;
+    float ao = materialSample.b;
+    float viewDepth = computeViewDepth(worldPos);
+
+    vec3 color = computePBRLighting(baseColorSample.rgb, normalSample.rgb, worldPos, metallic, roughness, ao, 1.0, viewDepth);
+    color += computeCoarseCulledPointLighting(input.uv, baseColorSample.rgb, worldPos, worldNormal);
     color = color / (color + float3(1.0, 1.0, 1.0));
     color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
     return float4(color, 1.0);

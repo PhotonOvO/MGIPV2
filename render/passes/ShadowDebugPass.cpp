@@ -1,6 +1,6 @@
 #include "ShadowDebugPass.h"
 #include "../Renderer.h"
-#include "../ShadowResources.h"
+#include "../CSMShadowResources.h"
 #include "../ClipSpaceConvention.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"
@@ -33,9 +33,13 @@ void ShadowDebugPass::execute(const PassContext& context) const
     if(shadowData == nullptr)
         return;
 
-    // Get the active light view-projection matrix
-    const glm::mat4& lightViewProj = shadowData->lightViewProjectionMatrix;
-    const glm::mat4 invLightViewProj = glm::inverse(lightViewProj);
+    // Cascade colors: Red, Green, Blue, Cyan
+    const float cascadeColors[shaderio::LCascadeCount][4] = {
+        {1.0f, 0.0f, 0.0f, 1.0f},  // Cascade 0: Red (closest)
+        {0.0f, 1.0f, 0.0f, 1.0f},  // Cascade 1: Green
+        {0.0f, 0.0f, 1.0f, 1.0f},  // Cascade 2: Blue
+        {0.0f, 1.0f, 1.0f, 1.0f},  // Cascade 3: Cyan (furthest)
+    };
 
     const clipspace::ProjectionConvention projectionConvention =
         clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
@@ -51,16 +55,6 @@ void ShadowDebugPass::execute(const PassContext& context) const
         glm::vec4( 1.0f,  1.0f, projectionConvention.ndcFarZ, 1.0f),
     };
 
-    // Transform to world space
-    glm::vec3 worldCorners[8];
-    for(int i = 0; i < 8; ++i)
-    {
-        glm::vec4 worldCorner = invLightViewProj * ndcCorners[i];
-        if(std::fabs(worldCorner.w) > 0.001f)
-            worldCorner /= worldCorner.w;
-        worldCorners[i] = glm::vec3(worldCorner);
-    }
-
     // Line indices for frustum wireframe (24 vertices for 12 lines)
     const int lineIndices[24] = {
         // Near plane edges (0-1-3-2-0)
@@ -71,52 +65,39 @@ void ShadowDebugPass::execute(const PassContext& context) const
         0, 4, 1, 5, 2, 6, 3, 7,
     };
 
-    // Colors for each axis direction (in world space)
-    const float colorX[4] = {1.0f, 0.0f, 0.0f, 1.0f};  // Red for world X direction
-    const float colorY[4] = {1.0f, 1.0f, 0.0f, 1.0f};  // Yellow for world Y direction (vertical)
-    const float colorZ[4] = {0.0f, 0.0f, 1.0f, 1.0f};  // Blue for world Z direction
+    // Build vertex buffer for all cascades (4 cascades * 24 vertices per frustum)
+    std::array<DebugVertex, shaderio::LCascadeCount * 24> vertices;
 
-    // Build vertex buffer with world-space direction-based coloring
-    std::array<DebugVertex, 24> vertices;
-    for(int i = 0; i < 24; i += 2)  // Process pairs of vertices (lines)
+    for(int cascade = 0; cascade < shaderio::LCascadeCount; ++cascade)
     {
-        // Get the two endpoints in world space
-        const glm::vec3& p0 = worldCorners[lineIndices[i]];
-        const glm::vec3& p1 = worldCorners[lineIndices[i + 1]];
+        const glm::mat4& lightViewProj = shadowData->cascadeViewProjection[cascade];
+        const glm::mat4 invLightViewProj = glm::inverse(lightViewProj);
 
-        // Compute direction vector in world space
-        const glm::vec3 dir = p1 - p0;
-        const float absX = std::abs(dir.x);
-        const float absY = std::abs(dir.y);
-        const float absZ = std::abs(dir.z);
-
-        // Choose color based on dominant axis in world space
-        const float* lineColor;
-        if(absY >= absX && absY >= absZ)
+        // Transform NDC corners to world space for this cascade
+        glm::vec3 worldCorners[8];
+        for(int i = 0; i < 8; ++i)
         {
-            lineColor = colorY;  // Vertical direction (world Y axis)
-        }
-        else if(absX >= absY && absX >= absZ)
-        {
-            lineColor = colorX;  // Horizontal X direction
-        }
-        else
-        {
-            lineColor = colorZ;  // Horizontal Z direction
+            glm::vec4 worldCorner = invLightViewProj * ndcCorners[i];
+            if(std::fabs(worldCorner.w) > 0.001f)
+                worldCorner /= worldCorner.w;
+            worldCorners[i] = glm::vec3(worldCorner);
         }
 
-        // Set both vertices of this line to the same color
-        for(int j = 0; j < 2; ++j)
+        // Get color for this cascade
+        const float* lineColor = cascadeColors[cascade];
+
+        // Write vertices for this cascade's frustum
+        const int baseVertex = cascade * 24;
+        for(int i = 0; i < 24; ++i)
         {
-            const int vertexIdx = i + j;
-            const glm::vec3& pos = worldCorners[lineIndices[vertexIdx]];
-            vertices[vertexIdx].position[0] = pos.x;
-            vertices[vertexIdx].position[1] = pos.y;
-            vertices[vertexIdx].position[2] = pos.z;
-            vertices[vertexIdx].color[0] = lineColor[0];
-            vertices[vertexIdx].color[1] = lineColor[1];
-            vertices[vertexIdx].color[2] = lineColor[2];
-            vertices[vertexIdx].color[3] = lineColor[3];
+            const glm::vec3& pos = worldCorners[lineIndices[i]];
+            vertices[baseVertex + i].position[0] = pos.x;
+            vertices[baseVertex + i].position[1] = pos.y;
+            vertices[baseVertex + i].position[2] = pos.z;
+            vertices[baseVertex + i].color[0] = lineColor[0];
+            vertices[baseVertex + i].color[1] = lineColor[1];
+            vertices[baseVertex + i].color[2] = lineColor[2];
+            vertices[baseVertex + i].color[3] = lineColor[3];
         }
     }
 
@@ -226,8 +207,8 @@ void ShadowDebugPass::execute(const PassContext& context) const
         const uint64_t vertexOffset = vertexAlloc.offset;
         context.cmd->bindVertexBuffers(0, &vertexBufferHandle, &vertexOffset, 1);
 
-        // Draw 12 lines (24 vertices)
-        context.cmd->draw(24, 1, 0, 0);
+        // Draw 4 cascade frustums (4 * 24 vertices = 96 vertices)
+        context.cmd->draw(shaderio::LCascadeCount * 24, 1, 0, 0);
     }
 
     context.cmd->endRenderPass();

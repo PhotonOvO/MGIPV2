@@ -7,6 +7,7 @@
 #include "FrameSubmission.h"
 #include "ClipSpaceConvention.h"
 #include "ImguiAxis.h"
+#include "CSMShadowResources.h"
 
 #include <cstring>
 #include <random>
@@ -19,7 +20,7 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
-constexpr uint32_t kLightPassTextureCount         = 5;
+constexpr uint32_t kLightPassTextureCount         = 4;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
 
@@ -433,16 +434,30 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     createDepthPyramidResources();
     createLightCoarseCullingResources();
 
+    // Initialize CSM shadow cascade resources
+    CSMShadowResources::CreateInfo csmInfo{
+        .cascadeCount      = 4,
+        .cascadeResolution = 1024,
+        .shadowFormat      = VK_FORMAT_D32_SFLOAT,
+    };
+    m_csmShadowResources.init(nativeDevice, m_device.allocator, cmd, csmInfo);
+
     // Create per-frame GBuffer descriptor sets for LightPass.
     {
       // Binding 0: Array of 5 sampled images (GBuffer0/1/2 + Depth + Shadow)
       const VkDescriptorSetLayoutBinding textureBinding{
-          0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kLightPassTextureCount, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+          shaderio::LBindTextures,
+          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          kLightPassTextureCount,
+          VK_SHADER_STAGE_FRAGMENT_BIT,
+          nullptr
       };
-
-      // Binding 1: Camera uniform buffer (dynamic, but we'll use fixed offset for LightPass)
-      const VkDescriptorSetLayoutBinding cameraBinding{
-          1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      const VkDescriptorSetLayoutBinding shadowMapBinding{
+          shaderio::LBindShadowMap,
+          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          1,
+          VK_SHADER_STAGE_FRAGMENT_BIT,
+          nullptr
       };
 
       const VkDescriptorSetLayoutBinding pointLightBinding{
@@ -457,7 +472,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
 
       const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
           textureBinding,
-          cameraBinding,
+          shadowMapBinding,
           pointLightBinding,
           pointCoarseBoundsBinding,
           lightCoarseCullingUniformBinding,
@@ -494,26 +509,6 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
 
   // Update GBuffer texture descriptor set
   updateGBufferTextureDescriptorSet();
-
-  // Create pipeline layout for LightPass (with push constants)
-  {
-    // Push constants for light parameters (48 bytes: 3 vec3 + padding)
-    const VkPushConstantRange pushConstantRange{
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset     = 0,
-        .size       = sizeof(shaderio::LightParams),
-    };
-
-    const VkPipelineLayoutCreateInfo layoutInfo{
-        .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts    = &m_device.gbufferTextureSetLayout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pushConstantRange,
-    };
-    VK_CHECK(vkCreatePipelineLayout(nativeDevice, &layoutInfo, nullptr, &m_device.lightPipelineLayout));
-    DBG_VK_NAME(m_device.lightPipelineLayout);
-  }
 
   createGraphicDescriptorSet();
   prebuildRequiredPipelineVariants();
@@ -599,7 +594,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_depthPrepass        = std::make_unique<DepthPrepass>(this);
   m_depthPyramidPass    = std::make_unique<DepthPyramidPass>(this);
   m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
-  m_shadowPass          = std::make_unique<ShadowPass>(this);
+  m_csmShadowPass       = std::make_unique<CSMShadowPass>(this);
   m_lightPass           = std::make_unique<LightPass>(this);
   m_forwardPass         = std::make_unique<ForwardPass>(this);
   m_debugPass           = std::make_unique<DebugPass>(this);
@@ -609,7 +604,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_depthPrepass);
   m_passExecutor.addPass(*m_depthPyramidPass);
   m_passExecutor.addPass(*m_lightCullingPass);
-  m_passExecutor.addPass(*m_shadowPass);
+  m_passExecutor.addPass(*m_csmShadowPass);
   m_passExecutor.addPass(*m_gbufferPass);
   // m_passExecutor.addPass(*m_animateVerticesPass);
   // m_passExecutor.addPass(*m_sceneOpaquePass);
@@ -715,7 +710,8 @@ void Renderer::shutdown(rhi::Surface& surface)
   // Just cleanup the transient allocators
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
-    destroyBuffer(m_device.allocator, frameUserData.lightCameraBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.lightingBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.lightCullingBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -749,6 +745,7 @@ void Renderer::shutdown(rhi::Surface& surface)
     m_materials.materialPool.destroy(handle);
   }
 
+  m_csmShadowResources.deinit();
   m_swapchainDependent.sceneResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
@@ -852,6 +849,18 @@ PipelineHandle Renderer::getDebugPipelineHandle() const
   return m_debugPipeline;
 }
 
+PipelineHandle Renderer::getCSMShadowPipelineHandle() const
+{
+  // TODO(Task 8): Create actual CSM shadow pipeline
+  // For now, reuse regular shadow pipeline
+  return m_shadowPipeline;
+}
+
+PipelineHandle Renderer::getLightCullingPipelineHandle() const
+{
+  return m_pointLightCoarseCullingPipeline;
+}
+
 VkImageView Renderer::getCurrentSwapchainImageView() const
 {
   if(m_swapchainDependent.swapchain == nullptr)
@@ -879,12 +888,17 @@ VkImageView Renderer::getOutputTextureView() const
 
 VkImageView Renderer::getShadowMapView() const
 {
-  return m_swapchainDependent.sceneResources.getShadowMapView();
+  return m_csmShadowResources.getCascadeView();
 }
 
 VkImage Renderer::getShadowMapImage() const
 {
-  return m_swapchainDependent.sceneResources.getShadowMapImage();
+  return m_csmShadowResources.getCascadeImage();
+}
+
+shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
+{
+  return m_csmShadowResources.getShadowUniformsData();
 }
 
 void Renderer::render(const RenderParams& params)
@@ -1022,8 +1036,11 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     frameUserData.transientAllocator.init(*m_device.device, m_device.allocator, kPerFrameTransientAllocatorSize);
-    frameUserData.lightCameraBuffer =
-        createBuffer(device, m_device.allocator, sizeof(shaderio::CameraUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
+    frameUserData.lightingBuffer =
+        createBuffer(device, m_device.allocator, sizeof(shaderio::LightingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
+                     VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+    frameUserData.lightCullingBuffer =
+        createBuffer(device, m_device.allocator, sizeof(shaderio::LightCullingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
                      VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   }
 
@@ -1069,9 +1086,9 @@ void Renderer::updateGBufferTextureDescriptorSet()
     LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
     return;
   }
-  if(sceneResources.getShadowMapView() == VK_NULL_HANDLE)
+  if(m_csmShadowResources.getCascadeView() == VK_NULL_HANDLE)
   {
-    LOGW("SceneResources shadow map view is null, skipping GBuffer descriptor update");
+    LOGW("CSM cascade shadow view is null, skipping GBuffer descriptor update");
     return;
   }
 
@@ -1085,7 +1102,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .maxLod      = VK_LOD_CLAMP_NONE,
   });
 
-  // Write descriptor array for GBuffer textures (indices 0-2) + depth (index 3) + shadow (index 4)
+  // Write descriptor array for GBuffer textures (indices 0-2) + scene depth (index 3).
   std::array<VkDescriptorImageInfo, kLightPassTextureCount> imageInfos{};
   for(uint32_t i = 0; i < 3; ++i)
   {
@@ -1102,9 +1119,9 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .imageView   = sceneResources.getDepthImageView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
-  imageInfos[4] = VkDescriptorImageInfo{
+  const VkDescriptorImageInfo shadowMapInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getShadowMapView(),
+      .imageView   = m_csmShadowResources.getCascadeView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -1112,11 +1129,6 @@ void Renderer::updateGBufferTextureDescriptorSet()
   ASSERT(m_device.gbufferTextureSets.size() == frameCount, "LightPass descriptor set count must match frame count");
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    const VkDescriptorBufferInfo cameraBufferInfo{
-        .buffer = m_perFrame.frameUserData[frameIndex].lightCameraBuffer.buffer,
-        .offset = 0,
-        .range  = sizeof(shaderio::CameraUniforms),
-    };
     const VkDescriptorBufferInfo pointLightBufferInfo{
         .buffer = m_lightResources.getPointLightBuffer(frameIndex),
         .offset = 0,
@@ -1133,11 +1145,11 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .range  = sizeof(shaderio::LightCoarseCullingUniforms),
     };
 
-    const std::array<VkWriteDescriptorSet, 5> writes = {
+    const std::array<VkWriteDescriptorSet, 5> writes{{
         VkWriteDescriptorSet{
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 0,
+            .dstBinding      = shaderio::LBindTextures,
             .dstArrayElement = 0,
             .descriptorCount = kLightPassTextureCount,
             .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1146,11 +1158,11 @@ void Renderer::updateGBufferTextureDescriptorSet()
         VkWriteDescriptorSet{
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 1,
+            .dstBinding      = shaderio::LBindShadowMap,
             .dstArrayElement = 0,
             .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &cameraBufferInfo,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &shadowMapInfo,
         },
         VkWriteDescriptorSet{
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1179,13 +1191,13 @@ void Renderer::updateGBufferTextureDescriptorSet()
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo     = &coarseCullingUniformBufferInfo,
         },
-    };
+    }};
 
     vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
   }
 }
 
-void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms)
+void Renderer::updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -1194,10 +1206,25 @@ void Renderer::updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio:
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
   void* mappedData = nullptr;
-  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation, &mappedData));
-  std::memcpy(mappedData, &cameraUniforms, sizeof(cameraUniforms));
-  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCameraBuffer.allocation, 0, sizeof(cameraUniforms)));
-  vmaUnmapMemory(m_device.allocator, frameUserData.lightCameraBuffer.allocation);
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.lightingBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &lightingUniforms, sizeof(lightingUniforms));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightingBuffer.allocation, 0, sizeof(lightingUniforms)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.lightingBuffer.allocation);
+}
+
+void Renderer::updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.lightCullingBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, &cullingUniforms, sizeof(cullingUniforms));
+  VK_CHECK(vmaFlushAllocation(m_device.allocator, frameUserData.lightCullingBuffer.allocation, 0, sizeof(cullingUniforms)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.lightCullingBuffer.allocation);
 }
 
 void Renderer::createLightCoarseCullingResources()
@@ -1458,17 +1485,17 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   const rhi::ResourceState swapchainInitialState =
       m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
 
+  // Update CSM cascade matrices based on current camera and light direction
+  if(params.cameraUniforms != nullptr)
+  {
+    m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+  }
+
   m_frameLightingState = buildFrameLightingState(params);
   ensureTestPointLights(params);
   buildDebugDrawList(params);
-  if(params.cameraUniforms != nullptr)
-  {
-    updateLightPassDescriptorSet(currentFrameIndex, *params.cameraUniforms);
-  }
-  else
-  {
-    updateLightPassDescriptorSet(currentFrameIndex, m_frameLightingState.shadowCamera);
-  }
+  updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
+  updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
 
   // Route through pass executor to orchestrate multi-pass rendering
   m_passExecutor.clearResourceBindings();
@@ -1531,6 +1558,13 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   m_passExecutor.bindTexture({
       .handle       = kPassShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
+      .aspect       = rhi::TextureAspect::depth,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassCSMShadowHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
       .aspect       = rhi::TextureAspect::depth,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
@@ -2029,6 +2063,43 @@ std::array<glm::vec3, 8> Renderer::computeOrthoFrustumCorners(const glm::mat4& i
   return worldCorners;
 }
 
+shaderio::LightCullingUniforms Renderer::buildLightCullingUniforms(const RenderParams& params) const
+{
+  shaderio::LightCullingUniforms uniforms{};
+  const VkExtent2D extent = m_swapchainDependent.sceneResources.getSize();
+
+  shaderio::CameraUniforms camera{};
+  if(params.cameraUniforms != nullptr)
+  {
+    camera = *params.cameraUniforms;
+  }
+  else
+  {
+    camera.view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    camera.projection = clipspace::makePerspectiveProjection(
+        glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
+        clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+    camera.viewProjection = camera.projection * camera.view;
+    camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f);
+  }
+
+  const clipspace::ProjectionConvention projectionConvention =
+      clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+  const float nearPlane = std::abs(clipspace::extractPerspectiveNearPlane(camera.projection, projectionConvention));
+  const float farPlane = std::abs(clipspace::extractPerspectiveFarPlane(camera.projection, projectionConvention));
+
+  uniforms.screenSizeAndClipPlanes = glm::vec4(
+      static_cast<float>(extent.width),
+      static_cast<float>(extent.height),
+      nearPlane,
+      farPlane);
+  uniforms.viewMatrix = camera.view;
+  uniforms.projectionMatrix = camera.projection;
+  uniforms.invProjectionMatrix = glm::inverse(camera.projection);
+  return uniforms;
+}
+
 Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParams& params) const
 {
   FrameLightingState state{};
@@ -2134,13 +2205,23 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   state.shadowCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, params.lightSettings.normalBias);
   state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
 
-  state.lightParams.worldToShadow = state.shadowCamera.viewProjection;
+  // Populate CSM cascade matrices and split distances for LightParams
+  const shaderio::ShadowUniforms* shadowData = m_csmShadowResources.getShadowUniformsData();
+  for(int i = 0; i < shaderio::LCascadeCount; ++i)
+  {
+    state.lightParams.worldToShadow[i] = shadowData->cascadeViewProjection[i];
+  }
+  state.lightParams.cascadeSplitDistances = shadowData->cascadeSplitDistances;
   state.lightParams.lightDirectionAndShadowStrength =
       glm::vec4(dirToLight, params.lightSettings.shadowStrength);
   state.lightParams.lightColorAndNormalBias = glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
   state.lightParams.ambientColorAndTexelSize =
-      glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(SceneResources::kShadowMapSize));
-  state.lightParams.shadowMetrics = glm::vec4(state.shadowDistance, params.lightSettings.depthBias, 0.0f, 0.0f);
+      glm::vec4(params.lightSettings.ambient, 1.0f / static_cast<float>(m_csmShadowResources.getCascadeResolution()));
+  state.lightParams.shadowMetrics = glm::vec4(
+      1.0f / static_cast<float>(m_csmShadowResources.getCascadeResolution()),
+      params.lightSettings.depthBias,
+      params.lightSettings.normalBias,
+      static_cast<float>(shaderio::LCascadeCount));
   return state;
 }
 
@@ -2589,7 +2670,19 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             .logicalIndex    = shaderio::LBindCamera,
             .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
             .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::vertex,
+            .visibility      = rhi::ResourceVisibility::allGraphics,
+        },
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindLighting,
+            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::fragment,
+        },
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindLightCulling,
+            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::compute,
         },
     };
 
@@ -2623,17 +2716,47 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
           .offset = 0,
           .range  = sizeof(shaderio::CameraUniforms),
       };
-      VkWriteDescriptorSet cameraWrite{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = cameraTable->getVkDescriptorSet(),
-          .dstBinding      = shaderio::LBindCamera,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-          .pBufferInfo     = &cameraBufferInfo,
+      VkDescriptorBufferInfo lightingBufferInfo{
+          .buffer = m_perFrame.frameUserData[i].lightingBuffer.buffer,
+          .offset = 0,
+          .range  = sizeof(shaderio::LightingUniforms),
       };
+      VkDescriptorBufferInfo lightCullingBufferInfo{
+          .buffer = m_perFrame.frameUserData[i].lightCullingBuffer.buffer,
+          .offset = 0,
+          .range  = sizeof(shaderio::LightCullingUniforms),
+      };
+      const std::array<VkWriteDescriptorSet, 3> cameraWrites{{
+          VkWriteDescriptorSet{
+              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet          = cameraTable->getVkDescriptorSet(),
+              .dstBinding      = shaderio::LBindCamera,
+              .dstArrayElement = 0,
+              .descriptorCount = 1,
+              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+              .pBufferInfo     = &cameraBufferInfo,
+          },
+          VkWriteDescriptorSet{
+              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet          = cameraTable->getVkDescriptorSet(),
+              .dstBinding      = shaderio::LBindLighting,
+              .dstArrayElement = 0,
+              .descriptorCount = 1,
+              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              .pBufferInfo     = &lightingBufferInfo,
+          },
+          VkWriteDescriptorSet{
+              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet          = cameraTable->getVkDescriptorSet(),
+              .dstBinding      = shaderio::LBindLightCulling,
+              .dstArrayElement = 0,
+              .descriptorCount = 1,
+              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              .pBufferInfo     = &lightCullingBufferInfo,
+          },
+      }};
       vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                             1, &cameraWrite, 0, nullptr);
+                             static_cast<uint32_t>(cameraWrites.size()), cameraWrites.data(), 0, nullptr);
 
       // Save the layout handle for pipeline layout creation (use first one, they're all identical)
       if(i == 0)
@@ -2747,6 +2870,24 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
 #ifdef USE_SLANG
   {
+    if(m_device.lightPipelineLayout == VK_NULL_HANDLE)
+    {
+      ASSERT(!m_perFrame.frameUserData.empty(), "LightPass requires per-frame scene bind groups");
+      const VkDescriptorSetLayout sceneSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
+          getBindGroupLayoutOpaque(m_perFrame.frameUserData.front().cameraBindGroup, BindGroupSetSlot::shaderSpecific));
+      const std::array<VkDescriptorSetLayout, 2> setLayouts{m_device.gbufferTextureSetLayout, sceneSetLayout};
+      const VkPipelineLayoutCreateInfo layoutInfo{
+          .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = static_cast<uint32_t>(setLayouts.size()),
+          .pSetLayouts    = setLayouts.data(),
+      };
+      VK_CHECK(vkCreatePipelineLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                      &layoutInfo,
+                                      nullptr,
+                                      &m_device.lightPipelineLayout));
+      DBG_VK_NAME(m_device.lightPipelineLayout);
+    }
+
     VkShaderModule lightShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
                                                                 {shader_light_slang, std::size(shader_light_slang)});
     DBG_VK_NAME(lightShaderModule);
@@ -3135,7 +3276,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             {
                 .colorFormats     = nullptr,
                 .colorFormatCount = 0,
-                .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+                .depthFormat      = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
             },
     };
     shadowDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
@@ -4159,6 +4300,11 @@ uint64_t Renderer::getLightPipelineLayout() const
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
 }
 
+uint64_t Renderer::getLightCullingPipelineLayout() const
+{
+  return 0;
+}
+
 uint64_t Renderer::getGraphicsPipelineLayout() const
 {
   return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
@@ -4191,6 +4337,11 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
+}
+
+uint64_t Renderer::getLightCullingDescriptorSet() const
+{
+  return 0;
 }
 
 BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const

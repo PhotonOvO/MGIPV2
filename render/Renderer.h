@@ -17,13 +17,14 @@
 #include "passes/ForwardPass.h"
 #include "passes/DepthPrepass.h"
 #include "passes/DepthPyramidPass.h"
-#include "passes/ShadowPass.h"
+#include "passes/CSMShadowPass.h"
 #include "passes/DebugPass.h"
 #include "passes/LightCullingPass.h"
 #include "MeshPool.h"
 #include "LightResources.h"
 #include "../loader/GltfLoader.h"
 #include "SceneResources.h"
+#include "CSMShadowResources.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
@@ -76,6 +77,12 @@ struct DebugPassOptions
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};
   float pointLightIntensityScale{4.0f};
+
+  // CSM Shadow cascade debug visualization
+  bool  showShadowCascades{true};      // Show cascade frustum splits
+  int   cascadeIndex{-1};              // -1 = all cascades, 0-3 = specific cascade
+  bool  cascadeOverlayMode{false};     // Screen-space cascade overlay
+  float cascadeOverlayAlpha{0.25f};    // Overlay transparency
 };
 
 struct RenderParams
@@ -165,14 +172,19 @@ public:
   PipelineHandle getDebugPipelineHandle() const;
   void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
+  PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
+  PipelineHandle getLightCullingPipelineHandle() const;
+  CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
+  uint64_t       getLightCullingPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
+  uint64_t       getLightCullingDescriptorSet() const;
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
 
   // Get descriptor set from bind group (for descriptor set binding)
@@ -224,6 +236,7 @@ public:
   VkImageView getOutputTextureView() const;
   VkImageView getShadowMapView() const;
   VkImage getShadowMapImage() const;
+  shaderio::ShadowUniforms* getShadowUniformsData();
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
 
 private:
@@ -364,7 +377,8 @@ private:
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
       BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
-      utils::Buffer      lightCameraBuffer{};
+      utils::Buffer      lightingBuffer{};
+      utils::Buffer      lightCullingBuffer{};
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -386,7 +400,7 @@ private:
   std::unique_ptr<DepthPrepass>         m_depthPrepass;
   std::unique_ptr<DepthPyramidPass>     m_depthPyramidPass;
   std::unique_ptr<LightCullingPass>     m_lightCullingPass;
-  std::unique_ptr<ShadowPass>          m_shadowPass;
+  std::unique_ptr<CSMShadowPass>        m_csmShadowPass;
   std::unique_ptr<LightPass>           m_lightPass;
   std::unique_ptr<ForwardPass>         m_forwardPass;
   std::unique_ptr<DebugPass>           m_debugPass;
@@ -405,6 +419,8 @@ private:
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
+  PipelineHandle m_csmShadowPipeline{};        // CSM cascade depth pass
+  CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
   PipelineHandle m_pointLightCoarseCullingPipeline{};
@@ -542,7 +558,8 @@ private:
   void              endFrame(rhi::CommandList& cmd);
   void              beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const;
   void              endDynamicRenderingToSwapchain(const rhi::CommandList& cmd);
-  void              updateLightPassDescriptorSet(uint32_t frameIndex, const shaderio::CameraUniforms& cameraUniforms);
+  void              updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms);
+  void              updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms);
   void              recordComputeCommands(rhi::CommandList& cmd, const RenderParams& params) const;
   void recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream);
   void                 prebuildRequiredPipelineVariants();
@@ -580,6 +597,7 @@ private:
   [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel) const;
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
   void              ensureTestPointLights(const RenderParams& params);
+  [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;
   [[nodiscard]] std::array<glm::vec3, 8> computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
                                                                           float nearDistance,
                                                                           float farDistance) const;

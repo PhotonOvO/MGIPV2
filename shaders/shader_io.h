@@ -23,11 +23,14 @@ using mat4 = glm::mat4;
 // Set 0: Pass-global textures (bindless)
 STATIC_CONST int LSetTextures  = 0;
 STATIC_CONST int LBindTextures = 0;
+STATIC_CONST int LBindShadowMap = 1;
 
 // Set 1: Scene-level uniform buffers
 STATIC_CONST int LSetScene      = 1;
 STATIC_CONST int LBindSceneInfo = 0;      // SceneInfo for compute
 STATIC_CONST int LBindCamera    = 1;      // Camera uniform buffer
+STATIC_CONST int LBindLighting  = 2;      // Scene lighting/shadow data
+STATIC_CONST int LBindLightCulling = 3;   // Scene light-culling data
 
 // Set 2: Draw-level dynamic uniforms
 STATIC_CONST int LSetDraw       = 2;
@@ -136,6 +139,16 @@ STATIC_CONST int LTileSizeY        = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
 STATIC_CONST int LDepthPyramidMaxMips = 32;
 
+// CSM (Cascaded Shadow Maps) constants
+STATIC_CONST int LCascadeCount = 4;  // Number of shadow cascades
+STATIC_CONST float LCascadeSplitLambda = 0.5f;  // Practical split (log + linear mix)
+STATIC_CONST float LCascadeBlendRegion = 0.0f;  // Hard boundaries (no blending)
+
+// Cascade debug overlay mode
+STATIC_CONST int LCascadeOverlayModeOff = 0;
+STATIC_CONST int LCascadeOverlayModeFrustum = 1;
+STATIC_CONST int LCascadeOverlayModeScreen = 2;
+
 struct LightData
 {
   vec3     positionOrDirection;  // Directional: direction to light, others: position
@@ -181,23 +194,47 @@ struct DepthPyramidUniforms
   uint32_t _padding2;
 };
 
-// Light parameters for PBR lighting pass (push constants)
+struct LightCullingUniforms
+{
+  vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane
+  mat4 viewMatrix;
+  mat4 projectionMatrix;
+  mat4 invProjectionMatrix;
+};
+
+// Light parameters for PBR lighting pass (scene-level UBO)
 struct LightParams
 {
-  mat4 worldToShadow;
-  vec4 lightDirectionAndShadowStrength;  // xyz = shading direction to light, w = shadow strength
-  vec4 lightColorAndNormalBias;          // rgb = light intensity, w = normal bias
-  vec4 ambientColorAndTexelSize;         // rgb = ambient term, w = 1 / shadow map size
-  vec4 shadowMetrics;                    // x = max shadow distance, y = depth bias
+  mat4 worldToShadow[LCascadeCount];      // Per-cascade matrices
+  vec4 cascadeSplitDistances;             // x=c0, y=c1, z=c2, w=c3 far distances
+  vec4 lightDirectionAndShadowStrength;   // xyz = shading direction to light, w = shadow strength
+  vec4 lightColorAndNormalBias;           // rgb = light intensity, w = normal bias
+  vec4 ambientColorAndTexelSize;          // rgb = ambient term, w = 1 / shadow map size
+  vec4 shadowMetrics;                     // x = texelSize, y = baseBias, z = slopeBias, w = cascadeCount
+};
+
+struct LightingUniforms
+{
+  LightParams light;
 };
 
 struct ShadowUniforms
 {
-  mat4 lightViewProjectionMatrix;
-  mat4 worldToShadowTextureMatrix;
+  // Per-cascade matrices
+  mat4 cascadeViewProjection[LCascadeCount];
+  mat4 cascadeWorldToShadowTexture[LCascadeCount];
+
+  // Cascade split distances (view-space depth)
+  vec4 cascadeSplitDistances;  // x=c0 far, y=c1 far, z=c2 far, w=c3 far
+
+  // Light parameters (unchanged)
   vec4 lightDirectionAndIntensity;
-  vec4 shadowMapMetrics;
-  vec4 shadowBiasAndKernel;
+
+  // Shadow parameters
+  vec4 shadowMapMetrics;  // x=1/shadowSize, y=maxShadowDistance, z=unused, w=cascadeCount
+
+  // Per-cascade bias (scaled)
+  vec4 cascadeBiasScale;  // x=baseConstantBias, y=baseSlopeBias, z=scaleFactor(0.5), w=normalBias
 };
 
 // Debug line vertex format
