@@ -1191,7 +1191,13 @@ bool Renderer::prepareFrameResources()
   auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
   if(!frameUserData.pendingUploadCmds.empty())
   {
-    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+    const VkDevice       device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+    const rhi::QueueInfo graphicsInfo  = m_device.device->getGraphicsQueue();
+    const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
+
+    // Wait for queue to ensure upload commands (submitted without fence) are complete
+    vkQueueWaitIdle(graphicsQueue);
+
     vkFreeCommandBuffers(device, m_device.uploadCmdPool,
                          static_cast<uint32_t>(frameUserData.pendingUploadCmds.size()),
                          frameUserData.pendingUploadCmds.data());
