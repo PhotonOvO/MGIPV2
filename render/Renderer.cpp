@@ -2388,9 +2388,13 @@ void Renderer::endFrame(rhi::CommandList& cmd)
 
   submitFrame(*m_perFrame.frameContext, cmd);
 
-  m_perFrame.frameCounter++;
+  // Advance to next frame slot and wait for it to be ready
+  // This allows CPU to overlap recording of next frame with GPU execution of current frame
+  m_perFrame.frameContext->advanceToNextFrame();
+  m_perFrame.frameContext->waitForFrameCompletion();
 
   presentFrame(*m_swapchainDependent.swapchain);
+  m_perFrame.frameCounter++;
 }
 
 void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const

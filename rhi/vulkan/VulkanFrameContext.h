@@ -35,6 +35,7 @@ public:
   void       advanceToNextFrame() override;
 
   void waitCurrentFrame() override;
+  void waitForFrameCompletion() override;
   void waitForFrame(uint64_t frameIndex) override;
 
   uint32_t getFrameCount() const override;

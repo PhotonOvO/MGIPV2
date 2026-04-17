@@ -122,12 +122,8 @@ void VulkanFrameContext::beginFrame()
   assert((m_device != VK_NULL_HANDLE) && "VulkanFrameContext::beginFrame requires initialized context");
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::beginFrame invalid frame index");
 
-  waitCurrentFrame();
-  if(isRenderDocInjected() && m_graphicsQueue != VK_NULL_HANDLE)
-  {
-    checkVk(vkQueueWaitIdle(m_graphicsQueue), "VulkanFrameContext::beginFrame vkQueueWaitIdle failed");
-  }
-  processRetirements(m_timelineSemaphore->getCurrentValue());
+  // Wait already done externally (waitForFrameCompletion) at end of previous frame
+  // Just reset pool and start command buffer recording
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];
   assert((frame.commandPool != nullptr) && "VulkanFrameContext::beginFrame missing command pool");
@@ -205,6 +201,18 @@ void VulkanFrameContext::waitForFrame(uint64_t frameIndex)
     return;
   }
   m_timelineSemaphore->wait(m_frames[frameIndex].lastSignalValue);
+}
+
+void VulkanFrameContext::waitForFrameCompletion()
+{
+  assert((m_timelineSemaphore != nullptr) && "VulkanFrameContext::waitForFrameCompletion requires timeline semaphore");
+  assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::waitForFrameCompletion invalid frame index");
+
+  // Wait for the frame slot to be ready (GPU finished)
+  m_timelineSemaphore->wait(m_frames[m_currentFrameIndex].lastSignalValue);
+
+  // Process deferred destructions now that we know the frame is complete
+  processRetirements(m_timelineSemaphore->getCurrentValue());
 }
 
 uint32_t VulkanFrameContext::getFrameCount() const

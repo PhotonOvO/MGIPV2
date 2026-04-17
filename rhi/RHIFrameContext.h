@@ -33,6 +33,7 @@ public:
   virtual void       advanceToNextFrame() = 0;
 
   virtual void waitCurrentFrame()                = 0;
+  virtual void waitForFrameCompletion()          = 0;
   virtual void waitForFrame(uint64_t frameIndex) = 0;
 
   virtual uint32_t getFrameCount() const        = 0;
