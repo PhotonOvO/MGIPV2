@@ -251,6 +251,12 @@ public:
         ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
         ImGui::Text("Total: %u", gpuCullStats.totalCount);
         ImGui::Text("Visible Ratio: %.1f%%", 100.0f * static_cast<float>(gpuCullStats.visibleCount) / static_cast<float>(totalCullEvaluated));
+
+        // Swapchain diagnostics
+        ImGui::Separator();
+        ImGui::Text("Swapchain");
+        ImGui::Text("Present Mode: %s", m_vSync ? "FIFO" : "Mailbox");
+        ImGui::Text("Swap Images: %u", m_renderer.getSwapchainImageCount());
       }
       ImGui::End();
 

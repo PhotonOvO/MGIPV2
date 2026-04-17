@@ -2211,9 +2211,13 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 
   if(!swapchainRebuilt)
   {
-    // Wait only for the current frame slot to finish, not the entire device
-    const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
-    m_perFrame.frameContext->waitForFrame(frameIndex);
+    // Wait for ALL frame slots to finish before destroying SceneResources
+    // (with 3 frames in flight, any could be using the images we're about to destroy)
+    const uint32_t frameCount = m_perFrame.frameContext->getFrameCount();
+    for(uint32_t i = 0; i < frameCount; ++i)
+    {
+      m_perFrame.frameContext->waitForFrame(i);
+    }
   }
 
   const VkDevice  device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());

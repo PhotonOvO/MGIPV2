@@ -247,6 +247,7 @@ public:
   static constexpr uint32_t getGltfTextureBaseIndex() { return kDemoMaterialSlotCount; }
 
   VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
+  uint32_t   getSwapchainImageCount() const { return m_swapchainDependent.swapchain->getRequestedImageCount(); }
   VkImageView getCurrentSwapchainImageView() const;
   VkImage getCurrentSwapchainImage() const;
   VkImageView getOutputTextureView() const;
