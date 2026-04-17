@@ -2211,7 +2211,9 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 
   if(!swapchainRebuilt)
   {
-    m_device.device->waitIdle();
+    // Wait only for the current frame slot to finish, not the entire device
+    const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+    m_perFrame.frameContext->waitForFrame(frameIndex);
   }
 
   const VkDevice  device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
