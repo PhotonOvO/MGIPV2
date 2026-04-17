@@ -766,6 +766,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
     m_device.transientCmdPool = VK_NULL_HANDLE;
   }
+  if(m_device.uploadCmdPool != VK_NULL_HANDLE)
+  {
+    vkDestroyCommandPool(device, m_device.uploadCmdPool, nullptr);
+    m_device.uploadCmdPool = VK_NULL_HANDLE;
+  }
 
   destroyPipelines();
   if(m_device.graphicPipelineLayout)
@@ -1120,6 +1125,15 @@ void Renderer::createTransientCommandPool()
   };
   VK_CHECK(vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &m_device.transientCmdPool));
   DBG_VK_NAME(m_device.transientCmdPool);
+
+  // Upload command pool for async uploads (separate pool for thread safety)
+  const VkCommandPoolCreateInfo uploadPoolInfo{
+      .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      .queueFamilyIndex = graphicsQueueInfo.familyIndex,
+  };
+  VK_CHECK(vkCreateCommandPool(device, &uploadPoolInfo, nullptr, &m_device.uploadCmdPool));
+  DBG_VK_NAME(m_device.uploadCmdPool);
 }
 
 void Renderer::createFrameSubmission(uint32_t numFrames)
@@ -1158,6 +1172,17 @@ bool Renderer::prepareFrameResources()
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
+
+  // Free upload command buffers from this frame slot (wait already done in beginFrame)
+  auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
+  if(!frameUserData.pendingUploadCmds.empty())
+  {
+    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+    vkFreeCommandBuffers(device, m_device.uploadCmdPool,
+                         static_cast<uint32_t>(frameUserData.pendingUploadCmds.size()),
+                         frameUserData.pendingUploadCmds.data());
+    frameUserData.pendingUploadCmds.clear();
+  }
   resolvePassGpuProfileResults(currentFrameIndex);
   m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
 
@@ -5070,13 +5095,25 @@ void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadF
   const rhi::QueueInfo graphicsInfo = m_device.device->getGraphicsQueue();
   const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
 
-  VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
+  VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.uploadCmdPool);
   uploadFn(cmd);
-  utils::endSingleTimeCommands(cmd, device, m_device.transientCmdPool, graphicsQueue);
+  VK_CHECK(vkEndCommandBuffer(cmd));
 
-  // Free staging buffers after GPU sync (upload is complete)
-  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
-  m_meshPool.freeStagingBuffers();
+  // Submit without fence — we rely on frame timeline for deferred cleanup
+  const VkCommandBufferSubmitInfo cmdBufferInfo{
+      .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cmd,
+  };
+  const VkSubmitInfo2 submitInfo{
+      .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos   = &cmdBufferInfo,
+  };
+  VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+
+  // Store cmd buffer for deferred free after frame fence passes
+  const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  m_perFrame.frameUserData[frameIndex].pendingUploadCmds.push_back(cmd);
 }
 
 GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)

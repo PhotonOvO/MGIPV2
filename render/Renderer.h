@@ -343,6 +343,7 @@ private:
     utils::Buffer                              vertexBuffer;
     utils::Buffer                              pointsBuffer;
     VkCommandPool                              transientCmdPool{};
+    VkCommandPool                              uploadCmdPool{};
     VkDescriptorPool                           descriptorPool{};
     VkDescriptorPool                           uiDescriptorPool{};
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
@@ -407,6 +408,7 @@ private:
       utils::Buffer      gpuCullingResultBuffer{};
       uint32_t           gpuCullingMeshCapacity{0};
       std::vector<uint32_t> gpuCullingResults;
+      std::vector<VkCommandBuffer> pendingUploadCmds;
     };
 
     std::vector<FrameUserData> frameUserData;
