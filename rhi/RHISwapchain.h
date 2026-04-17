@@ -44,6 +44,7 @@ public:
   virtual TextureHandle currentTexture() const       = 0;
   virtual Extent2D      getExtent() const            = 0;
   virtual uint32_t      getMaxFramesInFlight() const = 0;
+  virtual uint32_t      getRequestedImageCount() const = 0;
 
   virtual uint64_t getNativeSwapchain() const { return 0; }
   virtual uint64_t getNativeImageView(uint32_t) const { return 0; }

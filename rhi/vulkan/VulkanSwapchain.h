@@ -23,6 +23,7 @@ public:
   TextureHandle currentTexture() const override;
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
+  uint32_t      getRequestedImageCount() const { return m_requestedImageCount; }
 
   uint64_t                     getNativeSwapchain() const override;
   uint64_t                     getNativeImageView(uint32_t imageIndex) const override;
@@ -67,6 +68,7 @@ private:
   uint32_t m_frameResourceIndex{0};
   uint32_t m_frameImageIndex{0};
   uint32_t m_maxFramesInFlight{3};
+  uint32_t m_requestedImageCount{3};
   Extent2D m_extent{};
   bool     m_vSync{true};
   bool     m_needsRebuild{false};

@@ -277,13 +277,14 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   const uint32_t preferredImageCount = (std::max)(3u, minImageCount);
   const uint32_t maxImageCount =
       capabilities2.surfaceCapabilities.maxImageCount == 0 ? preferredImageCount : capabilities2.surfaceCapabilities.maxImageCount;
-  m_maxFramesInFlight = (std::clamp)(preferredImageCount, minImageCount, maxImageCount);
+  m_requestedImageCount = (std::clamp)(preferredImageCount, minImageCount, maxImageCount);
+  m_maxFramesInFlight   = m_requestedImageCount;
   m_imageFormat       = surfaceFormat2.surfaceFormat.format;
 
   const VkSwapchainCreateInfoKHR swapchainCreateInfo{
       .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
       .surface          = m_surface,
-      .minImageCount    = m_maxFramesInFlight,
+      .minImageCount    = m_requestedImageCount,
       .imageFormat      = surfaceFormat2.surfaceFormat.format,
       .imageColorSpace  = surfaceFormat2.surfaceFormat.colorSpace,
       .imageExtent      = vkExtent,
@@ -307,7 +308,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   checkVk(vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, swapImages.data()),
           "VulkanSwapchain::createResources failed querying swapchain images");
 
-  m_maxFramesInFlight = imageCount;
+  // Frame resources sized by requested count (CPU pacing), images sized by actual count (GPU backing)
   m_images.resize(imageCount);
   const VkSemaphoreCreateInfo semaphoreCreateInfo{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 
@@ -330,7 +331,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
             "VulkanSwapchain::createResources failed creating render-finished semaphore");
   }
 
-  m_frameResources.resize(imageCount);
+  m_frameResources.resize(m_requestedImageCount);
   for(auto& frame : m_frameResources)
   {
     checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &frame.imageAvailableSemaphore),

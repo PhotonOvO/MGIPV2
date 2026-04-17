@@ -469,7 +469,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
 
   // Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
   createMaterialBindGroup();
-  createFrameSubmission(m_swapchainDependent.swapchain->getMaxFramesInFlight());
+  createFrameSubmission(m_swapchainDependent.swapchain->getRequestedImageCount());
   createDescriptorPool();
   initImGui(window);
 
