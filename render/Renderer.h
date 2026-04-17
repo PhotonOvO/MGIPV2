@@ -344,6 +344,7 @@ private:
     utils::Buffer                              pointsBuffer;
     VkCommandPool                              transientCmdPool{};
     VkCommandPool                              uploadCmdPool{};
+    VkCommandPool                              computeCmdPool{};
     VkDescriptorPool                           descriptorPool{};
     VkDescriptorPool                           uiDescriptorPool{};
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};

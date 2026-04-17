@@ -771,6 +771,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyCommandPool(device, m_device.uploadCmdPool, nullptr);
     m_device.uploadCmdPool = VK_NULL_HANDLE;
   }
+  if(m_device.computeCmdPool != VK_NULL_HANDLE)
+  {
+    vkDestroyCommandPool(device, m_device.computeCmdPool, nullptr);
+    m_device.computeCmdPool = VK_NULL_HANDLE;
+  }
 
   destroyPipelines();
   if(m_device.graphicPipelineLayout)
@@ -1134,6 +1139,15 @@ void Renderer::createTransientCommandPool()
   };
   VK_CHECK(vkCreateCommandPool(device, &uploadPoolInfo, nullptr, &m_device.uploadCmdPool));
   DBG_VK_NAME(m_device.uploadCmdPool);
+
+  // Compute command pool for parallel compute pass recording
+  const VkCommandPoolCreateInfo computePoolInfo{
+      .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = graphicsQueueInfo.familyIndex,
+  };
+  VK_CHECK(vkCreateCommandPool(device, &computePoolInfo, nullptr, &m_device.computeCmdPool));
+  DBG_VK_NAME(m_device.computeCmdPool);
 }
 
 void Renderer::createFrameSubmission(uint32_t numFrames)
