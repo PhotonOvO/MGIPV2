@@ -1187,21 +1187,30 @@ bool Renderer::prepareFrameResources()
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
 
-  // Free upload command buffers from this frame slot (wait already done in beginFrame)
+  // Non-blocking cleanup: check upload fences, only free if GPU finished
   auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
-  if(!frameUserData.pendingUploadCmds.empty())
+  if(!frameUserData.pendingUploadFences.empty())
   {
-    const VkDevice       device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-    const rhi::QueueInfo graphicsInfo  = m_device.device->getGraphicsQueue();
-    const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
+    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
 
-    // Wait for queue to ensure upload commands (submitted without fence) are complete
-    vkQueueWaitIdle(graphicsQueue);
+    std::vector<size_t> toRemove;
+    for(size_t i = 0; i < frameUserData.pendingUploadFences.size(); ++i)
+    {
+      if(vkGetFenceStatus(device, frameUserData.pendingUploadFences[i]) == VK_SUCCESS)
+      {
+        vkFreeCommandBuffers(device, m_device.uploadCmdPool, 1, &frameUserData.pendingUploadCmds[i]);
+        vkDestroyFence(device, frameUserData.pendingUploadFences[i], nullptr);
+        toRemove.push_back(i);
+      }
+      // Not signaled: keep for next frame - true async, no blocking!
+    }
 
-    vkFreeCommandBuffers(device, m_device.uploadCmdPool,
-                         static_cast<uint32_t>(frameUserData.pendingUploadCmds.size()),
-                         frameUserData.pendingUploadCmds.data());
-    frameUserData.pendingUploadCmds.clear();
+    // Remove completed entries (reverse order to maintain indices)
+    for(auto it = toRemove.rbegin(); it != toRemove.rend(); ++it)
+    {
+      frameUserData.pendingUploadCmds.erase(frameUserData.pendingUploadCmds.begin() + *it);
+      frameUserData.pendingUploadFences.erase(frameUserData.pendingUploadFences.begin() + *it);
+    }
   }
   resolvePassGpuProfileResults(currentFrameIndex);
   m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
@@ -5129,7 +5138,11 @@ void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadF
   uploadFn(cmd);
   VK_CHECK(vkEndCommandBuffer(cmd));
 
-  // Submit without fence — we rely on frame timeline for deferred cleanup
+  // Create fence for this upload (non-blocking submit)
+  const VkFenceCreateInfo fenceInfo{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence uploadFence{VK_NULL_HANDLE};
+  VK_CHECK(vkCreateFence(device, &fenceInfo, nullptr, &uploadFence));
+
   const VkCommandBufferSubmitInfo cmdBufferInfo{
       .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
       .commandBuffer = cmd,
@@ -5139,11 +5152,12 @@ void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadF
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos   = &cmdBufferInfo,
   };
-  VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+  VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submitInfo, uploadFence));
 
-  // Store cmd buffer for deferred free after frame fence passes
+  // Store cmd buffer and fence for deferred cleanup (checked next frame)
   const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   m_perFrame.frameUserData[frameIndex].pendingUploadCmds.push_back(cmd);
+  m_perFrame.frameUserData[frameIndex].pendingUploadFences.push_back(uploadFence);
 }
 
 GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)

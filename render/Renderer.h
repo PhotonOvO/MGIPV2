@@ -411,6 +411,7 @@ private:
       uint32_t           gpuCullingMeshCapacity{0};
       std::vector<uint32_t> gpuCullingResults;
       std::vector<VkCommandBuffer> pendingUploadCmds;
+      std::vector<VkFence> pendingUploadFences;
     };
 
     std::vector<FrameUserData> frameUserData;
