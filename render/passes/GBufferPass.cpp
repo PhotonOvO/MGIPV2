@@ -215,56 +215,25 @@ void GBufferPass::execute(const PassContext& context) const
         }
 
         // First pass: collect visible meshes and compute DrawUniforms
+        // Use pre-built mesh lists to avoid full mesh scan
         std::vector<PendingDraw> pendingDraws;
-        for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+
+        // Process opaque meshes
+        const PipelineHandle opaquePipeline = m_renderer->getGBufferOpaquePipelineHandle();
+        for(size_t idx : context.gltfModel->opaqueMeshIndices)
         {
-            MeshHandle meshHandle = context.gltfModel->meshes[i];
+            MeshHandle meshHandle = context.gltfModel->meshes[idx];
             const MeshRecord* mesh = meshPool.tryGet(meshHandle);
             if(mesh == nullptr)
             {
                 continue;
             }
 
-            // Use pre-computed alphaMode from mesh - skip transparent (handled by ForwardPass)
-            const int32_t alphaMode = mesh->alphaMode;
-            if(alphaMode == shaderio::LAlphaBlend)
-            {
-                continue;
-            }
-
-            // Select pipeline variant based on alpha mode
-            PipelineHandle gbufferPipeline;
-            if(alphaMode == shaderio::LAlphaMask)
-            {
-                gbufferPipeline = m_renderer->getGBufferAlphaTestPipelineHandle();
-            }
-            else
-            {
-                gbufferPipeline = m_renderer->getGBufferOpaquePipelineHandle();
-            }
-
-            if(gbufferPipeline.isNull())
-            {
-                continue;
-            }
-
-            // Compute DrawUniforms
+            // Compute DrawUniforms using cached material data from mesh
             shaderio::DrawUniforms drawData{};
             drawData.modelMatrix = mesh->transform;
-            drawData.alphaMode = alphaMode;
+            drawData.alphaMode = shaderio::LAlphaOpaque;
             drawData.alphaCutoff = mesh->alphaCutoff;
-
-            // Get material texture indices
-            drawData.baseColorFactor = glm::vec4(1.0f);
-            drawData.baseColorTextureIndex = -1;
-            drawData.normalTextureIndex = -1;
-            drawData.metallicRoughnessTextureIndex = -1;
-            drawData.occlusionTextureIndex = -1;
-            drawData.metallicFactor = 1.0f;
-            drawData.roughnessFactor = 1.0f;
-            drawData.normalScale = 1.0f;
-
-            // Use cached material data from mesh (no per-frame lookup)
             drawData.baseColorFactor = mesh->baseColorFactor;
             drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
             drawData.normalTextureIndex = mesh->normalTextureIndex;
@@ -274,7 +243,35 @@ void GBufferPass::execute(const PassContext& context) const
             drawData.roughnessFactor = mesh->roughnessFactor;
             drawData.normalScale = mesh->normalScale;
 
-            pendingDraws.push_back({i, mesh, drawData, gbufferPipeline});
+            pendingDraws.push_back({idx, mesh, drawData, opaquePipeline});
+        }
+
+        // Process alpha-test meshes
+        const PipelineHandle alphaTestPipeline = m_renderer->getGBufferAlphaTestPipelineHandle();
+        for(size_t idx : context.gltfModel->alphaTestMeshIndices)
+        {
+            MeshHandle meshHandle = context.gltfModel->meshes[idx];
+            const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+            if(mesh == nullptr)
+            {
+                continue;
+            }
+
+            // Compute DrawUniforms using cached material data from mesh
+            shaderio::DrawUniforms drawData{};
+            drawData.modelMatrix = mesh->transform;
+            drawData.alphaMode = shaderio::LAlphaMask;
+            drawData.alphaCutoff = mesh->alphaCutoff;
+            drawData.baseColorFactor = mesh->baseColorFactor;
+            drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
+            drawData.normalTextureIndex = mesh->normalTextureIndex;
+            drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
+            drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+            drawData.metallicFactor = mesh->metallicFactor;
+            drawData.roughnessFactor = mesh->roughnessFactor;
+            drawData.normalScale = mesh->normalScale;
+
+            pendingDraws.push_back({idx, mesh, drawData, alphaTestPipeline});
         }
 
         // Batch allocate DrawUniforms for all visible meshes

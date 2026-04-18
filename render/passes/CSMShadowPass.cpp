@@ -184,19 +184,13 @@ void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipe
   }
 
   // First pass: collect visible meshes and compute DrawUniforms
+  // Use pre-built shadow caster list (already excludes transparent meshes)
   std::vector<PendingDraw> pendingDraws;
-  for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+  for(size_t idx : context.gltfModel->shadowCasterIndices)
   {
-    MeshHandle meshHandle = context.gltfModel->meshes[i];
+    MeshHandle meshHandle = context.gltfModel->meshes[idx];
     const MeshRecord* mesh = meshPool.tryGet(meshHandle);
     if(mesh == nullptr)
-    {
-      continue;
-    }
-
-    // Use pre-computed alphaMode from mesh - skip transparent meshes for shadow pass
-    const int32_t alphaMode = mesh->alphaMode;
-    if(alphaMode == shaderio::LAlphaBlend)
     {
       continue;
     }
@@ -212,10 +206,10 @@ void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipe
     drawData.metallicFactor = 1.0f;
     drawData.roughnessFactor = 1.0f;
     drawData.normalScale = 1.0f;
-    drawData.alphaMode = alphaMode;
+    drawData.alphaMode = mesh->alphaMode;
     drawData.alphaCutoff = mesh->alphaCutoff;
 
-    pendingDraws.push_back({i, mesh, drawData});
+    pendingDraws.push_back({idx, mesh, drawData});
   }
 
   // Batch allocate DrawUniforms for all visible meshes

@@ -134,26 +134,15 @@ void DepthPrepass::execute(const PassContext& context) const
   MeshPool& meshPool = m_renderer->getMeshPool();
 
   // First pass: collect visible meshes and compute DrawUniforms
+  // Use pre-built mesh lists to avoid full mesh scan
   std::vector<PendingDraw> pendingDraws;
-  for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+
+  // Process opaque meshes
+  const PipelineHandle opaquePipeline = m_renderer->getDepthPrepassOpaquePipelineHandle();
+  for(size_t idx : context.gltfModel->opaqueMeshIndices)
   {
-    const MeshRecord* mesh = meshPool.tryGet(context.gltfModel->meshes[i]);
+    const MeshRecord* mesh = meshPool.tryGet(context.gltfModel->meshes[idx]);
     if(mesh == nullptr)
-    {
-      continue;
-    }
-
-    // Use pre-computed alphaMode from mesh - skip transparent meshes
-    const int32_t alphaMode = mesh->alphaMode;
-    if(alphaMode == shaderio::LAlphaBlend)
-    {
-      continue;
-    }
-
-    const PipelineHandle pipeline = alphaMode == shaderio::LAlphaMask
-                                        ? m_renderer->getDepthPrepassAlphaTestPipelineHandle()
-                                        : m_renderer->getDepthPrepassOpaquePipelineHandle();
-    if(pipeline.isNull())
     {
       continue;
     }
@@ -169,10 +158,37 @@ void DepthPrepass::execute(const PassContext& context) const
     drawData.metallicFactor = 1.0f;
     drawData.roughnessFactor = 1.0f;
     drawData.normalScale = 1.0f;
-    drawData.alphaMode = alphaMode;
+    drawData.alphaMode = shaderio::LAlphaOpaque;
     drawData.alphaCutoff = mesh->alphaCutoff;
 
-    pendingDraws.push_back({i, mesh, drawData, pipeline});
+    pendingDraws.push_back({idx, mesh, drawData, opaquePipeline});
+  }
+
+  // Process alpha-test meshes
+  const PipelineHandle alphaTestPipeline = m_renderer->getDepthPrepassAlphaTestPipelineHandle();
+  for(size_t idx : context.gltfModel->alphaTestMeshIndices)
+  {
+    const MeshRecord* mesh = meshPool.tryGet(context.gltfModel->meshes[idx]);
+    if(mesh == nullptr)
+    {
+      continue;
+    }
+
+    // Compute DrawUniforms
+    shaderio::DrawUniforms drawData{};
+    drawData.modelMatrix = mesh->transform;
+    drawData.baseColorFactor = glm::vec4(1.0f);
+    drawData.baseColorTextureIndex = -1;
+    drawData.normalTextureIndex = -1;
+    drawData.metallicRoughnessTextureIndex = -1;
+    drawData.occlusionTextureIndex = -1;
+    drawData.metallicFactor = 1.0f;
+    drawData.roughnessFactor = 1.0f;
+    drawData.normalScale = 1.0f;
+    drawData.alphaMode = shaderio::LAlphaMask;
+    drawData.alphaCutoff = mesh->alphaCutoff;
+
+    pendingDraws.push_back({idx, mesh, drawData, alphaTestPipeline});
   }
 
   // Batch allocate DrawUniforms for all visible meshes
