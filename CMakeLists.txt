@@ -139,19 +139,17 @@ target_link_libraries(imgui_demo PUBLIC volk glfw)
 # Tracy Profiler - CPU/GPU profiling
 #====================================================================================
 if(TRACY_ENABLE)
+  set(TRACY_STATIC ON CACHE BOOL "" FORCE)
   FetchContent_Declare(
     tracy
     GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-    GIT_TAG v0.11.1
+    GIT_TAG v0.13.1
+    EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(tracy)
 
-  add_library(tracy_client STATIC
-    ${tracy_SOURCE_DIR}/public/TracyClient.cpp
-  )
-  target_compile_definitions(tracy_client PUBLIC TRACY_ENABLE)
-  target_include_directories(tracy_client PUBLIC ${tracy_SOURCE_DIR}/public/tracy)
-  target_link_libraries(tracy_client PUBLIC glfw)  # Tracy uses GLFW for platform detection
+  # Tracy provides TracyClient target with proper dependencies
+  target_compile_definitions(TracyClient PUBLIC TRACY_ENABLE)
 endif()
 
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
@@ -362,7 +360,7 @@ target_link_libraries(demo_core
 )
 
 if(TRACY_ENABLE)
-  target_link_libraries(demo_core PUBLIC tracy_client)
+  target_link_libraries(demo_core PUBLIC TracyClient)
 endif()
 
 if(UNIX AND NOT APPLE)

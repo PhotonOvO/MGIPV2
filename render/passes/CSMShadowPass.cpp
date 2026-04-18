@@ -36,6 +36,19 @@ void CSMShadowPass::execute(const PassContext& context) const
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   const uint32_t cascadeCount = csm.getCascadeCount();
 
+  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(csm.getCascadeImage()),
+      .aspect      = rhi::TextureAspect::depth,
+      .srcStage    = rhi::PipelineStage::FragmentShader,
+      .dstStage    = rhi::PipelineStage::FragmentShader,
+      .srcAccess   = rhi::ResourceAccess::read,
+      .dstAccess   = rhi::ResourceAccess::write,
+      .oldState    = rhi::ResourceState::General,
+      .newState    = rhi::ResourceState::DepthStencilAttachment,
+      .isSwapchain = false,
+  });
+
   // Render each cascade layer
   for(uint32_t i = 0; i < cascadeCount; ++i)
   {

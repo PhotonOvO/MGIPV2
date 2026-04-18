@@ -86,7 +86,15 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
 
 VkImageAspectFlags toVkAspectMask(TextureAspect aspect)
 {
-  return aspect == TextureAspect::depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+  switch(aspect)
+  {
+    case TextureAspect::depth:
+      return VK_IMAGE_ASPECT_DEPTH_BIT;
+    case TextureAspect::depthStencil:
+      return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    default:
+      return VK_IMAGE_ASPECT_COLOR_BIT;
+  }
 }
 
 VkImageLayout toVkImageLayout(ResourceState state)

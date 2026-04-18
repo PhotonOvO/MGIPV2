@@ -635,6 +635,7 @@ private:
   void                 createGraphicDescriptorSet();
   void                 updateGraphicsDescriptorSet();
   void                 updateGBufferTextureDescriptorSet();
+  void                 bindStaticPassResources();  // Bind static resources once per swapchain rebuild
   void                 destroyBindGroups();
   utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
   PipelineHandle       selectComputePipelineHandle() const;
@@ -717,6 +718,8 @@ private:
 
 #ifdef TRACY_ENABLE
   std::unique_ptr<profiling::TracyVulkanContext> m_tracyVkCtx;
+  VkCommandPool   m_tracyCmdPool{VK_NULL_HANDLE};
+  VkCommandBuffer m_tracyCmdBuf{VK_NULL_HANDLE};
 #endif
 };
 

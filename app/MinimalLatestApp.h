@@ -77,6 +77,21 @@ public:
           if(glfwGetKey(m_window, GLFW_KEY_Q) == GLFW_PRESS) moveDir.y += 1.0f;
           if(glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS) moveDir.y -= 1.0f;
 
+          // F1: Toggle fullscreen
+          static bool f1Pressed = false;
+          if(glfwGetKey(m_window, GLFW_KEY_F1) == GLFW_PRESS)
+          {
+            if(!f1Pressed)
+            {
+              f1Pressed = true;
+              toggleFullscreen();
+            }
+          }
+          else
+          {
+            f1Pressed = false;
+          }
+
           if(glm::length(moveDir) > 0.0f)
           {
               moveDir = glm::normalize(moveDir) * m_moveSpeed * ImGui::GetIO().DeltaTime;
@@ -296,6 +311,28 @@ public:
   }
 
 private:
+  void toggleFullscreen()
+  {
+    if(m_fullscreen)
+    {
+      // Restore windowed mode
+      glfwSetWindowMonitor(m_window, nullptr, m_windowedX, m_windowedY, m_windowedWidth, m_windowedHeight, 0);
+      m_fullscreen = false;
+    }
+    else
+    {
+      // Save current window position and size
+      glfwGetWindowPos(m_window, &m_windowedX, &m_windowedY);
+      glfwGetWindowSize(m_window, &m_windowedWidth, &m_windowedHeight);
+
+      // Switch to fullscreen on primary monitor
+      GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+      const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+      glfwSetWindowMonitor(m_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+      m_fullscreen = true;
+    }
+  }
+
   GLFWwindow*                                       m_window{};
   std::unique_ptr<demo::rhi::vulkan::VulkanSurface> m_surface;
   VkExtent2D                                        m_windowSize{800, 600};
@@ -321,6 +358,11 @@ private:
   bool m_cursorCaptured{false};  // Mouse capture state
   glm::vec2 m_lastMousePos{0.0f};
   shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
+
+  // Fullscreen state
+  bool m_fullscreen{false};
+  int m_windowedX{0}, m_windowedY{0};
+  int m_windowedWidth{800}, m_windowedHeight{600};
   demo::DirectionalLightSettings m_lightSettings{};
   float m_lightAzimuthDegrees{0.0f};
   float m_lightElevationDegrees{0.0f};

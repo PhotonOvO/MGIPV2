@@ -8,6 +8,11 @@
 
 namespace demo {
 
+// Forward declaration for Tracy GPU context
+namespace profiling {
+class TracyVulkanContext;
+}
+
 class PassExecutor
 {
 public:
@@ -50,7 +55,8 @@ public:
   void                 bindBuffer(BufferBinding binding);
   [[nodiscard]] size_t getPassCount() const;
   [[nodiscard]] const PassNode* getPass(size_t index) const;
-  void                 execute(const PassContext& context, const ExecutionHooks* hooks = nullptr) const;
+  void                 execute(const PassContext& context, const ExecutionHooks* hooks = nullptr,
+                               profiling::TracyVulkanContext* tracyVkCtx = nullptr) const;
 
 private:
   [[nodiscard]] const TextureBinding* findTextureBinding(TextureHandle handle) const;

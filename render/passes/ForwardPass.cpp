@@ -12,6 +12,23 @@
 
 namespace demo {
 
+namespace {
+
+[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
+{
+    switch(format)
+    {
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return rhi::TextureAspect::depthStencil;
+        default:
+            return rhi::TextureAspect::depth;
+    }
+}
+
+}  // namespace
+
 ForwardPass::ForwardPass(Renderer* renderer)
     : m_renderer(renderer)
 {
@@ -49,7 +66,7 @@ void ForwardPass::execute(const PassContext& context) const
         context.cmd->transitionTexture(rhi::TextureBarrierDesc{
             .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
             .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
-            .aspect      = rhi::TextureAspect::depth,
+            .aspect      = sceneDepthAspect(sceneResources.getDepthFormat()),
             .srcStage    = rhi::PipelineStage::FragmentShader,
             .dstStage    = rhi::PipelineStage::FragmentShader,
             .srcAccess   = rhi::ResourceAccess::read,
@@ -170,6 +187,19 @@ void ForwardPass::execute(const PassContext& context) const
         .storeOp = rhi::StoreOp::store,
         .clearValue = {0.0f, 0},
     };
+
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+        .aspect      = sceneDepthAspect(sceneResources.getDepthFormat()),
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::read,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::General,
+        .newState    = rhi::ResourceState::DepthStencilAttachment,
+        .isSwapchain = false,
+    });
 
     // Begin render pass using RHI interface
     const rhi::RenderPassDesc passDesc = {

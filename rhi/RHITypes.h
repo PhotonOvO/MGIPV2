@@ -120,6 +120,7 @@ enum class TextureAspect : uint8_t
 {
   color = 0,
   depth,
+  depthStencil,
 };
 
 enum class PipelineBindPoint : uint8_t

@@ -253,15 +253,19 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
   std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
   vmaFlushAllocation(m_allocator, m_shadowUniformBuffer.allocation, 0, sizeof(m_shadowUniformsData));
 
-  // Transition image to depth-stencil read-only optimal (ready for sampling)
+  // Initialize the cascade image to GENERAL. The shadow render pass will
+  // transition it to attachment usage, and the pass end transitions it back
+  // for sampling.
   const VkImageMemoryBarrier2 initBarrier{
       .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
       .srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
       .srcAccessMask       = VK_ACCESS_2_NONE,
-      .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-      .dstAccessMask       = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+      .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
+                             | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+      .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                             | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
       .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
-      .newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .image               = m_cascadeArray.image,

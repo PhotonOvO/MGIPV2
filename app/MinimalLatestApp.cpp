@@ -13,7 +13,7 @@
 
 int main()
 {
-    getchar();
+    // getchar();
   // Get the logger instance
   utils::Logger& logger = utils::Logger::getInstance();
   // logger.enableFileOutput(false);  // Don't write log to file

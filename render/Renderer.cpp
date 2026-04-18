@@ -25,6 +25,24 @@ constexpr uint32_t kLightPassTextureCount         = 4;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
 
+[[nodiscard]] bool hasStencilComponent(VkFormat format)
+{
+  switch(format)
+  {
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+[[nodiscard]] rhi::TextureAspect sceneDepthTextureAspect(VkFormat format)
+{
+  return hasStencilComponent(format) ? rhi::TextureAspect::depthStencil : rhi::TextureAspect::depth;
+}
+
 [[nodiscard]] uint32_t alignUp(uint32_t value, uint32_t alignment)
 {
   const uint32_t safeAlignment = alignment == 0 ? 1u : alignment;
@@ -2299,15 +2317,13 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
     return;
   }
 
-  if(!swapchainRebuilt)
+  // SceneResources are referenced by every graphics pass. Before destroying and
+  // recreating them, wait for every frame slot to retire so no in-flight command
+  // buffer can still reference the old attachments.
+  const uint32_t frameCount = m_perFrame.frameContext->getFrameCount();
+  for(uint32_t i = 0; i < frameCount; ++i)
   {
-    // Wait for ALL frame slots to finish before destroying SceneResources
-    // (with 3 frames in flight, any could be using the images we're about to destroy)
-    const uint32_t frameCount = m_perFrame.frameContext->getFrameCount();
-    for(uint32_t i = 0; i < frameCount; ++i)
-    {
-      m_perFrame.frameContext->waitForFrame(i);
-    }
+    m_perFrame.frameContext->waitForFrame(i);
   }
 
   const VkDevice  device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
@@ -2325,6 +2341,7 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
   }
 
   // Bind static pass resources once after swapchain/resources rebuild
+  m_passExecutor.clearResourceBindings();
   bindStaticPassResources();
 }
 
@@ -2360,26 +2377,27 @@ void Renderer::bindStaticPassResources()
   m_passExecutor.bindTexture({
       .handle       = kPassSceneDepthHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
-      .aspect       = rhi::TextureAspect::depth,
-      // Depth ends the previous frame as depth attachment, so start with that state
-      // This ensures the first barrier (from DepthPrepass) has correct oldLayout
-      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      .aspect       = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
+      // After swapchain rebuild, cmdInitImageLayout initializes depth to GENERAL layout
+      // PassExecutor will transition to DepthStencilAttachment before first depth pass
+      .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
   m_passExecutor.bindTexture({
       .handle       = kPassShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
       .aspect       = rhi::TextureAspect::depth,
-      // Shadow map ends as depth attachment from shadow passes
-      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      // After swapchain rebuild, cmdInitImageLayout initializes shadow map to GENERAL
+      .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
   m_passExecutor.bindTexture({
       .handle       = kPassCSMShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
       .aspect       = rhi::TextureAspect::depth,
-      // CSM cascade array ends as depth attachment from CSMShadowPass
-      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      // CSM cascade image is initialized to GENERAL and shadow sampling/rendering
+      // passes transition it explicitly from there.
+      .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
   m_passExecutor.bindTexture({
@@ -2513,6 +2531,22 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   {
     m_passGpuProfile.frames[currentFrameIndex].hasRecordedQueries = true;
   }
+
+  // Cleanup transitions: bring textures to known state for next frame start
+  // ForwardPass already transitions scene depth to General at its end
+  // CSM cascade ends as DepthStencilAttachment from CSMShadowPass, transition back to General
+  cmd.transitionTexture(rhi::TextureBarrierDesc{
+      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+      .aspect      = rhi::TextureAspect::depth,
+      .srcStage    = rhi::PipelineStage::FragmentShader,
+      .dstStage    = rhi::PipelineStage::Compute,
+      .srcAccess   = rhi::ResourceAccess::write,
+      .dstAccess   = rhi::ResourceAccess::read,
+      .oldState    = rhi::ResourceState::DepthStencilAttachment,
+      .newState    = rhi::ResourceState::General,
+      .isSwapchain = false,
+  });
 
   // Update swapchain image state after rendering
   m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex] = rhi::ResourceState::Present;
@@ -2719,6 +2753,19 @@ void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams
   std::memcpy(mappedData, &uniforms, sizeof(uniforms));
   VK_CHECK(vmaFlushAllocation(m_device.allocator, m_depthPyramidUniformBuffer.allocation, 0, sizeof(uniforms)));
   vmaUnmapMemory(m_device.allocator, m_depthPyramidUniformBuffer.allocation);
+
+  cmd.transitionTexture(rhi::TextureBarrierDesc{
+      .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+      .aspect      = sceneDepthTextureAspect(sceneResources.getDepthFormat()),
+      .srcStage    = rhi::PipelineStage::FragmentShader,
+      .dstStage    = rhi::PipelineStage::Compute,
+      .srcAccess   = rhi::ResourceAccess::write,
+      .dstAccess   = rhi::ResourceAccess::read,
+      .oldState    = rhi::ResourceState::Undefined,
+      .newState    = rhi::ResourceState::General,
+      .isSwapchain = false,
+  });
 
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
   vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE,

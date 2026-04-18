@@ -12,6 +12,23 @@
 
 namespace demo {
 
+namespace {
+
+[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
+{
+  switch(format)
+  {
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return rhi::TextureAspect::depthStencil;
+    default:
+      return rhi::TextureAspect::depth;
+  }
+}
+
+}  // namespace
+
 DepthPrepass::DepthPrepass(Renderer* renderer)
     : m_renderer(renderer)
 {}
@@ -54,6 +71,18 @@ void DepthPrepass::execute(const PassContext& context) const
       .colorTargetCount = 0,
       .depthTarget      = &depthTarget,
   };
+  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+      .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+      .aspect      = sceneDepthAspect(sceneResources.getDepthFormat()),
+      .srcStage    = rhi::PipelineStage::FragmentShader,
+      .dstStage    = rhi::PipelineStage::FragmentShader,
+      .srcAccess   = rhi::ResourceAccess::read,
+      .dstAccess   = rhi::ResourceAccess::write,
+      .oldState    = rhi::ResourceState::General,
+      .newState    = rhi::ResourceState::DepthStencilAttachment,
+      .isSwapchain = false,
+  });
   context.cmd->beginRenderPass(passDesc);
   context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});

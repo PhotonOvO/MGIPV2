@@ -62,6 +62,19 @@ void DebugPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
+  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+      .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+      .aspect      = rhi::TextureAspect::color,
+      .srcStage    = rhi::PipelineStage::FragmentShader,
+      .dstStage    = rhi::PipelineStage::FragmentShader,
+      .srcAccess   = rhi::ResourceAccess::read,
+      .dstAccess   = rhi::ResourceAccess::write,
+      .oldState    = rhi::ResourceState::General,
+      .newState    = rhi::ResourceState::ColorAttachment,
+      .isSwapchain = false,
+  });
+
   context.cmd->beginRenderPass(rhi::RenderPassDesc{
       .renderArea       = {{0, 0}, extent},
       .colorTargets     = &colorTarget,

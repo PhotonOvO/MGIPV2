@@ -11,6 +11,23 @@
 
 namespace demo {
 
+namespace {
+
+[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
+{
+    switch(format)
+    {
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return rhi::TextureAspect::depthStencil;
+        default:
+            return rhi::TextureAspect::depth;
+    }
+}
+
+}  // namespace
+
 GBufferPass::GBufferPass(Renderer* renderer)
     : m_renderer(renderer)
 {
@@ -72,6 +89,19 @@ void GBufferPass::execute(const PassContext& context) const
     std::array<rhi::RenderTargetDesc, 3> colorTargets{};
     for(uint32_t i = 0; i < 3; ++i)
     {
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{static_cast<uint32_t>(kPassGBuffer0Handle.index + i), kPassGBuffer0Handle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getColorImage(i)),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::read,
+            .dstAccess   = rhi::ResourceAccess::write,
+            .oldState    = rhi::ResourceState::General,
+            .newState    = rhi::ResourceState::ColorAttachment,
+            .isSwapchain = false,
+        });
+
         colorTargets[i] = {
             .texture = {},  // Not used when view carries native pointer
             .view = rhi::TextureViewHandle::fromNative(sceneResources.getGBufferImageView(i)),
@@ -91,6 +121,19 @@ void GBufferPass::execute(const PassContext& context) const
         .storeOp = rhi::StoreOp::store,
         .clearValue = {0.0f, 0},
     };
+
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
+        .aspect      = sceneDepthAspect(sceneResources.getDepthFormat()),
+        .srcStage    = rhi::PipelineStage::Compute,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::read,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::General,
+        .newState    = rhi::ResourceState::DepthStencilAttachment,
+        .isSwapchain = false,
+    });
 
     // Begin render pass using RHI interface
     const rhi::RenderPassDesc passDesc = {
@@ -332,7 +375,7 @@ void GBufferPass::execute(const PassContext& context) const
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
         .nativeImage = reinterpret_cast<uint64_t>(sceneResources.getDepthImage()),
-        .aspect      = rhi::TextureAspect::depth,
+        .aspect      = sceneDepthAspect(sceneResources.getDepthFormat()),
         .srcStage    = rhi::PipelineStage::FragmentShader,
         .dstStage    = rhi::PipelineStage::FragmentShader,
         .srcAccess   = rhi::ResourceAccess::write,

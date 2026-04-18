@@ -69,7 +69,7 @@ rhi::ResourceState requiredStateForTexture(const PassExecutor::TextureBinding& b
     return rhi::ResourceState::General;
   }
 
-  if(binding.aspect == rhi::TextureAspect::depth)
+  if(binding.aspect == rhi::TextureAspect::depth || binding.aspect == rhi::TextureAspect::depthStencil)
   {
     return rhi::ResourceState::General;
   }
