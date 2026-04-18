@@ -112,6 +112,17 @@ struct GltfUploadResult
   std::vector<MeshHandle>     meshes;
   std::vector<MaterialHandle> materials;
   std::vector<TextureHandle>  textures;
+
+  // Pre-built mesh lists for each pass type
+  std::vector<size_t> opaqueMeshIndices;        // Indices into meshes for OPAQUE
+  std::vector<size_t> alphaTestMeshIndices;     // Indices into meshes for MASK
+  std::vector<size_t> transparentMeshIndices;   // Indices into meshes for BLEND
+  std::vector<size_t> shadowCasterIndices;      // OPAQUE + MASK (skip BLEND)
+
+  // Cached sorting data for transparent meshes
+  std::vector<float> transparentDistances;      // Distance from last camera position
+  glm::vec3 lastSortCameraPos{0.0f};           // Camera position used for last sort
+  bool transparentSortDirty{true};              // Force re-sort on first frame
 };
 
 class Renderer
