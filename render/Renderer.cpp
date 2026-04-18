@@ -1182,6 +1182,12 @@ bool Renderer::prepareFrameResources()
   rebuildSwapchainDependentResources();
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
+
+  // Advance to next frame slot and wait for it to be GPU-complete
+  // This enables CPU/GPU overlap: while GPU executes frame N, CPU records frame N+1
+  m_perFrame.frameContext->advanceToNextFrame();
+  m_perFrame.frameContext->waitForFrameCompletion();
+
   m_perFrame.frameContext->beginFrame();
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
@@ -2423,10 +2429,8 @@ void Renderer::endFrame(rhi::CommandList& cmd)
 
   submitFrame(*m_perFrame.frameContext, cmd);
 
-  // Advance to next frame slot and wait for it to be ready
-  // This allows CPU to overlap recording of next frame with GPU execution of current frame
-  m_perFrame.frameContext->advanceToNextFrame();
-  m_perFrame.frameContext->waitForFrameCompletion();
+  // Frame advancement and wait moved to prepareFrameResources for CPU/GPU overlap
+  // GPU executes frame N while CPU records frame N+1
 
   presentFrame(*m_swapchainDependent.swapchain);
   m_perFrame.frameCounter++;
