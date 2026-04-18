@@ -3,6 +3,7 @@
 #include "../common/Common.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
+#include "../common/TracyProfiling.h"
 #include "BindGroups.h"
 #include "DrawStream.h"
 #include "DrawStreamDecoder.h"
@@ -713,6 +714,10 @@ private:
   std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
   PassGpuProfileState         m_passGpuProfile;
   PassProfilingHooks          m_passProfilingHooks{this};
+
+#ifdef TRACY_ENABLE
+  std::unique_ptr<profiling::TracyVulkanContext> m_tracyVkCtx;
+#endif
 };
 
 }  // namespace demo

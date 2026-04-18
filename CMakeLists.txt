@@ -39,6 +39,7 @@ else()
 endif()
 
 option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
+option(TRACY_ENABLE "Enable Tracy profiler integration" ON)
 
 include(FetchContent)
 
@@ -133,6 +134,25 @@ target_include_directories(imgui_demo PUBLIC
 )
 target_compile_definitions(imgui_demo PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
 target_link_libraries(imgui_demo PUBLIC volk glfw)
+
+#====================================================================================
+# Tracy Profiler - CPU/GPU profiling
+#====================================================================================
+if(TRACY_ENABLE)
+  FetchContent_Declare(
+    tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.11.1
+  )
+  FetchContent_MakeAvailable(tracy)
+
+  add_library(tracy_client STATIC
+    ${tracy_SOURCE_DIR}/public/TracyClient.cpp
+  )
+  target_compile_definitions(tracy_client PUBLIC TRACY_ENABLE)
+  target_include_directories(tracy_client PUBLIC ${tracy_SOURCE_DIR}/public/tracy)
+  target_link_libraries(tracy_client PUBLIC glfw)  # Tracy uses GLFW for platform detection
+endif()
 
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
 set(STB_IMAGE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
@@ -290,6 +310,7 @@ add_library(demo_core STATIC
   common/Common.h
   common/Handles.h
   common/HandlePool.h
+  common/TracyProfiling.h
   loader/GltfLoader.h
   loader/GltfLoader.cpp
   render/MeshPool.h
@@ -306,6 +327,9 @@ if(USE_SLANG)
 endif()
 if(VK_SEMAPHORE_DEBUG)
   target_compile_definitions(demo_core PUBLIC NVVK_SEMAPHORE_DEBUG=1)
+endif()
+if(TRACY_ENABLE)
+  target_compile_definitions(demo_core PUBLIC TRACY_ENABLE)
 endif()
 
 target_include_directories(demo_core
@@ -336,6 +360,10 @@ target_link_libraries(demo_core
     tinygltf
     Vulkan::Vulkan
 )
+
+if(TRACY_ENABLE)
+  target_link_libraries(demo_core PUBLIC tracy_client)
+endif()
 
 if(UNIX AND NOT APPLE)
   target_link_libraries(demo_core PUBLIC ${X11_LIBRARIES} Threads::Threads)

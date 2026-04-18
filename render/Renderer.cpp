@@ -1175,10 +1175,20 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
   }
 
   m_perFrame.frameCounter = 1;
+
+#ifdef TRACY_ENABLE
+  // Initialize Tracy Vulkan context for GPU profiling
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const VkQueue          graphicsQueue  = fromNativeHandle<VkQueue>(graphicsQueueInfo.nativeQueue);
+  m_tracyVkCtx = std::make_unique<profiling::TracyVulkanContext>(
+      physicalDevice, device, graphicsQueue, m_device.computeCmdPool);
+#endif
 }
 
 bool Renderer::prepareFrameResources()
 {
+  TRACY_ZONE_SCOPED("prepareFrameResources");
+
   rebuildSwapchainDependentResources();
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
@@ -1186,7 +1196,10 @@ bool Renderer::prepareFrameResources()
   // Wait for current frame slot (oldest in flight) to be GPU-complete BEFORE advancing
   // This guarantees the ring buffer slot is reusable when we move to it
   // Correct order: wait(current/oldest) -> advance -> begin
-  m_perFrame.frameContext->waitForFrameCompletion();
+  {
+    TRACY_ZONE_SCOPED("waitForFrameCompletion");
+    m_perFrame.frameContext->waitForFrameCompletion();
+  }
   m_perFrame.frameContext->advanceToNextFrame();
 
   m_perFrame.frameContext->beginFrame();
@@ -2267,6 +2280,8 @@ rhi::CommandList& Renderer::beginCommandRecording()
 
 void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 {
+  TRACY_ZONE_SCOPED("drawFrame");
+
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   auto&          frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
 
@@ -2425,16 +2440,33 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
 void Renderer::endFrame(rhi::CommandList& cmd)
 {
+  TRACY_ZONE_SCOPED("endFrame");
+
   (void)cmd;
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
-  submitFrame(*m_perFrame.frameContext, cmd);
+#ifdef TRACY_ENABLE
+  if(m_tracyVkCtx)
+  {
+    TRACY_GPU_COLLECT(m_tracyVkCtx);
+  }
+#endif
+
+  {
+    TRACY_ZONE_SCOPED("submitFrame");
+    submitFrame(*m_perFrame.frameContext, cmd);
+  }
 
   // Frame advancement and wait moved to prepareFrameResources for CPU/GPU overlap
   // GPU executes frame N while CPU records frame N+1
 
-  presentFrame(*m_swapchainDependent.swapchain);
+  {
+    TRACY_ZONE_SCOPED("presentFrame");
+    presentFrame(*m_swapchainDependent.swapchain);
+  }
   m_perFrame.frameCounter++;
+
+  TRACY_CPU_FRAME_MARK();
 }
 
 void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const
