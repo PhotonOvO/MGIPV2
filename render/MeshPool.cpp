@@ -197,6 +197,32 @@ void MeshPool::setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alph
     record->alphaCutoff = alphaCutoff;
 }
 
+void MeshPool::setMeshMaterialData(MeshHandle handle,
+                                   const glm::vec4& baseColorFactor,
+                                   int32_t baseColorTextureIndex,
+                                   int32_t normalTextureIndex,
+                                   int32_t metallicRoughnessTextureIndex,
+                                   int32_t occlusionTextureIndex,
+                                   float metallicFactor,
+                                   float roughnessFactor,
+                                   float normalScale)
+{
+    MeshRecord* record = m_pool.tryGet(handle);
+    if(record == nullptr)
+    {
+        return;
+    }
+
+    record->baseColorFactor = baseColorFactor;
+    record->baseColorTextureIndex = baseColorTextureIndex;
+    record->normalTextureIndex = normalTextureIndex;
+    record->metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
+    record->occlusionTextureIndex = occlusionTextureIndex;
+    record->metallicFactor = metallicFactor;
+    record->roughnessFactor = roughnessFactor;
+    record->normalScale = normalScale;
+}
+
 const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {
     return m_pool.tryGet(handle);
 }
