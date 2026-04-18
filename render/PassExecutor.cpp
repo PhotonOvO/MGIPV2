@@ -1,4 +1,6 @@
 #include "PassExecutor.h"
+#include "../common/TracyProfiling.h"
+#include "../rhi/vulkan/VulkanCommandList.h"
 
 #include <cassert>
 #include <unordered_map>
@@ -124,11 +126,29 @@ void PassExecutor::clearResourceBindings()
 
 void PassExecutor::bindTexture(TextureBinding binding)
 {
+  // Update existing binding if handle already bound, otherwise add new
+  for(TextureBinding& existing : m_textureBindings)
+  {
+    if(existing.handle == binding.handle)
+    {
+      existing = binding;
+      return;
+    }
+  }
   m_textureBindings.push_back(binding);
 }
 
 void PassExecutor::bindBuffer(BufferBinding binding)
 {
+  // Update existing binding if handle already bound, otherwise add new
+  for(BufferBinding& existing : m_bufferBindings)
+  {
+    if(existing.handle == binding.handle)
+    {
+      existing = binding;
+      return;
+    }
+  }
   m_bufferBindings.push_back(binding);
 }
 
@@ -166,7 +186,8 @@ const PassNode* PassExecutor::getPass(size_t index) const
   return index < m_passes.size() ? m_passes[index] : nullptr;
 }
 
-void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks) const
+void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks,
+                           profiling::TracyVulkanContext* tracyVkCtx) const
 {
   std::unordered_map<uint64_t, BufferUsageState>  bufferStates;
   std::unordered_map<uint64_t, TextureUsageState> textureStates;
@@ -182,11 +203,16 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
     context.cmd->setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, binding.handle.index, binding.handle.generation},
                                   binding.initialState);
   }
-  
+
+#ifdef TRACY_ENABLE
+  const VkCommandBuffer vkCmd = tracyVkCtx ? rhi::vulkan::getNativeCommandBuffer(*context.cmd) : VK_NULL_HANDLE;
+#endif
+
   for(uint32_t passIndex = 0; passIndex < m_passes.size(); ++passIndex)
   {
     const PassNode* pass = m_passes[passIndex];
     assert(pass != nullptr);
+
     if(hooks != nullptr)
     {
       hooks->beforePass(context, *pass, passIndex);
@@ -288,9 +314,30 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
                                     requiredState);
     }
 
+    // Tracy GPU zone for each pass - scoped zone must surround pass->execute()
+#ifdef TRACY_ENABLE
+    // Create Tracy GPU zone variable that stays alive during pass->execute()
+    tracy::VkCtxScope* tracy_gpu_zone = nullptr;
+    if(tracyVkCtx && vkCmd != VK_NULL_HANDLE)
+    {
+      tracy_gpu_zone = new tracy::VkCtxScope(tracyVkCtx->context(), TracyLine, TracyFile, strlen(TracyFile),
+                                             TracyFunction, strlen(TracyFunction), pass->getName(),
+                                             strlen(pass->getName()), vkCmd, true);
+    }
+#endif
+
     PassContext scopedContext = context;
     scopedContext.passIndex   = passIndex;
     pass->execute(scopedContext);
+
+#ifdef TRACY_ENABLE
+    // Delete Tracy GPU zone (destructor writes end timestamp)
+    if(tracy_gpu_zone)
+    {
+      delete tracy_gpu_zone;
+    }
+#endif
+
     if(hooks != nullptr)
     {
       hooks->afterPass(scopedContext, *pass, passIndex);

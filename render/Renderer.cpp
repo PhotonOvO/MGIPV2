@@ -685,6 +685,18 @@ void Renderer::shutdown(rhi::Surface& surface)
   m_device.device->waitIdle();
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
 
+#ifdef TRACY_ENABLE
+  // Destroy Tracy Vulkan context first (before command pool)
+  m_tracyVkCtx.reset();
+  if(m_tracyCmdPool != VK_NULL_HANDLE)
+  {
+    vkFreeCommandBuffers(device, m_tracyCmdPool, 1, &m_tracyCmdBuf);
+    vkDestroyCommandPool(device, m_tracyCmdPool, nullptr);
+    m_tracyCmdPool = VK_NULL_HANDLE;
+    m_tracyCmdBuf = VK_NULL_HANDLE;
+  }
+#endif
+
   if(m_swapchainDependent.swapchain)
   {
     auto* vkSwapchain = static_cast<rhi::vulkan::VulkanSwapchain*>(m_swapchainDependent.swapchain.get());
@@ -1178,10 +1190,47 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
 
 #ifdef TRACY_ENABLE
   // Initialize Tracy Vulkan context for GPU profiling
-  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
-  const VkQueue          graphicsQueue  = fromNativeHandle<VkQueue>(graphicsQueueInfo.nativeQueue);
+  // Tracy requires a dedicated command buffer for calibration queries
+  const VkInstance        instance        = fromNativeHandle<VkInstance>(m_device.device->getNativeInstance());
+  const VkPhysicalDevice  physicalDevice  = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const VkQueue           graphicsQueue   = fromNativeHandle<VkQueue>(graphicsQueueInfo.nativeHandle);
+
+  // Create dedicated command pool for Tracy (with reset bit for command buffer reuse)
+  const VkCommandPoolCreateInfo tracyPoolInfo{
+      .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      .queueFamilyIndex = graphicsQueueInfo.familyIndex,
+  };
+  vkCreateCommandPool(device, &tracyPoolInfo, nullptr, &m_tracyCmdPool);
+
+  // Allocate command buffer for Tracy (Tracy owns it for calibration)
+  const VkCommandBufferAllocateInfo tracyAllocInfo{
+      .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool        = m_tracyCmdPool,
+      .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  vkAllocateCommandBuffers(device, &tracyAllocInfo, &m_tracyCmdBuf);
+
   m_tracyVkCtx = std::make_unique<profiling::TracyVulkanContext>(
-      physicalDevice, device, graphicsQueue, m_device.computeCmdPool);
+      instance, physicalDevice, device, graphicsQueue, m_tracyCmdBuf);
+
+  // Tracy needs the initial command buffer submitted for calibration
+  // Submit an empty command buffer to kick off Tracy's calibration
+  const VkCommandBufferBeginInfo tracyBeginInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  vkBeginCommandBuffer(m_tracyCmdBuf, &tracyBeginInfo);
+  vkEndCommandBuffer(m_tracyCmdBuf);
+
+  const VkSubmitInfo tracySubmitInfo{
+      .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers    = &m_tracyCmdBuf,
+  };
+  vkQueueSubmit(graphicsQueue, 1, &tracySubmitInfo, VK_NULL_HANDLE);
+  vkQueueWaitIdle(graphicsQueue);  // Wait for calibration to complete
 #endif
 }
 
@@ -1192,6 +1241,12 @@ bool Renderer::prepareFrameResources()
   rebuildSwapchainDependentResources();
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
+
+#ifdef TRACY_ENABLE
+  // Collect GPU profiling results at end of frame
+  // TracyVkCollect should be called in the same command buffer that recorded zones
+  // It will be called in endFrame after all passes complete
+#endif
 
   // Wait for current frame slot (oldest in flight) to be GPU-complete BEFORE advancing
   // This guarantees the ring buffer slot is reusable when we move to it
@@ -2268,6 +2323,79 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
   {
     updateGPUCullingDescriptorSet(frameIndex);
   }
+
+  // Bind static pass resources once after swapchain/resources rebuild
+  bindStaticPassResources();
+}
+
+void Renderer::bindStaticPassResources()
+{
+  // Bind static resources that don't change per-frame
+  // Called once after swapchain/resources rebuild
+  m_passExecutor.bindBuffer({
+      .handle       = kPassVertexBufferHandle,
+      .nativeBuffer = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassGBuffer0Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(0)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassGBuffer1Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(1)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassGBuffer2Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassSceneDepthHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
+      .aspect       = rhi::TextureAspect::depth,
+      // Depth ends the previous frame as depth attachment, so start with that state
+      // This ensures the first barrier (from DepthPrepass) has correct oldLayout
+      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassShadowHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
+      .aspect       = rhi::TextureAspect::depth,
+      // Shadow map ends as depth attachment from shadow passes
+      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassCSMShadowHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+      .aspect       = rhi::TextureAspect::depth,
+      // CSM cascade array ends as depth attachment from CSMShadowPass
+      .initialState = rhi::ResourceState::DepthStencilAttachment,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassDepthPyramidHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthPyramidImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  m_passExecutor.bindTexture({
+      .handle       = kPassOutputHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
 }
 
 rhi::CommandList& Renderer::beginCommandRecording()
@@ -2310,11 +2438,9 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   updateGPUCullingBuffers(currentFrameIndex, params);
 
   // Route through pass executor to orchestrate multi-pass rendering
-  m_passExecutor.clearResourceBindings();
-  m_passExecutor.bindBuffer({
-      .handle       = kPassVertexBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
-  });
+  // Static resources (GBuffer, SceneDepth, Shadow, CSM, Output, VertexBuffer) are already bound
+  // in bindStaticPassResources() and persist across frames
+  // Only bind dynamic per-frame resources here
   m_passExecutor.bindBuffer({
       .handle       = kTransientAllocatorBufferHandle,
       .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
@@ -2359,62 +2485,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       .handle       = kPassGPUCullResultBufferHandle,
       .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
   });
-  m_passExecutor.bindTexture({
-      .handle       = kPassGBuffer0Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(0)),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassGBuffer1Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(1)),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassGBuffer2Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassSceneDepthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
-      .aspect       = rhi::TextureAspect::depth,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassShadowHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
-      .aspect       = rhi::TextureAspect::depth,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassCSMShadowHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
-      .aspect       = rhi::TextureAspect::depth,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassDepthPyramidHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthPyramidImage()),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  m_passExecutor.bindTexture({
-      .handle       = kPassOutputHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
+  // Swapchain image changes per-frame, must be bound dynamically
   m_passExecutor.bindTexture({
       .handle       = kPassSwapchainHandle,
       .nativeImage  = m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex),
@@ -2428,7 +2499,16 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
       m_materials.materialBindGroup};
   resetPassGpuProfileQueries(cmd, currentFrameIndex);
-  m_passExecutor.execute(context, &m_passProfilingHooks);
+
+#ifdef TRACY_ENABLE
+  if(m_tracyVkCtx)
+  {
+    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+    TracyVkZone(m_tracyVkCtx->context(), vkCmd, "RenderFrame");
+  }
+#endif
+
+  m_passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
   if(currentFrameIndex < m_passGpuProfile.frames.size())
   {
     m_passGpuProfile.frames[currentFrameIndex].hasRecordedQueries = true;
@@ -2446,9 +2526,12 @@ void Renderer::endFrame(rhi::CommandList& cmd)
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
 #ifdef TRACY_ENABLE
+  // Collect GPU profiling results at end of rendering command buffer
+  // TracyVkCollect resets query pools and reads results from GPU
   if(m_tracyVkCtx)
   {
-    TRACY_GPU_COLLECT(m_tracyVkCtx);
+    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+    TracyVkCollect(m_tracyVkCtx->context(), vkCmd);
   }
 #endif
 
