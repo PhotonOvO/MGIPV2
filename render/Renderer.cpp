@@ -1183,10 +1183,11 @@ bool Renderer::prepareFrameResources()
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
-  // Advance to next frame slot and wait for it to be GPU-complete
-  // This enables CPU/GPU overlap: while GPU executes frame N, CPU records frame N+1
-  m_perFrame.frameContext->advanceToNextFrame();
+  // Wait for current frame slot (oldest in flight) to be GPU-complete BEFORE advancing
+  // This guarantees the ring buffer slot is reusable when we move to it
+  // Correct order: wait(current/oldest) -> advance -> begin
   m_perFrame.frameContext->waitForFrameCompletion();
+  m_perFrame.frameContext->advanceToNextFrame();
 
   m_perFrame.frameContext->beginFrame();
 
