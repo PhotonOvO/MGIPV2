@@ -2,6 +2,7 @@
 
 #include "../common/Handles.h"
 #include "DrawStream.h"
+#include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
 
 #include <cstdint>
@@ -13,7 +14,6 @@ namespace demo {
 // hard dependency on the full RenderParams type from Renderer.
 struct RenderParams;
 struct GltfUploadResult;
-class TransientAllocator;
 
 struct PassContext
 {
@@ -29,6 +29,9 @@ struct PassContext
   const GltfUploadResult*   gltfModel{nullptr};
   // Global bindless resource (bind once at pass start)
   BindGroupHandle           globalBindlessGroup{};
+  // Shared camera uniform allocation (set once per frame by Renderer)
+  TransientAllocator::Allocation cameraAlloc{};
+  bool cameraAllocValid{false};
 };
 
 enum class ResourceAccess : uint8_t

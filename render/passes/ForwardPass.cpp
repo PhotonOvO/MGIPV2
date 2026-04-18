@@ -254,30 +254,27 @@ void ForwardPass::execute(const PassContext& context) const
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    // Allocate CameraUniforms from transient allocator
-    const uint32_t cameraAlignment = 256;
-    const TransientAllocator::Allocation cameraAlloc =
-        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), cameraAlignment);
-
-    // Setup camera matrices
-    shaderio::CameraUniforms cameraData{};
-    if(context.params->cameraUniforms != nullptr)
+    // Use shared camera allocation from PassContext (allocated once per frame by Renderer)
+    if(!context.cameraAllocValid)
     {
-        cameraData = *context.params->cameraUniforms;
+        context.cmd->endRenderPass();
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::write,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::ColorAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
+        restoreDepthForSampling();
+        context.cmd->endEvent();
+        return;
     }
-    else
-    {
-        cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        cameraData.projection = clipspace::makePerspectiveProjection(
-            glm::radians(45.0f), static_cast<float>(renderExtent.width) / static_cast<float>(renderExtent.height), 0.1f, 100.0f,
-            clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
-        cameraData.viewProjection = cameraData.projection * cameraData.view;
-        cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
-        cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
-    }
-
-    std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
-    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
+    const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 
     // Get camera descriptor set (per-frame, uses dynamic offsets)
     // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding

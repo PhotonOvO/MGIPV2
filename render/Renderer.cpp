@@ -2596,9 +2596,34 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
     m_perPass.drawStream.clear();
   }
 
+  // Allocate CameraUniforms once for all passes
+  const VkExtent2D viewportExtent = m_swapchainDependent.sceneResources.getSize();
+  const float viewportWidth = static_cast<float>(viewportExtent.width);
+  const float viewportHeight = static_cast<float>(viewportExtent.height);
+  TransientAllocator::Allocation cameraAlloc =
+      frameUserData.transientAllocator.allocate(sizeof(shaderio::CameraUniforms), 256);
+  shaderio::CameraUniforms cameraData{};
+  if(params.cameraUniforms != nullptr)
+  {
+    cameraData = *params.cameraUniforms;
+  }
+  else
+  {
+    // Fallback: default camera (consistent with passes)
+    cameraData.view = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    cameraData.projection = clipspace::makePerspectiveProjection(
+        glm::radians(45.0f), viewportWidth / viewportHeight, 0.1f, 100.0f,
+        clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+    cameraData.viewProjection = cameraData.projection * cameraData.view;
+    cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
+    cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
+  }
+  std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
+  frameUserData.transientAllocator.flushAllocation(cameraAlloc, sizeof(cameraData));
+
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
-      m_materials.materialBindGroup};
+      m_materials.materialBindGroup, cameraAlloc, true};
   resetPassGpuProfileQueries(cmd, currentFrameIndex);
 
 #ifdef TRACY_ENABLE
