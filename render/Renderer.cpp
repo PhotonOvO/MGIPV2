@@ -13,6 +13,7 @@
 #include <cstring>
 #include <random>
 #include <type_traits>
+#include <unordered_map>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -24,6 +25,59 @@ constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
 constexpr uint32_t kLightPassTextureCount         = 4;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
+
+struct DebugUnitLineSegment
+{
+  glm::vec3 a{0.0f};
+  glm::vec3 b{0.0f};
+};
+
+[[nodiscard]] const std::vector<DebugUnitLineSegment>& getCachedDebugSphereSegments(uint32_t segments)
+{
+  static std::unordered_map<uint32_t, std::vector<DebugUnitLineSegment>> cache;
+
+  const auto it = cache.find(segments);
+  if(it != cache.end())
+  {
+    return it->second;
+  }
+
+  auto& unitSegments = cache[segments];
+  unitSegments.reserve(static_cast<size_t>(segments) * 3u);
+
+  const float delta = 6.28318530718f / static_cast<float>(segments);
+  for(uint32_t i = 0; i < segments; ++i)
+  {
+    const float angle0 = delta * static_cast<float>(i);
+    const float angle1 = delta * static_cast<float>(i + 1);
+
+    const float cos0 = std::cos(angle0);
+    const float sin0 = std::sin(angle0);
+    const float cos1 = std::cos(angle1);
+    const float sin1 = std::sin(angle1);
+
+    unitSegments.push_back(DebugUnitLineSegment{
+        .a = glm::vec3(cos0, 0.0f, sin0),
+        .b = glm::vec3(cos1, 0.0f, sin1),
+    });
+    unitSegments.push_back(DebugUnitLineSegment{
+        .a = glm::vec3(0.0f, cos0, sin0),
+        .b = glm::vec3(0.0f, cos1, sin1),
+    });
+    unitSegments.push_back(DebugUnitLineSegment{
+        .a = glm::vec3(cos0, sin0, 0.0f),
+        .b = glm::vec3(cos1, sin1, 0.0f),
+    });
+  }
+
+  return unitSegments;
+}
+
+[[nodiscard]] bool needsCpuDebugLineBuild(const DebugPassOptions& debugOptions)
+{
+  return debugOptions.showSceneBounds || debugOptions.showShadowFrustum || debugOptions.showViewFrustum
+         || debugOptions.showLightDirection || debugOptions.showPointLights || debugOptions.showCullDistance;
+}
 
 [[nodiscard]] bool hasStencilComponent(VkFormat format)
 {
@@ -995,7 +1049,7 @@ PipelineHandle Renderer::getLightCullingPipelineHandle() const
 
 VkImageView Renderer::getCurrentSwapchainImageView() const
 {
-  if(m_swapchainDependent.swapchain == nullptr)
+  if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
   {
     return VK_NULL_HANDLE;
   }
@@ -1005,7 +1059,7 @@ VkImageView Renderer::getCurrentSwapchainImageView() const
 
 VkImage Renderer::getCurrentSwapchainImage() const
 {
-  if(m_swapchainDependent.swapchain == nullptr)
+  if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
   {
     return VK_NULL_HANDLE;
   }
@@ -1266,14 +1320,14 @@ bool Renderer::prepareFrameResources()
   // It will be called in endFrame after all passes complete
 #endif
 
-  // Wait for current frame slot (oldest in flight) to be GPU-complete BEFORE advancing
-  // This guarantees the ring buffer slot is reusable when we move to it
-  // Correct order: wait(current/oldest) -> advance -> begin
+  // Wait for the frame slot we are about to reuse. beginFrame()/submitFrame()
+  // operate on the current slot, and endFrame() advances after submission.
+  // Keeping the order as wait(current) -> begin(current) -> submit(current) ->
+  // advance(next) preserves actual CPU/GPU overlap across the frame ring.
   {
     TRACY_ZONE_SCOPED("waitForFrameCompletion");
     m_perFrame.frameContext->waitForFrameCompletion();
   }
-  m_perFrame.frameContext->advanceToNextFrame();
 
   m_perFrame.frameContext->beginFrame();
 
@@ -1307,8 +1361,51 @@ bool Renderer::prepareFrameResources()
   }
   resolvePassGpuProfileResults(currentFrameIndex);
   m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
+  m_swapchainDependent.hasAcquiredImage = false;
 
-  return acquireSwapchainImage(*m_swapchainDependent.swapchain, m_swapchainDependent.currentImageIndex);
+  return true;
+}
+
+bool Renderer::acquireSwapchainImageForPresent()
+{
+  TRACY_ZONE_SCOPED("lateAcquireSwapchainImage");
+
+  ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before late acquire");
+
+  m_swapchainDependent.hasAcquiredImage = false;
+  if(!acquireSwapchainImage(*m_swapchainDependent.swapchain, m_swapchainDependent.currentImageIndex))
+  {
+    if(m_swapchainDependent.swapchain->needsRebuild())
+    {
+      m_swapchainDependent.swapchain->requestRebuild();
+    }
+    updateSwapchainTextureBinding(rhi::ResourceState::Undefined);
+    return false;
+  }
+
+  if(m_swapchainDependent.currentImageIndex >= m_swapchainDependent.imageStates.size())
+  {
+    m_swapchainDependent.imageStates.resize(m_swapchainDependent.currentImageIndex + 1u, rhi::ResourceState::Undefined);
+  }
+
+  m_swapchainDependent.hasAcquiredImage = true;
+  updateSwapchainTextureBinding(m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex]);
+  return true;
+}
+
+void Renderer::updateSwapchainTextureBinding(rhi::ResourceState initialState)
+{
+  ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before binding the present target");
+
+  m_passExecutor.bindTexture({
+      .handle       = kPassSwapchainHandle,
+      .nativeImage  = m_swapchainDependent.hasAcquiredImage
+                        ? m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex)
+                        : 0,
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = initialState,
+      .isSwapchain  = true,
+  });
 }
 
 void Renderer::updateGBufferTextureDescriptorSet()
@@ -1940,9 +2037,12 @@ void Renderer::drawGPUInfoOverlay(const RenderParams& params) const
 
 void Renderer::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
 {
-  (void)pass;
   if(renderer != nullptr)
   {
+    if(std::strcmp(pass.getName(), "PresentPass") == 0)
+    {
+      renderer->acquireSwapchainImageForPresent();
+    }
     renderer->writePassGpuProfileTimestamp(context, passIndex, true);
   }
 }
@@ -2305,6 +2405,7 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
     const rhi::Extent2D extent             = m_swapchainDependent.swapchain->getExtent();
     m_swapchainDependent.windowSize        = VkExtent2D{extent.width, extent.height};
     m_swapchainDependent.currentImageIndex = 0;
+    m_swapchainDependent.hasAcquiredImage  = false;
     m_swapchainDependent.imageStates.assign(
         m_swapchainDependent.swapchain->getMaxFramesInFlight(),
         rhi::ResourceState::Undefined);
@@ -2431,88 +2532,73 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   auto&          frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
 
-  // Get the actual initial state of the current swapchain image
-  // Newly created/rebuilt swapchain images start as UNDEFINED
-  if(m_swapchainDependent.currentImageIndex >= m_swapchainDependent.imageStates.size())
   {
-    m_swapchainDependent.imageStates.resize(
-        m_swapchainDependent.swapchain->getMaxFramesInFlight(),
-        rhi::ResourceState::Undefined);
+    TRACY_ZONE_SCOPED("drawFrame.cpuFrontEnd");
+
+    // Update CSM cascade matrices based on current camera and light direction
+    if(params.cameraUniforms != nullptr)
+    {
+      m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+    }
+
+    m_frameLightingState = buildFrameLightingState(params);
+    ensureTestPointLights(params);
+    buildDebugDrawList(params);
+    updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
+    updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
+    updateGPUCullingBuffers(currentFrameIndex, params);
+
+    // Route through pass executor to orchestrate multi-pass rendering
+    // Static resources (GBuffer, SceneDepth, Shadow, CSM, Output, VertexBuffer) are already bound
+    // in bindStaticPassResources() and persist across frames
+    // Only bind dynamic per-frame resources here
+    m_passExecutor.bindBuffer({
+        .handle       = kTransientAllocatorBufferHandle,
+        .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassPointLightBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointLightBuffer(currentFrameIndex)),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassSpotLightBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassPointLightCoarseBoundsHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassSpotLightCoarseBoundsHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassLightCoarseCullingUniformHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassGPUCullObjectBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassGPUCullIndirectBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassGPUCullStatsBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassGPUCullUniformBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
+    });
+    m_passExecutor.bindBuffer({
+        .handle       = kPassGPUCullResultBufferHandle,
+        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
+    });
+    m_perPass.drawStream.clear();
   }
-  const rhi::ResourceState swapchainInitialState =
-      m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex];
 
-  // Update CSM cascade matrices based on current camera and light direction
-  if(params.cameraUniforms != nullptr)
-  {
-    m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
-  }
-
-  m_frameLightingState = buildFrameLightingState(params);
-  ensureTestPointLights(params);
-  buildDebugDrawList(params);
-  updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
-  updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
-  updateGPUCullingBuffers(currentFrameIndex, params);
-
-  // Route through pass executor to orchestrate multi-pass rendering
-  // Static resources (GBuffer, SceneDepth, Shadow, CSM, Output, VertexBuffer) are already bound
-  // in bindStaticPassResources() and persist across frames
-  // Only bind dynamic per-frame resources here
-  m_passExecutor.bindBuffer({
-      .handle       = kTransientAllocatorBufferHandle,
-      .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassPointLightBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointLightBuffer(currentFrameIndex)),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassSpotLightBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassPointLightCoarseBoundsHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassSpotLightCoarseBoundsHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassLightCoarseCullingUniformHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassGPUCullObjectBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassGPUCullIndirectBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassGPUCullStatsBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassGPUCullUniformBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
-  });
-  m_passExecutor.bindBuffer({
-      .handle       = kPassGPUCullResultBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
-  });
-  // Swapchain image changes per-frame, must be bound dynamically
-  m_passExecutor.bindTexture({
-      .handle       = kPassSwapchainHandle,
-      .nativeImage  = m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = swapchainInitialState,
-      .isSwapchain  = true,
-  });
-
-  m_perPass.drawStream.clear();
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
       m_materials.materialBindGroup};
@@ -2526,30 +2612,44 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
   }
 #endif
 
-  m_passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
+  {
+    TRACY_ZONE_SCOPED("drawFrame.passExecution");
+    m_passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
+  }
+
   if(currentFrameIndex < m_passGpuProfile.frames.size())
   {
     m_passGpuProfile.frames[currentFrameIndex].hasRecordedQueries = true;
   }
 
-  // Cleanup transitions: bring textures to known state for next frame start
-  // ForwardPass already transitions scene depth to General at its end
-  // CSM cascade ends as DepthStencilAttachment from CSMShadowPass, transition back to General
-  cmd.transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
-      .aspect      = rhi::TextureAspect::depth,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::Compute,
-      .srcAccess   = rhi::ResourceAccess::write,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::DepthStencilAttachment,
-      .newState    = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  {
+    TRACY_ZONE_SCOPED("drawFrame.cleanup");
 
-  // Update swapchain image state after rendering
-  m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex] = rhi::ResourceState::Present;
+    // Cleanup transitions: bring textures to known state for next frame start
+    // ForwardPass already transitions scene depth to General at its end
+    // CSM cascade ends as DepthStencilAttachment from CSMShadowPass, transition back to General
+    cmd.transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+        .aspect      = rhi::TextureAspect::depth,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::Compute,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::DepthStencilAttachment,
+        .newState    = rhi::ResourceState::General,
+        .isSwapchain = false,
+    });
+
+    // Update swapchain image state after rendering if this frame actually wrote a
+    // presentable image. Late-acquire frames that skipped presentation leave the
+    // swapchain ring untouched.
+    if(m_swapchainDependent.hasAcquiredImage
+       && m_swapchainDependent.currentImageIndex < m_swapchainDependent.imageStates.size())
+    {
+      m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex] = rhi::ResourceState::Present;
+    }
+  }
 }
 
 void Renderer::endFrame(rhi::CommandList& cmd)
@@ -3426,14 +3526,6 @@ void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& 
     LOGW("Renderer::recordGraphicCommands received malformed DrawStream; skipping pass");
     return;
   }
-
-  std::vector<DrawPacket> oraclePackets;
-  if(!m_drawStreamDecoder.decodeToDrawPackets(DrawStream(drawStream.begin(), drawStream.end()), oraclePackets))
-  {
-    LOGW("Renderer::recordGraphicCommands stream->packet oracle decode failed; skipping pass");
-    return;
-  }
-  ASSERT(oraclePackets.size() == m_perPass.decodedDraws.size(), "Draw stream oracle packet count must match decoded draw count");
 
   const VkViewport viewport{
       0.0F, 0.0F, float(m_swapchainDependent.viewportSize.width), float(m_swapchainDependent.viewportSize.height),
