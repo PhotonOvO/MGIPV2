@@ -5589,6 +5589,78 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
     }
   }
 
+  // Compute and cache material texture indices/factors for each mesh
+  for(size_t i = 0; i < model.meshes.size(); ++i)
+  {
+    MeshHandle meshHandle = result.meshes[i];
+    if(model.meshes[i].materialIndex < 0 ||
+       model.meshes[i].materialIndex >= static_cast<int32_t>(model.materials.size()))
+    {
+      continue;
+    }
+
+    MaterialHandle matHandle = result.materials[model.meshes[i].materialIndex];
+    const MaterialResources::MaterialRecord* material = tryGetMaterial(matHandle);
+    if(!material)
+    {
+      continue;
+    }
+
+    // Compute bindless texture indices once
+    const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+    auto findTextureIndex = [&](TextureHandle handle) -> int32_t {
+      if(handle.isNull()) return -1;
+      for(size_t t = 0; t < result.textures.size(); ++t)
+      {
+        if(result.textures[t] == handle)
+        {
+          return static_cast<int32_t>(gltfTextureBaseIndex + t);
+        }
+      }
+      return -1;
+    };
+
+    m_meshPool.setMeshMaterialData(meshHandle,
+        material->baseColorFactor,
+        findTextureIndex(material->baseColorTexture),
+        findTextureIndex(material->normalTexture),
+        findTextureIndex(material->metallicRoughnessTexture),
+        findTextureIndex(material->occlusionTexture),
+        material->metallicFactor,
+        material->roughnessFactor,
+        material->normalScale);
+  }
+
+  // Build mesh lists for each pass type
+  for(size_t i = 0; i < result.meshes.size(); ++i)
+  {
+    MeshHandle meshHandle = result.meshes[i];
+    const MeshRecord* mesh = m_meshPool.tryGet(meshHandle);
+    if(!mesh) continue;
+
+    const int32_t alphaMode = mesh->alphaMode;
+
+    if(alphaMode == shaderio::LAlphaOpaque)
+    {
+      result.opaqueMeshIndices.push_back(i);
+      result.shadowCasterIndices.push_back(i);
+    }
+    else if(alphaMode == shaderio::LAlphaMask)
+    {
+      result.alphaTestMeshIndices.push_back(i);
+      result.shadowCasterIndices.push_back(i);
+    }
+    else // LAlphaBlend
+    {
+      result.transparentMeshIndices.push_back(i);
+      // Transparent meshes don't cast shadows
+    }
+  }
+
+  // Initialize transparent sorting cache
+  result.transparentDistances.resize(result.transparentMeshIndices.size(), 0.0f);
+  result.transparentSortDirty = true;
+
   // Update bindless texture array with glTF textures
   // Use index offset to avoid conflict with sample materials
   const uint32_t gltfTextureBaseIndex = kDemoMaterialSlotCount;  // Start after predefined slots
