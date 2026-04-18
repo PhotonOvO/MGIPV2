@@ -1,5 +1,6 @@
 #include "LightPass.h"
 #include "../Renderer.h"
+#include "../TransientAllocator.h"
 #include "../SceneResources.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
@@ -151,14 +152,26 @@ void LightPass::execute(const PassContext& context) const
                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                             shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    const TransientAllocator::Allocation cameraAlloc =
-        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
-    shaderio::CameraUniforms cameraData =
-        context.params != nullptr && context.params->cameraUniforms != nullptr
-            ? *context.params->cameraUniforms
-            : m_renderer->getShadowCameraUniforms();
-    std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
-    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
+    // Use shared camera allocation from PassContext (allocated once per frame by Renderer)
+    if(!context.cameraAllocValid)
+    {
+        context.cmd->endRenderPass();
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = rhi::ResourceAccess::write,
+            .dstAccess   = rhi::ResourceAccess::read,
+            .oldState    = rhi::ResourceState::ColorAttachment,
+            .newState    = rhi::ResourceState::General,
+            .isSwapchain = false,
+        });
+        context.cmd->endEvent();
+        return;
+    }
+    const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     if(!cameraBindGroupHandle.isNull())

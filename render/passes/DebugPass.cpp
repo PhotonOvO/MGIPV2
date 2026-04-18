@@ -1,5 +1,6 @@
 #include "DebugPass.h"
 #include "../Renderer.h"
+#include "../TransientAllocator.h"
 #include "../SceneResources.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"
@@ -105,15 +106,26 @@ void DebugPass::execute(const PassContext& context) const
     return;
   }
 
-  const TransientAllocator::Allocation cameraAlloc =
-      context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
-  shaderio::CameraUniforms cameraData{};
-  if(context.params->cameraUniforms != nullptr)
+  // Use shared camera allocation from PassContext (allocated once per frame by Renderer)
+  if(!context.cameraAllocValid)
   {
-    cameraData = *context.params->cameraUniforms;
+    context.cmd->endRenderPass();
+    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+        .aspect      = rhi::TextureAspect::color,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = rhi::ResourceAccess::write,
+        .dstAccess   = rhi::ResourceAccess::read,
+        .oldState    = rhi::ResourceState::ColorAttachment,
+        .newState    = rhi::ResourceState::General,
+        .isSwapchain = false,
+    });
+    context.cmd->endEvent();
+    return;
   }
-  std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
-  context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cameraData));
+  const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 
   const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
   VkDescriptorSet cameraDescriptorSet = VK_NULL_HANDLE;
