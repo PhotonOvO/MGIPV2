@@ -185,6 +185,18 @@ void MeshPool::updateTransform(MeshHandle handle, const glm::mat4& transform)
     updateWorldBounds(*record);
 }
 
+void MeshPool::setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alphaCutoff)
+{
+    MeshRecord* record = m_pool.tryGet(handle);
+    if(record == nullptr)
+    {
+        return;
+    }
+
+    record->alphaMode = alphaMode;
+    record->alphaCutoff = alphaCutoff;
+}
+
 const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {
     return m_pool.tryGet(handle);
 }

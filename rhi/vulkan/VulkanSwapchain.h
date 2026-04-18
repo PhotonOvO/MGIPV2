@@ -67,6 +67,7 @@ private:
 
   uint32_t m_frameResourceIndex{0};
   uint32_t m_frameImageIndex{0};
+  bool     m_hasAcquiredImage{false};
   uint32_t m_maxFramesInFlight{3};
   uint32_t m_requestedImageCount{3};
   Extent2D m_extent{};

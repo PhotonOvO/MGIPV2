@@ -1654,14 +1654,11 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
       const glm::vec3 center = 0.5f * (meshRecord->worldBoundsMin + meshRecord->worldBoundsMax);
       const float radius = glm::length(meshRecord->worldBoundsMax - center);
 
+      // Use pre-computed alphaMode from mesh
       uint32_t flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagOcclusionCulling;
-      if(meshRecord->materialIndex >= 0 && meshRecord->materialIndex < static_cast<int32_t>(params.gltfModel->materials.size()))
+      if(meshRecord->alphaMode == shaderio::LAlphaBlend)
       {
-        const MaterialHandle materialHandle = params.gltfModel->materials[meshRecord->materialIndex];
-        if(getMaterialTextureIndices(materialHandle, params.gltfModel).alphaMode == shaderio::LAlphaBlend)
-        {
-          flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
-        }
+        flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
       }
 
       objects[meshIndex] = shaderio::GPUCullObject{
@@ -5553,11 +5550,18 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
     result.materials.push_back(matHandle);
   }
 
-  // Upload meshes
+  // Upload meshes and set pre-computed alpha mode from material
   for(const auto& meshData : model.meshes)
   {
     MeshHandle meshHandle = m_meshPool.uploadMesh(meshData, cmd);
     result.meshes.push_back(meshHandle);
+
+    // Pre-compute alphaMode from material - avoids per-frame per-pass lookup
+    if(meshData.materialIndex >= 0 && meshData.materialIndex < static_cast<int>(model.materials.size()))
+    {
+      const auto& matData = model.materials[meshData.materialIndex];
+      m_meshPool.setMeshAlphaMode(meshHandle, matData.alphaMode, matData.alphaCutoff);
+    }
   }
 
   // Update bindless texture array with glTF textures

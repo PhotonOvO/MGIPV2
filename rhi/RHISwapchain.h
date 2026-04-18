@@ -12,6 +12,7 @@ struct AcquireResult
     success,
     suboptimal,
     outOfDate,
+    notReady,  // Image not available yet (non-blocking acquire returned VK_NOT_READY)
   };
 
   TextureHandle texture{};

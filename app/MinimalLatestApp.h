@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../common/Common.h"
-#include "../render/FrameSubmission.h"
 #include "../render/Renderer.h"
 #include "../rhi/RHISurface.h"
 #include "../rhi/vulkan/VulkanSurface.h"
@@ -60,7 +59,8 @@ public:
   {
     while(!glfwWindowShouldClose(m_window))
     {
-      m_framePacer.paceFrame(m_vSync ? utils::getMonitorsMinRefreshRate() : 10000.0);
+      // Let the renderer/present path control pacing. Adding an app-side sleep
+      // here only reduces CPU/GPU overlap and steady-state utilization.
       glfwPollEvents();
 
       // Check async loading progress
@@ -338,9 +338,7 @@ private:
   VkExtent2D                                        m_windowSize{800, 600};
   demo::rhi::Extent2D                               m_viewportSize{800, 600};
   demo::Renderer                                    m_renderer;
-  utils::FramePacer                                 m_framePacer;
-
-  bool                       m_vSync{true};
+  bool                       m_vSync{false};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
 

@@ -58,6 +58,7 @@ void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void*
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkQueue");
   ensure(m_surface != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkSurfaceKHR");
   ensure(m_cmdPool != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkCommandPool");
+  m_hasAcquiredImage = false;
 }
 
 void VulkanSwapchain::deinit()
@@ -70,6 +71,7 @@ void VulkanSwapchain::deinit()
   m_cmdPool        = VK_NULL_HANDLE;
   m_imageFormat    = VK_FORMAT_UNDEFINED;
   m_extent         = {};
+  m_hasAcquiredImage = false;
   m_needsRebuild   = false;
 }
 
@@ -89,6 +91,7 @@ void VulkanSwapchain::rebuild()
   vkQueueWaitIdle(m_queue);
   m_frameResourceIndex = 0;
   m_frameImageIndex    = 0;
+  m_hasAcquiredImage   = false;
   m_needsRebuild       = false;
   destroyResources();
   createResources(m_vSync);
@@ -101,12 +104,23 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   ensure(!m_frameResources.empty(), "VulkanSwapchain::acquireNextImage requires frame resources");
 
   auto&          frame  = m_frameResources[m_frameResourceIndex];
-  const VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, (std::numeric_limits<uint64_t>::max)(),
+  // Block in the presentation engine instead of busy retrying on the CPU.
+  // This removes frame skipping and sleep-based bubbles when the swapchain is
+  // pacing the app under FIFO or waiting for an image to recycle.
+  const VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
                                                 frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
   if(isSwapchainInvalidPresentResult(result))
   {
+    m_hasAcquiredImage = false;
     m_needsRebuild = true;
     return AcquireResult{.texture = {}, .imageIndex = 0, .status = AcquireResult::Status::outOfDate};
+  }
+
+  if(result == VK_NOT_READY)
+  {
+    // No swapchain image available yet - caller can retry or skip frame
+    m_hasAcquiredImage = false;
+    return AcquireResult{.texture = {}, .imageIndex = 0, .status = AcquireResult::Status::notReady};
   }
 
   if(result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
@@ -117,6 +131,7 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   {
     m_needsRebuild = true;
   }
+  m_hasAcquiredImage = true;
   ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::acquireNextImage invalid image index");
   return AcquireResult{.texture    = m_images[m_frameImageIndex].texture,
                        .imageIndex = m_frameImageIndex,
@@ -127,6 +142,16 @@ PresentResult VulkanSwapchain::present()
 {
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::present requires VkQueue");
   ensure(m_swapchain != VK_NULL_HANDLE, "VulkanSwapchain::present requires initialized swapchain");
+
+  if(!m_hasAcquiredImage)
+  {
+    if(m_maxFramesInFlight > 0)
+    {
+      m_frameResourceIndex = (m_frameResourceIndex + 1) % m_maxFramesInFlight;
+    }
+    return PresentResult{};
+  }
+
   ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::present invalid swapchain image index");
 
   auto&                  image = m_images[m_frameImageIndex];
@@ -164,12 +189,14 @@ PresentResult VulkanSwapchain::present()
     m_frameResourceIndex = (m_frameResourceIndex + 1) % m_maxFramesInFlight;
   }
 
+  m_hasAcquiredImage = false;
+
   return presentResult;
 }
 
 TextureHandle VulkanSwapchain::currentTexture() const
 {
-  if(m_images.empty() || m_frameImageIndex >= m_images.size())
+  if(!m_hasAcquiredImage || m_images.empty() || m_frameImageIndex >= m_images.size())
   {
     return {};
   }
@@ -221,7 +248,7 @@ VkImage VulkanSwapchain::nativeImage(uint32_t imageIndex) const
 
 VkSemaphore VulkanSwapchain::imageAvailableSemaphoreForCurrentFrame() const
 {
-  if(m_frameResources.empty() || m_frameResourceIndex >= m_frameResources.size())
+  if(!m_hasAcquiredImage || m_frameResources.empty() || m_frameResourceIndex >= m_frameResources.size())
   {
     return VK_NULL_HANDLE;
   }
@@ -230,7 +257,7 @@ VkSemaphore VulkanSwapchain::imageAvailableSemaphoreForCurrentFrame() const
 
 VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentImage() const
 {
-  if(m_images.empty() || m_frameImageIndex >= m_images.size())
+  if(!m_hasAcquiredImage || m_images.empty() || m_frameImageIndex >= m_images.size())
   {
     return VK_NULL_HANDLE;
   }
@@ -343,6 +370,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 
 void VulkanSwapchain::destroyResources()
 {
+  m_hasAcquiredImage = false;
   if(m_device == VK_NULL_HANDLE)
   {
     m_images.clear();

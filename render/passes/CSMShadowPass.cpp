@@ -7,8 +7,23 @@
 
 #include <array>
 #include <cstring>
+#include <vector>
 
 namespace demo {
+
+namespace {
+
+// Dynamic UBO alignment requirement (minUniformBufferOffsetAlignment)
+constexpr uint32_t kDrawUniformsStride = 256;
+
+struct PendingDraw
+{
+    size_t meshIndex;
+    const MeshRecord* mesh;
+    shaderio::DrawUniforms uniforms;
+};
+
+}  // namespace
 
 CSMShadowPass::CSMShadowPass(Renderer* renderer)
     : m_renderer(renderer)
@@ -163,80 +178,85 @@ void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipe
   MeshPool& meshPool = m_renderer->getMeshPool();
   (void)cascadeIndex;
 
-  if(context.gltfModel != nullptr)
+  if(context.gltfModel == nullptr || drawBindGroupHandle.isNull())
   {
-    for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+    return;
+  }
+
+  // First pass: collect visible meshes and compute DrawUniforms
+  std::vector<PendingDraw> pendingDraws;
+  for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+  {
+    MeshHandle meshHandle = context.gltfModel->meshes[i];
+    const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+    if(mesh == nullptr)
     {
-      MeshHandle meshHandle = context.gltfModel->meshes[i];
-      const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-      if(mesh == nullptr)
-      {
-        continue;
-      }
-
-      // Skip alpha-blended meshes for shadow pass
-      int32_t alphaMode = shaderio::LAlphaOpaque;
-      if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
-      {
-        MaterialHandle materialHandle = context.gltfModel->materials[mesh->materialIndex];
-        alphaMode = m_renderer->getMaterialTextureIndices(materialHandle, context.gltfModel).alphaMode;
-        if(alphaMode == shaderio::LAlphaBlend)
-        {
-          continue;
-        }
-      }
-
-      // Allocate and upload draw uniforms
-      const TransientAllocator::Allocation drawAlloc =
-          context.transientAllocator->allocate(sizeof(shaderio::DrawUniforms), 256);
-
-      shaderio::DrawUniforms drawData{};
-      drawData.modelMatrix = mesh->transform;
-      drawData.baseColorFactor = glm::vec4(1.0f);
-      drawData.baseColorTextureIndex = -1;
-      drawData.normalTextureIndex = -1;
-      drawData.metallicRoughnessTextureIndex = -1;
-      drawData.occlusionTextureIndex = -1;
-      drawData.metallicFactor = 1.0f;
-      drawData.roughnessFactor = 1.0f;
-      drawData.normalScale = 1.0f;
-      drawData.alphaMode = alphaMode;
-      drawData.alphaCutoff = 0.5f;
-
-      // Apply cascade-specific bias in the draw uniforms (if shader supports it)
-      // Note: cascadeBiasScale packed values are passed via ShadowUniforms
-
-      if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
-      {
-        MaterialHandle materialHandle = context.gltfModel->materials[mesh->materialIndex];
-        drawData.baseColorFactor = m_renderer->getMaterialBaseColorFactor(materialHandle);
-        auto indices = m_renderer->getMaterialTextureIndices(materialHandle, context.gltfModel);
-        drawData.baseColorTextureIndex = indices.baseColor;
-        drawData.alphaMode = indices.alphaMode;
-        drawData.alphaCutoff = indices.alphaCutoff;
-      }
-
-      std::memcpy(drawAlloc.cpuPtr, &drawData, sizeof(drawData));
-      context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
-
-      if(!drawBindGroupHandle.isNull())
-      {
-        VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-            m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-        const uint32_t drawDynamicOffset = drawAlloc.offset;
-        vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
-      }
-
-      // Bind vertex and index buffers
-      const uint64_t vertexHandle = mesh->vertexBufferHandle;
-      const uint64_t vertexOffset = 0;
-      context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
-      context.cmd->bindIndexBuffer(mesh->indexBufferHandle, 0, rhi::IndexFormat::uint32);
-
-      // Draw mesh
-      context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+      continue;
     }
+
+    // Use pre-computed alphaMode from mesh - skip transparent meshes for shadow pass
+    const int32_t alphaMode = mesh->alphaMode;
+    if(alphaMode == shaderio::LAlphaBlend)
+    {
+      continue;
+    }
+
+    // Compute DrawUniforms
+    shaderio::DrawUniforms drawData{};
+    drawData.modelMatrix = mesh->transform;
+    drawData.baseColorFactor = glm::vec4(1.0f);
+    drawData.baseColorTextureIndex = -1;
+    drawData.normalTextureIndex = -1;
+    drawData.metallicRoughnessTextureIndex = -1;
+    drawData.occlusionTextureIndex = -1;
+    drawData.metallicFactor = 1.0f;
+    drawData.roughnessFactor = 1.0f;
+    drawData.normalScale = 1.0f;
+    drawData.alphaMode = alphaMode;
+    drawData.alphaCutoff = mesh->alphaCutoff;
+
+    pendingDraws.push_back({i, mesh, drawData});
+  }
+
+  // Batch allocate DrawUniforms for all visible meshes
+  if(pendingDraws.empty())
+  {
+    return;
+  }
+
+  const uint32_t batchSize = static_cast<uint32_t>(pendingDraws.size()) * kDrawUniformsStride;
+  const TransientAllocator::Allocation batchAlloc =
+      context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
+
+  // Write all DrawUniforms at once
+  for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+  {
+    std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
+    std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
+  }
+  context.transientAllocator->flushAllocation(batchAlloc, batchSize);
+
+  // Second pass: bind descriptors and draw
+  VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+      m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+
+  for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+  {
+    const PendingDraw& draw = pendingDraws[slot];
+
+    // Bind draw descriptor set with dynamic offset
+    const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
+    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                            shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
+
+    // Bind vertex and index buffers
+    const uint64_t vertexHandle = draw.mesh->vertexBufferHandle;
+    const uint64_t vertexOffset = 0;
+    context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
+    context.cmd->bindIndexBuffer(draw.mesh->indexBufferHandle, 0, rhi::IndexFormat::uint32);
+
+    // Draw mesh
+    context.cmd->drawIndexed(draw.mesh->indexCount, 1, 0, 0, 0);
   }
 }
 

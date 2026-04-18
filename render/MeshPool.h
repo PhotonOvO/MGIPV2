@@ -22,6 +22,10 @@ struct MeshRecord {
     uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
     glm::mat4 transform = glm::mat4(1.0f);
     int32_t materialIndex = -1;  // -1 = default material
+    // Pre-computed alpha mode from material - avoids per-frame per-pass lookup
+    // 0=OPAQUE, 1=MASK, 2=BLEND (matches shaderio::LAlphaOpaque/Mask/Blend)
+    int32_t alphaMode = 0;
+    float alphaCutoff = 0.5f;
     glm::vec3 localBoundsMin = glm::vec3(0.0f);
     glm::vec3 localBoundsMax = glm::vec3(0.0f);
     glm::vec3 worldBoundsMin = glm::vec3(0.0f);
@@ -55,6 +59,7 @@ public:
     MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd);
     void destroyMesh(MeshHandle handle);
     void updateTransform(MeshHandle handle, const glm::mat4& transform);
+    void setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alphaCutoff);
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
 

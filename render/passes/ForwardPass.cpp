@@ -9,10 +9,14 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <vector>
 
 namespace demo {
 
 namespace {
+
+// Dynamic UBO alignment requirement (minUniformBufferOffsetAlignment)
+constexpr uint32_t kDrawUniformsStride = 256;
 
 [[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
 {
@@ -110,7 +114,7 @@ void ForwardPass::execute(const PassContext& context) const
         return;
     }
 
-    // Collect transparent meshes and sort by distance
+    // Collect transparent meshes using pre-computed alphaMode and sort by distance
     std::vector<std::pair<size_t, float>> transparentMeshes;
 
     glm::vec3 cameraPos(0.0f);
@@ -125,19 +129,8 @@ void ForwardPass::execute(const PassContext& context) const
         const MeshRecord* mesh = meshPool.tryGet(meshHandle);
         if(mesh == nullptr) continue;
 
-        // Check material alpha mode
-        bool isTransparent = false;
-        if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
-        {
-            MaterialHandle matHandle = context.gltfModel->materials[mesh->materialIndex];
-            auto indices = m_renderer->getMaterialTextureIndices(matHandle, context.gltfModel);
-            if(indices.alphaMode == shaderio::LAlphaBlend)
-            {
-                isTransparent = true;
-            }
-        }
-
-        if(!isTransparent) continue;
+        // Use pre-computed alphaMode - only process transparent meshes here
+        if(mesh->alphaMode != shaderio::LAlphaBlend) continue;
 
         // Calculate distance from camera (use mesh center)
         glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
@@ -304,84 +297,103 @@ void ForwardPass::execute(const PassContext& context) const
     // Get draw descriptor set (per-frame)
     const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
-    // Render transparent meshes (sorted back to front)
-    for(const auto& [meshIndex, distance] : transparentMeshes)
+    // Batch allocate DrawUniforms for all transparent meshes
+    if(!transparentMeshes.empty() && !drawBindGroupHandle.isNull())
     {
-        (void)distance;
-        MeshHandle meshHandle = context.gltfModel->meshes[meshIndex];
-        const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-        if(mesh == nullptr) continue;
+        // First pass: compute DrawUniforms for all transparent meshes
+        std::vector<shaderio::DrawUniforms> uniformsData;
+        uniformsData.reserve(transparentMeshes.size());
 
-        // Allocate DrawUniforms
-        const uint32_t drawAlignment = 256;
-        const TransientAllocator::Allocation drawAlloc =
-            context.transientAllocator->allocate(sizeof(shaderio::DrawUniforms), drawAlignment);
+        std::vector<const MeshRecord*> meshRecords;
+        meshRecords.reserve(transparentMeshes.size());
 
-        // Setup draw uniforms
-        shaderio::DrawUniforms drawData{};
-        drawData.modelMatrix = mesh->transform;
-
-        drawData.baseColorFactor = glm::vec4(1.0f);
-        drawData.baseColorTextureIndex = -1;
-        drawData.normalTextureIndex = -1;
-        drawData.metallicRoughnessTextureIndex = -1;
-        drawData.occlusionTextureIndex = -1;
-        drawData.metallicFactor = 1.0f;
-        drawData.roughnessFactor = 1.0f;
-        drawData.normalScale = 1.0f;
-        drawData.alphaMode = shaderio::LAlphaBlend;
-        drawData.alphaCutoff = 0.5f;
-
-        if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
+        for(const auto& [meshIndex, distance] : transparentMeshes)
         {
-            MaterialHandle matHandle = context.gltfModel->materials[mesh->materialIndex];
-            drawData.baseColorFactor = m_renderer->getMaterialBaseColorFactor(matHandle);
+            (void)distance;
+            MeshHandle meshHandle = context.gltfModel->meshes[meshIndex];
+            const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+            if(mesh == nullptr) continue;
 
-            auto texIndices = m_renderer->getMaterialTextureIndices(matHandle, context.gltfModel);
-            drawData.baseColorTextureIndex = texIndices.baseColor;
-            drawData.normalTextureIndex = texIndices.normal;
-            drawData.metallicRoughnessTextureIndex = texIndices.metallicRoughness;
-            drawData.occlusionTextureIndex = texIndices.occlusion;
-            drawData.metallicFactor = texIndices.metallicFactor;
-            drawData.roughnessFactor = texIndices.roughnessFactor;
-            drawData.normalScale = texIndices.normalScale;
-            drawData.alphaMode = texIndices.alphaMode;
-            drawData.alphaCutoff = texIndices.alphaCutoff;
+            meshRecords.push_back(mesh);
+
+            shaderio::DrawUniforms drawData{};
+            drawData.modelMatrix = mesh->transform;
+            drawData.baseColorFactor = glm::vec4(1.0f);
+            drawData.baseColorTextureIndex = -1;
+            drawData.normalTextureIndex = -1;
+            drawData.metallicRoughnessTextureIndex = -1;
+            drawData.occlusionTextureIndex = -1;
+            drawData.metallicFactor = 1.0f;
+            drawData.roughnessFactor = 1.0f;
+            drawData.normalScale = 1.0f;
+            drawData.alphaMode = mesh->alphaMode;
+            drawData.alphaCutoff = mesh->alphaCutoff;
+
+            if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
+            {
+                MaterialHandle matHandle = context.gltfModel->materials[mesh->materialIndex];
+                drawData.baseColorFactor = m_renderer->getMaterialBaseColorFactor(matHandle);
+
+                auto texIndices = m_renderer->getMaterialTextureIndices(matHandle, context.gltfModel);
+                drawData.baseColorTextureIndex = texIndices.baseColor;
+                drawData.normalTextureIndex = texIndices.normal;
+                drawData.metallicRoughnessTextureIndex = texIndices.metallicRoughness;
+                drawData.occlusionTextureIndex = texIndices.occlusion;
+                drawData.metallicFactor = texIndices.metallicFactor;
+                drawData.roughnessFactor = texIndices.roughnessFactor;
+                drawData.normalScale = texIndices.normalScale;
+            }
+
+            uniformsData.push_back(drawData);
         }
 
-        std::memcpy(drawAlloc.cpuPtr, &drawData, sizeof(drawData));
-        context.transientAllocator->flushAllocation(drawAlloc, sizeof(drawData));
+        // Batch allocate
+        const uint32_t batchSize = static_cast<uint32_t>(uniformsData.size()) * kDrawUniformsStride;
+        const TransientAllocator::Allocation batchAlloc =
+            context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
 
-        // Bind draw descriptor set (set 2) with dynamic offset
-        // BLOCKER: RHI bindBindGroup is a stub placeholder, using native Vulkan binding
-        if(!drawBindGroupHandle.isNull())
+        // Write all DrawUniforms at once
+        for(size_t slot = 0; slot < uniformsData.size(); ++slot)
         {
-            uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
-            VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
-            const uint32_t drawDynamicOffset = drawAlloc.offset;
+            std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
+            std::memcpy(dst, &uniformsData[slot], sizeof(shaderio::DrawUniforms));
+        }
+        context.transientAllocator->flushAllocation(batchAlloc, batchSize);
+
+        // Second pass: bind and draw
+        uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
+        VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
+
+        for(size_t slot = 0; slot < meshRecords.size(); ++slot)
+        {
+            const MeshRecord* mesh = meshRecords[slot];
+            size_t meshIndex = transparentMeshes[slot].first;
+
+            // Bind draw descriptor set with dynamic offset
+            const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
             vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                     shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
-        }
 
-        // Bind vertex and index buffers using RHI interface with opaque uint64_t handles
-        const uint64_t vertexHandle = mesh->vertexBufferHandle;
-        const uint64_t vertexOffset = 0;
-        context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
+            // Bind vertex and index buffers
+            const uint64_t vertexHandle = mesh->vertexBufferHandle;
+            const uint64_t vertexOffset = 0;
+            context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
 
-        const uint64_t indexHandle = mesh->indexBufferHandle;
-        context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+            const uint64_t indexHandle = mesh->indexBufferHandle;
+            context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
 
-        if(indirectBufferHandle != 0)
-        {
-            context.cmd->drawIndexedIndirect(indirectBufferHandle,
-                                             static_cast<uint64_t>(meshIndex) * indirectCommandStride,
-                                             1,
-                                             indirectCommandStride);
-        }
-        else
-        {
-            context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+            if(indirectBufferHandle != 0)
+            {
+                context.cmd->drawIndexedIndirect(indirectBufferHandle,
+                                                 static_cast<uint64_t>(meshIndex) * indirectCommandStride,
+                                                 1,
+                                                 indirectCommandStride);
+            }
+            else
+            {
+                context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+            }
         }
     }
 

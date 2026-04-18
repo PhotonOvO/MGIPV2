@@ -10,6 +10,11 @@ bool acquireSwapchainImage(rhi::Swapchain& swapchain, uint32_t& imageIndexOut)
     return false;
   }
 
+  if(acquireResult.status == rhi::AcquireResult::Status::notReady)
+  {
+    return false;
+  }
+
   imageIndexOut = acquireResult.imageIndex;
   return true;
 }

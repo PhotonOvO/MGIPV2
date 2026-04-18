@@ -385,6 +385,7 @@ private:
     VkExtent2D                      viewportSize{800, 600};
     VkFormat                        swapchainImageFormat{VK_FORMAT_B8G8R8A8_UNORM};
     uint32_t                        currentImageIndex{0};
+    bool                            hasAcquiredImage{false};
     std::vector<rhi::ResourceState> imageStates;  // Track per-image layout state
     bool                            vSync{true};
   };
@@ -598,6 +599,8 @@ private:
   void              createFrameSubmission(uint32_t numFrames);
   void              rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize = std::nullopt);
   bool              prepareFrameResources();
+  bool              acquireSwapchainImageForPresent();
+  void              updateSwapchainTextureBinding(rhi::ResourceState initialState);
   rhi::CommandList& beginCommandRecording();
   void              drawFrame(rhi::CommandList& cmd, const RenderParams& params);
   void              endFrame(rhi::CommandList& cmd);
