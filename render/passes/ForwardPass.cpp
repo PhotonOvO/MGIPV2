@@ -114,28 +114,60 @@ void ForwardPass::execute(const PassContext& context) const
         return;
     }
 
-    // Collect transparent meshes using pre-computed alphaMode and sort by distance
-    std::vector<std::pair<size_t, float>> transparentMeshes;
-
+    // Use pre-built transparent mesh list with cached sorting
     glm::vec3 cameraPos(0.0f);
     if(context.params->cameraUniforms != nullptr)
     {
         cameraPos = context.params->cameraUniforms->cameraPosition;
     }
 
-    for(size_t i = 0; i < context.gltfModel->meshes.size(); ++i)
+    // Check if sorting needs update (camera moved significantly)
+    const float cameraMoveThreshold = 0.5f;  // meters
+    const float cameraDelta = glm::length(cameraPos - context.gltfModel->lastSortCameraPos);
+
+    GltfUploadResult* mutableGltfModel = const_cast<GltfUploadResult*>(context.gltfModel);
+    if(context.gltfModel->transparentSortDirty || cameraDelta > cameraMoveThreshold)
     {
-        MeshHandle meshHandle = context.gltfModel->meshes[i];
-        const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-        if(mesh == nullptr) continue;
+        // Update distances
+        mutableGltfModel->lastSortCameraPos = cameraPos;
+        for(size_t slot = 0; slot < context.gltfModel->transparentMeshIndices.size(); ++slot)
+        {
+            size_t meshIdx = context.gltfModel->transparentMeshIndices[slot];
+            MeshHandle meshHandle = context.gltfModel->meshes[meshIdx];
+            const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+            if(mesh == nullptr)
+            {
+                mutableGltfModel->transparentDistances[slot] = std::numeric_limits<float>::max();
+                continue;
+            }
+            glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
+            mutableGltfModel->transparentDistances[slot] = glm::length(meshCenter - cameraPos);
+        }
 
-        // Use pre-computed alphaMode - only process transparent meshes here
-        if(mesh->alphaMode != shaderio::LAlphaBlend) continue;
+        // Re-sort indices by distance (far to near)
+        std::vector<size_t> sortedIndices = context.gltfModel->transparentMeshIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end(),
+            [&](size_t a, size_t b) {
+                size_t slotA = std::find(context.gltfModel->transparentMeshIndices.begin(),
+                                         context.gltfModel->transparentMeshIndices.end(), a) -
+                               context.gltfModel->transparentMeshIndices.begin();
+                size_t slotB = std::find(context.gltfModel->transparentMeshIndices.begin(),
+                                         context.gltfModel->transparentMeshIndices.end(), b) -
+                               context.gltfModel->transparentMeshIndices.begin();
+                return context.gltfModel->transparentDistances[slotA] >
+                       context.gltfModel->transparentDistances[slotB];
+            });
 
-        // Calculate distance from camera (use mesh center)
-        glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
-        float distance = glm::length(meshCenter - cameraPos);
-        transparentMeshes.push_back({i, distance});
+        mutableGltfModel->transparentMeshIndices = sortedIndices;
+        mutableGltfModel->transparentSortDirty = false;
+    }
+
+    // Use pre-sorted transparent mesh indices directly
+    std::vector<std::pair<size_t, float>> transparentMeshes;
+    for(size_t slot = 0; slot < context.gltfModel->transparentMeshIndices.size(); ++slot)
+    {
+        transparentMeshes.push_back({context.gltfModel->transparentMeshIndices[slot],
+                                     context.gltfModel->transparentDistances[slot]});
     }
 
     // No transparent meshes, skip rendering
@@ -145,10 +177,6 @@ void ForwardPass::execute(const PassContext& context) const
         context.cmd->endEvent();
         return;
     }
-
-    // Sort far to near (back to front)
-    std::sort(transparentMeshes.begin(), transparentMeshes.end(),
-        [](const auto& a, const auto& b) { return a.second > b.second; });
 
     // Setup color attachment with LOAD loadOp (preserve LightPass output)
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
