@@ -354,20 +354,15 @@ void ForwardPass::execute(const PassContext& context) const
             drawData.alphaMode = mesh->alphaMode;
             drawData.alphaCutoff = mesh->alphaCutoff;
 
-            if(mesh->materialIndex >= 0 && mesh->materialIndex < static_cast<int32_t>(context.gltfModel->materials.size()))
-            {
-                MaterialHandle matHandle = context.gltfModel->materials[mesh->materialIndex];
-                drawData.baseColorFactor = m_renderer->getMaterialBaseColorFactor(matHandle);
-
-                auto texIndices = m_renderer->getMaterialTextureIndices(matHandle, context.gltfModel);
-                drawData.baseColorTextureIndex = texIndices.baseColor;
-                drawData.normalTextureIndex = texIndices.normal;
-                drawData.metallicRoughnessTextureIndex = texIndices.metallicRoughness;
-                drawData.occlusionTextureIndex = texIndices.occlusion;
-                drawData.metallicFactor = texIndices.metallicFactor;
-                drawData.roughnessFactor = texIndices.roughnessFactor;
-                drawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached material data from mesh (no per-frame lookup)
+            drawData.baseColorFactor = mesh->baseColorFactor;
+            drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
+            drawData.normalTextureIndex = mesh->normalTextureIndex;
+            drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
+            drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+            drawData.metallicFactor = mesh->metallicFactor;
+            drawData.roughnessFactor = mesh->roughnessFactor;
+            drawData.normalScale = mesh->normalScale;
 
             uniformsData.push_back(drawData);
         }
