@@ -2,6 +2,7 @@
 #include "../Renderer.h"
 #include "../MeshPool.h"
 #include "../CSMShadowResources.h"
+#include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"
 
@@ -65,9 +66,12 @@ void CSMShadowPass::execute(const PassContext& context) const
   });
 
   // Render each cascade layer
-  for(uint32_t i = 0; i < cascadeCount; ++i)
   {
-    renderCascadeLayer(context, i);
+    TRACY_ZONE_SCOPED("CSMShadowPass::cascadeLoop");
+    for(uint32_t i = 0; i < cascadeCount; ++i)
+    {
+      renderCascadeLayer(context, i);
+    }
   }
 
   // Final transition: DepthStencil -> General (for sampling in LightPass)
@@ -186,30 +190,33 @@ void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipe
   // First pass: collect visible meshes and compute DrawUniforms
   // Use pre-built shadow caster list (already excludes transparent meshes)
   std::vector<PendingDraw> pendingDraws;
-  for(size_t idx : context.gltfModel->shadowCasterIndices)
   {
-    MeshHandle meshHandle = context.gltfModel->meshes[idx];
-    const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-    if(mesh == nullptr)
+    TRACY_ZONE_SCOPED("CSMShadowPass::collectMeshes");
+    for(size_t idx : context.gltfModel->shadowCasterIndices)
     {
-      continue;
+      MeshHandle meshHandle = context.gltfModel->meshes[idx];
+      const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+      if(mesh == nullptr)
+      {
+        continue;
+      }
+
+      // Compute DrawUniforms
+      shaderio::DrawUniforms drawData{};
+      drawData.modelMatrix = mesh->transform;
+      drawData.baseColorFactor = glm::vec4(1.0f);
+      drawData.baseColorTextureIndex = -1;
+      drawData.normalTextureIndex = -1;
+      drawData.metallicRoughnessTextureIndex = -1;
+      drawData.occlusionTextureIndex = -1;
+      drawData.metallicFactor = 1.0f;
+      drawData.roughnessFactor = 1.0f;
+      drawData.normalScale = 1.0f;
+      drawData.alphaMode = mesh->alphaMode;
+      drawData.alphaCutoff = mesh->alphaCutoff;
+
+      pendingDraws.push_back({idx, mesh, drawData});
     }
-
-    // Compute DrawUniforms
-    shaderio::DrawUniforms drawData{};
-    drawData.modelMatrix = mesh->transform;
-    drawData.baseColorFactor = glm::vec4(1.0f);
-    drawData.baseColorTextureIndex = -1;
-    drawData.normalTextureIndex = -1;
-    drawData.metallicRoughnessTextureIndex = -1;
-    drawData.occlusionTextureIndex = -1;
-    drawData.metallicFactor = 1.0f;
-    drawData.roughnessFactor = 1.0f;
-    drawData.normalScale = 1.0f;
-    drawData.alphaMode = mesh->alphaMode;
-    drawData.alphaCutoff = mesh->alphaCutoff;
-
-    pendingDraws.push_back({idx, mesh, drawData});
   }
 
   // Batch allocate DrawUniforms for all visible meshes
@@ -222,35 +229,41 @@ void CSMShadowPass::drawMeshes(const PassContext& context, VkPipelineLayout pipe
   const TransientAllocator::Allocation batchAlloc =
       context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
 
-  // Write all DrawUniforms at once
-  for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
   {
-    std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
-    std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
+    TRACY_ZONE_SCOPED("CSMShadowPass::batchUpload");
+    // Write all DrawUniforms at once
+    for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+    {
+      std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
+      std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
+    }
+    context.transientAllocator->flushAllocation(batchAlloc, batchSize);
   }
-  context.transientAllocator->flushAllocation(batchAlloc, batchSize);
 
   // Second pass: bind descriptors and draw
   VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
       m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
 
-  for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
   {
-    const PendingDraw& draw = pendingDraws[slot];
+    TRACY_ZONE_SCOPED("CSMShadowPass::drawLoop");
+    for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+    {
+      const PendingDraw& draw = pendingDraws[slot];
 
-    // Bind draw descriptor set with dynamic offset
-    const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
+      // Bind draw descriptor set with dynamic offset
+      const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
+      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                              shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
 
-    // Bind vertex and index buffers
-    const uint64_t vertexHandle = draw.mesh->vertexBufferHandle;
-    const uint64_t vertexOffset = 0;
-    context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
-    context.cmd->bindIndexBuffer(draw.mesh->indexBufferHandle, 0, rhi::IndexFormat::uint32);
+      // Bind vertex and index buffers
+      const uint64_t vertexHandle = draw.mesh->vertexBufferHandle;
+      const uint64_t vertexOffset = 0;
+      context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
+      context.cmd->bindIndexBuffer(draw.mesh->indexBufferHandle, 0, rhi::IndexFormat::uint32);
 
-    // Draw mesh
-    context.cmd->drawIndexed(draw.mesh->indexCount, 1, 0, 0, 0);
+      // Draw mesh
+      context.cmd->drawIndexed(draw.mesh->indexCount, 1, 0, 0, 0);
+    }
   }
 }
 

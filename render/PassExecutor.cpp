@@ -328,6 +328,9 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
 
     PassContext scopedContext = context;
     scopedContext.passIndex   = passIndex;
+
+    // CPU Tracy zone for pass execution (pass-specific zones inside execute() provide breakdown)
+    TRACY_ZONE_SCOPED("PassExecutor::executePass");
     pass->execute(scopedContext);
 
 #ifdef TRACY_ENABLE

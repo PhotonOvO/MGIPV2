@@ -3,6 +3,7 @@
 #include "../MeshPool.h"
 #include "../SceneResources.h"
 #include "../ClipSpaceConvention.h"
+#include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
 #include "../../rhi/vulkan/VulkanCommandList.h"  // BLOCKER: Needed for native Vulkan pipeline/descriptor binding until RHI bindPipeline/bindBindGroup work
 
@@ -126,40 +127,43 @@ void ForwardPass::execute(const PassContext& context) const
     const float cameraDelta = glm::length(cameraPos - context.gltfModel->lastSortCameraPos);
 
     GltfUploadResult* mutableGltfModel = const_cast<GltfUploadResult*>(context.gltfModel);
-    if(context.gltfModel->transparentSortDirty || cameraDelta > cameraMoveThreshold)
     {
-        // Update distances
-        mutableGltfModel->lastSortCameraPos = cameraPos;
-        for(size_t slot = 0; slot < context.gltfModel->transparentMeshIndices.size(); ++slot)
+        TRACY_ZONE_SCOPED("ForwardPass::transparentSorting");
+        if(context.gltfModel->transparentSortDirty || cameraDelta > cameraMoveThreshold)
         {
-            size_t meshIdx = context.gltfModel->transparentMeshIndices[slot];
-            MeshHandle meshHandle = context.gltfModel->meshes[meshIdx];
-            const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-            if(mesh == nullptr)
+            // Update distances
+            mutableGltfModel->lastSortCameraPos = cameraPos;
+            for(size_t slot = 0; slot < context.gltfModel->transparentMeshIndices.size(); ++slot)
             {
-                mutableGltfModel->transparentDistances[slot] = std::numeric_limits<float>::max();
-                continue;
+                size_t meshIdx = context.gltfModel->transparentMeshIndices[slot];
+                MeshHandle meshHandle = context.gltfModel->meshes[meshIdx];
+                const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+                if(mesh == nullptr)
+                {
+                    mutableGltfModel->transparentDistances[slot] = std::numeric_limits<float>::max();
+                    continue;
+                }
+                glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
+                mutableGltfModel->transparentDistances[slot] = glm::length(meshCenter - cameraPos);
             }
-            glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
-            mutableGltfModel->transparentDistances[slot] = glm::length(meshCenter - cameraPos);
+
+            // Re-sort indices by distance (far to near)
+            std::vector<size_t> sortedIndices = context.gltfModel->transparentMeshIndices;
+            std::sort(sortedIndices.begin(), sortedIndices.end(),
+                [&](size_t a, size_t b) {
+                    size_t slotA = std::find(context.gltfModel->transparentMeshIndices.begin(),
+                                             context.gltfModel->transparentMeshIndices.end(), a) -
+                           context.gltfModel->transparentMeshIndices.begin();
+                    size_t slotB = std::find(context.gltfModel->transparentMeshIndices.begin(),
+                                             context.gltfModel->transparentMeshIndices.end(), b) -
+                           context.gltfModel->transparentMeshIndices.begin();
+                    return context.gltfModel->transparentDistances[slotA] >
+                           context.gltfModel->transparentDistances[slotB];
+                });
+
+            mutableGltfModel->transparentMeshIndices = sortedIndices;
+            mutableGltfModel->transparentSortDirty = false;
         }
-
-        // Re-sort indices by distance (far to near)
-        std::vector<size_t> sortedIndices = context.gltfModel->transparentMeshIndices;
-        std::sort(sortedIndices.begin(), sortedIndices.end(),
-            [&](size_t a, size_t b) {
-                size_t slotA = std::find(context.gltfModel->transparentMeshIndices.begin(),
-                                         context.gltfModel->transparentMeshIndices.end(), a) -
-                               context.gltfModel->transparentMeshIndices.begin();
-                size_t slotB = std::find(context.gltfModel->transparentMeshIndices.begin(),
-                                         context.gltfModel->transparentMeshIndices.end(), b) -
-                               context.gltfModel->transparentMeshIndices.begin();
-                return context.gltfModel->transparentDistances[slotA] >
-                       context.gltfModel->transparentDistances[slotB];
-            });
-
-        mutableGltfModel->transparentMeshIndices = sortedIndices;
-        mutableGltfModel->transparentSortDirty = false;
     }
 
     // Use pre-sorted transparent mesh indices directly
@@ -327,44 +331,46 @@ void ForwardPass::execute(const PassContext& context) const
     {
         // First pass: compute DrawUniforms for all transparent meshes
         std::vector<shaderio::DrawUniforms> uniformsData;
-        uniformsData.reserve(transparentMeshes.size());
-
         std::vector<const MeshRecord*> meshRecords;
-        meshRecords.reserve(transparentMeshes.size());
-
-        for(const auto& [meshIndex, distance] : transparentMeshes)
         {
-            (void)distance;
-            MeshHandle meshHandle = context.gltfModel->meshes[meshIndex];
-            const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-            if(mesh == nullptr) continue;
+            TRACY_ZONE_SCOPED("ForwardPass::collectMeshes");
+            uniformsData.reserve(transparentMeshes.size());
+            meshRecords.reserve(transparentMeshes.size());
 
-            meshRecords.push_back(mesh);
+            for(const auto& [meshIndex, distance] : transparentMeshes)
+            {
+                (void)distance;
+                MeshHandle meshHandle = context.gltfModel->meshes[meshIndex];
+                const MeshRecord* mesh = meshPool.tryGet(meshHandle);
+                if(mesh == nullptr) continue;
 
-            shaderio::DrawUniforms drawData{};
-            drawData.modelMatrix = mesh->transform;
-            drawData.baseColorFactor = glm::vec4(1.0f);
-            drawData.baseColorTextureIndex = -1;
-            drawData.normalTextureIndex = -1;
-            drawData.metallicRoughnessTextureIndex = -1;
-            drawData.occlusionTextureIndex = -1;
-            drawData.metallicFactor = 1.0f;
-            drawData.roughnessFactor = 1.0f;
-            drawData.normalScale = 1.0f;
-            drawData.alphaMode = mesh->alphaMode;
-            drawData.alphaCutoff = mesh->alphaCutoff;
+                meshRecords.push_back(mesh);
 
-            // Use cached material data from mesh (no per-frame lookup)
-            drawData.baseColorFactor = mesh->baseColorFactor;
-            drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
-            drawData.normalTextureIndex = mesh->normalTextureIndex;
-            drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
-            drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
-            drawData.metallicFactor = mesh->metallicFactor;
-            drawData.roughnessFactor = mesh->roughnessFactor;
-            drawData.normalScale = mesh->normalScale;
+                shaderio::DrawUniforms drawData{};
+                drawData.modelMatrix = mesh->transform;
+                drawData.baseColorFactor = glm::vec4(1.0f);
+                drawData.baseColorTextureIndex = -1;
+                drawData.normalTextureIndex = -1;
+                drawData.metallicRoughnessTextureIndex = -1;
+                drawData.occlusionTextureIndex = -1;
+                drawData.metallicFactor = 1.0f;
+                drawData.roughnessFactor = 1.0f;
+                drawData.normalScale = 1.0f;
+                drawData.alphaMode = mesh->alphaMode;
+                drawData.alphaCutoff = mesh->alphaCutoff;
 
-            uniformsData.push_back(drawData);
+                // Use cached material data from mesh (no per-frame lookup)
+                drawData.baseColorFactor = mesh->baseColorFactor;
+                drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
+                drawData.normalTextureIndex = mesh->normalTextureIndex;
+                drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
+                drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+                drawData.metallicFactor = mesh->metallicFactor;
+                drawData.roughnessFactor = mesh->roughnessFactor;
+                drawData.normalScale = mesh->normalScale;
+
+                uniformsData.push_back(drawData);
+            }
         }
 
         // Batch allocate
@@ -372,47 +378,53 @@ void ForwardPass::execute(const PassContext& context) const
         const TransientAllocator::Allocation batchAlloc =
             context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
 
-        // Write all DrawUniforms at once
-        for(size_t slot = 0; slot < uniformsData.size(); ++slot)
         {
-            std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
-            std::memcpy(dst, &uniformsData[slot], sizeof(shaderio::DrawUniforms));
+            TRACY_ZONE_SCOPED("ForwardPass::batchUpload");
+            // Write all DrawUniforms at once
+            for(size_t slot = 0; slot < uniformsData.size(); ++slot)
+            {
+                std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
+                std::memcpy(dst, &uniformsData[slot], sizeof(shaderio::DrawUniforms));
+            }
+            context.transientAllocator->flushAllocation(batchAlloc, batchSize);
         }
-        context.transientAllocator->flushAllocation(batchAlloc, batchSize);
 
         // Second pass: bind and draw
         uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
         VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
 
-        for(size_t slot = 0; slot < meshRecords.size(); ++slot)
         {
-            const MeshRecord* mesh = meshRecords[slot];
-            size_t meshIndex = transparentMeshes[slot].first;
-
-            // Bind draw descriptor set with dynamic offset
-            const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
-            vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                                    VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                    shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
-
-            // Bind vertex and index buffers
-            const uint64_t vertexHandle = mesh->vertexBufferHandle;
-            const uint64_t vertexOffset = 0;
-            context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
-
-            const uint64_t indexHandle = mesh->indexBufferHandle;
-            context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
-
-            if(indirectBufferHandle != 0)
+            TRACY_ZONE_SCOPED("ForwardPass::drawLoop");
+            for(size_t slot = 0; slot < meshRecords.size(); ++slot)
             {
-                context.cmd->drawIndexedIndirect(indirectBufferHandle,
-                                                 static_cast<uint64_t>(meshIndex) * indirectCommandStride,
-                                                 1,
-                                                 indirectCommandStride);
-            }
-            else
-            {
-                context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+                const MeshRecord* mesh = meshRecords[slot];
+                size_t meshIndex = transparentMeshes[slot].first;
+
+                // Bind draw descriptor set with dynamic offset
+                const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
+                vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                        shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
+
+                // Bind vertex and index buffers
+                const uint64_t vertexHandle = mesh->vertexBufferHandle;
+                const uint64_t vertexOffset = 0;
+                context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
+
+                const uint64_t indexHandle = mesh->indexBufferHandle;
+                context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+
+                if(indirectBufferHandle != 0)
+                {
+                    context.cmd->drawIndexedIndirect(indirectBufferHandle,
+                                                     static_cast<uint64_t>(meshIndex) * indirectCommandStride,
+                                                     1,
+                                                     indirectCommandStride);
+                }
+                else
+                {
+                    context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
+                }
             }
         }
     }
