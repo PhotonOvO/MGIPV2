@@ -234,6 +234,7 @@ public:
         ImGui::SliderFloat("Shadow Strength", &m_lightSettings.shadowStrength, 0.0f, 1.0f);
         ImGui::SliderFloat("Normal Bias", &m_lightSettings.normalBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Depth Bias", &m_lightSettings.depthBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::Checkbox("CSM Multi-Draw Indirect", &m_useCsmShadowMultiDrawIndirect);
 
         ImGui::Separator();
         ImGui::Text("Debug Overlay");
@@ -289,6 +290,7 @@ public:
       frameParams.cameraUniforms = &m_cameraUniforms;
       frameParams.lightSettings  = m_lightSettings;
       frameParams.debugOptions   = m_debugOptions;
+      frameParams.useCsmShadowMultiDrawIndirect = m_useCsmShadowMultiDrawIndirect;
       // Copy CSM debug settings to debugOptions
       frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
       frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
@@ -365,6 +367,7 @@ private:
   float m_lightAzimuthDegrees{0.0f};
   float m_lightElevationDegrees{0.0f};
   demo::DebugPassOptions m_debugOptions{};
+  bool m_useCsmShadowMultiDrawIndirect{false};
 
   // CSM Shadow debug settings (copied to debugOptions in run())
   bool  m_showShadowCascades{true};

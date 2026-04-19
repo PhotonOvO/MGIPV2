@@ -69,6 +69,7 @@
 #include "_autogen/shader.debug.slang.h"
 #include "_autogen/shader.light_culling.slang.h"
 #include "_autogen/shader.gpu_culling.slang.h"
+#include "_autogen/shader.shadow_culling.slang.h"
 #else
 #include "_autogen/shader.frag.glsl.h"
 #include "_autogen/shader.vert.glsl.h"

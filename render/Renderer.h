@@ -105,10 +105,19 @@ struct RenderParams
   const shaderio::CameraUniforms*       cameraUniforms{nullptr};
   DirectionalLightSettings               lightSettings{};
   DebugPassOptions                       debugOptions{};
+  bool                                   useCsmShadowMultiDrawIndirect{false};
 };
 
 struct GltfUploadResult
 {
+  struct ShadowPackedMesh
+  {
+    size_t   meshIndex{0};
+    uint32_t indexCount{0};
+    uint32_t firstIndex{0};
+    int32_t  vertexOffset{0};
+  };
+
   std::vector<MeshHandle>     meshes;
   std::vector<MaterialHandle> materials;
   std::vector<TextureHandle>  textures;
@@ -123,6 +132,10 @@ struct GltfUploadResult
   std::vector<float> transparentDistances;      // Distance from last camera position
   glm::vec3 lastSortCameraPos{0.0f};           // Camera position used for last sort
   bool transparentSortDirty{true};              // Force re-sort on first frame
+
+  utils::Buffer                 shadowPackedVertexBuffer{};
+  utils::Buffer                 shadowPackedIndexBuffer{};
+  std::vector<ShadowPackedMesh> shadowPackedMeshes;
 };
 
 class Renderer
@@ -192,6 +205,11 @@ public:
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
+  uint64_t       getCSMShadowPipelineLayout() const;
+  PipelineHandle getShadowCullingPipelineHandle() const;
+  uint64_t       getShadowCullingPipelineLayout() const;
+  uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
+  uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   PipelineHandle getLightCullingPipelineHandle() const;
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
@@ -202,6 +220,7 @@ public:
   CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
+  [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
   uint64_t       getLightCullingPipelineLayout() const;
@@ -223,6 +242,7 @@ public:
   // Per-frame bind group accessors for dynamic uniform buffers
   BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;
   BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;
+  BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const;
 
   // BindGroup creation (new RHI interface)
   rhi::BindGroupLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
@@ -267,6 +287,7 @@ public:
   VkImage getShadowMapImage() const;
   shaderio::ShadowUniforms* getShadowUniformsData();
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
+  uint64_t    getPhysicalDeviceOpaque() const { return m_device.device ? m_device.device->getNativePhysicalDevice() : 0; }
 
 private:
   class SamplerCache
@@ -369,6 +390,9 @@ private:
     VkDescriptorSetLayout                      gpuCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gpuCullingDescriptorSets;
     VkPipelineLayout                           gpuCullingPipelineLayout{nullptr};
+    VkDescriptorSetLayout                      shadowCullingSetLayout{nullptr};
+    std::vector<VkDescriptorSet>               shadowCullingDescriptorSets;
+    VkPipelineLayout                           shadowCullingPipelineLayout{nullptr};
     VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
     VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
@@ -376,6 +400,7 @@ private:
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       debugPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
+    std::unique_ptr<rhi::PipelineLayout>       csmShadowMdiPipelineLayout;
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
     struct PrebuiltPipelineVariants
@@ -414,6 +439,8 @@ private:
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
       BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
+      std::array<BindGroupHandle, shaderio::LCascadeCount> csmShadowMdiDrawBindGroups{
+          kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle};
       utils::Buffer      lightingBuffer{};
       utils::Buffer      lightCullingBuffer{};
       utils::Buffer      gpuCullingObjectBuffer{};
@@ -423,6 +450,10 @@ private:
       utils::Buffer      gpuCullingResultBuffer{};
       uint32_t           gpuCullingMeshCapacity{0};
       std::vector<uint32_t> gpuCullingResults;
+      utils::Buffer      shadowCullingObjectBuffer{};
+      utils::Buffer      shadowCullingIndirectBuffer{};
+      utils::Buffer      shadowCullingDrawDataBuffer{};
+      uint32_t           shadowCullingMeshCapacity{0};
       std::vector<VkCommandBuffer> pendingUploadCmds;
       std::vector<VkFence> pendingUploadFences;
     };
@@ -464,10 +495,11 @@ private:
   PipelineHandle m_depthPrepassAlphaTestPipeline{};
   PipelineHandle m_depthPyramidPipeline{};
   PipelineHandle m_gpuCullingPipeline{};
+  PipelineHandle m_shadowCullingPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
-  PipelineHandle m_csmShadowPipeline{};        // CSM cascade depth pass
+  PipelineHandle m_csmShadowPipeline{};          // CSM cascade MDI depth pass
   CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
@@ -634,6 +666,11 @@ private:
   void                 createGPUCullingPipeline();
   void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
+  void                 createShadowCullingResources();
+  void                 updateShadowCullingDescriptorSet(uint32_t frameIndex);
+  void                 createShadowCullingPipeline();
+  void                 ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
+  void                 updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 cacheGPUCullingStats(uint32_t frameIndex);
   void                 drawGPUInfoOverlay(const RenderParams& params) const;
   void                 drawGPUCullingOverlay(const RenderParams& params) const;

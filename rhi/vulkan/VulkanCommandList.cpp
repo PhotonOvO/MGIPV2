@@ -447,6 +447,19 @@ void VulkanCommandList::bindVertexBuffers(uint32_t firstBinding, const uint64_t*
                                           const uint64_t* offsets, uint32_t bufferCount)
 {
   ensureCommandBuffer(m_commandBuffer);
+  if(bufferCount == 0)
+  {
+    return;
+  }
+
+  if(bufferCount == 1)
+  {
+    const VkBuffer nativeBuffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(bufferHandles[0]));
+    const VkDeviceSize nativeOffset = offsets != nullptr ? static_cast<VkDeviceSize>(offsets[0]) : 0;
+    vkCmdBindVertexBuffers(m_commandBuffer, firstBinding, 1, &nativeBuffer, &nativeOffset);
+    return;
+  }
+
   // Convert opaque handles to VkBuffer (handles are just encoded pointers)
   std::vector<VkBuffer> nativeBuffers(bufferCount);
   for(uint32_t i = 0; i < bufferCount; ++i)

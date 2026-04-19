@@ -21,7 +21,9 @@ private:
   Renderer* m_renderer{nullptr};
 
   void renderCascadeLayer(const PassContext& context, uint32_t cascadeIndex) const;
-  void drawMeshes(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const;
+  bool prepareMultiDrawIndirect(const PassContext& context, uint32_t cascadeIndex) const;
+  void drawMeshesLegacy(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const;
+  void drawMeshesMultiDrawIndirect(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const;
 };
 
 }  // namespace demo

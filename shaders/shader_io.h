@@ -35,6 +35,7 @@ STATIC_CONST int LBindLightCulling = 3;   // Scene light-culling data
 // Set 2: Draw-level dynamic uniforms
 STATIC_CONST int LSetDraw       = 2;
 STATIC_CONST int LBindDrawModel = 0;      // Per-draw model matrix
+STATIC_CONST int LBindDrawModelMdi = 1;   // Per-draw model data for MDI / indexed via draw ID
 
 // Vertex layout
 STATIC_CONST int LVPosition = 0;
@@ -221,6 +222,24 @@ struct GPUCullIndirectCommand
   uint32_t firstIndex;
   int32_t  vertexOffset;
   uint32_t firstInstance;
+};
+
+struct ShadowCullObject
+{
+  vec4     sphereCenterRadius;
+  uint32_t indexCount;
+  uint32_t firstIndex;
+  int32_t  vertexOffset;
+  uint32_t firstInstance;
+};
+
+struct ShadowCullPushConstants
+{
+  vec4     frustumPlanes[LGPUCullingFrustumPlaneCount];
+  uint32_t objectCount;
+  uint32_t _padding0;
+  uint32_t _padding1;
+  uint32_t _padding2;
 };
 
 struct GPUCullStats

@@ -7,8 +7,12 @@ namespace {
 [[nodiscard]] uint32_t alignUp(uint32_t value, uint32_t alignment)
 {
   const uint32_t safeAlignment = alignment == 0 ? 1u : alignment;
-  const uint32_t mask          = safeAlignment - 1u;
-  return (value + mask) & ~mask;
+  const uint32_t remainder = value % safeAlignment;
+  if(remainder == 0u)
+  {
+    return value;
+  }
+  return value + (safeAlignment - remainder);
 }
 
 }  // namespace
@@ -35,7 +39,8 @@ void TransientAllocator::init(rhi::Device& device, VmaAllocator allocator, uint3
       .pNext = bufferCreatePNext,
       .size  = bufferSize,
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-               | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+               | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+               | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
   };
 

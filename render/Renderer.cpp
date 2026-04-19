@@ -123,6 +123,23 @@ struct DebugUnitLineSegment
   };
 }
 
+[[nodiscard]] shaderio::DrawUniforms buildShadowDrawUniforms(const MeshRecord& mesh)
+{
+  shaderio::DrawUniforms drawData{};
+  drawData.modelMatrix = mesh.transform;
+  drawData.baseColorFactor = mesh.baseColorFactor;
+  drawData.baseColorTextureIndex = mesh.baseColorTextureIndex;
+  drawData.normalTextureIndex = mesh.normalTextureIndex;
+  drawData.metallicRoughnessTextureIndex = mesh.metallicRoughnessTextureIndex;
+  drawData.occlusionTextureIndex = mesh.occlusionTextureIndex;
+  drawData.metallicFactor = mesh.metallicFactor;
+  drawData.roughnessFactor = mesh.roughnessFactor;
+  drawData.normalScale = mesh.normalScale;
+  drawData.alphaMode = mesh.alphaMode;
+  drawData.alphaCutoff = mesh.alphaCutoff;
+  return drawData;
+}
+
 struct OverlayCircle
 {
   ImVec2 center{};
@@ -566,6 +583,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
     createDepthPyramidResources();
     createGPUCullingResources();
+    createShadowCullingResources();
     createLightCoarseCullingResources();
 
     // Initialize CSM shadow cascade resources
@@ -815,6 +833,17 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyDescriptorSetLayout(device, m_device.gpuCullingSetLayout, nullptr);
     m_device.gpuCullingSetLayout = VK_NULL_HANDLE;
   }
+  if(m_device.shadowCullingPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.shadowCullingPipelineLayout, nullptr);
+    m_device.shadowCullingPipelineLayout = VK_NULL_HANDLE;
+  }
+  m_device.shadowCullingDescriptorSets.clear();
+  if(m_device.shadowCullingSetLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyDescriptorSetLayout(device, m_device.shadowCullingSetLayout, nullptr);
+    m_device.shadowCullingSetLayout = VK_NULL_HANDLE;
+  }
   if(m_device.lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.lightCoarseCullingPipelineLayout, nullptr);
@@ -882,6 +911,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     m_device.gbufferPipelineLayout->deinit();
     m_device.gbufferPipelineLayout.reset();
   }
+  if(m_device.csmShadowMdiPipelineLayout)
+  {
+    m_device.csmShadowMdiPipelineLayout->deinit();
+    m_device.csmShadowMdiPipelineLayout.reset();
+  }
   // Per-frame bind groups already destroyed by destroyBindGroups() above
   // Just cleanup the transient allocators
   for(auto& frameUserData : m_perFrame.frameUserData)
@@ -893,6 +927,9 @@ void Renderer::shutdown(rhi::Surface& surface)
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -1037,9 +1074,44 @@ PipelineHandle Renderer::getGPUCullingDebugPipelineHandle() const
 
 PipelineHandle Renderer::getCSMShadowPipelineHandle() const
 {
-  // TODO(Task 8): Create actual CSM shadow pipeline
-  // For now, reuse regular shadow pipeline
-  return m_shadowPipeline;
+  return m_csmShadowPipeline.isNull() ? m_shadowPipeline : m_csmShadowPipeline;
+}
+
+uint64_t Renderer::getCSMShadowPipelineLayout() const
+{
+  if(m_device.csmShadowMdiPipelineLayout)
+  {
+    return m_device.csmShadowMdiPipelineLayout->getNativeHandle();
+  }
+  return getGBufferPipelineLayout();
+}
+
+PipelineHandle Renderer::getShadowCullingPipelineHandle() const
+{
+  return m_shadowCullingPipeline;
+}
+
+uint64_t Renderer::getShadowCullingPipelineLayout() const
+{
+  return reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout);
+}
+
+uint64_t Renderer::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_device.shadowCullingDescriptorSets.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]);
+}
+
+uint64_t Renderer::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer.buffer);
 }
 
 PipelineHandle Renderer::getLightCullingPipelineHandle() const
@@ -1704,6 +1776,184 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
   vmaUnmapMemory(m_device.allocator, frameUserData.gpuCullingUniformBuffer.allocation);
 }
 
+void Renderer::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
+{
+  const uint32_t requiredCapacity = std::max(requiredMeshCount, 1u);
+  if(frameUserData.shadowCullingMeshCapacity >= requiredCapacity)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  destroyBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer);
+
+  frameUserData.shadowCullingObjectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::ShadowCullObject) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.shadowCullingIndirectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_GPU_ONLY);
+  frameUserData.shadowCullingDrawDataBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::DrawUniforms) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.shadowCullingMeshCapacity = requiredCapacity;
+}
+
+void Renderer::updateShadowCullingDescriptorSet(uint32_t frameIndex)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingDescriptorSets.size()
+     || m_device.shadowCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  if(frameUserData.shadowCullingObjectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.shadowCullingIndirectBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const std::array<VkDescriptorBufferInfo, 2> bufferInfos{{
+      VkDescriptorBufferInfo{frameUserData.shadowCullingObjectBuffer.buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameUserData.shadowCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
+  }};
+
+  const std::array<VkWriteDescriptorSet, 2> writes{{
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.shadowCullingDescriptorSets[frameIndex],
+          .dstBinding      = 0,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[0],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.shadowCullingDescriptorSets[frameIndex],
+          .dstBinding      = 1,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[1],
+      },
+  }};
+  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+}
+
+void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  const uint32_t objectCount =
+      params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->shadowPackedMeshes.size()) : 0u;
+
+  ensureShadowCullingBuffers(frameUserData, objectCount);
+  updateShadowCullingDescriptorSet(frameIndex);
+
+  if(frameUserData.shadowCullingObjectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.shadowCullingDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  if(objectCount == 0 || params.gltfModel == nullptr)
+  {
+    return;
+  }
+
+  std::vector<shaderio::ShadowCullObject> objects(objectCount);
+  std::vector<shaderio::DrawUniforms> drawData(objectCount);
+
+  for(uint32_t meshIndex = 0; meshIndex < objectCount; ++meshIndex)
+  {
+    const GltfUploadResult::ShadowPackedMesh& packedMesh = params.gltfModel->shadowPackedMeshes[meshIndex];
+    if(packedMesh.meshIndex >= params.gltfModel->meshes.size())
+    {
+      continue;
+    }
+
+    const MeshRecord* meshRecord = m_meshPool.tryGet(params.gltfModel->meshes[packedMesh.meshIndex]);
+    if(meshRecord == nullptr)
+    {
+      continue;
+    }
+
+    const glm::vec3 center = 0.5f * (meshRecord->worldBoundsMin + meshRecord->worldBoundsMax);
+    const float radius = glm::length(meshRecord->worldBoundsMax - center);
+
+    objects[meshIndex] = shaderio::ShadowCullObject{
+        .sphereCenterRadius = glm::vec4(center, radius),
+        .indexCount         = packedMesh.indexCount,
+        .firstIndex         = packedMesh.firstIndex,
+        .vertexOffset       = packedMesh.vertexOffset,
+        .firstInstance      = meshIndex,
+    };
+    drawData[meshIndex] = buildShadowDrawUniforms(*meshRecord);
+  }
+
+  void* mappedData = nullptr;
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.shadowCullingObjectBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, objects.data(), sizeof(shaderio::ShadowCullObject) * objectCount);
+  VK_CHECK(vmaFlushAllocation(m_device.allocator,
+                              frameUserData.shadowCullingObjectBuffer.allocation,
+                              0,
+                              sizeof(shaderio::ShadowCullObject) * std::max<uint32_t>(objectCount, 1u)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.shadowCullingObjectBuffer.allocation);
+
+  VK_CHECK(vmaMapMemory(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer.allocation, &mappedData));
+  std::memcpy(mappedData, drawData.data(), sizeof(shaderio::DrawUniforms) * objectCount);
+  VK_CHECK(vmaFlushAllocation(m_device.allocator,
+                              frameUserData.shadowCullingDrawDataBuffer.allocation,
+                              0,
+                              sizeof(shaderio::DrawUniforms) * std::max<uint32_t>(objectCount, 1u)));
+  vmaUnmapMemory(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer.allocation);
+
+  for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
+  {
+    const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
+    if(drawBindGroupHandle.isNull())
+    {
+      continue;
+    }
+
+    const VkDescriptorSet drawDescriptorSet =
+        reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+    const VkDescriptorBufferInfo drawDataBufferInfo{
+        .buffer = frameUserData.shadowCullingDrawDataBuffer.buffer,
+        .offset = 0,
+        .range  = sizeof(shaderio::DrawUniforms) * objectCount,
+    };
+    const VkWriteDescriptorSet drawDataWrite{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = drawDescriptorSet,
+        .dstBinding      = shaderio::LBindDrawModelMdi,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo     = &drawDataBufferInfo,
+    };
+    vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+  }
+}
+
 void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
@@ -2096,6 +2346,55 @@ void Renderer::createGPUCullingResources()
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
     updateGPUCullingDescriptorSet(frameIndex);
+  }
+}
+
+void Renderer::createShadowCullingResources()
+{
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
+
+  const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+
+  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .pBindings    = bindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.shadowCullingSetLayout));
+  DBG_VK_NAME(m_device.shadowCullingSetLayout);
+
+  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.shadowCullingSetLayout);
+  m_device.shadowCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo allocInfo{
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_device.descriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts        = setLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.shadowCullingDescriptorSets.data()));
+
+  const VkPushConstantRange pushConstantRange{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset     = 0,
+      .size       = sizeof(shaderio::ShadowCullPushConstants),
+  };
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = 1,
+      .pSetLayouts            = &m_device.shadowCullingSetLayout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges    = &pushConstantRange,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.shadowCullingPipelineLayout));
+  DBG_VK_NAME(m_device.shadowCullingPipelineLayout);
+
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    updateShadowCullingDescriptorSet(frameIndex);
   }
 }
 
@@ -2544,6 +2843,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
     updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
     updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
     updateGPUCullingBuffers(currentFrameIndex, params);
+    updateShadowCullingBuffers(currentFrameIndex, params);
 
     // Route through pass executor to orchestrate multi-pass rendering
     // Static resources (GBuffer, SceneDepth, Shadow, CSM, Output, VertexBuffer) are already bound
@@ -3309,6 +3609,24 @@ shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParam
   return uniforms;
 }
 
+shaderio::ShadowCullPushConstants Renderer::buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const
+{
+  shaderio::ShadowCullPushConstants pushConstants{};
+  const shaderio::ShadowUniforms* shadowUniforms = m_csmShadowResources.getShadowUniformsData();
+  if(shadowUniforms == nullptr || cascadeIndex >= shaderio::LCascadeCount)
+  {
+    return pushConstants;
+  }
+
+  const auto frustumPlanes = extractFrustumPlanes(shadowUniforms->cascadeViewProjection[cascadeIndex]);
+  for(uint32_t planeIndex = 0; planeIndex < shaderio::LGPUCullingFrustumPlaneCount; ++planeIndex)
+  {
+    pushConstants.frustumPlanes[planeIndex] = frustumPlanes[planeIndex];
+  }
+  pushConstants.objectCount = objectCount;
+  return pushConstants;
+}
+
 Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParams& params) const
 {
   FrameLightingState state{};
@@ -3675,6 +3993,7 @@ void Renderer::prebuildRequiredPipelineVariants()
   createPrebuiltComputePipelineVariant();
   createDepthPyramidPipeline();
   createGPUCullingPipeline();
+  createShadowCullingPipeline();
   createLightCoarseCullingPipelines();
 }
 
@@ -4025,10 +4344,68 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
       }
     }
 
+    std::vector<rhi::BindTableLayoutEntry> shadowMdiDrawLayoutEntries{
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindDrawModelMdi,
+            .resourceType    = rhi::BindlessResourceType::storageBuffer,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
+        },
+    };
+
+    VkDescriptorSetLayout shadowMdiDrawSetLayout = VK_NULL_HANDLE;
+    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
+    {
+      for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
+      {
+        auto* shadowMdiDrawLayout = new rhi::vulkan::VulkanBindTableLayout();
+        shadowMdiDrawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                                  shadowMdiDrawLayoutEntries);
+        DBG_VK_NAME(shadowMdiDrawLayout->getVkDescriptorSetLayout());
+
+        auto* shadowMdiDrawTable = new rhi::vulkan::VulkanBindTable();
+        shadowMdiDrawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                                 *shadowMdiDrawLayout, 1);
+        DBG_VK_NAME(shadowMdiDrawTable->getVkDescriptorSet());
+
+        BindGroupDesc shadowMdiDrawBindGroupDesc{
+            .slot                = BindGroupSetSlot::shaderSpecific,
+            .layout              = shadowMdiDrawLayout,
+            .table               = shadowMdiDrawTable,
+            .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
+            .debugName           = "csm-shadow-mdi-draw",
+        };
+        m_perFrame.frameUserData[i].csmShadowMdiDrawBindGroups[cascadeIndex] = createBindGroup(shadowMdiDrawBindGroupDesc);
+
+        const VkDescriptorBufferInfo shadowMdiDrawBufferInfo{
+            .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
+            .offset = 0,
+            .range  = VK_WHOLE_SIZE,
+        };
+        const VkWriteDescriptorSet shadowMdiDrawWrite{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = shadowMdiDrawTable->getVkDescriptorSet(),
+            .dstBinding      = shaderio::LBindDrawModelMdi,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &shadowMdiDrawBufferInfo,
+        };
+        vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &shadowMdiDrawWrite, 0,
+                               nullptr);
+
+        if(i == 0 && cascadeIndex == 0)
+        {
+          shadowMdiDrawSetLayout = shadowMdiDrawLayout->getVkDescriptorSetLayout();
+        }
+      }
+    }
+
     // Create GBuffer pipeline layout
     const uint64_t textureLayoutHandle = getBindGroupLayoutOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
     const uint64_t cameraLayoutHandle = reinterpret_cast<uint64_t>(cameraSetLayout);
     const uint64_t drawLayoutHandle = reinterpret_cast<uint64_t>(drawSetLayout);
+    const uint64_t shadowMdiDrawLayoutHandle = reinterpret_cast<uint64_t>(shadowMdiDrawSetLayout);
 
     rhi::ShaderReflectionData gbufferReflection{};
     gbufferReflection.name = "shader.gbuffer";
@@ -4067,6 +4444,43 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                 gbufferLayoutDesc, gbufferLayoutLowering);
     DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
     m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
+
+    rhi::ShaderReflectionData csmShadowMdiReflection{};
+    csmShadowMdiReflection.name = "shader.shadow.mdi";
+    csmShadowMdiReflection.entryPoints = {
+        rhi::ShaderEntryPoint{"vertexMdiMain", rhi::ShaderStageFlagBits::vertex},
+        rhi::ShaderEntryPoint{"fragmentMdiMain", rhi::ShaderStageFlagBits::fragment},
+    };
+    csmShadowMdiReflection.resourceBindings = {
+        rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
+                                   rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
+                                   Renderer::kDemoMaterialSlotCount, 0},
+        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
+                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
+        rhi::ShaderResourceBinding{"drawData", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
+                                   rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
+                                   shaderio::LSetDraw, shaderio::LBindDrawModelMdi, 1, 0},
+    };
+
+    rhi::PipelineLayoutDesc csmShadowMdiLayoutDesc = rhi::derivePipelineLayoutDesc(csmShadowMdiReflection);
+    csmShadowMdiLayoutDesc.debugName = "csm-shadow-mdi-layout";
+
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> csmShadowMdiLayoutMappings{
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
+        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, shadowMdiDrawLayoutHandle),
+    };
+
+    const rhi::vulkan::VulkanPipelineLayoutLowering csmShadowMdiLayoutLowering{
+        .setLayouts     = csmShadowMdiLayoutMappings.data(),
+        .setLayoutCount = static_cast<uint32_t>(csmShadowMdiLayoutMappings.size()),
+    };
+
+    auto csmShadowMdiPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    csmShadowMdiPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                                     csmShadowMdiLayoutDesc, csmShadowMdiLayoutLowering);
+    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(csmShadowMdiPipelineLayout->getNativeHandle()));
+    m_device.csmShadowMdiPipelineLayout = std::move(csmShadowMdiPipelineLayout);
 
     rhi::ShaderReflectionData debugReflection{};
     debugReflection.name = "shader.debug.gpu-cull";
@@ -4532,6 +4946,29 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     m_shadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                         reinterpret_cast<uint64_t>(shadowPipeline),
                                         shadowCreateInfo.key.specializationVariant);
+
+    std::array<rhi::PipelineShaderStageDesc, 2> shadowMdiStages{{
+        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "vertexMdiMain"},
+        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMdiMain"},
+    }};
+    rhi::GraphicsPipelineDesc shadowMdiDesc = shadowDesc;
+    shadowMdiDesc.layout = m_device.csmShadowMdiPipelineLayout.get();
+    shadowMdiDesc.shaderStages = shadowMdiStages.data();
+
+    rhi::vulkan::GraphicsPipelineCreateInfo shadowMdiCreateInfo{
+        .key =
+            {
+                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                .specializationVariant = 7,
+            },
+        .desc = shadowMdiDesc,
+    };
+    const VkPipeline shadowMdiPipeline =
+        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowMdiCreateInfo);
+    DBG_VK_NAME(shadowMdiPipeline);
+    m_csmShadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                           reinterpret_cast<uint64_t>(shadowMdiPipeline),
+                                           shadowMdiCreateInfo.key.specializationVariant);
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
   }
@@ -5075,7 +5512,8 @@ void Renderer::destroyBindGroups()
   {
     frameUserData.sceneBindGroup = kNullBindGroupHandle;
     frameUserData.cameraBindGroup = kNullBindGroupHandle;
-    frameUserData.drawBindGroup = kNullBindGroupHandle;  
+    frameUserData.drawBindGroup = kNullBindGroupHandle;
+    frameUserData.csmShadowMdiDrawBindGroups.fill(kNullBindGroupHandle);
   }
 }
 
@@ -5308,6 +5746,41 @@ void Renderer::createGPUCullingPipeline()
 #endif
 }
 
+void Renderer::createShadowCullingPipeline()
+{
+  if(m_device.shadowCullingPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  VkShaderModule shaderModule =
+      utils::createShaderModule(nativeDevice, {shader_shadow_culling_slang, std::size(shader_shadow_culling_slang)});
+  DBG_VK_NAME(shaderModule);
+
+  const VkPipelineShaderStageCreateInfo shaderStage{
+      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module = shaderModule,
+      .pName  = "shadowCullingMain",
+  };
+  const VkComputePipelineCreateInfo pipelineInfo{
+      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage  = shaderStage,
+      .layout = m_device.shadowCullingPipelineLayout,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+  DBG_VK_NAME(pipeline);
+  m_shadowCullingPipeline =
+      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 14);
+
+  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+#endif
+}
+
 PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
@@ -5344,6 +5817,7 @@ void Renderer::destroyPipelines()
   m_depthPrepassAlphaTestPipeline = kNullPipelineHandle;
   m_depthPyramidPipeline = kNullPipelineHandle;
   m_gpuCullingPipeline = kNullPipelineHandle;
+  m_shadowCullingPipeline = kNullPipelineHandle;
   m_gbufferOpaquePipeline = kNullPipelineHandle;
   m_gbufferAlphaTestPipeline = kNullPipelineHandle;
   m_shadowPipeline = kNullPipelineHandle;
@@ -5661,6 +6135,109 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
   result.transparentDistances.resize(result.transparentMeshIndices.size(), 0.0f);
   result.transparentSortDirty = true;
 
+  if(!result.shadowCasterIndices.empty())
+  {
+    std::vector<uint8_t> packedVertexData;
+    std::vector<uint32_t> packedIndexData;
+    packedVertexData.reserve(result.shadowCasterIndices.size() * 48u * 64u);
+
+    for(size_t shadowCasterListIndex = 0; shadowCasterListIndex < result.shadowCasterIndices.size(); ++shadowCasterListIndex)
+    {
+      const size_t meshIndex = result.shadowCasterIndices[shadowCasterListIndex];
+      if(meshIndex >= model.meshes.size())
+      {
+        continue;
+      }
+
+      const GltfMeshData& meshData = model.meshes[meshIndex];
+      if(meshData.positions.empty() || meshData.indices.empty())
+      {
+        continue;
+      }
+
+      const uint32_t vertexCount = static_cast<uint32_t>(meshData.positions.size() / 3u);
+      const uint32_t vertexBase = static_cast<uint32_t>(packedVertexData.size() / 48u);
+      const uint32_t firstIndex = static_cast<uint32_t>(packedIndexData.size());
+
+      packedVertexData.resize(packedVertexData.size() + static_cast<size_t>(vertexCount) * 48u);
+      for(uint32_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex)
+      {
+        float* dst = reinterpret_cast<float*>(packedVertexData.data() + (static_cast<size_t>(vertexBase) + vertexIndex) * 48u);
+
+        dst[0] = meshData.positions[vertexIndex * 3u + 0u];
+        dst[1] = meshData.positions[vertexIndex * 3u + 1u];
+        dst[2] = meshData.positions[vertexIndex * 3u + 2u];
+
+        if(!meshData.normals.empty())
+        {
+          dst[3] = meshData.normals[vertexIndex * 3u + 0u];
+          dst[4] = meshData.normals[vertexIndex * 3u + 1u];
+          dst[5] = meshData.normals[vertexIndex * 3u + 2u];
+        }
+        else
+        {
+          dst[3] = 0.0f;
+          dst[4] = 1.0f;
+          dst[5] = 0.0f;
+        }
+
+        if(!meshData.texCoords.empty())
+        {
+          dst[6] = meshData.texCoords[vertexIndex * 2u + 0u];
+          dst[7] = meshData.texCoords[vertexIndex * 2u + 1u];
+        }
+        else
+        {
+          dst[6] = 0.0f;
+          dst[7] = 0.0f;
+        }
+
+        if(!meshData.tangents.empty())
+        {
+          dst[8] = meshData.tangents[vertexIndex * 4u + 0u];
+          dst[9] = meshData.tangents[vertexIndex * 4u + 1u];
+          dst[10] = meshData.tangents[vertexIndex * 4u + 2u];
+          dst[11] = meshData.tangents[vertexIndex * 4u + 3u];
+        }
+        else
+        {
+          dst[8] = 1.0f;
+          dst[9] = 0.0f;
+          dst[10] = 0.0f;
+          dst[11] = 1.0f;
+        }
+      }
+
+      packedIndexData.reserve(packedIndexData.size() + meshData.indices.size());
+      for(uint32_t index : meshData.indices)
+      {
+        packedIndexData.push_back(vertexBase + index);
+      }
+
+      result.shadowPackedMeshes.push_back(GltfUploadResult::ShadowPackedMesh{
+          .meshIndex = meshIndex,
+          .indexCount = static_cast<uint32_t>(meshData.indices.size()),
+          .firstIndex = firstIndex,
+          .vertexOffset = 0,
+      });
+    }
+
+    if(!result.shadowPackedMeshes.empty())
+    {
+      const std::span<const std::byte> packedVertexBytes(reinterpret_cast<const std::byte*>(packedVertexData.data()),
+                                                         packedVertexData.size());
+      const std::span<const std::byte> packedIndexBytes(reinterpret_cast<const std::byte*>(packedIndexData.data()),
+                                                        packedIndexData.size() * sizeof(uint32_t));
+
+      result.shadowPackedVertexBuffer = upload::createStaticBufferWithUpload(
+          device, m_device.allocator, cmd, packedVertexBytes, VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
+          m_device.staticBufferUploadPolicy, &m_device.stagingBuffers);
+      result.shadowPackedIndexBuffer = upload::createStaticBufferWithUpload(
+          device, m_device.allocator, cmd, packedIndexBytes, VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
+          m_device.staticBufferUploadPolicy, &m_device.stagingBuffers);
+    }
+  }
+
   // Update bindless texture array with glTF textures
   // Use index offset to avoid conflict with sample materials
   const uint32_t gltfTextureBaseIndex = kDemoMaterialSlotCount;  // Start after predefined slots
@@ -5676,6 +6253,11 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
 void Renderer::destroyGltfResources(const GltfUploadResult& result)
 {
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+
+  utils::Buffer shadowPackedVertexBuffer = result.shadowPackedVertexBuffer;
+  utils::Buffer shadowPackedIndexBuffer = result.shadowPackedIndexBuffer;
+  destroyBuffer(m_device.allocator, shadowPackedVertexBuffer);
+  destroyBuffer(m_device.allocator, shadowPackedIndexBuffer);
 
   // Destroy meshes
   for(MeshHandle handle : result.meshes)
@@ -5802,6 +6384,15 @@ BindGroupHandle Renderer::getDrawBindGroup(uint32_t frameIndex) const
   if(frameIndex < m_perFrame.frameUserData.size())
   {
     return m_perFrame.frameUserData[frameIndex].drawBindGroup;
+  }
+  return kNullBindGroupHandle;
+}
+
+BindGroupHandle Renderer::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const
+{
+  if(frameIndex < m_perFrame.frameUserData.size() && cascadeIndex < shaderio::LCascadeCount)
+  {
+    return m_perFrame.frameUserData[frameIndex].csmShadowMdiDrawBindGroups[cascadeIndex];
   }
   return kNullBindGroupHandle;
 }

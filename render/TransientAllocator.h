@@ -39,6 +39,7 @@ public:
   }
 
   [[nodiscard]] uint64_t getBufferOpaque() const { return reinterpret_cast<uint64_t>(m_buffer.buffer); }
+  [[nodiscard]] uint32_t getCapacity() const { return m_capacity; }
   [[nodiscard]] uint64_t getLastLogicalReleaseTimeline() const { return m_lastLogicalReleaseTimeline; }
 
 private:
