@@ -169,6 +169,7 @@ struct Buffer
   VkBuffer        buffer{};      // Vulkan Buffer
   VmaAllocation   allocation{};  // Memory associated with the buffer
   VkDeviceAddress address{};     // Address of the buffer in the shader
+  void*           mapped{};      // Persistent mapped pointer for host-visible allocations when available
 };
 
 /*--
@@ -404,7 +405,7 @@ static VkFormat findSupportedFormat(VkPhysicalDevice             physicalDevice,
 static VkFormat findDepthFormat(VkPhysicalDevice physicalDevice)
 {
   return findSupportedFormat(physicalDevice,
-                             {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
+                             {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
                              VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
 

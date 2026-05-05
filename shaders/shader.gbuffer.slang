@@ -41,6 +41,9 @@ ConstantBuffer<CameraUniforms> camera;
 [[vk::binding(LBindDrawModel, LSetDraw)]]
 ConstantBuffer<DrawUniforms> draw;
 
+[[vk::binding(LBindDrawModelMdi, LSetDraw)]]
+StructuredBuffer<DrawUniforms> drawData;
+
 //------------------------------------------------------------------------------
 // Specialization Constants
 //------------------------------------------------------------------------------
@@ -77,6 +80,32 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 
+struct VertexOutputMdi
+{
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+    float3 worldNormal : TEXCOORD1;
+    float3 worldTangent : TEXCOORD2;
+    float tangentW : TEXCOORD3;
+    nointerpolation uint drawIndex : TEXCOORD4;
+};
+
+[shader("vertex")]
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+{
+    const DrawUniforms mdiDraw = drawData[drawIndex];
+    VertexOutputMdi output;
+
+    float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));
+    output.position = mul(camera.viewProjection, worldPos);
+    output.uv = input.texCoord;
+    output.worldNormal = normalize(mul(mdiDraw.modelMatrix, float4(input.normal, 0.0)).xyz);
+    output.worldTangent = normalize(mul(mdiDraw.modelMatrix, float4(input.tangent.xyz, 0.0)).xyz);
+    output.tangentW = input.tangent.w;
+    output.drawIndex = drawIndex;
+    return output;
+}
+
 //------------------------------------------------------------------------------
 // Fragment Shader (MRT Output)
 //------------------------------------------------------------------------------
@@ -96,12 +125,11 @@ void fragmentMain(
         float4 texColor = inTexture[draw.baseColorTextureIndex].Sample(input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
-
     // 2. Alpha test (specialization constant controlled)
     if (alphaTestEnabled)
     {
         if (color.a < draw.alphaCutoff)
-        {
+        { 
             discard;
         }
     }
@@ -156,6 +184,65 @@ void fragmentMain(
     }
 
     // Pack outputs
+    outGBuffer0 = float4(color.rgb, color.a);
+    outGBuffer1 = float4(worldNormal * 0.5 + 0.5, 0.0);
+    outGBuffer2 = float4(metallic, roughness, ao, 0.0);
+}
+
+[shader("fragment")]
+void fragmentMdiMain(
+    VertexOutputMdi input,
+    bool isFrontFace : SV_IsFrontFace,
+    out float4 outGBuffer0 : SV_Target0,
+    out float4 outGBuffer1 : SV_Target1,
+    out float4 outGBuffer2 : SV_Target2
+) {
+    const DrawUniforms draw = drawData[input.drawIndex];
+    float4 color = draw.baseColorFactor;
+    if(draw.baseColorTextureIndex >= 0)
+    {
+        float4 texColor = inTexture[draw.baseColorTextureIndex].Sample(input.uv);
+        color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
+    }
+
+    if (alphaTestEnabled)
+    {
+        if (color.a < draw.alphaCutoff)
+        {
+            discard;
+        }
+    }
+
+    float3 worldNormal = normalize(input.worldNormal);
+    if(draw.normalTextureIndex >= 0)
+    {
+        float3 tangentNormal = inTexture[draw.normalTextureIndex].Sample(input.uv).rgb;
+        tangentNormal = tangentNormal * 2.0 - 1.0;
+        tangentNormal = normalize(tangentNormal);
+        float3 N = normalize(input.worldNormal);
+        float3 T = normalize(input.worldTangent);
+        float3 B = normalize(cross(N, T)) * input.tangentW;
+        worldNormal = normalize(tangentNormal.x * T + tangentNormal.y * B + tangentNormal.z * N);
+    }
+    if (!isFrontFace)
+    {
+        worldNormal = -worldNormal;
+    }
+
+    float metallic = draw.metallicFactor;
+    float roughness = draw.roughnessFactor;
+    float ao = 1.0;
+    if(draw.metallicRoughnessTextureIndex >= 0)
+    {
+        float4 mrSample = inTexture[draw.metallicRoughnessTextureIndex].Sample(input.uv);
+        metallic = mrSample.g * draw.metallicFactor;
+        roughness = mrSample.b * draw.roughnessFactor;
+    }
+    if(draw.occlusionTextureIndex >= 0)
+    {
+        ao = inTexture[draw.occlusionTextureIndex].Sample(input.uv).r;
+    }
+
     outGBuffer0 = float4(color.rgb, 0.0);
     outGBuffer1 = float4(worldNormal * 0.5 + 0.5, 0.0);
     outGBuffer2 = float4(metallic, roughness, ao, 0.0);

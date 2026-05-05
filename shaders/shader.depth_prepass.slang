@@ -25,6 +25,9 @@ ConstantBuffer<CameraUniforms> camera;
 [[vk::binding(LBindDrawModel, LSetDraw)]]
 ConstantBuffer<DrawUniforms> draw;
 
+[[vk::binding(LBindDrawModelMdi, LSetDraw)]]
+StructuredBuffer<DrawUniforms> drawData;
+
 [[vk::constant_id(0)]]
 const bool alphaTestEnabled = false;
 
@@ -38,9 +41,44 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 
+struct VertexOutputMdi
+{
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+    nointerpolation uint drawIndex : TEXCOORD1;
+};
+
+[shader("vertex")]
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+{
+    const DrawUniforms mdiDraw = drawData[drawIndex];
+    VertexOutputMdi output;
+    float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));
+    output.position = mul(camera.viewProjection, worldPos);
+    output.uv = input.texCoord;
+    output.drawIndex = drawIndex;
+    return output;
+}
+
 [shader("fragment")]
 void fragmentMain(VertexOutput input)
 {
+    if(!alphaTestEnabled || draw.baseColorTextureIndex < 0)
+    {
+        return;
+    }
+
+    float alpha = inTexture[draw.baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
+    if(alpha < draw.alphaCutoff)
+    {
+        discard;
+    }
+}
+
+[shader("fragment")]
+void fragmentMdiMain(VertexOutputMdi input)
+{
+    const DrawUniforms draw = drawData[input.drawIndex];
     if(!alphaTestEnabled || draw.baseColorTextureIndex < 0)
     {
         return;

@@ -17,19 +17,17 @@ namespace {
 
 // Dynamic UBO alignment requirement (minUniformBufferOffsetAlignment)
 constexpr uint32_t kDrawUniformsStride = 256;
-constexpr uint32_t kDrawUniformStorageStride = static_cast<uint32_t>(sizeof(shaderio::DrawUniforms));
-
-[[nodiscard]] uint32_t alignUpTo(uint32_t value, uint32_t alignment)
-{
-    const uint32_t safeAlignment = std::max(1u, alignment);
-    const uint32_t remainder = value % safeAlignment;
-    return remainder == 0 ? value : (value + safeAlignment - remainder);
-}
 
 struct PendingLegacyDraw
 {
     const MeshRecord* mesh;
     shaderio::DrawUniforms uniforms;
+};
+
+struct VisiblePackedShadowDraw
+{
+    const GltfUploadResult::ShadowPackedMesh* packedMesh;
+    uint32_t                                  drawIndex;
 };
 
 struct PendingMdiDraw
@@ -55,41 +53,39 @@ struct PendingMdiDraw
     return drawData;
 }
 
-[[nodiscard]] bool isAabbVisibleInShadowCascade(const glm::vec3& worldBoundsMin,
-                                                const glm::vec3& worldBoundsMax,
-                                                const glm::mat4& cascadeViewProjection)
+[[nodiscard]] glm::vec4 normalizePlane(glm::vec4 plane)
 {
-    const glm::vec4 corners[8] = {
-        {worldBoundsMin.x, worldBoundsMin.y, worldBoundsMin.z, 1.0f},
-        {worldBoundsMax.x, worldBoundsMin.y, worldBoundsMin.z, 1.0f},
-        {worldBoundsMin.x, worldBoundsMax.y, worldBoundsMin.z, 1.0f},
-        {worldBoundsMax.x, worldBoundsMax.y, worldBoundsMin.z, 1.0f},
-        {worldBoundsMin.x, worldBoundsMin.y, worldBoundsMax.z, 1.0f},
-        {worldBoundsMax.x, worldBoundsMin.y, worldBoundsMax.z, 1.0f},
-        {worldBoundsMin.x, worldBoundsMax.y, worldBoundsMax.z, 1.0f},
-        {worldBoundsMax.x, worldBoundsMax.y, worldBoundsMax.z, 1.0f},
+    const float length = glm::length(glm::vec3(plane));
+    return length > 0.0f ? plane / length : plane;
+}
+
+[[nodiscard]] std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> extractFrustumPlanes(const glm::mat4& viewProjection)
+{
+    const glm::mat4 transposed = glm::transpose(viewProjection);
+    return {
+        normalizePlane(transposed[3] + transposed[0]),
+        normalizePlane(transposed[3] - transposed[0]),
+        normalizePlane(transposed[3] + transposed[1]),
+        normalizePlane(transposed[3] - transposed[1]),
+        normalizePlane(transposed[3] + transposed[2]),
+        normalizePlane(transposed[3] - transposed[2]),
     };
+}
 
-    bool outsideLeft = true;
-    bool outsideRight = true;
-    bool outsideBottom = true;
-    bool outsideTop = true;
-    bool outsideNear = true;
-    bool outsideFar = true;
-
-    for(const glm::vec4& corner : corners)
+[[nodiscard]] bool isBoundingSphereVisibleInShadowCascade(
+    const glm::vec3& center,
+    float radius,
+    const std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount>& frustumPlanes)
+{
+    const float safeRadius = std::max(radius, 0.0f);
+    for(const glm::vec4& plane : frustumPlanes)
     {
-        const glm::vec4 clip = cascadeViewProjection * corner;
-
-        outsideLeft = outsideLeft && (clip.x < -clip.w);
-        outsideRight = outsideRight && (clip.x > clip.w);
-        outsideBottom = outsideBottom && (clip.y < -clip.w);
-        outsideTop = outsideTop && (clip.y > clip.w);
-        outsideNear = outsideNear && (clip.z < 0.0f);
-        outsideFar = outsideFar && (clip.z > clip.w);
+        if(glm::dot(glm::vec3(plane), center) + plane.w < -safeRadius)
+        {
+            return false;
+        }
     }
-
-    return !(outsideLeft || outsideRight || outsideBottom || outsideTop || outsideNear || outsideFar);
+    return true;
 }
 
 }  // namespace
@@ -163,18 +159,22 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
 {
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   shaderio::ShadowUniforms* shadowData = csm.getShadowUniformsData();
+  const bool hasPackedShadowPipeline = m_renderer->getCSMShadowPipelineHandle() != m_renderer->getShadowPipelineHandle()
+                                       && m_renderer->getCSMShadowPipelineLayout() != m_renderer->getGBufferPipelineLayout();
 
   // Get cascade-specific depth target view
   VkImageView layerView = csm.getCascadeLayerView(cascadeIndex);
   const VkExtent2D cascadeExtent = csm.getCascadeExtent();
   const rhi::Extent2D extent{cascadeExtent.width, cascadeExtent.height};
 
+  const bool usePackedShadowPath = hasPackedShadowPipeline
+                                   && context.gltfModel != nullptr
+                                   && !context.gltfModel->shadowPackedMeshes.empty()
+                                   && context.gltfModel->shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE
+                                   && context.gltfModel->shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE
+                                   && !m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex).isNull();
   const bool useMultiDrawIndirect = context.params->useCsmShadowMultiDrawIndirect
-                                    && context.gltfModel != nullptr
-                                    && !context.gltfModel->shadowPackedMeshes.empty()
-                                    && context.gltfModel->shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE
-                                    && context.gltfModel->shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE
-                                    && !m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex).isNull()
+                                    && usePackedShadowPath
                                     && m_renderer->getShadowCullingPipelineHandle().isNull() == false
                                     && m_renderer->getShadowCullingDescriptorSetOpaque(context.frameIndex) != 0
                                     && m_renderer->getShadowCullingIndirectBufferOpaque(context.frameIndex) != 0;
@@ -204,8 +204,8 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
 
-  const PipelineHandle csmPipeline = useMultiDrawIndirect ? m_renderer->getCSMShadowPipelineHandle()
-                                                          : m_renderer->getShadowPipelineHandle();
+  const PipelineHandle csmPipeline = usePackedShadowPath ? m_renderer->getCSMShadowPipelineHandle()
+                                                         : m_renderer->getShadowPipelineHandle();
   if(csmPipeline.isNull())
   {
     context.cmd->endRenderPass();
@@ -215,7 +215,7 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   const VkPipeline nativePipeline =
       reinterpret_cast<VkPipeline>(m_renderer->getPipelineOpaque(csmPipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS)));
   const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
-      useMultiDrawIndirect ? m_renderer->getCSMShadowPipelineLayout() : m_renderer->getGBufferPipelineLayout());
+      usePackedShadowPath ? m_renderer->getCSMShadowPipelineLayout() : m_renderer->getGBufferPipelineLayout());
   rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
 
   // Bind texture descriptor set (bindless textures)
@@ -336,11 +336,83 @@ bool CSMShadowPass::prepareMultiDrawIndirect(const PassContext& context, uint32_
 
 void CSMShadowPass::drawMeshesLegacy(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const
 {
-  const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
   MeshPool& meshPool = m_renderer->getMeshPool();
   const shaderio::ShadowUniforms* shadowData = m_renderer->getCSMShadowResources().getShadowUniformsData();
 
-  if(context.gltfModel == nullptr || drawBindGroupHandle.isNull())
+  if(context.gltfModel == nullptr || shadowData == nullptr)
+  {
+    return;
+  }
+
+  const auto cascadeFrustumPlanes = extractFrustumPlanes(shadowData->cascadeViewProjection[cascadeIndex]);
+  const bool hasPackedShadowPipeline = m_renderer->getCSMShadowPipelineHandle() != m_renderer->getShadowPipelineHandle()
+                                       && m_renderer->getCSMShadowPipelineLayout() != m_renderer->getGBufferPipelineLayout();
+  const BindGroupHandle packedDrawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex);
+  const bool usePackedShadowPath = hasPackedShadowPipeline
+                                   && !packedDrawBindGroupHandle.isNull()
+                                   && !context.gltfModel->shadowPackedMeshes.empty()
+                                   && context.gltfModel->shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE
+                                   && context.gltfModel->shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE;
+  if(usePackedShadowPath)
+  {
+    std::vector<VisiblePackedShadowDraw> visibleDraws;
+    visibleDraws.reserve(context.gltfModel->shadowPackedMeshes.size());
+    {
+      TRACY_ZONE_SCOPED("CSMShadowPass::collectMeshes");
+      for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(context.gltfModel->shadowPackedMeshes.size()); ++drawIndex)
+      {
+        const GltfUploadResult::ShadowPackedMesh& packedMesh = context.gltfModel->shadowPackedMeshes[drawIndex];
+        if(packedMesh.meshIndex >= context.gltfModel->meshes.size())
+        {
+          continue;
+        }
+
+        const MeshRecord* mesh = meshPool.tryGet(context.gltfModel->meshes[packedMesh.meshIndex]);
+        if(mesh == nullptr)
+        {
+          continue;
+        }
+
+        if(!isBoundingSphereVisibleInShadowCascade(mesh->worldBoundsCenter, mesh->worldBoundsRadius, cascadeFrustumPlanes))
+        {
+          continue;
+        }
+
+        visibleDraws.push_back({&packedMesh, drawIndex});
+      }
+    }
+
+    if(visibleDraws.empty())
+    {
+      return;
+    }
+
+    const VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+        m_renderer->getBindGroupDescriptorSet(packedDrawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+    const demo::rhi::CommandList& commandList = *context.cmd;
+    rhi::vulkan::cmdBindDescriptorSets(commandList, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, shaderio::LSetDraw, 1,
+                                       &drawDescriptorSet, 0, nullptr);
+
+    constexpr VkDeviceSize vertexOffset = 0;
+    constexpr VkDeviceSize indexOffset = 0;
+    const VkBuffer vertexBuffer = context.gltfModel->shadowPackedVertexBuffer.buffer;
+    const VkBuffer indexBuffer = context.gltfModel->shadowPackedIndexBuffer.buffer;
+    rhi::vulkan::cmdBindVertexBuffers(commandList, 0, 1, &vertexBuffer, &vertexOffset);
+    rhi::vulkan::cmdBindIndexBuffer(commandList, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
+
+    {
+      TRACY_ZONE_SCOPED("CSMShadowPass::drawLoop");
+      for(const VisiblePackedShadowDraw& draw : visibleDraws)
+      {
+        rhi::vulkan::cmdDrawIndexed(commandList, draw.packedMesh->indexCount, 1, draw.packedMesh->firstIndex,
+                                    draw.packedMesh->vertexOffset, draw.drawIndex);
+      }
+    }
+    return;
+  }
+
+  const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
+  if(drawBindGroupHandle.isNull())
   {
     return;
   }
@@ -360,7 +432,7 @@ void CSMShadowPass::drawMeshesLegacy(const PassContext& context, VkPipelineLayou
         continue;
       }
 
-      if(!isAabbVisibleInShadowCascade(mesh->worldBoundsMin, mesh->worldBoundsMax, shadowData->cascadeViewProjection[cascadeIndex]))
+      if(!isBoundingSphereVisibleInShadowCascade(mesh->worldBoundsCenter, mesh->worldBoundsRadius, cascadeFrustumPlanes))
       {
         continue;
       }

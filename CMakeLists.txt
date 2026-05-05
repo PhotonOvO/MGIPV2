@@ -25,7 +25,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #====================================================================================
 
 option(USE_SLANG "Use Slang shaders instead of GLSL" ON)
-
 if(USE_SLANG)
   message(STATUS "Shader Authority: Slang is the single source of truth")
   message(STATUS "  - Slang compilation: ENABLED")
@@ -256,6 +255,22 @@ add_library(demo_core STATIC
   rhi/d3d12/D3D12FrameContext.cpp
   render/Renderer.cpp
   render/Renderer.h
+  render/RendererFacade.h
+  render/RendererFacade.cpp
+  render/AsyncLoadingCoordinator.h  
+  render/AsyncLoadingCoordinator.cpp
+  render/GPUDrivenRenderer.h
+  render/GPUDrivenRenderer.cpp
+  render/GPUSceneRegistry.h
+  render/GPUSceneRegistry.cpp
+  render/HiZDepthPyramid.h
+  render/HiZDepthPyramid.cpp
+  render/GPUBatchBuilder.h
+  render/GPUBatchBuilder.cpp
+  render/MeshletConverter.h
+  render/MeshletConverter.cpp
+  render/GPUMeshletBuffer.h
+  render/GPUMeshletBuffer.cpp
   render/ImguiAxis.cpp
   render/ImguiAxis.h
   render/passes/DepthPrepass.h
@@ -264,6 +279,14 @@ add_library(demo_core STATIC
   render/passes/DepthPyramidPass.cpp
   render/passes/GPUCullingPass.h
   render/passes/GPUCullingPass.cpp
+  render/passes/GPUDrivenDepthPrepass.h
+  render/passes/GPUDrivenDepthPrepass.cpp
+  render/passes/GPUDrivenGBufferPass.h
+  render/passes/GPUDrivenGBufferPass.cpp
+  render/passes/GPUDrivenLightPass.h
+  render/passes/GPUDrivenLightPass.cpp
+  render/passes/MeshletCullingPass.h
+  render/passes/MeshletCullingPass.cpp
   render/passes/AnimateVerticesPass.h
   render/passes/AnimateVerticesPass.cpp
   render/passes/GBufferPass.h
@@ -303,6 +326,10 @@ add_library(demo_core STATIC
   render/DrawStreamDecoder.h
   render/DrawStreamWriter.cpp
   render/DrawStreamWriter.h
+  render/BatchUploadContext.cpp
+  render/BatchUploadContext.h
+  render/MipmapGenerator.cpp
+  render/MipmapGenerator.h
   render/UploadUtils.cpp
   render/UploadUtils.h
   common/Common.h
@@ -311,6 +338,10 @@ add_library(demo_core STATIC
   common/TracyProfiling.h
   loader/GltfLoader.h
   loader/GltfLoader.cpp
+  loader/Ktx2Loader.h
+  loader/Ktx2Loader.cpp
+  loader/SceneCacheSerializer.h
+  loader/SceneCacheSerializer.cpp
   render/MeshPool.h
   render/MeshPool.cpp
   render/Camera.h
@@ -374,17 +405,50 @@ endif()
 add_executable(Demo app/MinimalLatestApp.cpp)
 target_link_libraries(Demo PRIVATE demo_core)
 
-#====================================================================================
-# RESOURCE COPYING - Copy all resources to build output directory
-#====================================================================================
-file(GLOB RESOURCE_FILES "${CMAKE_CURRENT_LIST_DIR}/resources/*")
+add_executable(texture_converter
+  tools/texture_converter.cpp
+)
 
-add_custom_command(
-  TARGET Demo POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory
-    "$<TARGET_FILE_DIR:Demo>/resources"
+find_package(KtxCli REQUIRED)
+file(TO_NATIVE_PATH "${KtxCli_EXECUTABLE}" KTXCLI_EXECUTABLE_NATIVE)
+set(COMPRESS_TEXTURES_SCRIPT_TEMPLATE [=[@echo off
+setlocal
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "KTX_CLI=%~1"
+if "%KTX_CLI%"=="" set "KTX_CLI=@KTXCLI_EXECUTABLE_NATIVE@"
+set "CONVERTER=%SCRIPT_DIR%\..\texture_converter.exe"
+if not exist "%CONVERTER%" (
+  echo texture_converter.exe was not found next to the Demo executable.
+  exit /b 1
+)
+if not exist "%KTX_CLI%" (
+  echo KTX CLI was not found: "%KTX_CLI%"
+  exit /b 1
+)
+echo Using KTX CLI: %KTX_CLI%
+"%CONVERTER%" "%SCRIPT_DIR%" "%SCRIPT_DIR%" "%KTX_CLI%"
+]=])
+string(CONFIGURE "${COMPRESS_TEXTURES_SCRIPT_TEMPLATE}" COMPRESS_TEXTURES_SCRIPT @ONLY)
+
+#====================================================================================
+# RESOURCE PREP - Copy resources and generate a manual texture conversion script
+#====================================================================================
+set(DEMO_RESOURCES_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/resources")
+set(DEMO_RESOURCES_OUTPUT_DIR "$<TARGET_FILE_DIR:Demo>/resources")
+
+file(GENERATE
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/compress_textures_$<CONFIG>.cmd"
+  CONTENT "${COMPRESS_TEXTURES_SCRIPT}"
+)
+
+add_custom_target(copy_demo_resources
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${DEMO_RESOURCES_OUTPUT_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${DEMO_RESOURCES_SOURCE_DIR}" "${DEMO_RESOURCES_OUTPUT_DIR}"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    ${RESOURCE_FILES}
-    $<TARGET_FILE_DIR:Demo>/resources
+          "${CMAKE_CURRENT_BINARY_DIR}/compress_textures_$<CONFIG>.cmd"
+          "${DEMO_RESOURCES_OUTPUT_DIR}/compress_textures.cmd"
   COMMENT "Copying resources to build directory..."
 )
+
+add_dependencies(Demo texture_converter copy_demo_resources)

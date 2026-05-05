@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 
 namespace demo {
@@ -32,6 +33,56 @@ glm::vec3 sanitizeEulerDegrees(const glm::vec3& radians)
         std::isfinite(degrees.x) ? degrees.x : 0.0f,
         std::isfinite(degrees.y) ? degrees.y : 0.0f,
         std::isfinite(degrees.z) ? degrees.z : 0.0f);
+}
+
+std::vector<uint8_t> expandToRgba8(const std::vector<uint8_t>& pixels, int width, int height, int channels)
+{
+    if(width <= 0 || height <= 0 || pixels.empty())
+    {
+        return {};
+    }
+
+    if(channels == 4)
+    {
+        return pixels;
+    }
+
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<uint8_t> rgba(pixelCount * 4u, 255u);
+
+    for(size_t i = 0; i < pixelCount; ++i)
+    {
+        const size_t srcIndex = i * static_cast<size_t>(std::max(channels, 1));
+        const size_t dstIndex = i * 4u;
+
+        switch(channels)
+        {
+            case 1:
+                rgba[dstIndex + 0] = pixels[srcIndex + 0];
+                rgba[dstIndex + 1] = pixels[srcIndex + 0];
+                rgba[dstIndex + 2] = pixels[srcIndex + 0];
+                break;
+            case 2:
+                rgba[dstIndex + 0] = pixels[srcIndex + 0];
+                rgba[dstIndex + 1] = pixels[srcIndex + 0];
+                rgba[dstIndex + 2] = pixels[srcIndex + 0];
+                rgba[dstIndex + 3] = pixels[srcIndex + 1];
+                break;
+            case 3:
+                rgba[dstIndex + 0] = pixels[srcIndex + 0];
+                rgba[dstIndex + 1] = pixels[srcIndex + 1];
+                rgba[dstIndex + 2] = pixels[srcIndex + 2];
+                break;
+            default:
+                rgba[dstIndex + 0] = pixels[srcIndex + 0];
+                rgba[dstIndex + 1] = pixels[srcIndex + 1];
+                rgba[dstIndex + 2] = pixels[srcIndex + 2];
+                rgba[dstIndex + 3] = pixels[srcIndex + 3];
+                break;
+        }
+    }
+
+    return rgba;
 }
 
 }  // namespace
@@ -55,6 +106,8 @@ static bool readFloatAccessor(
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     outModel = {};
+    outModel.sourcePath = filepath;
+    outModel.sourceDirectory = std::filesystem::path(filepath).parent_path().string();
 
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
@@ -90,7 +143,7 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
 
     // Process materials and images first (they are referenced by meshes)
     processMaterials(model, outModel);
-    processImages(model, outModel);
+    processImages(model, std::filesystem::path(filepath), outModel);
 
     // Set model name from file
     size_t lastSlash = filepath.find_last_of("/\\");
@@ -424,17 +477,24 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
     }
 }
 
-void GltfLoader::processImages(const tinygltf::Model& model, GltfModel& outModel) {
+void GltfLoader::processImages(const tinygltf::Model& model, const std::filesystem::path& sourcePath, GltfModel& outModel) {
+    (void)sourcePath;
     outModel.images.reserve(model.images.size());
 
     for (const auto& image : model.images) {
         GltfImageData imageData;
         imageData.width = image.width;
         imageData.height = image.height;
-        imageData.channels = image.component;
+        imageData.channels = 4;
+        imageData.uri = image.uri;
 
-        // Copy pixel data directly from tinygltf
-        imageData.pixels = image.image;
+        // Normalize to RGBA8 so the upload path can generate mipmaps reliably.
+        imageData.pixels = expandToRgba8(image.image, image.width, image.height, image.component);
+
+        if(imageData.uri.empty() && !image.name.empty())
+        {
+            imageData.uri = image.name;
+        }
 
         outModel.images.push_back(std::move(imageData));
     }

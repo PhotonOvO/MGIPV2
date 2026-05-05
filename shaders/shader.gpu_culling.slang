@@ -20,11 +20,12 @@ ConstantBuffer<GPUCullingUniforms> gpuCullingUniforms;
 
 bool isInsideFrustum(float3 center, float radius)
 {
+    const float conservativeRadius = radius * 1.05 + 0.05;
     for(uint planeIndex = 0; planeIndex < uint(LGPUCullingFrustumPlaneCount); ++planeIndex)
     {
         float4 plane = gpuCullingUniforms.frustumPlanes[planeIndex];
         float distanceToPlane = dot(plane.xyz, center) + plane.w;
-        if(distanceToPlane < -radius)
+        if(distanceToPlane < -conservativeRadius)
         {
             return false;
         }
@@ -59,8 +60,9 @@ float sampleHiZCenterClusterDepth(uint mipLevel, int2 centerCoord, int2 mipExten
 
 bool isOccluded(float3 center, float radius)
 {
+    const float conservativeRadius = radius * 1.1 + 0.1;
     const float3 centerView = mul(gpuCullingUniforms.viewMatrix, float4(center, 1.0)).xyz;
-    const float nearestPositiveZ = -centerView.z - radius;
+    const float nearestPositiveZ = -centerView.z - conservativeRadius;
     if(nearestPositiveZ <= 1e-4)
     {
         return false;
@@ -75,10 +77,11 @@ bool isOccluded(float3 center, float radius)
     const float2 centerNdc = clipCenter.xy / clipCenter.w;
     const float2 projectionScale = float2(abs(gpuCullingUniforms.projectionMatrix[0][0]),
                                           abs(gpuCullingUniforms.projectionMatrix[1][1]));
-    const float2 radiusNdc = projectionScale * (radius / nearestPositiveZ);
+    const float2 radiusNdc = projectionScale * (conservativeRadius / nearestPositiveZ);
+    const float2 guardBandNdc = 2.0 / max(gpuCullingUniforms.screenSizeAndPyramidSize.xy, float2(1.0, 1.0));
 
-    float2 minNdc = centerNdc - radiusNdc;
-    float2 maxNdc = centerNdc + radiusNdc;
+    float2 minNdc = centerNdc - radiusNdc - guardBandNdc;
+    float2 maxNdc = centerNdc + radiusNdc + guardBandNdc;
     if(maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
     {
         return false;
@@ -93,6 +96,12 @@ bool isOccluded(float3 center, float radius)
 
     const float2 minPixel = (minNdc * 0.5 + 0.5) * screenSize;
     const float2 maxPixel = (maxNdc * 0.5 + 0.5) * screenSize;
+    const float2 extentPixels = maxPixel - minPixel;
+    const float footprint = max(extentPixels.x, extentPixels.y);
+    if(footprint >= 192.0)
+    {
+        return false;
+    }
     const uint mipLevel = selectMip(minPixel, maxPixel, mipCount);
     const float sourceFootprint = exp2(float(mipLevel + 1u));
 
@@ -101,7 +110,7 @@ bool isOccluded(float3 center, float radius)
     const int2 centerCoord = clamp(int2(centerPixel / sourceFootprint), int2(0, 0), mipExtent - int2(1, 1));
     const float hizDepth = sampleHiZCenterClusterDepth(mipLevel, centerCoord, mipExtent);
 
-    const float nearestViewZ = centerView.z + radius;
+    const float nearestViewZ = centerView.z + conservativeRadius;
     if(nearestViewZ >= -1e-4)
     {
         return false;
@@ -115,7 +124,7 @@ bool isOccluded(float3 center, float radius)
 
     const float nearestDepth = saturate(nearestClip.z / nearestClip.w);
     const float depthEpsilon = gpuCullingUniforms.cullingInfo.w;
-    return nearestDepth < hizDepth - depthEpsilon;
+    return nearestDepth > hizDepth + depthEpsilon;
 }
 
 [numthreads(LGPUCullingThreadCount, 1, 1)]
@@ -150,7 +159,7 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     command.instanceCount = 0u;
     command.firstIndex = objectData.firstIndex;
     command.vertexOffset = objectData.vertexOffset;
-    command.firstInstance = 0u;
+    command.firstInstance = objectIndex;
 
     const float3 center = objectData.sphereCenterRadius.xyz;
     const float radius = max(objectData.sphereCenterRadius.w, 0.0);

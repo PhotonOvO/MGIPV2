@@ -9,6 +9,30 @@
 #include "volk.h"
 #include "vulkan/vk_enum_string_helper.h"
 
+// Support VK_EXT_full_screen_exclusive even on older Vulkan headers
+#ifndef VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT
+#define VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT   1000255000
+#define VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT 1000255001
+typedef enum VkFullScreenExclusiveEXT {
+    VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT                = 0,
+    VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT                = 1,
+    VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT             = 2,
+    VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT = 3,
+} VkFullScreenExclusiveEXT;
+typedef struct VkSurfaceFullScreenExclusiveInfoEXT {
+    VkStructureType            sType;
+    const void*                pNext;
+    VkFullScreenExclusiveEXT   fullScreenExclusive;
+} VkSurfaceFullScreenExclusiveInfoEXT;
+#ifdef _WIN32
+typedef struct VkSurfaceFullScreenExclusiveWin32InfoEXT {
+    VkStructureType sType;
+    const void*     pNext;
+    void*           hmonitor;
+} VkSurfaceFullScreenExclusiveWin32InfoEXT;
+#endif
+#endif
+
 namespace demo::rhi::vulkan {
 namespace {
 
@@ -73,6 +97,30 @@ void VulkanSwapchain::deinit()
   m_extent         = {};
   m_hasAcquiredImage = false;
   m_needsRebuild   = false;
+  m_presentMode    = VK_PRESENT_MODE_FIFO_KHR;
+}
+
+void VulkanSwapchain::setVSync(bool vSync)
+{
+  if(m_vSync == vSync)
+  {
+    return;
+  }
+
+  m_vSync = vSync;
+  requestRebuild();
+}
+
+void VulkanSwapchain::set_fullscreen(bool fullscreen, void* platform_handle)
+{
+  if(m_fullscreen == fullscreen && m_platform_handle == platform_handle)
+  {
+    return;
+  }
+
+  m_fullscreen = fullscreen;
+  m_platform_handle = platform_handle;
+  requestRebuild();
 }
 
 void VulkanSwapchain::requestRebuild()
@@ -296,6 +344,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 
   const VkSurfaceFormat2KHR surfaceFormat2 = selectSwapSurfaceFormat(formats);
   const VkPresentModeKHR    presentMode    = selectSwapPresentMode(presentModes, vSync);
+  m_presentMode                           = presentMode;
 
   const VkExtent2D vkExtent = capabilities2.surfaceCapabilities.currentExtent;
   m_extent                  = {vkExtent.width, vkExtent.height};
@@ -308,21 +357,32 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   m_maxFramesInFlight   = m_requestedImageCount;
   m_imageFormat       = surfaceFormat2.surfaceFormat.format;
 
-  const VkSwapchainCreateInfoKHR swapchainCreateInfo{
-      .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-      .surface          = m_surface,
-      .minImageCount    = m_requestedImageCount,
-      .imageFormat      = surfaceFormat2.surfaceFormat.format,
-      .imageColorSpace  = surfaceFormat2.surfaceFormat.colorSpace,
-      .imageExtent      = vkExtent,
-      .imageArrayLayers = 1,
-      .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .preTransform     = capabilities2.surfaceCapabilities.currentTransform,
-      .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      .presentMode      = presentMode,
-      .clipped          = VK_TRUE,
-  };
+  VkSurfaceFullScreenExclusiveInfoEXT fullScreenExclusiveInfo{};
+  fullScreenExclusiveInfo.sType               = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT);
+  fullScreenExclusiveInfo.fullScreenExclusive = static_cast<VkFullScreenExclusiveEXT>(VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT);
+
+#ifdef _WIN32
+  VkSurfaceFullScreenExclusiveWin32InfoEXT fullScreenExclusiveWin32Info{};
+  fullScreenExclusiveWin32Info.sType    = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT);
+  fullScreenExclusiveWin32Info.hmonitor = m_platform_handle;
+  fullScreenExclusiveInfo.pNext = &fullScreenExclusiveWin32Info;
+#endif
+
+  VkSwapchainCreateInfoKHR swapchainCreateInfo{};
+  swapchainCreateInfo.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+  swapchainCreateInfo.pNext            = m_fullscreen ? &fullScreenExclusiveInfo : nullptr;
+  swapchainCreateInfo.surface          = m_surface;
+  swapchainCreateInfo.minImageCount    = m_requestedImageCount;
+  swapchainCreateInfo.imageFormat      = surfaceFormat2.surfaceFormat.format;
+  swapchainCreateInfo.imageColorSpace  = surfaceFormat2.surfaceFormat.colorSpace;
+  swapchainCreateInfo.imageExtent      = vkExtent;
+  swapchainCreateInfo.imageArrayLayers = 1;
+  swapchainCreateInfo.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  swapchainCreateInfo.preTransform     = capabilities2.surfaceCapabilities.currentTransform;
+  swapchainCreateInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  swapchainCreateInfo.presentMode      = presentMode;
+  swapchainCreateInfo.clipped          = VK_TRUE;
   checkVk(vkCreateSwapchainKHR(m_device, &swapchainCreateInfo, nullptr, &m_swapchain),
           "VulkanSwapchain::createResources failed creating swapchain");
 

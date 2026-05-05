@@ -280,35 +280,105 @@ void GBufferPass::execute(const PassContext& context) const
         // Batch allocate DrawUniforms for all visible meshes
         if(!pendingDraws.empty() && !drawBindGroupHandle.isNull())
         {
+            const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex).isNull();
             const uint32_t batchSize = static_cast<uint32_t>(pendingDraws.size()) * kDrawUniformsStride;
             const TransientAllocator::Allocation batchAlloc =
-                context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
+                useMdi ? TransientAllocator::Allocation{} : context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
 
             {
                 TRACY_ZONE_SCOPED("GBuffer::batchUpload");
-                // Write all DrawUniforms at once
-                for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+                if(useMdi)
                 {
-                    std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + slot * kDrawUniformsStride;
-                    std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
+                    std::vector<shaderio::DrawUniforms> mdiDrawData(context.gltfModel->meshes.size());
+                    for(const PendingDraw& draw : pendingDraws)
+                    {
+                        mdiDrawData[draw.meshIndex] = draw.uniforms;
+                    }
+                    m_renderer->uploadGBufferMDIDrawData(context.frameIndex, mdiDrawData);
                 }
-                context.transientAllocator->flushAllocation(batchAlloc, batchSize);
+                else
+                {
+                    for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
+                    {
+                        std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + static_cast<uint32_t>(slot) * kDrawUniformsStride;
+                        std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
+                    }
+                    context.transientAllocator->flushAllocation(batchAlloc, batchSize);
+                }
             }
 
-            // Second pass: bind pipeline/descriptors and draw
-            const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
-                m_renderer->getGBufferPipelineLayout());
-            uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
-            VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
-
+            if(useMdi)
             {
+                const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getMDIPipelineLayout());
+                const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
+                    m_renderer->getGBufferColorDescriptorSet());
+                vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                        shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+                if(!cameraBindGroupHandle.isNull())
+                {
+                    uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
+                    VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
+                    const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+                    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                                            VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                            shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                }
+                const BindGroupHandle mdiDrawBindGroupHandle = m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex);
+                const VkDescriptorSet mdiDrawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+                    m_renderer->getBindGroupDescriptorSet(mdiDrawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+                vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                        shaderio::LSetDraw, 1, &mdiDrawDescriptorSet, 0, nullptr);
+
+                const uint64_t sharedVertexHandle = pendingDraws.front().mesh->vertexBufferHandle;
+                const uint64_t sharedIndexHandle = pendingDraws.front().mesh->indexBufferHandle;
+                const uint64_t vertexOffset = 0;
+                context.cmd->bindVertexBuffers(0, &sharedVertexHandle, &vertexOffset, 1);
+                context.cmd->bindIndexBuffer(sharedIndexHandle, 0, rhi::IndexFormat::uint32);
+
+                TRACY_ZONE_SCOPED("GBuffer::drawLoopMDI");
+                size_t runBegin = 0;
+                while(runBegin < pendingDraws.size())
+                {
+                    const PipelineHandle mdiPipeline =
+                        pendingDraws[runBegin].pipeline == m_renderer->getGBufferAlphaTestPipelineHandle()
+                            ? m_renderer->getGBufferAlphaTestMDIPipelineHandle()
+                            : m_renderer->getGBufferOpaqueMDIPipelineHandle();
+                    const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
+                        m_renderer->getPipelineOpaque(mdiPipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS)));
+                    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
+
+                    size_t runEnd = runBegin + 1;
+                    while(runEnd < pendingDraws.size()
+                          && pendingDraws[runEnd].pipeline == pendingDraws[runBegin].pipeline
+                          && pendingDraws[runEnd].meshIndex == pendingDraws[runEnd - 1].meshIndex + 1)
+                    {
+                        ++runEnd;
+                    }
+
+                    context.cmd->drawIndexedIndirect(indirectBufferHandle,
+                                                     static_cast<uint64_t>(pendingDraws[runBegin].meshIndex) * indirectCommandStride,
+                                                     static_cast<uint32_t>(runEnd - runBegin),
+                                                     indirectCommandStride);
+                    runBegin = runEnd;
+                }
+            }
+            else
+            {
+                const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
+                    m_renderer->getGBufferPipelineLayout());
+                uint64_t drawSetOpaque = m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific);
+                VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(drawSetOpaque);
+
                 TRACY_ZONE_SCOPED("GBuffer::drawLoop");
                 PipelineHandle currentPipeline{};
+                uint64_t currentVertexHandle = 0;
+                uint64_t currentIndexHandle = 0;
                 for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
                 {
                     const PendingDraw& draw = pendingDraws[slot];
 
-                    // Bind pipeline if changed
                     if(draw.pipeline != currentPipeline)
                     {
                         const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
@@ -317,31 +387,26 @@ void GBufferPass::execute(const PassContext& context) const
                         currentPipeline = draw.pipeline;
                     }
 
-                    // Bind draw descriptor set with dynamic offset
                     const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
                     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                             VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
                                             shaderio::LSetDraw, 1, &drawDescriptorSet, 1, &drawDynamicOffset);
 
-                    // Bind vertex and index buffers
                     const uint64_t vertexHandle = draw.mesh->vertexBufferHandle;
-                    const uint64_t vertexOffset = 0;
-                    context.cmd->bindVertexBuffers(0, &vertexHandle, &vertexOffset, 1);
-
                     const uint64_t indexHandle = draw.mesh->indexBufferHandle;
-                    context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+                    if(vertexHandle != currentVertexHandle)
+                    {
+                        const uint64_t vo = 0;
+                        context.cmd->bindVertexBuffers(0, &vertexHandle, &vo, 1);
+                        currentVertexHandle = vertexHandle;
+                    }
+                    if(indexHandle != currentIndexHandle)
+                    {
+                        context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
+                        currentIndexHandle = indexHandle;
+                    }
 
-                    if(indirectBufferHandle != 0)
-                    {
-                        context.cmd->drawIndexedIndirect(indirectBufferHandle,
-                                                         static_cast<uint64_t>(draw.meshIndex) * indirectCommandStride,
-                                                         1,
-                                                         indirectCommandStride);
-                    }
-                    else
-                    {
-                        context.cmd->drawIndexed(draw.mesh->indexCount, 1, 0, 0, 0);
-                    }
+                    context.cmd->drawIndexed(draw.mesh->indexCount, 1, draw.mesh->firstIndex, draw.mesh->vertexOffset, 0);
                 }
             }
         }

@@ -28,7 +28,9 @@ utils::Buffer createStorageBuffer(VkDevice device,
   };
 
   utils::Buffer buffer{};
-  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr));
+  VmaAllocationInfo allocationInfo{};
+  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, &allocationInfo));
+  buffer.mapped = allocationInfo.pMappedData;
   return buffer;
 }
 
@@ -50,7 +52,9 @@ utils::Buffer createUniformBuffer(VkDevice device,
   };
 
   utils::Buffer buffer{};
-  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr));
+  VmaAllocationInfo allocationInfo{};
+  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, &allocationInfo));
+  buffer.mapped = allocationInfo.pMappedData;
   return buffer;
 }
 
@@ -70,12 +74,20 @@ void updateMappedStorageBuffer(VmaAllocator allocator, utils::Buffer& buffer, st
     return;
   }
 
-  void* mappedData = nullptr;
   const VkDeviceSize copySize = sizeof(shaderio::LightData) * lights.size();
-  VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+  void* mappedData = buffer.mapped;
+  bool  mappedHere = false;
+  if(mappedData == nullptr)
+  {
+    VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+    mappedHere = true;
+  }
   std::memcpy(mappedData, lights.data(), static_cast<size_t>(copySize));
   VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, 0, copySize));
-  vmaUnmapMemory(allocator, buffer.allocation);
+  if(mappedHere)
+  {
+    vmaUnmapMemory(allocator, buffer.allocation);
+  }
 }
 
 void updateMappedUniformBuffer(VmaAllocator allocator, utils::Buffer& buffer, const shaderio::LightCoarseCullingUniforms& uniforms)
@@ -85,11 +97,19 @@ void updateMappedUniformBuffer(VmaAllocator allocator, utils::Buffer& buffer, co
     return;
   }
 
-  void* mappedData = nullptr;
-  VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+  void* mappedData = buffer.mapped;
+  bool  mappedHere = false;
+  if(mappedData == nullptr)
+  {
+    VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+    mappedHere = true;
+  }
   std::memcpy(mappedData, &uniforms, sizeof(uniforms));
   VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, 0, sizeof(uniforms)));
-  vmaUnmapMemory(allocator, buffer.allocation);
+  if(mappedHere)
+  {
+    vmaUnmapMemory(allocator, buffer.allocation);
+  }
 }
 
 }  // namespace
@@ -114,17 +134,17 @@ void LightResources::init(rhi::Device& device, VmaAllocator allocator, const Cre
   {
     frame.pointLightBuffer =
         createStorageBuffer(m_device, m_allocator, pointLightBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
-                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
     frame.spotLightBuffer =
         createStorageBuffer(m_device, m_allocator, spotLightBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
-                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
     frame.pointCoarseBoundsBuffer =
         createStorageBuffer(m_device, m_allocator, pointBoundsBufferSize, VMA_MEMORY_USAGE_GPU_ONLY);
     frame.spotCoarseBoundsBuffer =
         createStorageBuffer(m_device, m_allocator, spotBoundsBufferSize, VMA_MEMORY_USAGE_GPU_ONLY);
     frame.coarseCullingUniformBuffer =
         createUniformBuffer(m_device, m_allocator, coarseUniformBufferSize, VMA_MEMORY_USAGE_CPU_TO_GPU,
-                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
   }
 }
 

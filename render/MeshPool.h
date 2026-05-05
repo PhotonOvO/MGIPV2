@@ -10,6 +10,7 @@
 
 namespace demo {
 
+class BatchUploadContext;
 struct GltfMeshData;  // Forward declaration
 
 struct MeshRecord {
@@ -19,7 +20,11 @@ struct MeshRecord {
     VmaAllocation indexAllocation = nullptr;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
+    uint32_t firstIndex = 0;
+    int32_t vertexOffset = 0;
     uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
+    VkDeviceSize vertexBufferOffset = 0;
+    VkDeviceSize indexBufferOffset = 0;
     glm::mat4 transform = glm::mat4(1.0f);
     int32_t materialIndex = -1;  // -1 = default material
     // Pre-computed alpha mode from material - avoids per-frame per-pass lookup
@@ -43,6 +48,8 @@ struct MeshRecord {
     glm::vec3 localBoundsMax = glm::vec3(0.0f);
     glm::vec3 worldBoundsMin = glm::vec3(0.0f);
     glm::vec3 worldBoundsMax = glm::vec3(0.0f);
+    glm::vec3 worldBoundsCenter = glm::vec3(0.0f);
+    float     worldBoundsRadius = 0.0f;
 
     // Helper to get native VkBuffer from opaque handle
     VkBuffer getNativeVertexBuffer() const {
@@ -69,7 +76,7 @@ public:
     void init(VkDevice device, VmaAllocator allocator, upload::StaticBufferUploadPolicy staticUploadPolicy = {});
     void deinit();
 
-    MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd);
+    MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
     void destroyMesh(MeshHandle handle);
     void updateTransform(MeshHandle handle, const glm::mat4& transform);
     void setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alphaCutoff);
@@ -84,6 +91,9 @@ public:
                             float normalScale);
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
+    void reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd);
+    [[nodiscard]] uint64_t getSharedVertexBufferHandle() const;
+    [[nodiscard]] uint64_t getSharedIndexBufferHandle() const;
 
     // Free staging buffers after GPU sync (call after command buffer completes)
     void freeStagingBuffers();
@@ -94,10 +104,25 @@ public:
     }
 
 private:
+    struct SharedBufferArena
+    {
+        utils::Buffer buffer{};
+        VkDeviceSize capacity{0};
+        VkDeviceSize bytesUsed{0};
+    };
+
+    void ensureSharedCapacity(SharedBufferArena& arena,
+                              VkDeviceSize requiredSize,
+                              VkBufferUsageFlags2KHR usage,
+                              VkCommandBuffer cmd);
+    void resetSharedBuffers();
+
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
     upload::StaticBufferUploadPolicy m_staticUploadPolicy{};
     HandlePool<MeshHandle, MeshRecord> m_pool;
+    SharedBufferArena m_sharedVertexBuffer{};
+    SharedBufferArena m_sharedIndexBuffer{};
     std::vector<utils::Buffer> m_stagingBuffers;  // Deferred deletion after GPU sync
 };
 

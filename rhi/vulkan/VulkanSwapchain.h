@@ -14,6 +14,10 @@ public:
 
   void init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync);
   void deinit();
+  void setVSync(bool vSync);
+  [[nodiscard]] bool             getVSync() const { return m_vSync; }
+  [[nodiscard]] VkPresentModeKHR getPresentMode() const { return m_presentMode; }
+  void                             set_fullscreen(bool fullscreen, void* platform_handle = nullptr);
 
   void          requestRebuild() override;
   bool          needsRebuild() const override;
@@ -73,6 +77,9 @@ private:
   Extent2D m_extent{};
   bool     m_vSync{true};
   bool     m_needsRebuild{false};
+  VkPresentModeKHR m_presentMode{VK_PRESENT_MODE_FIFO_KHR};
+  bool     m_fullscreen{false};
+  void*    m_platform_handle{nullptr};
 };
 
 }  // namespace demo::rhi::vulkan

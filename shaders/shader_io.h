@@ -215,6 +215,24 @@ struct GPUCullObject
   uint32_t flags;
 };
 
+struct GPUSceneObject
+{
+  vec4     worldMatrixRows[3];  // 48 bytes, row-major 3x4 affine transform
+  vec4     boundsSphere;        // xyz = center, w = radius
+  uint32_t materialIndex;
+  uint32_t meshIndex;
+  uint32_t flags;
+  uint32_t _padding;
+};
+
+struct GPUSceneInfo
+{
+  uint64_t objectBufferAddress;
+  uint64_t cullObjectBufferAddress;
+  uint32_t objectCount;
+  uint32_t _padding0;
+};
+
 struct GPUCullIndirectCommand
 {
   uint32_t indexCount;
@@ -252,6 +270,23 @@ struct GPUCullStats
   uint32_t transparentVisibleCount;
   uint32_t opaqueCount;
   uint32_t transparentCount;
+};
+
+struct GPUBatchBuildStats
+{
+  uint32_t visibleCount;
+  uint32_t batchCount;
+  uint32_t sortPassCount;
+  uint32_t _padding0;
+};
+
+struct Meshlet
+{
+  vec4     boundsSphere;
+  uint32_t vertexOffset;
+  uint32_t indexOffset;
+  uint32_t triangleCount;
+  uint32_t materialIndex;
 };
 
 STATIC_CONST uint32_t LGPUCullFlagFrustumCulling = 0x1u;

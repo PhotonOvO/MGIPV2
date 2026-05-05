@@ -42,6 +42,7 @@ constexpr VkDeviceSize kMiB = 1024ull * kKiB;
   {
     return false;
   }
+  buffer.mapped = allocationInfo.pMappedData;
 
   const VkBufferDeviceAddressInfo addressInfo{
       .sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
@@ -172,14 +173,28 @@ StaticBufferUploadPolicy buildStaticBufferUploadPolicy(const rhi::MemoryProperti
 
 utils::Buffer createUploadStagingBuffer(VkDevice device, VmaAllocator allocator, std::span<const std::byte> data)
 {
+  utils::Buffer stagingBuffer = createMappedUploadStagingBuffer(device, allocator, data.size_bytes());
+  writeAllocationBytes(allocator, stagingBuffer.allocation, data);
+  return stagingBuffer;
+}
+
+utils::Buffer createMappedUploadStagingBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
+{
   VmaAllocationCreateInfo allocInfo{};
   allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
   allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-  utils::Buffer stagingBuffer =
-      createBufferInternal(device, allocator, data.size_bytes(), VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR, allocInfo);
-  writeAllocationBytes(allocator, stagingBuffer.allocation, data);
-  return stagingBuffer;
+  return createBufferInternal(device, allocator, size, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR, allocInfo);
+}
+
+utils::Buffer createStaticBuffer(VkDevice device,
+                                 VmaAllocator allocator,
+                                 VkDeviceSize size,
+                                 VkBufferUsageFlags2KHR usage)
+{
+  VmaAllocationCreateInfo allocInfo{};
+  allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  return createBufferInternal(device, allocator, size, usage | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR, allocInfo);
 }
 
 utils::Buffer createStaticBufferWithUpload(VkDevice device,
@@ -202,10 +217,7 @@ utils::Buffer createStaticBufferWithUpload(VkDevice device,
 
   utils::Buffer stagingBuffer = createUploadStagingBuffer(device, allocator, data);
 
-  VmaAllocationCreateInfo allocInfo{};
-  allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-  utils::Buffer gpuBuffer =
-      createBufferInternal(device, allocator, data.size_bytes(), usage | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR, allocInfo);
+  utils::Buffer gpuBuffer = createStaticBuffer(device, allocator, data.size_bytes(), usage);
 
   const VkBufferCopy copyRegion{.size = data.size_bytes()};
   vkCmdCopyBuffer(cmd, stagingBuffer.buffer, gpuBuffer.buffer, 1, &copyRegion);

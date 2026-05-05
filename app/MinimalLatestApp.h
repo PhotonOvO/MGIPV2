@@ -1,10 +1,19 @@
 #pragma once
 
 #include "../common/Common.h"
-#include "../render/Renderer.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
+
+#include "../render/RendererFacade.h"
 #include "../rhi/RHISurface.h"
 #include "../rhi/vulkan/VulkanSurface.h"
 #include "../loader/GltfLoader.h"
+#include "../loader/SceneCacheSerializer.h"
+#include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
 
 #include <memory>
@@ -164,7 +173,7 @@ public:
         {
           if(ImGui::MenuItem("vSync", "", &m_vSync))
           {
-            m_renderer.requestSwapchainRebuild();
+            m_renderer.setVSync(m_vSync);
           }
           ImGui::Separator();
           if(ImGui::MenuItem("Exit"))
@@ -270,9 +279,26 @@ public:
 
         // Swapchain diagnostics
         ImGui::Separator();
+        ImGui::Text("Renderer Backend: %s", m_renderer.getBackendName());
+        if(m_renderer.getBackend() == demo::RendererBackend::gpuDriven)
+        {
+          const demo::GPUDrivenRuntimeStats gpuDrivenStats = m_renderer.getGPUDrivenRuntimeStats();
+          ImGui::Text("Persistent Objects: %u", gpuDrivenStats.objectCount);
+          ImGui::Text("Meshlets: %u", gpuDrivenStats.meshletCount);
+          ImGui::Text("Meshlet Triangles: %u", gpuDrivenStats.meshletTriangleCount);
+          ImGui::Text("Scene Uploads: %u", gpuDrivenStats.sceneUploadCount);
+          ImGui::Text("Pending Scene Updates: %u", gpuDrivenStats.pendingSceneUpdates);
+          ImGui::Text("Batch Builder: %u visible, %u sort passes",
+                      gpuDrivenStats.batchStats.visibleCount,
+                      gpuDrivenStats.batchStats.sortPassCount);
+        }
+
+        ImGui::Separator();
         ImGui::Text("Swapchain");
-        ImGui::Text("Present Mode: %s", m_vSync ? "FIFO" : "Mailbox");
+        ImGui::Text("VSync Requested: %s", m_renderer.getVSync() ? "On" : "Off");
+        ImGui::Text("Present Mode: %s", m_renderer.getSwapchainPresentModeName());
         ImGui::Text("Swap Images: %u", m_renderer.getSwapchainImageCount());
+        ImGui::Text("Fullscreen: %s", m_fullscreen ? "Yes" : "No");
       }
       ImGui::End();
 
@@ -320,6 +346,7 @@ private:
       // Restore windowed mode
       glfwSetWindowMonitor(m_window, nullptr, m_windowedX, m_windowedY, m_windowedWidth, m_windowedHeight, 0);
       m_fullscreen = false;
+      m_renderer.setFullscreen(false, nullptr);
     }
     else
     {
@@ -332,6 +359,12 @@ private:
       const GLFWvidmode* mode = glfwGetVideoMode(monitor);
       glfwSetWindowMonitor(m_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
       m_fullscreen = true;
+#ifdef _WIN32
+      HMONITOR hmonitor = MonitorFromWindow(glfwGetWin32Window(m_window), MONITOR_DEFAULTTONEAREST);
+      m_renderer.setFullscreen(true, static_cast<void*>(hmonitor));
+#else
+      m_renderer.setFullscreen(true, nullptr);
+#endif
     }
   }
 
@@ -339,7 +372,7 @@ private:
   std::unique_ptr<demo::rhi::vulkan::VulkanSurface> m_surface;
   VkExtent2D                                        m_windowSize{800, 600};
   demo::rhi::Extent2D                               m_viewportSize{800, 600};
-  demo::Renderer                                    m_renderer;
+  demo::RendererFacade                              m_renderer;
   bool                       m_vSync{false};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
@@ -392,6 +425,7 @@ private:
 
   // Async loading state
   std::future<std::optional<demo::GltfModel>> m_loadFuture;
+  std::optional<demo::AsyncLoadingCoordinator> m_asyncLoadingCoordinator;
   std::string m_pendingModelPath;
   bool m_isLoading = false;
   float m_loadProgress = 0.0f;
@@ -453,84 +487,135 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
   m_loadProgress = 0.0f;
   m_loadStatus = "Starting load...";
   m_pendingModelPath = path;
+  m_asyncLoadingCoordinator.reset();
 
   // Start async loading (only file parsing, no member access)
   m_loadFuture = std::async(std::launch::async, [path]() -> std::optional<demo::GltfModel> {
+    demo::SceneCacheSerializer cacheSerializer;
     demo::GltfLoader loader;
     demo::GltfModel model;
+
+    const std::filesystem::path sourcePath(path);
+    const std::filesystem::path cachePath = demo::SceneCacheSerializer::buildCachePath(sourcePath);
+
+    if(cacheSerializer.isCacheValid(cachePath, sourcePath) && cacheSerializer.loadCache(cachePath, model))
+    {
+      LOGI("Loaded scene cache: %s", cachePath.string().c_str());
+      return model;
+    }
+
     if(!loader.load(path, model))
     {
       return std::nullopt;
     }
+
+    if(!cacheSerializer.saveCache(cachePath, model, sourcePath))
+    {
+      LOGW("Failed to save scene cache %s: %s", cachePath.string().c_str(), cacheSerializer.getLastError().c_str());
+    }
+
     return model;
   });
 }
 
 inline void MinimalLatestApp::updateAsyncLoading()
 {
-  if(!m_isLoading || !m_loadFuture.valid())
+  if(!m_isLoading)
   {
     return;
   }
 
-  // Simulate progress while waiting
-  if(m_loadProgress < 0.4f)
+  if(m_loadFuture.valid())
   {
-    m_loadProgress += 0.005f;
-    m_loadStatus = "Loading glTF file...";
+    if(m_loadProgress < 0.35f)
+    {
+      m_loadProgress += 0.005f;
+      m_loadStatus = "Parsing glTF and checking cache...";
+    }
+
+    auto status = m_loadFuture.wait_for(std::chrono::milliseconds(0));
+    if(status == std::future_status::ready)
+    {
+      auto result = m_loadFuture.get();
+      if(result.has_value())
+      {
+        m_loadStatus = "Preparing upload...";
+        m_loadProgress = 0.4f;
+
+        m_renderer.waitForIdle();
+        unloadModel();
+
+        m_sceneModel = std::move(*result);
+        m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
+
+        m_currentModel.emplace();
+        m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
+        m_asyncLoadingCoordinator.emplace();
+        m_asyncLoadingCoordinator->beginOneShot(*m_sceneModel);  // One-shot upload (all assets in single batch)
+
+        m_modelPath = m_pendingModelPath;
+        m_modelLoaded = true;
+
+        LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
+             m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+      }
+      else
+      {
+        m_loadStatus = "Failed to load model";
+        m_loadProgress = 0.0f;
+        m_isLoading = false;
+        LOGE("Failed to load model: %s", m_pendingModelPath.c_str());
+        return;
+      }
+    }
   }
 
-  // Check if loading is complete (non-blocking)
-  auto status = m_loadFuture.wait_for(std::chrono::milliseconds(0));
-  if(status == std::future_status::ready)
+  if(m_asyncLoadingCoordinator.has_value() && m_sceneModel.has_value() && m_currentModel.has_value())
   {
-    m_loadProgress = 0.5f;
-    m_loadStatus = "Preparing GPU upload...";
-
-    auto result = m_loadFuture.get();
-    if(result.has_value())
+    demo::AsyncLoadingCoordinator::LoadProgress progress = m_asyncLoadingCoordinator->getProgress();
+    if(m_asyncLoadingCoordinator->hasPendingBatches())
     {
-      m_loadStatus = "Uploading to GPU...";
-      m_loadProgress = 0.7f;
+      demo::AsyncLoadingCoordinator::UploadBatch batch = m_asyncLoadingCoordinator->takeNextBatch();
+      if(!batch.meshIndices.empty() || !batch.materialIndices.empty() || !batch.textureIndices.empty())
+      {
+        m_loadStatus = batch.criticalBatch ? "Uploading critical scene assets..." : "Streaming remaining scene assets...";
+        m_renderer.executeUploadCommand([this, batch](VkCommandBuffer cmd) {
+          m_renderer.uploadGltfModelBatch(*m_sceneModel,
+                                          batch.textureIndices,
+                                          batch.materialIndices,
+                                          batch.meshIndices,
+                                          *m_currentModel,
+                                          cmd);
+        });
+        m_asyncLoadingCoordinator->markBatchUploaded(batch);
+        progress = m_asyncLoadingCoordinator->getProgress();
+      }
+    }
 
-      m_renderer.waitForIdle();
-      unloadModel();
-
-      m_loadProgress = 0.9f;
-
-      m_sceneModel = std::move(*result);
-      m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
-
-      // Upload model to GPU
-      m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
-        m_currentModel = m_renderer.uploadGltfModel(*m_sceneModel, cmd);
-      });
-
-      m_modelPath = m_pendingModelPath;
-      m_modelLoaded = true;
+    m_loadProgress = 0.35f + progress.progressPercent * 0.65f;
+    if(progress.isComplete)
+    {
       m_loadProgress = 1.0f;
       m_loadStatus = "Done!";
-
-      LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
-           m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+      m_isLoading = false;
     }
-    else
-    {
-      m_loadStatus = "Failed to load model";
-      m_loadProgress = 0.0f;
-      LOGE("Failed to load model: %s", m_pendingModelPath.c_str());
-    }
-
-    m_isLoading = false;
   }
 }
 
 inline void MinimalLatestApp::unloadModel()
 {
+  m_asyncLoadingCoordinator.reset();
   if(m_modelLoaded && m_currentModel.has_value())
   {
     m_renderer.waitForIdle();
     m_renderer.destroyGltfResources(*m_currentModel);
+    m_currentModel.reset();
+    m_sceneModel.reset();
+    m_selectedSceneNode = -1;
+    m_modelLoaded = false;
+  }
+  else
+  {
     m_currentModel.reset();
     m_sceneModel.reset();
     m_selectedSceneNode = -1;
@@ -595,6 +680,17 @@ inline void MinimalLatestApp::drawModelLoaderUI()
       ImGui::Separator();
       ImGui::Text("%s", m_loadStatus.c_str());
       ImGui::ProgressBar(m_loadProgress, ImVec2(-1, 0));
+      if(m_asyncLoadingCoordinator.has_value())
+      {
+        const demo::AsyncLoadingCoordinator::LoadProgress& progress = m_asyncLoadingCoordinator->getProgress();
+        ImGui::Text("Meshes %u/%u  Materials %u/%u  Textures %u/%u",
+                    progress.meshesLoaded,
+                    progress.meshesTotal,
+                    progress.materialsLoaded,
+                    progress.materialsTotal,
+                    progress.texturesLoaded,
+                    progress.texturesTotal);
+      }
     }
 
     // Clear scene

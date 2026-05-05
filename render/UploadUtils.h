@@ -19,6 +19,15 @@ struct StaticBufferUploadPolicy
                                                       VmaAllocator allocator,
                                                       std::span<const std::byte> data);
 
+[[nodiscard]] utils::Buffer createMappedUploadStagingBuffer(VkDevice device,
+                                                            VmaAllocator allocator,
+                                                            VkDeviceSize size);
+
+[[nodiscard]] utils::Buffer createStaticBuffer(VkDevice device,
+                                               VmaAllocator allocator,
+                                               VkDeviceSize size,
+                                               VkBufferUsageFlags2KHR usage);
+
 [[nodiscard]] utils::Buffer createStaticBufferWithUpload(VkDevice device,
                                                          VmaAllocator allocator,
                                                          VkCommandBuffer cmd,

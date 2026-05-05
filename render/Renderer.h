@@ -90,6 +90,17 @@ struct DebugPassOptions
   float cascadeOverlayAlpha{0.25f};    // Overlay transparency
 };
 
+struct GPUDrivenSceneView
+{
+  uint64_t                           gpuSceneObjectBufferAddress{0};
+  uint64_t                           gpuCullObjectBufferAddress{0};
+  VkBuffer                           gpuCullObjectBuffer{VK_NULL_HANDLE};
+  uint32_t                           objectCount{0};
+  const shaderio::GPUCullObject*     overlayObjects{nullptr};
+  uint32_t                           overlayObjectCount{0};
+  bool                               usePersistentCullingObjects{false};
+};
+
 struct RenderParams
 {
   rhi::Extent2D                          viewportSize{};
@@ -106,6 +117,7 @@ struct RenderParams
   DirectionalLightSettings               lightSettings{};
   DebugPassOptions                       debugOptions{};
   bool                                   useCsmShadowMultiDrawIndirect{false};
+  const GPUDrivenSceneView*              gpuDrivenSceneView{nullptr};
 };
 
 struct GltfUploadResult
@@ -154,6 +166,10 @@ public:
 
   void init(GLFWwindow* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
+  void setVSync(bool enabled);
+  [[nodiscard]] bool        getVSync() const { return m_swapchainDependent.vSync; }
+  void setFullscreen(bool enabled, void* platformHandle = nullptr);
+  [[nodiscard]] const char* getSwapchainPresentModeName() const;
   void requestSwapchainRebuild()
   {
     if(m_swapchainDependent.swapchain)
@@ -181,6 +197,13 @@ public:
 
   // glTF model support
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
+  void             uploadGltfModelBatch(const GltfModel&          model,
+                                        std::span<const uint32_t> textureIndices,
+                                        std::span<const uint32_t> materialIndices,
+                                        std::span<const uint32_t> meshIndices,
+                                        GltfUploadResult&         ioResult,
+                                        VkCommandBuffer           cmd);
+  void             initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const;
   void             destroyGltfResources(const GltfUploadResult& result);
   void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
 
@@ -190,13 +213,20 @@ public:
   MeshPool& getMeshPool() { return m_meshPool; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
   void      waitForIdle();
+  [[nodiscard]] VkDevice getNativeDeviceHandle() const;
+  [[nodiscard]] VmaAllocator getAllocatorHandle() const { return m_device.allocator; }
+  [[nodiscard]] VkExtent2D getSceneExtent() const { return m_swapchainDependent.sceneResources.getSize(); }
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
   PipelineHandle getDepthPrepassOpaquePipelineHandle() const;
   PipelineHandle getDepthPrepassAlphaTestPipelineHandle() const;
+  PipelineHandle getDepthPrepassOpaqueMDIPipelineHandle() const;
+  PipelineHandle getDepthPrepassAlphaTestMDIPipelineHandle() const;
   PipelineHandle getGBufferOpaquePipelineHandle() const;
   PipelineHandle getGBufferAlphaTestPipelineHandle() const;
+  PipelineHandle getGBufferOpaqueMDIPipelineHandle() const;
+  PipelineHandle getGBufferAlphaTestMDIPipelineHandle() const;
   PipelineHandle getForwardPipelineHandle() const;
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
@@ -212,6 +242,9 @@ public:
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   PipelineHandle getLightCullingPipelineHandle() const;
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
+  [[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const;
+  [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex,
+                                                          const GltfUploadResult* gltfModel) const;
   [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
   {
     return static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand));
@@ -227,6 +260,7 @@ public:
   uint64_t       getDebugPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
   uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
+  uint64_t       getMDIPipelineLayout() const;
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getLightCullingDescriptorSet() const;
@@ -242,7 +276,12 @@ public:
   // Per-frame bind group accessors for dynamic uniform buffers
   BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;
   BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;
+  BindGroupHandle getMDIDrawBindGroup(uint32_t frameIndex) const;
+  BindGroupHandle getGBufferMDIDrawBindGroup(uint32_t frameIndex) const;
+  BindGroupHandle getDepthMDIDrawBindGroup(uint32_t frameIndex) const;
   BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const;
+  void uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
+  void uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
 
   // BindGroup creation (new RHI interface)
   rhi::BindGroupLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
@@ -400,6 +439,7 @@ private:
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       debugPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
+    std::unique_ptr<rhi::PipelineLayout>       mdiPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       csmShadowMdiPipelineLayout;
     HandlePool<PipelineHandle, PipelineRecord> pipelineRegistry;
 
@@ -439,6 +479,9 @@ private:
       BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
       BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
       BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
+      BindGroupHandle    mdiDrawBindGroup{kNullBindGroupHandle};
+      BindGroupHandle    gbufferMdiDrawBindGroup{kNullBindGroupHandle};
+      BindGroupHandle    depthMdiDrawBindGroup{kNullBindGroupHandle};
       std::array<BindGroupHandle, shaderio::LCascadeCount> csmShadowMdiDrawBindGroups{
           kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle};
       utils::Buffer      lightingBuffer{};
@@ -448,12 +491,24 @@ private:
       utils::Buffer      gpuCullingStatsBuffer{};
       utils::Buffer      gpuCullingUniformBuffer{};
       utils::Buffer      gpuCullingResultBuffer{};
+      VkBuffer           externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
+      uint64_t           externalGPUCullingObjectBufferAddress{0};
+      bool               useExternalGPUCullingObjectBuffer{false};
+      const GltfUploadResult* gpuCullingSourceModel{nullptr};
+      uint32_t           gpuCullingObjectCount{0};
       uint32_t           gpuCullingMeshCapacity{0};
       std::vector<uint32_t> gpuCullingResults;
+      std::vector<shaderio::GPUCullObject> gpuCullingScratchObjects;
       utils::Buffer      shadowCullingObjectBuffer{};
       utils::Buffer      shadowCullingIndirectBuffer{};
       utils::Buffer      shadowCullingDrawDataBuffer{};
+      utils::Buffer      gbufferMdiDrawDataBuffer{};
+      utils::Buffer      depthMdiDrawDataBuffer{};
       uint32_t           shadowCullingMeshCapacity{0};
+      uint32_t           gbufferMdiDrawCapacity{0};
+      uint32_t           depthMdiDrawCapacity{0};
+      std::vector<shaderio::ShadowCullObject> shadowCullingScratchObjects;
+      std::vector<shaderio::DrawUniforms>     shadowCullingScratchDrawData;
       std::vector<VkCommandBuffer> pendingUploadCmds;
       std::vector<VkFence> pendingUploadFences;
     };
@@ -493,11 +548,15 @@ private:
   PipelineHandle m_lightPipeline{};
   PipelineHandle m_depthPrepassOpaquePipeline{};
   PipelineHandle m_depthPrepassAlphaTestPipeline{};
+  PipelineHandle m_depthPrepassOpaqueMDIPipeline{};
+  PipelineHandle m_depthPrepassAlphaTestMDIPipeline{};
   PipelineHandle m_depthPyramidPipeline{};
   PipelineHandle m_gpuCullingPipeline{};
   PipelineHandle m_shadowCullingPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
   PipelineHandle m_gbufferAlphaTestPipeline{};   // GBuffer AlphaTest variant
+  PipelineHandle m_gbufferOpaqueMDIPipeline{};
+  PipelineHandle m_gbufferAlphaTestMDIPipeline{};
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
   PipelineHandle m_csmShadowPipeline{};          // CSM cascade MDI depth pass
   CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
@@ -589,6 +648,7 @@ private:
     {
       utils::ImageResource ownedImage{};
       VkExtent2D           sourceExtent{};
+      uint32_t             mipLevels{1};
     };
 
     struct TextureRecord
@@ -664,12 +724,18 @@ private:
   void                 createGPUCullingResources();
   void                 updateGPUCullingDescriptorSet(uint32_t frameIndex);
   void                 createGPUCullingPipeline();
+  void                 waitForAllFrameSlots();
   void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 createShadowCullingResources();
   void                 updateShadowCullingDescriptorSet(uint32_t frameIndex);
+  void                 updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex);
+  void                 updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex);
+  void                 updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex);
   void                 createShadowCullingPipeline();
   void                 ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
+  void                 ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
+  void                 ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
   void                 updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 cacheGPUCullingStats(uint32_t frameIndex);
   void                 drawGPUInfoOverlay(const RenderParams& params) const;
@@ -706,6 +772,7 @@ private:
   uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
   [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel) const;
+  void                     rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd);
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
   void              ensureTestPointLights(const RenderParams& params);
   [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;
@@ -763,6 +830,8 @@ private:
   FrameLightingState          m_frameLightingState;
   DebugDrawList               m_debugDrawList;
   shaderio::GPUCullStats      m_lastGPUCullingStats{};
+  const shaderio::GPUCullObject* m_externalGPUCullingOverlayObjects{nullptr};
+  uint32_t                    m_externalGPUCullingOverlayObjectCount{0};
   std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
   PassGpuProfileState         m_passGpuProfile;
   PassProfilingHooks          m_passProfilingHooks{this};

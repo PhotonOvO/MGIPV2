@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,7 @@ struct GltfImageData {
     int width = 0;
     int height = 0;
     int channels = 0;
+    std::string uri;
 };
 
 struct GltfNodeData {
@@ -84,6 +86,8 @@ struct GltfModel {
     std::vector<GltfNodeData> nodes;
     std::vector<int> rootNodes;
     std::string name;
+    std::string sourcePath;
+    std::string sourceDirectory;
 };
 
 class GltfLoader {
@@ -104,7 +108,7 @@ private:
                      GltfModel& outModel);
     bool processMesh(const tinygltf::Model& model, int meshIndex, const glm::mat4& transform, GltfModel& outModel);
     void processMaterials(const tinygltf::Model& model, GltfModel& outModel);
-    void processImages(const tinygltf::Model& model, GltfModel& outModel);
+    void processImages(const tinygltf::Model& model, const std::filesystem::path& sourcePath, GltfModel& outModel);
 };
 
 }  // namespace demo
