@@ -21,6 +21,7 @@ public:
   [[nodiscard]] uint32_t getMeshletCount() const { return m_meshletCount; }
 
 private:
+  void ensureCapacities(uint32_t requiredMeshletCount, uint32_t requiredIndexCount);
   void destroyBuffer(utils::Buffer& buffer);
 
   VkDevice      m_device{VK_NULL_HANDLE};
@@ -29,6 +30,9 @@ private:
   utils::Buffer m_meshletVertexBuffer{};
   utils::Buffer m_meshletIndexBuffer{};
   uint32_t      m_meshletCount{0};
+  uint32_t      m_meshletIndexCount{0};
+  uint32_t      m_meshletCapacity{0};
+  uint32_t      m_meshletIndexCapacity{0};
 };
 
 }  // namespace demo

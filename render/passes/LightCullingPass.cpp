@@ -28,7 +28,7 @@ void LightCullingPass::execute(const PassContext& context) const
     if(m_renderer == nullptr || context.params == nullptr)
         return;
 
-    context.cmd->beginEvent("LightCoarseCulling");
+    context.cmd->beginEvent("GPUDrivenLightCulling");
     m_renderer->executeLightCoarseCullingPass(*context.cmd, *context.params);
     context.cmd->endEvent();
 }

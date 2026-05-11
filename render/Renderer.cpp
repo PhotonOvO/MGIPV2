@@ -10,9 +10,11 @@
 #include "BatchUploadContext.h"
 #include "CSMShadowResources.h"
 #include "MipmapGenerator.h"
+#include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include "../loader/Ktx2Loader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <numeric>
@@ -114,6 +116,18 @@ struct DebugUnitLineSegment
   return !imageData.pixels.empty() && imageData.width > 0 && imageData.height > 0;
 }
 
+[[nodiscard]] bool supportsSampledImageFormat(VkPhysicalDevice physicalDevice, VkFormat format)
+{
+  if(physicalDevice == VK_NULL_HANDLE || format == VK_FORMAT_UNDEFINED)
+  {
+    return false;
+  }
+
+  VkFormatProperties properties{};
+  vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+  return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+
 [[nodiscard]] VkDeviceSize computeSelectedBatchUploadSize(const GltfModel&              model,
                                                           std::span<const uint32_t>     textureIndices,
                                                           std::span<const uint32_t>     meshIndices)
@@ -138,7 +152,8 @@ struct DebugUnitLineSegment
 
     if(hasKtx2Sidecar)
     {
-      totalSize += static_cast<VkDeviceSize>(ktxTexture.data.size());
+      totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
+                            static_cast<VkDeviceSize>(imageData.pixels.size()));
       totalSize += 16;  // alignment padding for KTX allocations
     }
     else
@@ -851,7 +866,7 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_debugPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
-  createPassGpuProfileResources();
+  createPassGpuProfileResources(m_passExecutor);
 }
 
 void Renderer::shutdown(rhi::Surface& surface)
@@ -1019,8 +1034,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     destroyBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer);
     destroyBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer);
     destroyBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gbufferMdiDrawDataBuffer);
     destroyBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -1215,6 +1233,11 @@ PipelineHandle Renderer::getForwardPipelineHandle() const
   return m_forwardPipeline;
 }
 
+PipelineHandle Renderer::getForwardMDIPipelineHandle() const
+{
+  return m_forwardMDIPipeline;
+}
+
 PipelineHandle Renderer::getShadowPipelineHandle() const
 {
   return m_shadowPipeline;
@@ -1223,6 +1246,11 @@ PipelineHandle Renderer::getShadowPipelineHandle() const
 PipelineHandle Renderer::getDebugPipelineHandle() const
 {
   return m_debugPipeline;
+}
+
+PipelineHandle Renderer::getSpotLightCoarseCullingPipelineHandle() const
+{
+  return m_spotLightCoarseCullingPipeline;
 }
 
 PipelineHandle Renderer::getGPUCullingDebugPipelineHandle() const
@@ -1249,9 +1277,19 @@ PipelineHandle Renderer::getShadowCullingPipelineHandle() const
   return m_shadowCullingPipeline;
 }
 
+PipelineHandle Renderer::getGPUCullingPipelineHandle() const
+{
+  return m_gpuCullingPipeline;
+}
+
 uint64_t Renderer::getShadowCullingPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout);
+}
+
+uint64_t Renderer::getGPUCullingPipelineLayout() const
+{
+  return reinterpret_cast<uint64_t>(m_device.gpuCullingPipelineLayout);
 }
 
 uint64_t Renderer::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
@@ -1261,6 +1299,15 @@ uint64_t Renderer::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) cons
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]);
+}
+
+uint64_t Renderer::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_device.gpuCullingDescriptorSets.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex]);
 }
 
 uint64_t Renderer::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
@@ -1317,8 +1364,59 @@ shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
   return m_csmShadowResources.getShadowUniformsData();
 }
 
+RuntimeProfileSnapshot Renderer::getRuntimeProfileSnapshot() const
+{
+  RuntimeProfileSnapshot snapshot{};
+  static constexpr size_t kMaxReasonableProfilePassCount = 256;
+  const size_t safePassCount = std::min({
+      m_passGpuProfile.passNames.size(),
+      m_passGpuProfile.latestCpuPassDurationsMs.size(),
+      m_passGpuProfile.latestPassDurationsMs.size(),
+      kMaxReasonableProfilePassCount,
+  });
+
+  snapshot.passNames.assign(m_passGpuProfile.passNames.begin(),
+                            m_passGpuProfile.passNames.begin() + static_cast<ptrdiff_t>(safePassCount));
+  snapshot.cpuPassDurationsMs.assign(m_passGpuProfile.latestCpuPassDurationsMs.begin(),
+                                     m_passGpuProfile.latestCpuPassDurationsMs.begin() + static_cast<ptrdiff_t>(safePassCount));
+  snapshot.gpuPassDurationsMs.assign(m_passGpuProfile.latestPassDurationsMs.begin(),
+                                     m_passGpuProfile.latestPassDurationsMs.begin() + static_cast<ptrdiff_t>(safePassCount));
+  snapshot.gpuValid = m_passGpuProfile.latestValid;
+  return snapshot;
+}
+
 void Renderer::render(const RenderParams& params)
 {
+  renderWithPassExecutor(params, m_passExecutor);
+}
+
+void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
+{
+  m_presentPassActive = false;
+
+  if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
+  {
+    createPassGpuProfileResources(passExecutor);
+  }
+  else
+  {
+    bool needsProfileRebuild = false;
+    for(size_t passIndex = 0; passIndex < passExecutor.getPassCount(); ++passIndex)
+    {
+      const PassNode* pass = passExecutor.getPass(passIndex);
+      const char* passName = pass != nullptr ? pass->getName() : "Unknown";
+      if(m_passGpuProfile.passNames[passIndex] != passName)
+      {
+        needsProfileRebuild = true;
+        break;
+      }
+    }
+    if(needsProfileRebuild)
+    {
+      createPassGpuProfileResources(passExecutor);
+    }
+  }
+
   if(params.viewportSize.width > 0 && params.viewportSize.height > 0
      && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
          || params.viewportSize.height != m_swapchainDependent.viewportSize.height))
@@ -1329,13 +1427,10 @@ void Renderer::render(const RenderParams& params)
   if(!prepareFrameResources())
     return;
 
-  if(params.debugOptions.showGPUCullingOverlay)
-  {
-    cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex());
-  }
+  cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex());
 
   rhi::CommandList& cmd = beginCommandRecording();
-  drawFrame(cmd, params);
+  drawFrame(cmd, params, passExecutor);
   endFrame(cmd);
 }
 
@@ -1352,6 +1447,11 @@ void Renderer::executeGraphicsPass(rhi::CommandList& cmd, const RenderParams& pa
 
 void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
 {
+  if(!m_presentPassActive)
+  {
+    return;
+  }
+
   if(params.debugOptions.showViewportAxis && params.cameraUniforms != nullptr)
   {
     ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);
@@ -1370,6 +1470,8 @@ void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& param
 
 void Renderer::beginPresentPass(rhi::CommandList& cmd)
 {
+  m_presentPassActive = false;
+
   const VkImage swapchainImage = getCurrentSwapchainImage();
   if(swapchainImage != VK_NULL_HANDLE)
   {
@@ -1396,10 +1498,17 @@ void Renderer::beginPresentPass(rhi::CommandList& cmd)
   }
 
   beginDynamicRenderingToSwapchain(cmd);
+  m_presentPassActive = true;
 }
 
 void Renderer::endPresentPass(rhi::CommandList& cmd)
 {
+  if(!m_presentPassActive)
+  {
+    return;
+  }
+
+  m_presentPassActive = false;
   endDynamicRenderingToSwapchain(cmd);
 
   // Close the swapchain image layout explicitly at the end of the final UI pass.
@@ -1566,32 +1675,10 @@ bool Renderer::prepareFrameResources()
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
+  syncMaterialBindGroup(currentFrameIndex);
 
-  // Non-blocking cleanup: check upload fences, only free if GPU finished
+  flushPendingUploadCommands(false);
   auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
-  if(!frameUserData.pendingUploadFences.empty())
-  {
-    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-
-    std::vector<size_t> toRemove;
-    for(size_t i = 0; i < frameUserData.pendingUploadFences.size(); ++i)
-    {
-      if(vkGetFenceStatus(device, frameUserData.pendingUploadFences[i]) == VK_SUCCESS)
-      {
-        vkFreeCommandBuffers(device, m_device.uploadCmdPool, 1, &frameUserData.pendingUploadCmds[i]);
-        vkDestroyFence(device, frameUserData.pendingUploadFences[i], nullptr);
-        toRemove.push_back(i);
-      }
-      // Not signaled: keep for next frame - true async, no blocking!
-    }
-
-    // Remove completed entries (reverse order to maintain indices)
-    for(auto it = toRemove.rbegin(); it != toRemove.rend(); ++it)
-    {
-      frameUserData.pendingUploadCmds.erase(frameUserData.pendingUploadCmds.begin() + *it);
-      frameUserData.pendingUploadFences.erase(frameUserData.pendingUploadFences.begin() + *it);
-    }
-  }
   resolvePassGpuProfileResults(currentFrameIndex);
   m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
   m_swapchainDependent.hasAcquiredImage = false;
@@ -1898,7 +1985,7 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
       useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBuffer : VK_NULL_HANDLE;
   frameUserData.externalGPUCullingObjectBufferAddress =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : 0;
-  frameUserData.gpuCullingSourceModel = params.gltfModel;
+  frameUserData.gpuCullingSourceModel = useExternalPersistentObjects ? nullptr : params.gltfModel;
   frameUserData.gpuCullingObjectCount = objectCount;
   m_externalGPUCullingOverlayObjects =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->overlayObjects : nullptr;
@@ -1983,7 +2070,8 @@ void Renderer::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& fram
                    m_device.allocator,
                    sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
-                   VMA_MEMORY_USAGE_GPU_ONLY);
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.shadowCullingDrawDataBuffer =
       createBuffer(device,
                    m_device.allocator,
@@ -2116,6 +2204,34 @@ void Renderer::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& 
   updateGBufferMdiDrawDataDescriptorSet(frameIndex);
 }
 
+void Renderer::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+{
+  const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
+  if(frameUserData.mdiDrawCapacity >= requiredCapacity)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  if(frameUserData.mdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
+  {
+    waitForAllFrameSlots();
+  }
+
+  destroyBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer);
+  frameUserData.mdiDrawDataBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::DrawUniforms) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.mdiDrawCapacity = requiredCapacity;
+
+  const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
+  updateMdiDrawDataDescriptorSet(frameIndex);
+}
+
 void Renderer::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
@@ -2144,6 +2260,57 @@ void Renderer::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& fr
   updateDepthMdiDrawDataDescriptorSet(frameIndex);
 }
 
+void Renderer::ensureForwardMdiIndirectBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+{
+  const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
+  if(frameUserData.forwardMdiIndirectCapacity >= requiredCapacity)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  if(frameUserData.forwardMdiIndirectBuffer.buffer != VK_NULL_HANDLE)
+  {
+    waitForAllFrameSlots();
+  }
+
+  destroyBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer);
+  frameUserData.forwardMdiIndirectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.forwardMdiIndirectCapacity = requiredCapacity;
+}
+
+void Renderer::ensureGPUDrivenBootstrapIndirectBuffer(PerFrameResources::FrameUserData& frameUserData,
+                                                      uint32_t                          requiredDrawCount)
+{
+  const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
+  if(frameUserData.gpuDrivenBootstrapIndirectCapacity >= requiredCapacity)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  if(frameUserData.gpuDrivenBootstrapIndirectBuffer.buffer != VK_NULL_HANDLE)
+  {
+    waitForAllFrameSlots();
+  }
+
+  destroyBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer);
+  frameUserData.gpuDrivenBootstrapIndirectBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+                   VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  frameUserData.gpuDrivenBootstrapIndirectCapacity = requiredCapacity;
+}
+
 void Renderer::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
@@ -2165,6 +2332,44 @@ void Renderer::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
 
   const VkDescriptorBufferInfo drawDataBufferInfo{
       .buffer = frameUserData.gbufferMdiDrawDataBuffer.buffer,
+      .offset = 0,
+      .range  = VK_WHOLE_SIZE,
+  };
+  const VkDescriptorSet drawDescriptorSet =
+      reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+  const VkWriteDescriptorSet drawDataWrite{
+      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet          = drawDescriptorSet,
+      .dstBinding      = shaderio::LBindDrawModelMdi,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo     = &drawDataBufferInfo,
+  };
+  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+}
+
+void Renderer::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  if(frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const BindGroupHandle drawBindGroupHandle = getMDIDrawBindGroup(frameIndex);
+  if(drawBindGroupHandle.isNull())
+  {
+    return;
+  }
+
+  const VkDescriptorBufferInfo drawDataBufferInfo{
+      .buffer = frameUserData.mdiDrawDataBuffer.buffer,
       .offset = 0,
       .range  = VK_WHOLE_SIZE,
   };
@@ -2222,14 +2427,42 @@ void Renderer::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
 
 void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
 {
+  struct ShadowCullingSource
+  {
+    const MeshHandle* meshHandles{nullptr};
+    uint32_t meshHandleCount{0};
+    const ShadowPackedMesh* shadowPackedMeshes{nullptr};
+    uint32_t shadowPackedMeshCount{0};
+  };
+
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
     return;
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  const uint32_t objectCount =
-      params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->shadowPackedMeshes.size()) : 0u;
+  ShadowCullingSource source{};
+  if(params.gpuDrivenSceneView != nullptr)
+  {
+    if(params.gpuDrivenSceneView->meshHandles == nullptr || params.gpuDrivenSceneView->shadowPackedMeshes == nullptr)
+    {
+      return;
+    }
+
+    source.meshHandles = params.gpuDrivenSceneView->meshHandles;
+    source.meshHandleCount = params.gpuDrivenSceneView->meshHandleCount;
+    source.shadowPackedMeshes = params.gpuDrivenSceneView->shadowPackedMeshes;
+    source.shadowPackedMeshCount = params.gpuDrivenSceneView->shadowPackedMeshCount;
+  }
+  else if(params.gltfModel != nullptr)
+  {
+    source.meshHandles = params.gltfModel->meshes.data();
+    source.meshHandleCount = static_cast<uint32_t>(params.gltfModel->meshes.size());
+    source.shadowPackedMeshes = params.gltfModel->shadowPackedMeshes.data();
+    source.shadowPackedMeshCount = static_cast<uint32_t>(params.gltfModel->shadowPackedMeshes.size());
+  }
+
+  const uint32_t objectCount = source.shadowPackedMeshCount;
 
   ensureShadowCullingBuffers(frameUserData, objectCount);
 
@@ -2239,7 +2472,7 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
     return;
   }
 
-  if(objectCount == 0 || params.gltfModel == nullptr)
+  if(objectCount == 0 || source.meshHandles == nullptr || source.shadowPackedMeshes == nullptr)
   {
     return;
   }
@@ -2248,18 +2481,19 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
   frameUserData.shadowCullingScratchDrawData.resize(objectCount);
   auto& objects = frameUserData.shadowCullingScratchObjects;
   auto& drawData = frameUserData.shadowCullingScratchDrawData;
+  std::vector<shaderio::GPUCullIndirectCommand> bootstrapCommands(objectCount, shaderio::GPUCullIndirectCommand{});
   std::fill(objects.begin(), objects.end(), shaderio::ShadowCullObject{});
   std::fill(drawData.begin(), drawData.end(), shaderio::DrawUniforms{});
 
   for(uint32_t meshIndex = 0; meshIndex < objectCount; ++meshIndex)
   {
-    const GltfUploadResult::ShadowPackedMesh& packedMesh = params.gltfModel->shadowPackedMeshes[meshIndex];
-    if(packedMesh.meshIndex >= params.gltfModel->meshes.size())
+    const ShadowPackedMesh& packedMesh = source.shadowPackedMeshes[meshIndex];
+    if(packedMesh.meshIndex >= source.meshHandleCount)
     {
       continue;
     }
 
-    const MeshRecord* meshRecord = m_meshPool.tryGet(params.gltfModel->meshes[packedMesh.meshIndex]);
+    const MeshRecord* meshRecord = m_meshPool.tryGet(source.meshHandles[packedMesh.meshIndex]);
     if(meshRecord == nullptr)
     {
       continue;
@@ -2272,6 +2506,13 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
         .vertexOffset       = packedMesh.vertexOffset,
         .firstInstance      = meshIndex,
     };
+    bootstrapCommands[meshIndex] = shaderio::GPUCullIndirectCommand{
+        .indexCount    = packedMesh.indexCount,
+        .instanceCount = 1u,
+        .firstIndex    = packedMesh.firstIndex,
+        .vertexOffset  = packedMesh.vertexOffset,
+        .firstInstance = meshIndex,
+    };
     drawData[meshIndex] = buildShadowDrawUniforms(*meshRecord);
   }
 
@@ -2279,6 +2520,8 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
   {
     writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer, objects.data(),
                            sizeof(shaderio::ShadowCullObject) * objectCount);
+    writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer, bootstrapCommands.data(),
+                           sizeof(shaderio::GPUCullIndirectCommand) * objectCount);
     writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer, drawData.data(),
                            sizeof(shaderio::DrawUniforms) * objectCount);
   }
@@ -2398,7 +2641,7 @@ void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
   }
 }
 
-void Renderer::createPassGpuProfileResources()
+void Renderer::createPassGpuProfileResources(const PassExecutor& passExecutor)
 {
   destroyPassGpuProfileResources();
 
@@ -2411,24 +2654,28 @@ void Renderer::createPassGpuProfileResources()
   vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
 
   m_passGpuProfile.timestampPeriodNs = deviceProperties2.properties.limits.timestampPeriod;
-  m_passGpuProfile.queryCount = static_cast<uint32_t>(m_passExecutor.getPassCount() * 2);
+  m_passGpuProfile.queryCount = static_cast<uint32_t>(passExecutor.getPassCount() * 2);
   m_passGpuProfile.passNames.clear();
+  m_passGpuProfile.latestCpuPassDurationsMs.clear();
   m_passGpuProfile.latestPassDurationsMs.clear();
   m_passGpuProfile.latestValid = false;
   m_passGpuProfile.frames.clear();
+  m_passGpuProfile.currentCpuPassStartNs.clear();
 
   if(m_passGpuProfile.queryCount == 0 || m_perFrame.frameUserData.empty())
   {
     return;
   }
 
-  m_passGpuProfile.passNames.reserve(m_passExecutor.getPassCount());
-  for(size_t passIndex = 0; passIndex < m_passExecutor.getPassCount(); ++passIndex)
+  m_passGpuProfile.passNames.reserve(passExecutor.getPassCount());
+  for(size_t passIndex = 0; passIndex < passExecutor.getPassCount(); ++passIndex)
   {
-    const PassNode* pass = m_passExecutor.getPass(passIndex);
+    const PassNode* pass = passExecutor.getPass(passIndex);
     m_passGpuProfile.passNames.push_back(pass != nullptr ? pass->getName() : "Unknown");
   }
-  m_passGpuProfile.latestPassDurationsMs.assign(m_passExecutor.getPassCount(), 0.0);
+  m_passGpuProfile.latestCpuPassDurationsMs.assign(passExecutor.getPassCount(), 0.0);
+  m_passGpuProfile.latestPassDurationsMs.assign(passExecutor.getPassCount(), 0.0);
+  m_passGpuProfile.currentCpuPassStartNs.assign(passExecutor.getPassCount(), 0ull);
 
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   m_passGpuProfile.frames.resize(m_perFrame.frameUserData.size());
@@ -2441,7 +2688,8 @@ void Renderer::createPassGpuProfileResources()
     };
     VK_CHECK(vkCreateQueryPool(device, &queryPoolInfo, nullptr, &frame.queryPool));
     DBG_VK_NAME(frame.queryPool);
-    frame.passDurationsMs.assign(m_passExecutor.getPassCount(), 0.0);
+    frame.cpuPassDurationsMs.assign(passExecutor.getPassCount(), 0.0);
+    frame.passDurationsMs.assign(passExecutor.getPassCount(), 0.0);
     frame.valid = false;
     frame.hasRecordedQueries = false;
   }
@@ -2459,6 +2707,7 @@ void Renderer::destroyPassGpuProfileResources()
         vkDestroyQueryPool(device, frame.queryPool, nullptr);
         frame.queryPool = VK_NULL_HANDLE;
       }
+      frame.cpuPassDurationsMs.clear();
       frame.passDurationsMs.clear();
       frame.valid = false;
       frame.hasRecordedQueries = false;
@@ -2467,10 +2716,12 @@ void Renderer::destroyPassGpuProfileResources()
 
   m_passGpuProfile.frames.clear();
   m_passGpuProfile.passNames.clear();
+  m_passGpuProfile.latestCpuPassDurationsMs.clear();
   m_passGpuProfile.latestPassDurationsMs.clear();
   m_passGpuProfile.latestValid = false;
   m_passGpuProfile.queryCount = 0;
   m_passGpuProfile.timestampPeriodNs = 0.0f;
+  m_passGpuProfile.currentCpuPassStartNs.clear();
 }
 
 void Renderer::resolvePassGpuProfileResults(uint32_t frameIndex)
@@ -2520,6 +2771,10 @@ void Renderer::resolvePassGpuProfileResults(uint32_t frameIndex)
   }
 
   frame.valid = anyValidPass;
+  if(m_passGpuProfile.latestCpuPassDurationsMs.size() == frame.cpuPassDurationsMs.size())
+  {
+    m_passGpuProfile.latestCpuPassDurationsMs = frame.cpuPassDurationsMs;
+  }
   if(anyValidPass)
   {
     m_passGpuProfile.latestPassDurationsMs = frame.passDurationsMs;
@@ -2572,28 +2827,73 @@ void Renderer::writePassGpuProfileTimestamp(const PassContext& context, uint32_t
 
 void Renderer::drawPassGpuProfileOverlay(const RenderParams& params) const
 {
-  if(!m_passGpuProfile.latestValid || m_passGpuProfile.latestPassDurationsMs.empty())
+  if(m_passGpuProfile.passNames.empty())
   {
-    ImGui::TextUnformatted("Waiting for GPU timestamps...");
+    ImGui::TextUnformatted("Waiting for runtime profiler data...");
     return;
   }
 
-  double totalMs = 0.0;
-  for(double durationMs : m_passGpuProfile.latestPassDurationsMs)
+  static ImGuiUtils::ProfilerGraph cpuGraph(240);
+  static ImGuiUtils::ProfilerGraph gpuGraph(240);
+  static std::vector<legit::ProfilerTask> cpuTasks;
+  static std::vector<legit::ProfilerTask> gpuTasks;
+  static constexpr std::array<uint32_t, 8> kTaskColors = {
+      legit::Colors::peterRiver,
+      legit::Colors::emerald,
+      legit::Colors::sunFlower,
+      legit::Colors::carrot,
+      legit::Colors::amethyst,
+      legit::Colors::alizarin,
+      legit::Colors::clouds,
+      legit::Colors::turqoise,
+  };
+
+  auto buildTasks = [&](const std::vector<double>& durationsMs, std::vector<legit::ProfilerTask>& outTasks) {
+    outTasks.clear();
+    outTasks.reserve(std::min(m_passGpuProfile.passNames.size(), durationsMs.size()));
+    double cursorSeconds = 0.0;
+    for(size_t i = 0; i < m_passGpuProfile.passNames.size() && i < durationsMs.size(); ++i)
+    {
+      const double durationSeconds = std::max(0.0, durationsMs[i]) * 1e-3;
+      if(durationSeconds <= 0.0)
+      {
+        continue;
+      }
+
+      legit::ProfilerTask task{};
+      task.startTime = cursorSeconds;
+      task.endTime = cursorSeconds + durationSeconds;
+      task.name = m_passGpuProfile.passNames[i];
+      task.color = kTaskColors[i % kTaskColors.size()];
+      outTasks.push_back(task);
+      cursorSeconds = task.endTime;
+    }
+  };
+
+  buildTasks(m_passGpuProfile.latestCpuPassDurationsMs, cpuTasks);
+  buildTasks(m_passGpuProfile.latestPassDurationsMs, gpuTasks);
+  cpuGraph.LoadFrameData(cpuTasks.data(), cpuTasks.size());
+  if(m_passGpuProfile.latestValid)
   {
-    totalMs += durationMs;
+    gpuGraph.LoadFrameData(gpuTasks.data(), gpuTasks.size());
+  }
+  else
+  {
+    gpuGraph.LoadFrameData(nullptr, 0);
   }
 
-  ImGui::Text("Tracked Passes: %d", static_cast<int>(m_passGpuProfile.passNames.size()));
-  ImGui::Text("Total: %.3f ms", totalMs);
-  ImGui::Separator();
-  for(size_t passIndex = 0; passIndex < m_passGpuProfile.passNames.size()
-                         && passIndex < m_passGpuProfile.latestPassDurationsMs.size();
-      ++passIndex)
-  {
-    ImGui::Text("%-18s %.3f ms", m_passGpuProfile.passNames[passIndex].c_str(),
-                m_passGpuProfile.latestPassDurationsMs[passIndex]);
-  }
+  float maxFrameTime = std::max(1.0f / 30.0f, params.deltaTime * 1.5f);
+  float availableWidth = ImGui::GetContentRegionAvail().x;
+  int legendWidth = 220;
+  int graphWidth = std::max(120, static_cast<int>(availableWidth) - legendWidth);
+
+  ImGui::TextUnformatted("CPU Pass Timeline");
+  cpuGraph.useColoredLegendText = true;
+  cpuGraph.RenderTimings(graphWidth, legendWidth, 120, 0, maxFrameTime);
+  ImGui::Spacing();
+  ImGui::TextUnformatted("GPU Pass Timeline");
+  gpuGraph.useColoredLegendText = true;
+  gpuGraph.RenderTimings(graphWidth, legendWidth, 120, 0, maxFrameTime);
 }
 
 void Renderer::drawGPUInfoOverlay(const RenderParams& params) const
@@ -2631,9 +2931,16 @@ void Renderer::PassProfilingHooks::beforePass(const PassContext& context, const 
 {
   if(renderer != nullptr)
   {
-    if(std::strcmp(pass.getName(), "PresentPass") == 0)
+    const char* passName = pass.getName();
+    if(std::strcmp(passName, "PresentPass") == 0 || std::strcmp(passName, "GPUDrivenPresent") == 0)
     {
       renderer->acquireSwapchainImageForPresent();
+    }
+    if(passIndex < renderer->m_passGpuProfile.currentCpuPassStartNs.size())
+    {
+      const auto now = std::chrono::steady_clock::now().time_since_epoch();
+      renderer->m_passGpuProfile.currentCpuPassStartNs[passIndex] =
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
     }
     renderer->writePassGpuProfileTimestamp(context, passIndex, true);
   }
@@ -2644,6 +2951,20 @@ void Renderer::PassProfilingHooks::afterPass(const PassContext& context, const P
   (void)pass;
   if(renderer != nullptr)
   {
+    if(context.frameIndex < renderer->m_passGpuProfile.frames.size()
+       && passIndex < renderer->m_passGpuProfile.currentCpuPassStartNs.size()
+       && passIndex < renderer->m_passGpuProfile.frames[context.frameIndex].cpuPassDurationsMs.size())
+    {
+      const uint64_t startNs = renderer->m_passGpuProfile.currentCpuPassStartNs[passIndex];
+      if(startNs != 0)
+      {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const uint64_t endNs =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+        renderer->m_passGpuProfile.frames[context.frameIndex].cpuPassDurationsMs[passIndex] =
+            static_cast<double>(endNs - startNs) * 1e-6;
+      }
+    }
     renderer->writePassGpuProfileTimestamp(context, passIndex, false);
   }
 }
@@ -3093,34 +3414,39 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 
 void Renderer::bindStaticPassResources()
 {
+  bindStaticPassResources(m_passExecutor);
+}
+
+void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
+{
   // Bind static resources that don't change per-frame
   // Called once after swapchain/resources rebuild
-  m_passExecutor.bindBuffer({
+  passExecutor.bindBuffer({
       .handle       = kPassVertexBufferHandle,
       .nativeBuffer = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassGBuffer0Handle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(0)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassGBuffer1Handle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(1)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassGBuffer2Handle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassSceneDepthHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
       .aspect       = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
@@ -3129,7 +3455,7 @@ void Renderer::bindStaticPassResources()
       .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
       .aspect       = rhi::TextureAspect::depth,
@@ -3137,7 +3463,7 @@ void Renderer::bindStaticPassResources()
       .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassCSMShadowHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
       .aspect       = rhi::TextureAspect::depth,
@@ -3146,14 +3472,14 @@ void Renderer::bindStaticPassResources()
       .initialState = rhi::ResourceState::General,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthPyramidImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
-  m_passExecutor.bindTexture({
+  passExecutor.bindTexture({
       .handle       = kPassOutputHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
       .aspect       = rhi::TextureAspect::color,
@@ -3171,6 +3497,11 @@ rhi::CommandList& Renderer::beginCommandRecording()
 }
 
 void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
+{
+  drawFrame(cmd, params, m_passExecutor);
+}
+
+void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor)
 {
   TRACY_ZONE_SCOPED("drawFrame");
 
@@ -3198,49 +3529,49 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
     // Static resources (GBuffer, SceneDepth, Shadow, CSM, Output, VertexBuffer) are already bound
     // in bindStaticPassResources() and persist across frames
     // Only bind dynamic per-frame resources here
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kTransientAllocatorBufferHandle,
         .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassPointLightBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointLightBuffer(currentFrameIndex)),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassSpotLightBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassPointLightCoarseBoundsHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassSpotLightCoarseBoundsHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassLightCoarseCullingUniformHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassGPUCullObjectBufferHandle,
         .nativeBuffer = frameUserData.useExternalGPUCullingObjectBuffer
                             ? reinterpret_cast<uint64_t>(frameUserData.externalGPUCullingObjectBuffer)
                             : reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassGPUCullIndirectBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassGPUCullStatsBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassGPUCullUniformBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
     });
-    m_passExecutor.bindBuffer({
+    passExecutor.bindBuffer({
         .handle       = kPassGPUCullResultBufferHandle,
         .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
     });
@@ -3274,7 +3605,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
-      m_materials.materialBindGroup, cameraAlloc, true};
+      getCurrentMaterialBindGroupHandle(), cameraAlloc, true};
   resetPassGpuProfileQueries(cmd, currentFrameIndex);
 
 #ifdef TRACY_ENABLE
@@ -3287,7 +3618,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
 
   {
     TRACY_ZONE_SCOPED("drawFrame.passExecution");
-    m_passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
+    passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
   }
 
   if(currentFrameIndex < m_passGpuProfile.frames.size())
@@ -3551,8 +3882,13 @@ void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams
 
 void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params)
 {
-  if(params.cameraUniforms == nullptr || params.gltfModel == nullptr || m_gpuCullingPipeline.isNull()
-     || m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
+  const bool useExternalPersistentObjects =
+      params.gpuDrivenSceneView != nullptr
+      && params.gpuDrivenSceneView->usePersistentCullingObjects
+      && params.gpuDrivenSceneView->gpuCullObjectBuffer != VK_NULL_HANDLE
+      && params.gpuDrivenSceneView->objectCount > 0u;
+
+  if(params.cameraUniforms == nullptr || m_gpuCullingPipeline.isNull() || m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
   {
     return;
   }
@@ -3564,7 +3900,9 @@ void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& 
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
-  const uint32_t objectCount = static_cast<uint32_t>(params.gltfModel->meshes.size());
+  const uint32_t objectCount = useExternalPersistentObjects
+                                   ? params.gpuDrivenSceneView->objectCount
+                                   : (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
   if(objectCount == 0 || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
@@ -3687,10 +4025,32 @@ void Renderer::DebugDrawList::addArrow(const glm::vec3& origin, const glm::vec3&
   addLine(end, end - dir * headLength - bitangent * headLength * 0.5f, color);
 }
 
-Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel) const
+Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const
 {
   Aabb bounds{};
-  if(gltfModel == nullptr || gltfModel->meshes.empty())
+
+  if(gpuDrivenSceneView != nullptr && gpuDrivenSceneView->sceneBoundsValid)
+  {
+    bounds.min = gpuDrivenSceneView->sceneBoundsMin;
+    bounds.max = gpuDrivenSceneView->sceneBoundsMax;
+    bounds.valid = true;
+    return bounds;
+  }
+
+  const MeshHandle* meshHandles = nullptr;
+  uint32_t meshCount = 0;
+  if(gpuDrivenSceneView != nullptr && gpuDrivenSceneView->meshHandles != nullptr && gpuDrivenSceneView->meshHandleCount > 0u)
+  {
+    meshHandles = gpuDrivenSceneView->meshHandles;
+    meshCount = gpuDrivenSceneView->meshHandleCount;
+  }
+  else if(gltfModel != nullptr && !gltfModel->meshes.empty())
+  {
+    meshHandles = gltfModel->meshes.data();
+    meshCount = static_cast<uint32_t>(gltfModel->meshes.size());
+  }
+
+  if(meshHandles == nullptr || meshCount == 0u)
   {
     return bounds;
   }
@@ -3699,8 +4059,9 @@ Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel) c
   bounds.max = glm::vec3(std::numeric_limits<float>::lowest());
   bounds.valid = false;
 
-  for(const MeshHandle meshHandle : gltfModel->meshes)
+  for(uint32_t meshIndex = 0; meshIndex < meshCount; ++meshIndex)
   {
+    const MeshHandle meshHandle = meshHandles[meshIndex];
     const MeshRecord* mesh = m_meshPool.tryGet(meshHandle);
     if(mesh == nullptr)
     {
@@ -4004,7 +4365,7 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
     camera.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
   }
 
-  state.sceneBounds = computeSceneBounds(params.gltfModel);
+  state.sceneBounds = computeSceneBounds(params.gltfModel, params.gpuDrivenSceneView);
 
   const clipspace::ProjectionConvention projectionConvention =
       clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
@@ -4271,7 +4632,7 @@ void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& 
   ASSERT(sceneSetIndex.has_value(), "drawDynamic bind-group slot must map to active shader set");
 
   const uint64_t materialBindTableHandle =
-      getBindGroupDescriptorSetOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+      getBindGroupDescriptorSetOpaque(getCurrentMaterialBindGroupHandle(), BindGroupSetSlot::material);
   rhi::vulkan::cmdBindDescriptorSetOpaque(cmd, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                           m_device.graphicPipelineLayout->getNativeHandle(), materialSetIndex.value(),
                                           materialBindTableHandle, 0, nullptr);
@@ -4779,6 +5140,10 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
       {
         mdiDrawSetLayout = mdiDrawLayout->getVkDescriptorSetLayout();
       }
+
+      updateMdiDrawDataDescriptorSet(i);
+      updateGBufferMdiDrawDataDescriptorSet(i);
+      updateDepthMdiDrawDataDescriptorSet(i);
     }
 
     VkDescriptorSetLayout shadowMdiDrawSetLayout = VK_NULL_HANDLE;
@@ -5555,6 +5920,18 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             .entryPoint = "fragmentMain",
         },
     }};
+    std::array<rhi::PipelineShaderStageDesc, 2> forwardMdiShaderStages{{
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::vertex,
+            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .entryPoint = "vertexMdiMain",
+        },
+        rhi::PipelineShaderStageDesc{
+            .stage = rhi::ShaderStage::fragment,
+            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .entryPoint = "fragmentMdiMain",
+        },
+    }};
 
     // Render to swapchain format
     const rhi::TextureFormat swapchainFormat = toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat);
@@ -5597,6 +5974,28 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     m_forwardPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                          reinterpret_cast<uint64_t>(forwardPipeline),
                                          forwardCreateInfo.key.specializationVariant);
+
+    if(m_device.mdiPipelineLayout)
+    {
+      rhi::GraphicsPipelineDesc forwardMdiGraphicsDesc = forwardGraphicsDesc;
+      forwardMdiGraphicsDesc.layout = m_device.mdiPipelineLayout.get();
+      forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages.data();
+
+      rhi::vulkan::GraphicsPipelineCreateInfo forwardMdiCreateInfo{
+          .key =
+              {
+                  .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
+                  .specializationVariant = 17,
+              },
+          .desc = forwardMdiGraphicsDesc,
+      };
+      const VkPipeline forwardMdiPipeline =
+          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardMdiCreateInfo);
+      DBG_VK_NAME(forwardMdiPipeline);
+      m_forwardMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                              reinterpret_cast<uint64_t>(forwardMdiPipeline),
+                                              forwardMdiCreateInfo.key.specializationVariant);
+    }
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
   }
@@ -5850,7 +6249,7 @@ static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& 
 
 void Renderer::createMaterialBindGroup()
 {
-  // Create material bind group early - needed for pipeline layout creation
+  // Create per-frame material bind groups early - needed for pipeline layout creation
   std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
       .logicalIndex    = kMaterialBindlessTexturesIndex,
       .resourceType    = rhi::BindlessResourceType::sampledTexture,
@@ -5858,25 +6257,71 @@ void Renderer::createMaterialBindGroup()
       .visibility      = rhi::ResourceVisibility::allGraphics,
   }};
 
-  auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
-  materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
+  const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
+  m_materials.materialBindGroups.clear();
+  m_materials.materialBindGroups.reserve(frameCount);
+  m_materials.materialBindGroupGenerations.assign(frameCount, 0);
+  m_materials.materialDescriptorImageInfos.assign(m_materials.maxTextures, {});
+  m_materials.materialDescriptorValid.assign(m_materials.maxTextures, 0);
+  m_materials.materialDescriptorGeneration = 0;
 
-  auto* materialTable = new rhi::vulkan::VulkanBindTable();
-  materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                      *materialLayout, m_materials.maxTextures);
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
+    materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
 
-  BindGroupDesc materialBindGroupDesc{
-      .slot                = BindGroupSetSlot::material,
-      .layout              = materialLayout,
-      .table               = materialTable,
-      .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
-      .debugName           = "material-texture-bind-group",
-  };
-  m_materials.materialBindGroup = createBindGroup(std::move(materialBindGroupDesc));
+    auto* materialTable = new rhi::vulkan::VulkanBindTable();
+    materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                        *materialLayout, m_materials.maxTextures);
+
+    BindGroupDesc materialBindGroupDesc{
+        .slot                = BindGroupSetSlot::material,
+        .layout              = materialLayout,
+        .table               = materialTable,
+        .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
+        .debugName           = "material-texture-bind-group",
+    };
+    m_materials.materialBindGroups.push_back(createBindGroup(std::move(materialBindGroupDesc)));
+  }
+
+  m_materials.materialBindGroup =
+      m_materials.materialBindGroups.empty() ? kNullBindGroupHandle : m_materials.materialBindGroups.front();
 }
 
 void Renderer::createGraphicDescriptorSet()
 {
+  if(m_materials.materialBindGroups.size() < m_perFrame.frameUserData.size())
+  {
+    std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
+        .logicalIndex    = kMaterialBindlessTexturesIndex,
+        .resourceType    = rhi::BindlessResourceType::sampledTexture,
+        .descriptorCount = m_materials.maxTextures,
+        .visibility      = rhi::ResourceVisibility::allGraphics,
+    }};
+
+    const size_t existingCount = m_materials.materialBindGroups.size();
+    m_materials.materialBindGroups.reserve(m_perFrame.frameUserData.size());
+    m_materials.materialBindGroupGenerations.resize(m_perFrame.frameUserData.size(), 0);
+    for(size_t frameIndex = existingCount; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
+    {
+      auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
+      materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
+
+      auto* materialTable = new rhi::vulkan::VulkanBindTable();
+      materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
+                          *materialLayout, m_materials.maxTextures);
+
+      BindGroupDesc materialBindGroupDesc{
+          .slot                = BindGroupSetSlot::material,
+          .layout              = materialLayout,
+          .table               = materialTable,
+          .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
+          .debugName           = "material-texture-bind-group",
+      };
+      m_materials.materialBindGroups.push_back(createBindGroup(std::move(materialBindGroupDesc)));
+    }
+  }
+
   // Create per-frame scene bind groups - must be called after createFrameSubmission()
   {
     std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
@@ -5960,7 +6405,18 @@ void Renderer::updateGraphicsDescriptorSet()
       .visibility      = rhi::ResourceVisibility::allGraphics,
       .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
   };
-  updateBindGroup(m_materials.materialBindGroup, &materialWrite, 1);
+  for(uint32_t i = 0; i < descriptorImageInfos.size(); ++i)
+  {
+    m_materials.materialDescriptorImageInfos[i] = descriptorImageInfos[i];
+    m_materials.materialDescriptorValid[i]      = 1;
+  }
+  ++m_materials.materialDescriptorGeneration;
+
+  for(uint32_t frameIndex = 0; frameIndex < m_materials.materialBindGroups.size(); ++frameIndex)
+  {
+    updateBindGroup(m_materials.materialBindGroups[frameIndex], &materialWrite, 1);
+    m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
+  }
 
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
@@ -5985,6 +6441,69 @@ void Renderer::updateGraphicsDescriptorSet()
     };
     updateBindGroup(frameUserData.sceneBindGroup, &sceneWrite, 1);
   }
+}
+
+void Renderer::syncMaterialBindGroup(uint32_t frameIndex)
+{
+  if(frameIndex >= m_materials.materialBindGroups.size() || frameIndex >= m_materials.materialBindGroupGenerations.size())
+  {
+    return;
+  }
+
+  if(m_materials.materialBindGroupGenerations[frameIndex] == m_materials.materialDescriptorGeneration)
+  {
+    return;
+  }
+
+  std::vector<rhi::BindTableWrite> writes;
+  std::vector<rhi::DescriptorImageInfo> imageInfos;
+  writes.reserve(m_materials.materialDescriptorImageInfos.size());
+  imageInfos.reserve(m_materials.materialDescriptorImageInfos.size());
+
+  for(uint32_t index = 0; index < m_materials.materialDescriptorImageInfos.size(); ++index)
+  {
+    if(m_materials.materialDescriptorValid[index] == 0)
+    {
+      continue;
+    }
+
+    imageInfos.push_back(m_materials.materialDescriptorImageInfos[index]);
+    writes.push_back(rhi::BindTableWrite{
+        .dstIndex        = kMaterialBindlessTexturesIndex,
+        .dstArrayElement = index,
+        .resourceType    = rhi::BindlessResourceType::sampledTexture,
+        .descriptorCount = 1,
+        .pImageInfo      = &imageInfos.back(),
+        .visibility      = rhi::ResourceVisibility::allGraphics,
+        .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
+    });
+  }
+
+  if(!writes.empty())
+  {
+    updateBindGroup(m_materials.materialBindGroups[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
+  }
+
+  m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
+}
+
+BindGroupHandle Renderer::getCurrentMaterialBindGroupHandle() const
+{
+  if(m_materials.materialBindGroups.empty())
+  {
+    return m_materials.materialBindGroup;
+  }
+
+  uint32_t frameIndex = 0;
+  if(m_perFrame.frameContext != nullptr)
+  {
+    frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  }
+  if(frameIndex >= m_materials.materialBindGroups.size())
+  {
+    return m_materials.materialBindGroups.front();
+  }
+  return m_materials.materialBindGroups[frameIndex];
 }
 
 rhi::BindGroupLayoutHandle Renderer::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
@@ -6069,6 +6588,11 @@ void Renderer::destroyBindGroups()
     destroyBindGroup(handle);
   }
   m_materials.materialBindGroup = kNullBindGroupHandle;
+  m_materials.materialBindGroups.clear();
+  m_materials.materialDescriptorImageInfos.clear();
+  m_materials.materialDescriptorValid.clear();
+  m_materials.materialBindGroupGenerations.clear();
+  m_materials.materialDescriptorGeneration = 0;
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     frameUserData.sceneBindGroup = kNullBindGroupHandle;
@@ -6401,6 +6925,7 @@ void Renderer::destroyPipelines()
   m_gbufferAlphaTestMDIPipeline = kNullPipelineHandle;
   m_shadowPipeline = kNullPipelineHandle;
   m_forwardPipeline = kNullPipelineHandle;
+  m_forwardMDIPipeline = kNullPipelineHandle;
   m_debugPipeline = kNullPipelineHandle;
   m_gpuCullingDebugPipeline = kNullPipelineHandle;
   m_pointLightCoarseCullingPipeline = kNullPipelineHandle;
@@ -6459,6 +6984,7 @@ const Renderer::MaterialResources::TextureColdData* Renderer::tryGetTextureCold(
 
 void Renderer::waitForIdle()
 {
+  flushPendingUploadCommands(true);
   m_device.device->waitIdle();
 }
 
@@ -6473,6 +6999,8 @@ VkDevice Renderer::getNativeDeviceHandle() const
 
 void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
 {
+  flushPendingUploadCommands(true);
+
   const VkDevice       device       = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const rhi::QueueInfo graphicsInfo = m_device.device->getGraphicsQueue();
   const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
@@ -6501,6 +7029,49 @@ void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadF
   const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   m_perFrame.frameUserData[frameIndex].pendingUploadCmds.push_back(cmd);
   m_perFrame.frameUserData[frameIndex].pendingUploadFences.push_back(uploadFence);
+}
+
+void Renderer::flushPendingUploadCommands(bool waitForCompletion)
+{
+  if(m_perFrame.frameUserData.empty() || m_device.device == nullptr)
+  {
+    return;
+  }
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  for(auto& frameUserData : m_perFrame.frameUserData)
+  {
+    if(frameUserData.pendingUploadFences.empty())
+    {
+      continue;
+    }
+
+    std::vector<size_t> completedIndices;
+    completedIndices.reserve(frameUserData.pendingUploadFences.size());
+    for(size_t i = 0; i < frameUserData.pendingUploadFences.size(); ++i)
+    {
+      const VkFence fence = frameUserData.pendingUploadFences[i];
+      if(waitForCompletion)
+      {
+        VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+        completedIndices.push_back(i);
+        continue;
+      }
+
+      if(vkGetFenceStatus(device, fence) == VK_SUCCESS)
+      {
+        completedIndices.push_back(i);
+      }
+    }
+
+    for(auto it = completedIndices.rbegin(); it != completedIndices.rend(); ++it)
+    {
+      vkFreeCommandBuffers(device, m_device.uploadCmdPool, 1, &frameUserData.pendingUploadCmds[*it]);
+      vkDestroyFence(device, frameUserData.pendingUploadFences[*it], nullptr);
+      frameUserData.pendingUploadCmds.erase(frameUserData.pendingUploadCmds.begin() + *it);
+      frameUserData.pendingUploadFences.erase(frameUserData.pendingUploadFences.begin() + *it);
+    }
+  }
 }
 
 GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
@@ -6535,6 +7106,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
                                     VkCommandBuffer           cmd)
 {
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
 
   if(ioResult.meshes.size() != model.meshes.size()
      || ioResult.materials.size() != model.materials.size()
@@ -6581,17 +7153,25 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     const std::filesystem::path ktx2Path =
         Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
 
-    const bool hasKtx2Sidecar =
+    const bool loadedKtx2Sidecar =
         !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const bool hasSupportedKtx2Sidecar =
+        loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, ktxTexture.format);
+    if(loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
+    {
+      LOGW("Skipping unsupported KTX2 format %s for %s, falling back to source image upload",
+           string_VkFormat(ktxTexture.format),
+           ktx2Path.string().c_str());
+    }
 
-    const VkFormat format = hasKtx2Sidecar ? ktxTexture.format : VK_FORMAT_R8G8B8A8_UNORM;
-    const uint32_t width = hasKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
-    const uint32_t height = hasKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
-    const uint32_t mipLevels = hasKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
+    const VkFormat format = hasSupportedKtx2Sidecar ? ktxTexture.format : VK_FORMAT_R8G8B8A8_UNORM;
+    const uint32_t width = hasSupportedKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
+    const uint32_t height = hasSupportedKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
+    const uint32_t mipLevels = hasSupportedKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
                                               : MipmapGenerator::calculateMipLevelCount(width, height);
 
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if(!hasKtx2Sidecar && mipLevels > 1)
+    if(!hasSupportedKtx2Sidecar && mipLevels > 1)
     {
       usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
@@ -6610,7 +7190,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     utils::Image image = createImage(m_device.allocator, imageInfo);
     utils::cmdInitImageLayout(cmd, image.image);
 
-    if(hasKtx2Sidecar)
+    if(hasSupportedKtx2Sidecar)
     {
       const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
       std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
@@ -6812,6 +7392,10 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
 void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd)
 {
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
+  {
+    waitForAllFrameSlots();
+  }
   destroyBuffer(m_device.allocator, result.shadowPackedVertexBuffer);
   destroyBuffer(m_device.allocator, result.shadowPackedIndexBuffer);
   result.shadowPackedMeshes.clear();
@@ -6896,7 +7480,7 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
       packedIndexData.push_back(vertexBase + index);
     }
 
-    result.shadowPackedMeshes.push_back(GltfUploadResult::ShadowPackedMesh{
+    result.shadowPackedMeshes.push_back(ShadowPackedMesh{
         .meshIndex     = meshIndex,
         .indexCount    = static_cast<uint32_t>(meshData.indices.size()),
         .firstIndex    = firstIndex,
@@ -6935,6 +7519,7 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
 void Renderer::destroyGltfResources(const GltfUploadResult& result)
 {
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
 
   utils::Buffer shadowPackedVertexBuffer = result.shadowPackedVertexBuffer;
   utils::Buffer shadowPackedIndexBuffer = result.shadowPackedIndexBuffer;
@@ -6954,8 +7539,10 @@ void Renderer::destroyGltfResources(const GltfUploadResult& result)
   }
 
   // Destroy textures
-  for(TextureHandle handle : result.textures)
+  for(size_t textureIndex = 0; textureIndex < result.textures.size(); ++textureIndex)
   {
+    invalidateBindlessTexture(gltfTextureBaseIndex + static_cast<uint32_t>(textureIndex));
+    TextureHandle handle = result.textures[textureIndex];
     const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
     if(cold && cold->ownedImage.image != VK_NULL_HANDLE)
     {
@@ -7001,9 +7588,19 @@ uint64_t Renderer::getMDIPipelineLayout() const
   return m_device.mdiPipelineLayout ? m_device.mdiPipelineLayout->getNativeHandle() : 0;
 }
 
+uint64_t Renderer::getGraphicsScenePipelineLayout() const
+{
+  return getGBufferPipelineLayout();
+}
+
+uint64_t Renderer::getGraphicsMDIPipelineLayout() const
+{
+  return getMDIPipelineLayout();
+}
+
 uint64_t Renderer::getGBufferColorDescriptorSet() const
 {
-  return getBindGroupDescriptorSetOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
+  return getBindGroupDescriptorSetOpaque(getCurrentMaterialBindGroupHandle(), BindGroupSetSlot::material);
 }
 
 uint64_t Renderer::getGBufferTextureDescriptorSet() const
@@ -7025,9 +7622,41 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
 }
 
+uint64_t Renderer::getGraphicsMaterialDescriptorSet() const
+{
+  return getGBufferColorDescriptorSet();
+}
+
+uint64_t Renderer::getLightingInputDescriptorSet() const
+{
+  return getGBufferTextureDescriptorSet();
+}
+
 uint64_t Renderer::getLightCullingDescriptorSet() const
 {
-  return 0;
+  const uint32_t frameIndex = m_perFrame.frameContext != nullptr ? m_perFrame.frameContext->getCurrentFrameIndex() : 0u;
+  if(frameIndex >= m_device.lightCoarseCullingDescriptorSets.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_device.lightCoarseCullingDescriptorSets[frameIndex]);
+}
+
+void Renderer::updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)
+{
+  m_lightResources.updatePointLights(frameIndex, m_testPointLights);
+  m_lightResources.updateSpotLights(frameIndex, m_testSpotLights);
+  m_lightResources.updateCoarseCullingUniforms(frameIndex, uniforms);
+}
+
+uint32_t Renderer::getActivePointLightCount() const
+{
+  return std::min<uint32_t>(static_cast<uint32_t>(m_testPointLights.size()), m_lightResources.getMaxPointLights());
+}
+
+uint32_t Renderer::getActiveSpotLightCount() const
+{
+  return std::min<uint32_t>(static_cast<uint32_t>(m_testSpotLights.size()), m_lightResources.getMaxSpotLights());
 }
 
 uint64_t Renderer::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
@@ -7062,6 +7691,24 @@ uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
+uint32_t Renderer::getGPUCullingObjectCount(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return m_perFrame.frameUserData[frameIndex].gpuCullingObjectCount;
+}
+
+uint32_t Renderer::getCurrentFrameIndexHint() const
+{
+  if(m_perFrame.frameContext == nullptr)
+  {
+    return 0;
+  }
+  return m_perFrame.frameContext->getCurrentFrameIndex();
+}
+
 uint64_t Renderer::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const
 {
   const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
@@ -7074,16 +7721,33 @@ uint64_t Renderer::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFra
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
+uint64_t Renderer::getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenBootstrapIndirectBuffer.buffer);
+}
+
 uint32_t Renderer::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, const GltfUploadResult* gltfModel) const
 {
   const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1 || gltfModel == nullptr)
+  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
   {
     return 0;
   }
 
   const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
   const PerFrameResources::FrameUserData& previousFrame = m_perFrame.frameUserData[previousFrameIndex];
+  if(previousFrame.useExternalGPUCullingObjectBuffer)
+  {
+    return previousFrame.gpuCullingObjectCount;
+  }
+  if(gltfModel == nullptr)
+  {
+    return 0;
+  }
   if(previousFrame.gpuCullingSourceModel != gltfModel)
   {
     return 0;
@@ -7146,6 +7810,33 @@ BindGroupHandle Renderer::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint
   return kNullBindGroupHandle;
 }
 
+uint64_t Renderer::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
+{
+  if(frameIndex < m_perFrame.frameUserData.size())
+  {
+    return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].forwardMdiIndirectBuffer.buffer);
+  }
+  return 0;
+}
+
+void Renderer::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureMdiDrawDataBuffer(frameUserData, static_cast<uint32_t>(drawData.size()));
+  if(frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer, drawData.data(),
+                         sizeof(shaderio::DrawUniforms) * drawData.size());
+}
+
 void Renderer::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
@@ -7182,9 +7873,47 @@ void Renderer::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shade
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
+void Renderer::uploadGPUDrivenBootstrapCommands(uint32_t frameIndex,
+                                                std::span<const shaderio::GPUCullIndirectCommand> commands)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || commands.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureGPUDrivenBootstrapIndirectBuffer(frameUserData, static_cast<uint32_t>(commands.size()));
+  if(frameUserData.gpuDrivenBootstrapIndirectBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer, commands.data(),
+                         sizeof(shaderio::GPUCullIndirectCommand) * commands.size());
+}
+
+void Renderer::uploadForwardMDICommands(uint32_t frameIndex,
+                                        std::span<const shaderio::GPUCullIndirectCommand> commands)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || commands.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureForwardMdiIndirectBuffer(frameUserData, static_cast<uint32_t>(commands.size()));
+  if(frameUserData.forwardMdiIndirectBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer, commands.data(),
+                         sizeof(shaderio::GPUCullIndirectCommand) * commands.size());
+}
+
 rhi::BindGroupHandle Renderer::getGlobalBindlessGroup() const
 {
-  return m_materials.materialBindGroup;
+  return getCurrentMaterialBindGroupHandle();
 }
 
 glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const
@@ -7304,16 +8033,27 @@ void Renderer::updateBindlessTexture(uint32_t index, TextureHandle textureHandle
       .imageLayout = static_cast<uint32_t>(imageInfo.imageLayout),
   };
 
-  const rhi::BindTableWrite textureWrite{
-      .dstIndex        = kMaterialBindlessTexturesIndex,
-      .dstArrayElement = index,
-      .resourceType    = rhi::BindlessResourceType::sampledTexture,
-      .descriptorCount = 1,
-      .pImageInfo      = &descriptorImageInfo,
-      .visibility      = rhi::ResourceVisibility::allGraphics,
-      .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
-  };
-  updateBindGroup(m_materials.materialBindGroup, &textureWrite, 1);
+  if(index < m_materials.materialDescriptorImageInfos.size())
+  {
+    m_materials.materialDescriptorImageInfos[index] = descriptorImageInfo;
+    m_materials.materialDescriptorValid[index]      = 1;
+    ++m_materials.materialDescriptorGeneration;
+  }
+}
+
+void Renderer::invalidateBindlessTexture(uint32_t index)
+{
+  if(index >= m_materials.materialDescriptorImageInfos.size() || index >= m_materials.materialDescriptorValid.size())
+  {
+    return;
+  }
+
+  m_materials.materialDescriptorImageInfos[index] = {};
+  if(m_materials.materialDescriptorValid[index] != 0)
+  {
+    m_materials.materialDescriptorValid[index] = 0;
+    ++m_materials.materialDescriptorGeneration;
+  }
 }
 
 }  // namespace demo

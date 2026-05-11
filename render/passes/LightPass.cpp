@@ -61,7 +61,7 @@ void LightPass::execute(const PassContext& context) const
     if(m_renderer == nullptr || context.transientAllocator == nullptr)
         return;
 
-    context.cmd->beginEvent("LightPass");
+    context.cmd->beginEvent("GPUDrivenLight");
 
     // Get output texture view and fixed extent
     rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(

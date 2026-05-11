@@ -11,7 +11,7 @@ public:
     explicit ForwardPass(Renderer* renderer);
     ~ForwardPass() override = default;
 
-    [[nodiscard]] const char* getName() const override { return "ForwardPass"; }
+    [[nodiscard]] const char* getName() const override { return "GPUDrivenForward"; }
     [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
     void execute(const PassContext& context) const override;
 

@@ -26,7 +26,7 @@ void DepthPyramidPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("DepthPyramidPass");
+  context.cmd->beginEvent("GPUDrivenDepthPyramid");
   m_renderer->executeDepthPyramidPass(*context.cmd, *context.params);
   context.cmd->endEvent();
 }

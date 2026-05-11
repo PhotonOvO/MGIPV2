@@ -14,10 +14,54 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 
 namespace demo {
 
 namespace {
+
+constexpr size_t kMaxReasonableNodes = 1u << 16;
+constexpr size_t kMaxReasonableMeshes = 1u << 16;
+constexpr size_t kMaxReasonableMaterials = 1u << 14;
+constexpr size_t kMaxReasonableImages = 1u << 14;
+constexpr size_t kMaxReasonableImageDimension = 1u << 14;
+constexpr size_t kMaxReasonableImageBytes = 1u << 28;
+constexpr size_t kMaxReasonableAccessorElements = 1u << 24;
+constexpr uint64_t kMaxReasonableModelPayloadBytes = 512ull << 20;
+
+bool hasReasonableModelShape(const tinygltf::Model& model)
+{
+    return model.nodes.size() <= kMaxReasonableNodes
+        && model.meshes.size() <= kMaxReasonableMeshes
+        && model.materials.size() <= kMaxReasonableMaterials
+        && model.images.size() <= kMaxReasonableImages;
+}
+
+uint64_t estimateModelPayloadBytes(const GltfModel& model)
+{
+    uint64_t totalBytes = 0;
+
+    for(const GltfMeshData& mesh : model.meshes)
+    {
+        totalBytes += static_cast<uint64_t>(mesh.positions.size()) * sizeof(float);
+        totalBytes += static_cast<uint64_t>(mesh.normals.size()) * sizeof(float);
+        totalBytes += static_cast<uint64_t>(mesh.texCoords.size()) * sizeof(float);
+        totalBytes += static_cast<uint64_t>(mesh.tangents.size()) * sizeof(float);
+        totalBytes += static_cast<uint64_t>(mesh.indices.size()) * sizeof(uint32_t);
+    }
+
+    for(const GltfImageData& image : model.images)
+    {
+        totalBytes += static_cast<uint64_t>(image.pixels.size());
+    }
+
+    for(const GltfNodeData& node : model.nodes)
+    {
+        totalBytes += static_cast<uint64_t>(node.children.size()) * sizeof(int);
+    }
+
+    return totalBytes;
+}
 
 glm::mat4 composeTransform(const glm::vec3& translation, const glm::quat& rotation, const glm::vec3& scale)
 {
@@ -106,6 +150,7 @@ static bool readFloatAccessor(
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     outModel = {};
+    m_nodeVisitState.clear();
     outModel.sourcePath = filepath;
     outModel.sourceDirectory = std::filesystem::path(filepath).parent_path().string();
 
@@ -140,6 +185,13 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
         m_lastError = "Failed to load glTF file: " + filepath;
         return false;
     }
+
+    if(!hasReasonableModelShape(model)) {
+        m_lastError = "glTF contains unreasonable node, mesh, material, or image counts";
+        return false;
+    }
+
+    m_nodeVisitState.assign(model.nodes.size(), 0u);
 
     // Process materials and images first (they are referenced by meshes)
     processMaterials(model, outModel);
@@ -177,6 +229,11 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
         }
     }
 
+    if(estimateModelPayloadBytes(outModel) > kMaxReasonableModelPayloadBytes) {
+        m_lastError = "glTF payload exceeds safe memory budget";
+        return false;
+    }
+
     return true;
 }
 
@@ -189,6 +246,22 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
         m_lastError = "Invalid node index: " + std::to_string(nodeIndex);
         return false;
     }
+
+    if(static_cast<size_t>(nodeIndex) >= m_nodeVisitState.size()) {
+        m_lastError = "Node visit state out of range";
+        return false;
+    }
+
+    if(m_nodeVisitState[static_cast<size_t>(nodeIndex)] == 1u) {
+        m_lastError = "glTF node graph contains a cycle";
+        return false;
+    }
+
+    if(m_nodeVisitState[static_cast<size_t>(nodeIndex)] == 2u) {
+        return true;
+    }
+
+    m_nodeVisitState[static_cast<size_t>(nodeIndex)] = 1u;
 
     const auto& node = model.nodes[nodeIndex];
 
@@ -285,6 +358,8 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
         }
     }
 
+    m_nodeVisitState[static_cast<size_t>(nodeIndex)] = 2u;
+
     return true;
 }
 
@@ -312,6 +387,10 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
 
         const auto& posAccessor = model.accessors[posIt->second];
         size_t vertexCount = posAccessor.count;
+        if(vertexCount > kMaxReasonableAccessorElements) {
+            m_lastError = "Mesh POSITION accessor has unreasonable vertex count";
+            return false;
+        }
         if (!readFloatAccessor(model, posAccessor, TINYGLTF_TYPE_VEC3, 3, meshData.positions)) {
             m_lastError = "Mesh POSITION accessor must be VEC3 float";
             return false;
@@ -359,13 +438,26 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
         // Get indices
         if (primitive.indices >= 0) {
             const auto& indexAccessor = model.accessors[primitive.indices];
+            if(indexAccessor.count > kMaxReasonableAccessorElements) {
+                m_lastError = "Mesh index accessor has unreasonable index count";
+                return false;
+            }
             const auto& indexBufferView = model.bufferViews[indexAccessor.bufferView];
             const auto& indexBuffer = model.buffers[indexBufferView.buffer];
 
             meshData.indices.reserve(indexAccessor.count);
 
             // Handle different index component types
-            const uint8_t* indexData = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
+            const size_t componentSize = indexAccessor.ByteStride(indexBufferView) != 0
+                ? indexAccessor.ByteStride(indexBufferView)
+                : tinygltf::GetComponentSizeInBytes(indexAccessor.componentType);
+            const size_t byteOffset = indexBufferView.byteOffset + indexAccessor.byteOffset;
+            const size_t byteSize = static_cast<size_t>(indexAccessor.count) * componentSize;
+            if(byteOffset > indexBuffer.data.size() || byteSize > indexBuffer.data.size() - byteOffset) {
+                m_lastError = "Mesh index accessor exceeds source buffer bounds";
+                return false;
+            }
+            const uint8_t* indexData = indexBuffer.data.data() + byteOffset;
 
             switch (indexAccessor.componentType) {
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
@@ -482,6 +574,18 @@ void GltfLoader::processImages(const tinygltf::Model& model, const std::filesyst
     outModel.images.reserve(model.images.size());
 
     for (const auto& image : model.images) {
+        if(image.width < 0 || image.height < 0 || image.component < 0) {
+            continue;
+        }
+        if(static_cast<size_t>(image.width) > kMaxReasonableImageDimension
+           || static_cast<size_t>(image.height) > kMaxReasonableImageDimension
+           || image.component > 4) {
+            continue;
+        }
+        if(image.image.size() > kMaxReasonableImageBytes) {
+            continue;
+        }
+
         GltfImageData imageData;
         imageData.width = image.width;
         imageData.height = image.height;
@@ -602,12 +706,20 @@ static bool readFloatAccessor(
     if (bufferView.buffer < 0 || bufferView.buffer >= static_cast<int>(model.buffers.size())) {
         return false;
     }
+    if(accessor.count > kMaxReasonableAccessorElements) {
+        return false;
+    }
 
     const auto& buffer = model.buffers[bufferView.buffer];
     const size_t stride = accessor.ByteStride(bufferView);
     const size_t packedSize = sizeof(float) * static_cast<size_t>(componentCount);
     const size_t byteStride = stride == 0 ? packedSize : stride;
-    const uint8_t* base = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+    const size_t byteOffset = bufferView.byteOffset + accessor.byteOffset;
+    const size_t byteSize = accessor.count == 0 ? 0 : ((accessor.count - 1) * byteStride + packedSize);
+    if(byteOffset > buffer.data.size() || byteSize > buffer.data.size() - byteOffset) {
+        return false;
+    }
+    const uint8_t* base = buffer.data.data() + byteOffset;
 
     out.resize(accessor.count * static_cast<size_t>(componentCount));
     for (size_t i = 0; i < accessor.count; ++i) {

@@ -15,11 +15,13 @@
 #include "../loader/SceneCacheSerializer.h"
 #include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
+#include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 
 #include <memory>
 #include <optional>
 #include <future>
 #include <atomic>
+#include <array>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -68,11 +70,16 @@ public:
   {
     while(!glfwWindowShouldClose(m_window))
     {
+      const char* framePhase = "FrameStart";
+      try
+      {
       // Let the renderer/present path control pacing. Adding an app-side sleep
       // here only reduces CPU/GPU overlap and steady-state utilization.
+      framePhase = "PollEvents";
       glfwPollEvents();
 
       // Check async loading progress
+      framePhase = "UpdateAsyncLoading";
       updateAsyncLoading();
 
       // Camera input handling
@@ -153,9 +160,17 @@ public:
         continue;
       }
 
+      framePhase = "ImGuiVulkanNewFrame";
       ImGui_ImplVulkan_NewFrame();
+      framePhase = "ImGuiGlfwNewFrame";
       ImGui_ImplGlfw_NewFrame();
+      framePhase = "ImGuiFrameBegin";
       ImGui::NewFrame();
+      framePhase = "RuntimeProfiler";
+      if(!m_runtimeProfilerDisabled)
+      {
+        updateRuntimeProfiler();
+      }
 
       const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
       ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
@@ -280,10 +295,58 @@ public:
         // Swapchain diagnostics
         ImGui::Separator();
         ImGui::Text("Renderer Backend: %s", m_renderer.getBackendName());
+        drawRuntimeProfilerPanel();
         if(m_renderer.getBackend() == demo::RendererBackend::gpuDriven)
         {
           const demo::GPUDrivenRuntimeStats gpuDrivenStats = m_renderer.getGPUDrivenRuntimeStats();
+          const char* authorityName = "None";
+          switch(gpuDrivenStats.authority)
+          {
+            case demo::GPUDrivenSceneAuthority::persistentCullObjects:
+              authorityName = "Persistent Cull Objects";
+              break;
+            case demo::GPUDrivenSceneAuthority::futureSceneObjects:
+              authorityName = "GPU Scene Objects";
+              break;
+            default:
+              break;
+          }
+          const char* indirectSourceName = "None";
+          switch(gpuDrivenStats.indirectSource)
+          {
+            case demo::GPUDrivenIndirectSourceKind::gpuCullingOpaqueIndirect:
+              indirectSourceName = "GPUCullingPass Opaque Indirect";
+              break;
+            default:
+              break;
+          }
           ImGui::Text("Persistent Objects: %u", gpuDrivenStats.objectCount);
+          ImGui::Text("GPU Path: %s",
+                      m_renderer.isExperimentalMeshletPathEnabled() ? "Experimental Meshlet" : "Object-Level Shipping");
+          ImGui::Text("Scene Authority: %s", authorityName);
+          ImGui::Text("Indirect Source: %s", indirectSourceName);
+          ImGui::Text("Indirect Draws: %u", gpuDrivenStats.indirectDrawCount);
+          ImGui::Text("Indirect Stride: %u", gpuDrivenStats.indirectCommandStride);
+          ImGui::Text("Persistent Cull Objects: %s", gpuDrivenStats.usesPersistentCullObjects ? "Yes" : "No");
+          ImGui::Text("Render Chain Ownership: %s", gpuDrivenStats.ownsFullRenderChain ? "GPU-Driven Full Chain" : "Hybrid");
+          ImGui::Text("Hi-Z Ownership: %s", gpuDrivenStats.ownsHiZVisibilityChain ? "GPU-Driven" : "Bridged");
+          ImGui::Text("Hi-Z Generation: %llu", static_cast<unsigned long long>(gpuDrivenStats.hiZGeneration));
+          const char* visibilityOwnershipLabel = "CPU Bootstrap";
+          switch(gpuDrivenStats.visibilityOwnership)
+          {
+            case demo::GPUDrivenVisibilityOwnership::gpuSortCpuFeedback:
+              visibilityOwnershipLabel = "GPU Sort + CPU Feedback";
+              break;
+            case demo::GPUDrivenVisibilityOwnership::gpuOwned:
+              visibilityOwnershipLabel = "GPU-Owned";
+              break;
+            case demo::GPUDrivenVisibilityOwnership::cpuBootstrap:
+            default:
+              visibilityOwnershipLabel = "CPU Bootstrap";
+              break;
+          }
+          ImGui::Text("Visibility Ownership: %s", visibilityOwnershipLabel);
+          ImGui::Text("GPU Sort Feedback: %s", gpuDrivenStats.batchStats.sortPassCount > 0 ? "Active" : "Idle");
           ImGui::Text("Meshlets: %u", gpuDrivenStats.meshletCount);
           ImGui::Text("Meshlet Triangles: %u", gpuDrivenStats.meshletTriangleCount);
           ImGui::Text("Scene Uploads: %u", gpuDrivenStats.sceneUploadCount);
@@ -305,6 +368,7 @@ public:
       drawModelLoaderUI();
       drawSceneGraphUI();
 
+      framePhase = "Render";
       demo::RenderParams frameParams{};
       frameParams.viewportSize   = m_viewportSize;
       frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
@@ -334,6 +398,12 @@ public:
       {
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
+      }
+      }
+      catch(const std::exception& e)
+      {
+        LOGE("Frame failed during phase %s: %s", framePhase, e.what());
+        throw;
       }
     }
   }
@@ -431,6 +501,12 @@ private:
   float m_loadProgress = 0.0f;
   std::string m_loadStatus;
   int m_selectedSceneNode = -1;
+  ImGuiUtils::ProfilerGraph m_cpuProfilerGraph{240};
+  ImGuiUtils::ProfilerGraph m_gpuProfilerGraph{240};
+  std::vector<legit::ProfilerTask> m_cpuProfilerTasks;
+  std::vector<legit::ProfilerTask> m_gpuProfilerTasks;
+  bool m_runtimeProfilerInitialized{false};
+  bool m_runtimeProfilerDisabled{false};
 
   void loadModelAsync(const std::string& path);
   void unloadModel();
@@ -444,6 +520,8 @@ private:
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
   void drawCSMDebugPanel();
+  void updateRuntimeProfiler();
+  void drawRuntimeProfilerPanel();
 };
 
 inline void MinimalLatestApp::syncLightAnglesFromDirection()
@@ -498,23 +576,45 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
     const std::filesystem::path sourcePath(path);
     const std::filesystem::path cachePath = demo::SceneCacheSerializer::buildCachePath(sourcePath);
 
-    if(cacheSerializer.isCacheValid(cachePath, sourcePath) && cacheSerializer.loadCache(cachePath, model))
+    try
     {
-      LOGI("Loaded scene cache: %s", cachePath.string().c_str());
+      if(cacheSerializer.isCacheValid(cachePath, sourcePath))
+      {
+        if(cacheSerializer.loadCache(cachePath, model))
+        {
+          LOGI("Loaded scene cache: %s", cachePath.string().c_str());
+          return model;
+        }
+
+        LOGW("Ignoring invalid scene cache %s: %s",
+             cachePath.string().c_str(),
+             cacheSerializer.getLastError().c_str());
+        std::error_code removeError;
+        std::filesystem::remove(cachePath, removeError);
+      }
+
+      if(!loader.load(path, model))
+      {
+        return std::nullopt;
+      }
+
+      if(!cacheSerializer.saveCache(cachePath, model, sourcePath))
+      {
+        LOGW("Failed to save scene cache %s: %s", cachePath.string().c_str(), cacheSerializer.getLastError().c_str());
+      }
+
       return model;
     }
-
-    if(!loader.load(path, model))
+    catch(const std::bad_alloc&)
     {
+      LOGE("Out of memory while loading scene: %s", path.c_str());
       return std::nullopt;
     }
-
-    if(!cacheSerializer.saveCache(cachePath, model, sourcePath))
+    catch(const std::exception& e)
     {
-      LOGW("Failed to save scene cache %s: %s", cachePath.string().c_str(), cacheSerializer.getLastError().c_str());
+      LOGE("Scene load failed with exception for %s: %s", path.c_str(), e.what());
+      return std::nullopt;
     }
-
-    return model;
   });
 }
 
@@ -536,28 +636,64 @@ inline void MinimalLatestApp::updateAsyncLoading()
     auto status = m_loadFuture.wait_for(std::chrono::milliseconds(0));
     if(status == std::future_status::ready)
     {
-      auto result = m_loadFuture.get();
+      std::optional<demo::GltfModel> result;
+      try
+      {
+        result = m_loadFuture.get();
+      }
+      catch(const std::bad_alloc&)
+      {
+        m_loadStatus = "Model future allocation failed";
+        m_loadProgress = 0.0f;
+        m_isLoading = false;
+        LOGE("Out of memory while retrieving parsed scene: %s", m_pendingModelPath.c_str());
+        return;
+      }
+      catch(const std::exception& e)
+      {
+        m_loadStatus = "Model load failed";
+        m_loadProgress = 0.0f;
+        m_isLoading = false;
+        LOGE("Failed to retrieve loaded scene %s: %s", m_pendingModelPath.c_str(), e.what());
+        return;
+      }
+
       if(result.has_value())
       {
-        m_loadStatus = "Preparing upload...";
-        m_loadProgress = 0.4f;
+        try
+        {
+          m_loadStatus = "Preparing upload...";
+          m_loadProgress = 0.4f;
 
-        m_renderer.waitForIdle();
-        unloadModel();
+          m_renderer.waitForIdle();
+          unloadModel();
 
-        m_sceneModel = std::move(*result);
-        m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
+          m_sceneModel = std::move(*result);
+          m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
 
-        m_currentModel.emplace();
-        m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
-        m_asyncLoadingCoordinator.emplace();
-        m_asyncLoadingCoordinator->beginOneShot(*m_sceneModel);  // One-shot upload (all assets in single batch)
+          m_currentModel.emplace();
+          m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
+          m_asyncLoadingCoordinator.emplace();
+          m_asyncLoadingCoordinator->begin(*m_sceneModel, m_camera.getPosition(), 24, 96);
 
-        m_modelPath = m_pendingModelPath;
-        m_modelLoaded = true;
+          m_modelPath = m_pendingModelPath;
+          m_modelLoaded = true;
 
-        LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
-             m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+          LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
+               m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+        }
+        catch(const std::bad_alloc&)
+        {
+          m_sceneModel.reset();
+          m_currentModel.reset();
+          m_asyncLoadingCoordinator.reset();
+          m_modelLoaded = false;
+          m_loadStatus = "Model allocation failed";
+          m_loadProgress = 0.0f;
+          m_isLoading = false;
+          LOGE("Out of memory while preparing scene upload: %s", m_pendingModelPath.c_str());
+          return;
+        }
       }
       else
       {
@@ -921,4 +1057,125 @@ inline void MinimalLatestApp::drawCSMDebugPanel()
 
     ImGui::Unindent();
   }
+}
+
+inline void MinimalLatestApp::updateRuntimeProfiler()
+{
+  try
+  {
+    const demo::RuntimeProfileSnapshot snapshot = m_renderer.getRuntimeProfileSnapshot();
+    if(snapshot.passNames.empty())
+    {
+      return;
+    }
+
+    static constexpr size_t kMaxReasonableProfilePassCount = 256;
+    const size_t safePassCount = std::min({
+        snapshot.passNames.size(),
+        snapshot.cpuPassDurationsMs.size(),
+        snapshot.gpuPassDurationsMs.size(),
+        kMaxReasonableProfilePassCount,
+    });
+    if(safePassCount == 0)
+    {
+      return;
+    }
+
+    static constexpr std::array<uint32_t, 8> kTaskColors = {
+        legit::Colors::peterRiver,
+        legit::Colors::emerald,
+        legit::Colors::sunFlower,
+        legit::Colors::carrot,
+        legit::Colors::amethyst,
+        legit::Colors::alizarin,
+        legit::Colors::clouds,
+        legit::Colors::turqoise,
+    };
+
+    auto buildTasks = [](const std::vector<std::string>& passNames,
+                         const std::vector<double>& durationsMs,
+                         size_t count,
+                         const std::array<uint32_t, 8>& colors,
+                         std::vector<legit::ProfilerTask>& outTasks) {
+      outTasks.clear();
+      outTasks.reserve(count);
+
+      double cursorSeconds = 0.0;
+      for(size_t i = 0; i < count; ++i)
+      {
+        const double durationSeconds = std::max(0.0, durationsMs[i]) * 1e-3;
+        if(durationSeconds <= 0.0)
+        {
+          continue;
+        }
+
+        legit::ProfilerTask task{};
+        task.startTime = cursorSeconds;
+        task.endTime = cursorSeconds + durationSeconds;
+        task.name = passNames[i];
+        task.color = colors[i % colors.size()];
+        outTasks.push_back(task);
+        cursorSeconds = task.endTime;
+      }
+    };
+
+    buildTasks(snapshot.passNames, snapshot.cpuPassDurationsMs, safePassCount, kTaskColors, m_cpuProfilerTasks);
+    buildTasks(snapshot.passNames, snapshot.gpuPassDurationsMs, safePassCount, kTaskColors, m_gpuProfilerTasks);
+
+    m_cpuProfilerGraph.LoadFrameData(m_cpuProfilerTasks.data(), m_cpuProfilerTasks.size());
+    if(snapshot.gpuValid)
+    {
+      m_gpuProfilerGraph.LoadFrameData(m_gpuProfilerTasks.data(), m_gpuProfilerTasks.size());
+    }
+    else
+    {
+      m_gpuProfilerGraph.LoadFrameData(nullptr, 0);
+    }
+
+    m_runtimeProfilerInitialized = true;
+  }
+  catch(const std::bad_alloc&)
+  {
+    m_cpuProfilerTasks.clear();
+    m_gpuProfilerTasks.clear();
+    m_cpuProfilerGraph.LoadFrameData(nullptr, 0);
+    m_gpuProfilerGraph.LoadFrameData(nullptr, 0);
+    m_runtimeProfilerInitialized = false;
+    m_runtimeProfilerDisabled = true;
+    LOGE("Runtime profiler disabled after allocation failure");
+  }
+}
+
+inline void MinimalLatestApp::drawRuntimeProfilerPanel()
+{
+  if(m_runtimeProfilerDisabled)
+  {
+    ImGui::TextUnformatted("Runtime Profiler: disabled after allocation failure.");
+    return;
+  }
+
+  if(!m_runtimeProfilerInitialized)
+  {
+    ImGui::TextUnformatted("Runtime Profiler: waiting for frame timings...");
+    return;
+  }
+
+  ImGui::SeparatorText("Runtime Profiler");
+  const float maxFrameTime = std::max(1.0f / 30.0f, ImGui::GetIO().DeltaTime * 1.5f);
+  const float availableWidth = ImGui::GetContentRegionAvail().x;
+  const int legendWidth = 220;
+  const int graphWidth = std::max(120, static_cast<int>(availableWidth) - legendWidth);
+
+  ImGui::TextUnformatted("CPU Pass Timeline");
+  m_cpuProfilerGraph.useColoredLegendText = true;
+  m_cpuProfilerGraph.frameWidth = 3;
+  m_cpuProfilerGraph.frameSpacing = 1;
+  m_cpuProfilerGraph.RenderTimings(graphWidth, legendWidth, 140, 0, maxFrameTime);
+
+  ImGui::Spacing();
+  ImGui::TextUnformatted("GPU Pass Timeline");
+  m_gpuProfilerGraph.useColoredLegendText = true;
+  m_gpuProfilerGraph.frameWidth = 3;
+  m_gpuProfilerGraph.frameSpacing = 1;
+  m_gpuProfilerGraph.RenderTimings(graphWidth, legendWidth, 140, 0, maxFrameTime);
 }

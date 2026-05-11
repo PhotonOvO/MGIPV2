@@ -29,6 +29,14 @@ struct VertexOutput
     float3 worldNormal : TEXCOORD1;
 };
 
+struct VertexOutputMdi
+{
+    float4 position : SV_Position;
+    float2 uv       : TEXCOORD0;
+    float3 worldNormal : TEXCOORD1;
+    nointerpolation uint drawIndex : TEXCOORD2;
+};
+
 //------------------------------------------------------------------------------
 // Resource Bindings (same as GBuffer)
 //------------------------------------------------------------------------------
@@ -41,6 +49,9 @@ ConstantBuffer<CameraUniforms> camera;
 
 [[vk::binding(LBindDrawModel, LSetDraw)]]
 ConstantBuffer<DrawUniforms> draw;
+
+[[vk::binding(LBindDrawModelMdi, LSetDraw)]]
+StructuredBuffer<DrawUniforms> drawData;
 
 //------------------------------------------------------------------------------
 // Vertex Shader
@@ -64,6 +75,21 @@ VertexOutput vertexMain(VertexInput input)
     return output;
 }
 
+[shader("vertex")]
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+{
+    VertexOutputMdi output;
+    const DrawUniforms mdiDraw = drawData[drawIndex];
+
+    float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));
+    output.position = mul(camera.viewProjection, worldPos);
+    output.uv = input.texCoord;
+    output.worldNormal = normalize(mul(mdiDraw.modelMatrix, float4(input.normal, 0.0)).xyz);
+    output.drawIndex = drawIndex;
+
+    return output;
+}
+
 //------------------------------------------------------------------------------
 // Fragment Shader (Output with alpha for blending)
 //------------------------------------------------------------------------------
@@ -80,5 +106,20 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     }
 
     // Output with alpha (blending handled by pipeline state)
+    return color;
+}
+
+[shader("fragment")]
+float4 fragmentMdiMain(VertexOutputMdi input) : SV_Target
+{
+    const DrawUniforms mdiDraw = drawData[input.drawIndex];
+
+    float4 color = mdiDraw.baseColorFactor;
+    if(mdiDraw.baseColorTextureIndex >= 0)
+    {
+        float4 texColor = inTexture[mdiDraw.baseColorTextureIndex].Sample(input.uv);
+        color = float4(texColor.rgb * mdiDraw.baseColorFactor.rgb, texColor.a * mdiDraw.baseColorFactor.a);
+    }
+
     return color;
 }

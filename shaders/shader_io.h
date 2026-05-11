@@ -280,6 +280,19 @@ struct GPUBatchBuildStats
   uint32_t _padding0;
 };
 
+struct BitonicSortPushConstants
+{
+  uint32_t elementCount;
+  uint32_t level;
+  uint32_t levelMask;
+  uint32_t descending;
+};
+
+struct TransparentVisibilityPatchPushConstants
+{
+  uint32_t elementCount;
+};
+
 struct Meshlet
 {
   vec4     boundsSphere;

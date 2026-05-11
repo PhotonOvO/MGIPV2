@@ -174,11 +174,11 @@ void MeshPool::reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize addition
 {
     ensureSharedCapacity(m_sharedVertexBuffer,
                          m_sharedVertexBuffer.bytesUsed + additionalVertexBytes,
-                         VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
+                         VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
                          cmd);
     ensureSharedCapacity(m_sharedIndexBuffer,
                          m_sharedIndexBuffer.bytesUsed + additionalIndexBytes,
-                         VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
+                         VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
                          cmd);
 }
 

@@ -38,7 +38,9 @@ void DebugPass::execute(const PassContext& context) const
   const std::vector<shaderio::DebugLineVertex>& debugVertices = m_renderer->getDebugLineVertices();
   const bool hasLineDebug = !debugVertices.empty();
   const uint32_t gpuCullObjectCount =
-      context.params->gltfModel != nullptr ? static_cast<uint32_t>(context.params->gltfModel->meshes.size()) : 0u;
+      context.params->gpuDrivenSceneView != nullptr && context.params->gpuDrivenSceneView->usePersistentCullingObjects
+          ? context.params->gpuDrivenSceneView->objectCount
+          : (context.params->gltfModel != nullptr ? static_cast<uint32_t>(context.params->gltfModel->meshes.size()) : 0u);
   const bool hasGPUCullingDebug =
       context.params->debugOptions.showGPUCullingOverlay && gpuCullObjectCount > 0
       && !m_renderer->getGPUCullingDebugPipelineHandle().isNull()
@@ -49,7 +51,7 @@ void DebugPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("DebugPass");
+  context.cmd->beginEvent("GPUDrivenDebug");
 
   const VkExtent2D outputExtent = m_renderer->getSceneResources().getSize();
   const rhi::Extent2D extent{outputExtent.width, outputExtent.height};

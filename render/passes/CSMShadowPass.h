@@ -13,7 +13,7 @@ public:
   explicit CSMShadowPass(Renderer* renderer);
   ~CSMShadowPass() override = default;
 
-  [[nodiscard]] const char* getName() const override { return "CSMShadowPass"; }
+  [[nodiscard]] const char* getName() const override { return "GPUDrivenCSMShadow"; }
   [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
   void execute(const PassContext& context) const override;
 

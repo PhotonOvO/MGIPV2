@@ -1,5 +1,6 @@
 #include "SceneCacheSerializer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <type_traits>
@@ -10,6 +11,15 @@ namespace {
 
 constexpr char     kCacheMagic[8] = {'V', 'K', 'C', 'A', 'C', 'H', 'E', 0};
 constexpr uint32_t kCacheVersion  = SceneCacheSerializer::kCurrentVersion;
+constexpr uint64_t kMaxReasonableStringBytes = 1ull << 20;
+constexpr uint64_t kMaxReasonableVectorElements = 1ull << 22;
+constexpr uint32_t kMaxReasonableMeshCount = 1u << 16;
+constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
+constexpr uint32_t kMaxReasonableImageCount = 1u << 14;
+constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
+constexpr uint32_t kMaxReasonableRootNodeCount = 1u << 14;
+constexpr uint32_t kMaxReasonableImageDimension = 1u << 14;
+constexpr uint64_t kMaxReasonableImagePixels = 1ull << 28;
 
 struct CacheHeader
 {
@@ -25,6 +35,104 @@ struct CacheHeader
   uint32_t nodeCount{0};
   uint32_t rootNodeCount{0};
 };
+
+[[nodiscard]] bool hasReasonableCounts(const CacheHeader& header)
+{
+  return header.meshCount <= kMaxReasonableMeshCount
+         && header.materialCount <= kMaxReasonableMaterialCount
+         && header.imageCount <= kMaxReasonableImageCount
+         && header.nodeCount <= kMaxReasonableNodeCount
+         && header.rootNodeCount <= kMaxReasonableRootNodeCount;
+}
+
+[[nodiscard]] bool hasReasonableModelShape(const GltfModel& model)
+{
+  return model.meshes.size() <= kMaxReasonableMeshCount
+         && model.materials.size() <= kMaxReasonableMaterialCount
+         && model.images.size() <= kMaxReasonableImageCount
+         && model.nodes.size() <= kMaxReasonableNodeCount
+         && model.rootNodes.size() <= kMaxReasonableRootNodeCount;
+}
+
+[[nodiscard]] bool hasReasonableMeshPayload(const GltfMeshData& mesh)
+{
+  const size_t vertexCount = mesh.positions.size() / 3;
+  return mesh.positions.size() % 3 == 0
+         && mesh.normals.size() % 3 == 0
+         && mesh.texCoords.size() % 2 == 0
+         && mesh.tangents.size() % 4 == 0
+         && mesh.positions.size() <= kMaxReasonableVectorElements
+         && mesh.normals.size() <= kMaxReasonableVectorElements
+         && mesh.texCoords.size() <= kMaxReasonableVectorElements
+         && mesh.tangents.size() <= kMaxReasonableVectorElements
+         && mesh.indices.size() <= kMaxReasonableVectorElements
+         && (mesh.normals.empty() ? true : (mesh.normals.size() / 3 == vertexCount))
+         && (mesh.texCoords.empty() ? true : (mesh.texCoords.size() / 2 == vertexCount))
+         && (mesh.tangents.empty() ? true : (mesh.tangents.size() / 4 == vertexCount));
+}
+
+[[nodiscard]] bool hasReasonableImagePayload(const GltfImageData& image)
+{
+  if(image.width < 0 || image.height < 0 || image.channels < 0)
+  {
+    return false;
+  }
+
+  const uint64_t width = static_cast<uint64_t>(image.width);
+  const uint64_t height = static_cast<uint64_t>(image.height);
+  const uint64_t channels = static_cast<uint64_t>(image.channels);
+  if(width > kMaxReasonableImageDimension || height > kMaxReasonableImageDimension || channels > 4)
+  {
+    return false;
+  }
+
+  const uint64_t expectedBytes = width * height * channels;
+  return expectedBytes <= kMaxReasonableImagePixels
+         && image.pixels.size() <= kMaxReasonableImagePixels
+         && (expectedBytes == 0 || image.pixels.size() == expectedBytes);
+}
+
+[[nodiscard]] bool hasReasonableNodePayload(const GltfNodeData& node, size_t nodeCount, size_t meshCount)
+{
+  return node.children.size() <= kMaxReasonableVectorElements
+         && node.firstMeshIndex <= meshCount
+         && node.meshCount <= meshCount
+         && static_cast<uint64_t>(node.firstMeshIndex) + static_cast<uint64_t>(node.meshCount) <= meshCount
+         && std::all_of(node.children.begin(), node.children.end(), [nodeCount](int child) {
+              return child >= 0 && static_cast<size_t>(child) < nodeCount;
+            });
+}
+
+[[nodiscard]] bool hasReasonablePayload(const GltfModel& model)
+{
+  for(const GltfMeshData& mesh : model.meshes)
+  {
+    if(!hasReasonableMeshPayload(mesh))
+    {
+      return false;
+    }
+  }
+
+  for(const GltfImageData& image : model.images)
+  {
+    if(!hasReasonableImagePayload(image))
+    {
+      return false;
+    }
+  }
+
+  for(const GltfNodeData& node : model.nodes)
+  {
+    if(!hasReasonableNodePayload(node, model.nodes.size(), model.meshes.size()))
+    {
+      return false;
+    }
+  }
+
+  return std::all_of(model.rootNodes.begin(), model.rootNodes.end(), [&model](int rootNode) {
+    return rootNode >= 0 && static_cast<size_t>(rootNode) < model.nodes.size();
+  });
+}
 
 [[nodiscard]] uint64_t hashPath(const std::filesystem::path& path)
 {
@@ -69,6 +177,11 @@ bool readString(std::istream& stream, std::string& value)
     return false;
   }
 
+  if(size > kMaxReasonableStringBytes)
+  {
+    return false;
+  }
+
   value.resize(static_cast<size_t>(size));
   if(size > 0)
   {
@@ -95,6 +208,11 @@ bool readVector(std::istream& stream, std::vector<T>& values)
   static_assert(std::is_trivially_copyable_v<T>, "readVector requires trivially copyable element types");
   uint64_t size = 0;
   if(!readPod(stream, size))
+  {
+    return false;
+  }
+
+  if(size > kMaxReasonableVectorElements)
   {
     return false;
   }
@@ -293,83 +411,109 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
 {
   m_lastError.clear();
 
-  std::ifstream stream(cachePath, std::ios::binary);
-  if(!stream)
+  try
   {
-    m_lastError = "Failed to open cache file for reading";
-    return false;
-  }
-
-  CacheHeader header{};
-  if(!readPod(stream, header))
-  {
-    m_lastError = "Failed to read cache header";
-    return false;
-  }
-
-  if(std::memcmp(header.magic, kCacheMagic, sizeof(kCacheMagic)) != 0 || header.version != kCacheVersion)
-  {
-    m_lastError = "Unsupported cache format";
-    return false;
-  }
-
-  GltfModel loadedModel{};
-  loadedModel.meshes.resize(header.meshCount);
-  loadedModel.materials.resize(header.materialCount);
-  loadedModel.images.resize(header.imageCount);
-  loadedModel.nodes.resize(header.nodeCount);
-
-  if(!readString(stream, loadedModel.name))
-  {
-    m_lastError = "Failed to read model name";
-    return false;
-  }
-  if(!readString(stream, loadedModel.sourcePath) || !readString(stream, loadedModel.sourceDirectory))
-  {
-    m_lastError = "Failed to read model source metadata";
-    return false;
-  }
-
-  for(auto& mesh : loadedModel.meshes)
-  {
-    if(!readMesh(stream, mesh))
+    std::ifstream stream(cachePath, std::ios::binary);
+    if(!stream)
     {
-      m_lastError = "Failed to read mesh payload";
+      m_lastError = "Failed to open cache file for reading";
       return false;
     }
-  }
-  for(auto& material : loadedModel.materials)
-  {
-    if(!readMaterial(stream, material))
+
+    CacheHeader header{};
+    if(!readPod(stream, header))
     {
-      m_lastError = "Failed to read material payload";
+      m_lastError = "Failed to read cache header";
       return false;
     }
-  }
-  for(auto& image : loadedModel.images)
-  {
-    if(!readImage(stream, image))
+
+    if(std::memcmp(header.magic, kCacheMagic, sizeof(kCacheMagic)) != 0 || header.version != kCacheVersion)
     {
-      m_lastError = "Failed to read image payload";
+      m_lastError = "Unsupported cache format";
       return false;
     }
-  }
-  for(auto& node : loadedModel.nodes)
-  {
-    if(!readNode(stream, node))
+
+    if(!hasReasonableCounts(header))
     {
-      m_lastError = "Failed to read node payload";
+      m_lastError = "Cache header contains unreasonable object counts";
       return false;
     }
+
+    GltfModel loadedModel{};
+    loadedModel.meshes.resize(header.meshCount);
+    loadedModel.materials.resize(header.materialCount);
+    loadedModel.images.resize(header.imageCount);
+    loadedModel.nodes.resize(header.nodeCount);
+
+    if(!readString(stream, loadedModel.name))
+    {
+      m_lastError = "Failed to read model name";
+      return false;
+    }
+    if(!readString(stream, loadedModel.sourcePath) || !readString(stream, loadedModel.sourceDirectory))
+    {
+      m_lastError = "Failed to read model source metadata";
+      return false;
+    }
+
+    for(auto& mesh : loadedModel.meshes)
+    {
+      if(!readMesh(stream, mesh))
+      {
+        m_lastError = "Failed to read mesh payload";
+        return false;
+      }
+    }
+    for(auto& material : loadedModel.materials)
+    {
+      if(!readMaterial(stream, material))
+      {
+        m_lastError = "Failed to read material payload";
+        return false;
+      }
+    }
+    for(auto& image : loadedModel.images)
+    {
+      if(!readImage(stream, image))
+      {
+        m_lastError = "Failed to read image payload";
+        return false;
+      }
+    }
+    for(auto& node : loadedModel.nodes)
+    {
+      if(!readNode(stream, node))
+      {
+        m_lastError = "Failed to read node payload";
+        return false;
+      }
+    }
+    if(!readVector(stream, loadedModel.rootNodes))
+    {
+      m_lastError = "Failed to read root node payload";
+      return false;
+    }
+
+    if(!hasReasonableModelShape(loadedModel))
+    {
+      m_lastError = "Cache payload contains unreasonable object counts";
+      return false;
+    }
+
+    if(!hasReasonablePayload(loadedModel))
+    {
+      m_lastError = "Cache payload contains unreasonable mesh, image, or node data";
+      return false;
+    }
+
+    model = std::move(loadedModel);
+    return true;
   }
-  if(!readVector(stream, loadedModel.rootNodes))
+  catch(const std::bad_alloc&)
   {
-    m_lastError = "Failed to read root node payload";
+    m_lastError = "Cache allocation exceeded sane limits";
     return false;
   }
-
-  model = std::move(loadedModel);
-  return true;
 }
 
 bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, const std::filesystem::path& sourcePath)
@@ -396,6 +540,11 @@ bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, 
   }
 
   if(std::memcmp(header.magic, kCacheMagic, sizeof(kCacheMagic)) != 0 || header.version != kCacheVersion)
+  {
+    return false;
+  }
+
+  if(!hasReasonableCounts(header))
   {
     return false;
   }

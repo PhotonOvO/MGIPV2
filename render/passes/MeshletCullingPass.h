@@ -10,7 +10,7 @@ class MeshletCullingPass : public ComputePassNode
 {
 public:
   explicit MeshletCullingPass(GPUDrivenRenderer* renderer);
-  [[nodiscard]] const char* getName() const override { return "MeshletCullingPass"; }
+  [[nodiscard]] const char* getName() const override { return "GPUDrivenVisibilitySort"; }
   [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
   void execute(const PassContext& context) const override;
 

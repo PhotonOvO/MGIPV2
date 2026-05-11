@@ -31,7 +31,7 @@ void GPUCullingPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUCullingPass");
+  context.cmd->beginEvent("GPUDrivenCulling");
   m_renderer->executeGPUCullingPass(*context.cmd, *context.params);
   context.cmd->endEvent();
 }

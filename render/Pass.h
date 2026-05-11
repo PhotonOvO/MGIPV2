@@ -90,6 +90,8 @@ inline constexpr BufferHandle  kPassGPUCullIndirectBufferHandle{0xF008u, 1u};
 inline constexpr BufferHandle  kPassGPUCullStatsBufferHandle{0xF009u, 1u};
 inline constexpr BufferHandle  kPassGPUCullUniformBufferHandle{0xF00Au, 1u};
 inline constexpr BufferHandle  kPassGPUCullResultBufferHandle{0xF00Bu, 1u};
+inline constexpr BufferHandle  kPassGPUDrivenSortKeyBufferHandle{0xF00Cu, 1u};
+inline constexpr BufferHandle  kPassGPUDrivenSortValueBufferHandle{0xF00Du, 1u};
 inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
 inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
 inline constexpr TextureHandle kPassGBuffer2Handle{0xF103u, 1u};

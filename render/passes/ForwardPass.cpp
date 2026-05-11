@@ -64,7 +64,7 @@ void ForwardPass::execute(const PassContext& context) const
         return;
     }
 
-    context.cmd->beginEvent("ForwardPass");
+    context.cmd->beginEvent("GPUDrivenForward");
 
     SceneResources& sceneResources = m_renderer->getSceneResources();
     const auto restoreDepthForSampling = [&]() {
@@ -103,9 +103,6 @@ void ForwardPass::execute(const PassContext& context) const
     }
 
     MeshPool& meshPool = m_renderer->getMeshPool();
-    const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
-    const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
-
     // Use output texture extent for rendering
     const rhi::Extent2D renderExtent = outputExtent;
     if(renderExtent.width == 0 || renderExtent.height == 0)
@@ -398,8 +395,6 @@ void ForwardPass::execute(const PassContext& context) const
             for(size_t slot = 0; slot < meshRecords.size(); ++slot)
             {
                 const MeshRecord* mesh = meshRecords[slot];
-                size_t meshIndex = transparentMeshes[slot].first;
-
                 // Bind draw descriptor set with dynamic offset
                 const uint32_t drawDynamicOffset = batchAlloc.offset + static_cast<uint32_t>(slot) * kDrawUniformsStride;
                 vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
@@ -414,17 +409,7 @@ void ForwardPass::execute(const PassContext& context) const
                 const uint64_t indexHandle = mesh->indexBufferHandle;
                 context.cmd->bindIndexBuffer(indexHandle, 0, rhi::IndexFormat::uint32);
 
-                if(indirectBufferHandle != 0)
-                {
-                    context.cmd->drawIndexedIndirect(indirectBufferHandle,
-                                                     static_cast<uint64_t>(meshIndex) * indirectCommandStride,
-                                                     1,
-                                                     indirectCommandStride);
-                }
-                else
-                {
-                    context.cmd->drawIndexed(mesh->indexCount, 1, 0, 0, 0);
-                }
+                context.cmd->drawIndexed(mesh->indexCount, 1, mesh->firstIndex, mesh->vertexOffset, 0);
             }
         }
     }

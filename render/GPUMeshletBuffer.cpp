@@ -1,5 +1,7 @@
 #include "GPUMeshletBuffer.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace demo {
@@ -54,6 +56,9 @@ void GPUMeshletBuffer::deinit()
   destroyBuffer(m_meshletVertexBuffer);
   destroyBuffer(m_meshletIndexBuffer);
   m_meshletCount = 0;
+  m_meshletIndexCount = 0;
+  m_meshletCapacity = 0;
+  m_meshletIndexCapacity = 0;
   m_device = VK_NULL_HANDLE;
   m_allocator = nullptr;
 }
@@ -64,6 +69,9 @@ void GPUMeshletBuffer::clear()
   destroyBuffer(m_meshletVertexBuffer);
   destroyBuffer(m_meshletIndexBuffer);
   m_meshletCount = 0;
+  m_meshletIndexCount = 0;
+  m_meshletCapacity = 0;
+  m_meshletIndexCapacity = 0;
 }
 
 void GPUMeshletBuffer::uploadMeshlets(VkCommandBuffer cmd,
@@ -71,35 +79,80 @@ void GPUMeshletBuffer::uploadMeshlets(VkCommandBuffer cmd,
                                       const std::vector<uint32_t>& meshletIndices)
 {
   (void)cmd;
-  clear();
-  m_meshletCount = static_cast<uint32_t>(meshlets.size());
+  const uint32_t newMeshletCount = static_cast<uint32_t>(meshlets.size());
+  const uint32_t newIndexCount = static_cast<uint32_t>(meshletIndices.size());
+  const uint32_t previousMeshletCount = m_meshletCount;
+  const uint32_t previousIndexCount = m_meshletIndexCount;
+  const bool capacityGrowth =
+      newMeshletCount > m_meshletCapacity || (newIndexCount > 0 && newIndexCount > m_meshletIndexCapacity);
+  const bool rewriteAll = capacityGrowth || newMeshletCount < m_meshletCount || newIndexCount < m_meshletIndexCount;
+  if(rewriteAll)
+  {
+    clear();
+  }
+
+  m_meshletCount = newMeshletCount;
+  m_meshletIndexCount = newIndexCount;
   if(meshlets.empty())
   {
     return;
   }
 
-  const VkDeviceSize meshletBytes = sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(meshlets.size());
-  const VkDeviceSize indexBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(meshletIndices.size());
+  ensureCapacities(newMeshletCount, newIndexCount);
 
-  m_meshletDataBuffer = createBuffer(m_device,
-                                     m_allocator,
-                                     meshletBytes,
-                                     VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-                                     VMA_MEMORY_USAGE_CPU_TO_GPU,
-                                     VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-  std::memcpy(m_meshletDataBuffer.mapped, meshlets.data(), static_cast<size_t>(meshletBytes));
-  VK_CHECK(vmaFlushAllocation(m_allocator, m_meshletDataBuffer.allocation, 0, meshletBytes));
-
-  if(indexBytes > 0)
+  const uint32_t meshletStart = rewriteAll ? 0u : std::min(previousMeshletCount, newMeshletCount);
+  const uint32_t meshletUploadCount = newMeshletCount - meshletStart;
+  if(meshletUploadCount > 0)
   {
+    const VkDeviceSize meshletOffsetBytes =
+        sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(meshletStart);
+    const VkDeviceSize meshletUploadBytes =
+        sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(meshletUploadCount);
+    std::memcpy(static_cast<std::byte*>(m_meshletDataBuffer.mapped) + meshletOffsetBytes,
+                meshlets.data() + meshletStart,
+                static_cast<size_t>(meshletUploadBytes));
+    VK_CHECK(vmaFlushAllocation(m_allocator, m_meshletDataBuffer.allocation, meshletOffsetBytes, meshletUploadBytes));
+  }
+
+  const uint32_t indexStart = rewriteAll ? 0u : std::min(previousIndexCount, newIndexCount);
+  const uint32_t indexUploadCount = newIndexCount - indexStart;
+  if(indexUploadCount > 0)
+  {
+    const VkDeviceSize indexOffsetBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(indexStart);
+    const VkDeviceSize indexUploadBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(indexUploadCount);
+    std::memcpy(static_cast<std::byte*>(m_meshletIndexBuffer.mapped) + indexOffsetBytes,
+                meshletIndices.data() + indexStart,
+                static_cast<size_t>(indexUploadBytes));
+    VK_CHECK(vmaFlushAllocation(m_allocator, m_meshletIndexBuffer.allocation, indexOffsetBytes, indexUploadBytes));
+  }
+}
+
+void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t requiredIndexCount)
+{
+  if(requiredMeshletCount > m_meshletCapacity)
+  {
+    destroyBuffer(m_meshletDataBuffer);
+    m_meshletCapacity = std::max(requiredMeshletCount, std::max(64u, m_meshletCapacity * 2u));
+    const VkDeviceSize meshletBytes = sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(m_meshletCapacity);
+    m_meshletDataBuffer = createBuffer(m_device,
+                                       m_allocator,
+                                       meshletBytes,
+                                       VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                                       VMA_MEMORY_USAGE_CPU_TO_GPU,
+                                       VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  }
+
+  if(requiredIndexCount > 0 && requiredIndexCount > m_meshletIndexCapacity)
+  {
+    destroyBuffer(m_meshletIndexBuffer);
+    m_meshletIndexCapacity = std::max(requiredIndexCount, std::max(128u, m_meshletIndexCapacity * 2u));
+    const VkDeviceSize indexBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(m_meshletIndexCapacity);
     m_meshletIndexBuffer = createBuffer(m_device,
                                         m_allocator,
                                         indexBytes,
                                         VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
                                         VMA_MEMORY_USAGE_CPU_TO_GPU,
                                         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-    std::memcpy(m_meshletIndexBuffer.mapped, meshletIndices.data(), static_cast<size_t>(indexBytes));
-    VK_CHECK(vmaFlushAllocation(m_allocator, m_meshletIndexBuffer.allocation, 0, indexBytes));
   }
 }
 

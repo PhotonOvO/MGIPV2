@@ -208,6 +208,7 @@ add_library(demo_core STATIC
   rhi/RHIResourceLifetime.h
   rhi/RHIShaderReflection.h
   rhi/RHIPipeline.h
+  # vulkan backend
   rhi/vulkan/VulkanSurface.h
   rhi/vulkan/VulkanSurface.cpp
   rhi/vulkan/VulkanDevice.h
@@ -279,12 +280,30 @@ add_library(demo_core STATIC
   render/passes/DepthPyramidPass.cpp
   render/passes/GPUCullingPass.h
   render/passes/GPUCullingPass.cpp
+  render/passes/GPUDrivenDepthPyramidPass.h
+  render/passes/GPUDrivenDepthPyramidPass.cpp
+  render/passes/GPUDrivenCullingPass.h
+  render/passes/GPUDrivenCullingPass.cpp
   render/passes/GPUDrivenDepthPrepass.h
   render/passes/GPUDrivenDepthPrepass.cpp
+  render/passes/GPUDrivenForwardPass.h
+  render/passes/GPUDrivenForwardPass.cpp
   render/passes/GPUDrivenGBufferPass.h
   render/passes/GPUDrivenGBufferPass.cpp
   render/passes/GPUDrivenLightPass.h
   render/passes/GPUDrivenLightPass.cpp
+  render/passes/GPUDrivenLightCullingPass.h
+  render/passes/GPUDrivenLightCullingPass.cpp
+  render/passes/GPUDrivenCSMShadowPass.h
+  render/passes/GPUDrivenCSMShadowPass.cpp
+  render/passes/GPUDrivenDebugPass.h
+  render/passes/GPUDrivenDebugPass.cpp
+  render/passes/GPUDrivenPresentPass.h
+  render/passes/GPUDrivenPresentPass.cpp
+  render/passes/GPUDrivenImguiPass.h
+  render/passes/GPUDrivenImguiPass.cpp
+  render/passes/GPUDrivenVisibilitySortPass.h
+  render/passes/GPUDrivenVisibilitySortPass.cpp
   render/passes/MeshletCullingPass.h
   render/passes/MeshletCullingPass.cpp
   render/passes/AnimateVerticesPass.h

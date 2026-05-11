@@ -42,11 +42,13 @@ public:
   void             waitForIdle();
 
   [[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
+  [[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData();
   [[nodiscard]] CSMShadowResources& getCSMShadowResources();
   [[nodiscard]] RendererBackend getBackend() const { return m_backend; }
   [[nodiscard]] const char* getBackendName() const;
   [[nodiscard]] GPUDrivenRuntimeStats getGPUDrivenRuntimeStats() const;
+  [[nodiscard]] bool isExperimentalMeshletPathEnabled() const;
 
 private:
   Renderer&          legacy() { return m_legacyRenderer; }

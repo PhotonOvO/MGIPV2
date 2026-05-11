@@ -100,6 +100,7 @@ public:
 
 private:
     std::string m_lastError;
+    std::vector<uint8_t> m_nodeVisitState;
 
     bool processNode(const tinygltf::Model& model,
                      int nodeIndex,

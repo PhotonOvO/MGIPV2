@@ -195,6 +195,12 @@ const shaderio::GPUCullStats& RendererFacade::getLastGPUCullingStats() const
   return m_backend == RendererBackend::gpuDriven ? gpuDriven().getLastGPUCullingStats() : legacy().getLastGPUCullingStats();
 }
 
+RuntimeProfileSnapshot RendererFacade::getRuntimeProfileSnapshot() const
+{
+  return m_backend == RendererBackend::gpuDriven ? gpuDriven().getRuntimeProfileSnapshot()
+                                                 : legacy().getRuntimeProfileSnapshot();
+}
+
 shaderio::ShadowUniforms* RendererFacade::getShadowUniformsData()
 {
   return m_backend == RendererBackend::gpuDriven ? gpuDriven().getShadowUniformsData() : legacy().getShadowUniformsData();
@@ -213,6 +219,11 @@ const char* RendererFacade::getBackendName() const
 GPUDrivenRuntimeStats RendererFacade::getGPUDrivenRuntimeStats() const
 {
   return m_backend == RendererBackend::gpuDriven ? gpuDriven().getRuntimeStats() : GPUDrivenRuntimeStats{};
+}
+
+bool RendererFacade::isExperimentalMeshletPathEnabled() const
+{
+  return m_backend == RendererBackend::gpuDriven && gpuDriven().isExperimentalMeshletPathEnabled();
 }
 
 }  // namespace demo

@@ -27,15 +27,32 @@ std::string quote(const std::string& value)
   return "\"" + value + "\"";
 }
 
-std::string buildKtxCreateCommand(const std::string& ktxExecutable,
-                                  const std::filesystem::path& inputPath,
-                                  const std::filesystem::path& outputPath)
+std::wstring toLower(std::wstring value)
 {
-  return quote(ktxExecutable)
-         + " create --generate-mipmap --format R8G8B8A8_UNORM "
-         + quote(inputPath)
-         + " "
-         + quote(outputPath);
+  for(wchar_t& ch : value)
+  {
+    if(ch >= L'A' && ch <= L'Z')
+    {
+      ch = static_cast<wchar_t>(ch - L'A' + L'a');
+    }
+  }
+  return value;
+}
+
+std::wstring selectCompressedFormat(const std::filesystem::path& inputPath)
+{
+  const std::wstring stem = toLower(inputPath.stem().wstring());
+
+  if(stem.find(L"albedo") != std::wstring::npos
+     || stem.find(L"basecolor") != std::wstring::npos
+     || stem.find(L"base_color") != std::wstring::npos
+     || stem.find(L"diffuse") != std::wstring::npos
+     || stem.find(L"emissive") != std::wstring::npos)
+  {
+    return L"BC7_SRGB_BLOCK";
+  }
+
+  return L"BC7_UNORM_BLOCK";
 }
 
 int runCommand(const std::string& ktxExecutable, const std::vector<std::wstring>& arguments)
@@ -66,12 +83,13 @@ int runKtxCreateCommand(const std::string& ktxExecutable,
                         const std::filesystem::path& inputPath,
                         const std::filesystem::path& outputPath)
 {
+  const std::wstring format = selectCompressedFormat(inputPath);
   return runCommand(ktxExecutable,
                     {
                         L"create",
                         L"--generate-mipmap",
                         L"--format",
-                        L"R8G8B8A8_UNORM",
+                        format,
                         inputPath.wstring(),
                         outputPath.wstring(),
                     });
@@ -84,7 +102,7 @@ int main(int argc, char** argv)
   if(argc < 3)
   {
     std::cerr << "Usage: texture_converter <input_dir> <output_dir> [ktx_path]\n";
-    std::cerr << "This helper shells out to KTX-Software's recommended unified 'ktx' tool to produce KTX2 sidecars.\n";
+    std::cerr << "This helper shells out to KTX-Software's recommended unified 'ktx' tool to produce BC7 KTX2 sidecars.\n";
     return 1;
   }
 
@@ -127,8 +145,7 @@ int main(int argc, char** argv)
     std::filesystem::create_directories(outputPath.parent_path());
 
     // Use the unified `ktx create` front-end recommended by current KTX-Software docs.
-    // We generate mipmapped KTX2 sidecars in an uncompressed format that the runtime
-    // loader can upload directly without requiring Basis / ASTC transcoding support.
+    // Color textures use BC7 sRGB, while data textures use BC7 UNORM.
     std::cout << "Converting " << entry.path() << " -> " << outputPath << "\n";
     const int result = runKtxCreateCommand(ktxExecutable, entry.path(), outputPath);
     if(result != 0)

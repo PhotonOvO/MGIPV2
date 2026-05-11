@@ -24,15 +24,9 @@ struct PendingLegacyDraw
     shaderio::DrawUniforms uniforms;
 };
 
-struct VisiblePackedShadowDraw
-{
-    const GltfUploadResult::ShadowPackedMesh* packedMesh;
-    uint32_t                                  drawIndex;
-};
-
 struct PendingMdiDraw
 {
-    const GltfUploadResult::ShadowPackedMesh* packedMesh;
+    const ShadowPackedMesh* packedMesh;
     shaderio::DrawUniforms uniforms;
 };
 
@@ -88,6 +82,50 @@ struct PendingMdiDraw
     return true;
 }
 
+struct ShadowSceneSource
+{
+    const MeshHandle* meshHandles{nullptr};
+    uint32_t          meshHandleCount{0};
+    const size_t*     shadowCasterIndices{nullptr};
+    uint32_t          shadowCasterCount{0};
+    const ShadowPackedMesh* shadowPackedMeshes{nullptr};
+    uint32_t          shadowPackedMeshCount{0};
+    VkBuffer          shadowPackedVertexBuffer{VK_NULL_HANDLE};
+    VkBuffer          shadowPackedIndexBuffer{VK_NULL_HANDLE};
+};
+
+[[nodiscard]] ShadowSceneSource resolveShadowSceneSource(const PassContext& context)
+{
+    ShadowSceneSource source{};
+    if(context.params != nullptr && context.params->gpuDrivenSceneView != nullptr)
+    {
+        const GPUDrivenSceneView& sceneView = *context.params->gpuDrivenSceneView;
+        source.meshHandles = sceneView.meshHandles;
+        source.meshHandleCount = sceneView.meshHandleCount;
+        source.shadowCasterIndices = sceneView.shadowCasterMeshIndices;
+        source.shadowCasterCount = sceneView.shadowCasterCount;
+        source.shadowPackedMeshes = sceneView.shadowPackedMeshes;
+        source.shadowPackedMeshCount = sceneView.shadowPackedMeshCount;
+        source.shadowPackedVertexBuffer = sceneView.shadowPackedVertexBuffer;
+        source.shadowPackedIndexBuffer = sceneView.shadowPackedIndexBuffer;
+        return source;
+    }
+
+    if(context.gltfModel != nullptr)
+    {
+        source.meshHandles = context.gltfModel->meshes.data();
+        source.meshHandleCount = static_cast<uint32_t>(context.gltfModel->meshes.size());
+        source.shadowCasterIndices = context.gltfModel->shadowCasterIndices.data();
+        source.shadowCasterCount = static_cast<uint32_t>(context.gltfModel->shadowCasterIndices.size());
+        source.shadowPackedMeshes = context.gltfModel->shadowPackedMeshes.data();
+        source.shadowPackedMeshCount = static_cast<uint32_t>(context.gltfModel->shadowPackedMeshes.size());
+        source.shadowPackedVertexBuffer = context.gltfModel->shadowPackedVertexBuffer.buffer;
+        source.shadowPackedIndexBuffer = context.gltfModel->shadowPackedIndexBuffer.buffer;
+    }
+
+    return source;
+}
+
 }  // namespace
 
 CSMShadowPass::CSMShadowPass(Renderer* renderer)
@@ -111,7 +149,7 @@ void CSMShadowPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("CSMShadowPass");
+  context.cmd->beginEvent("GPUDrivenCSMShadow");
 
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   const uint32_t cascadeCount = csm.getCascadeCount();
@@ -159,6 +197,8 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
 {
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   shaderio::ShadowUniforms* shadowData = csm.getShadowUniformsData();
+  const ShadowSceneSource sceneSource = resolveShadowSceneSource(context);
+  const bool gpuDrivenScenePath = context.params->gpuDrivenSceneView != nullptr;
   const bool hasPackedShadowPipeline = m_renderer->getCSMShadowPipelineHandle() != m_renderer->getShadowPipelineHandle()
                                        && m_renderer->getCSMShadowPipelineLayout() != m_renderer->getGBufferPipelineLayout();
 
@@ -168,18 +208,22 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   const rhi::Extent2D extent{cascadeExtent.width, cascadeExtent.height};
 
   const bool usePackedShadowPath = hasPackedShadowPipeline
-                                   && context.gltfModel != nullptr
-                                   && !context.gltfModel->shadowPackedMeshes.empty()
-                                   && context.gltfModel->shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE
-                                   && context.gltfModel->shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE
+                                   && sceneSource.shadowPackedMeshCount > 0
+                                   && sceneSource.shadowPackedVertexBuffer != VK_NULL_HANDLE
+                                   && sceneSource.shadowPackedIndexBuffer != VK_NULL_HANDLE
                                    && !m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex).isNull();
+  const bool hasShadowIndirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(context.frameIndex) != 0;
+  const bool useShadowMdi = usePackedShadowPath && hasShadowIndirectBuffer;
   const bool useMultiDrawIndirect = context.params->useCsmShadowMultiDrawIndirect
-                                    && usePackedShadowPath
+                                    && useShadowMdi
                                     && m_renderer->getShadowCullingPipelineHandle().isNull() == false
-                                    && m_renderer->getShadowCullingDescriptorSetOpaque(context.frameIndex) != 0
-                                    && m_renderer->getShadowCullingIndirectBufferOpaque(context.frameIndex) != 0;
+                                    && m_renderer->getShadowCullingDescriptorSetOpaque(context.frameIndex) != 0;
 
   if(useMultiDrawIndirect && !prepareMultiDrawIndirect(context, cascadeIndex))
+  {
+    return;
+  }
+  if(gpuDrivenScenePath && !useShadowMdi)
   {
     return;
   }
@@ -256,11 +300,11 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   }
 
   // Draw meshes for this cascade layer
-  if(useMultiDrawIndirect)
+  if(useShadowMdi)
   {
     drawMeshesMultiDrawIndirect(context, pipelineLayout, cascadeIndex);
   }
-  else
+  else if(!gpuDrivenScenePath)
   {
     drawMeshesLegacy(context, pipelineLayout, cascadeIndex);
   }
@@ -270,12 +314,8 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
 
 bool CSMShadowPass::prepareMultiDrawIndirect(const PassContext& context, uint32_t cascadeIndex) const
 {
-  if(context.gltfModel == nullptr)
-  {
-    return false;
-  }
-
-  const uint32_t objectCount = static_cast<uint32_t>(context.gltfModel->shadowPackedMeshes.size());
+  const ShadowSceneSource sceneSource = resolveShadowSceneSource(context);
+  const uint32_t objectCount = sceneSource.shadowPackedMeshCount;
   if(objectCount == 0)
   {
     return false;
@@ -338,79 +378,14 @@ void CSMShadowPass::drawMeshesLegacy(const PassContext& context, VkPipelineLayou
 {
   MeshPool& meshPool = m_renderer->getMeshPool();
   const shaderio::ShadowUniforms* shadowData = m_renderer->getCSMShadowResources().getShadowUniformsData();
+  const ShadowSceneSource sceneSource = resolveShadowSceneSource(context);
 
-  if(context.gltfModel == nullptr || shadowData == nullptr)
+  if(sceneSource.meshHandles == nullptr || shadowData == nullptr)
   {
     return;
   }
 
   const auto cascadeFrustumPlanes = extractFrustumPlanes(shadowData->cascadeViewProjection[cascadeIndex]);
-  const bool hasPackedShadowPipeline = m_renderer->getCSMShadowPipelineHandle() != m_renderer->getShadowPipelineHandle()
-                                       && m_renderer->getCSMShadowPipelineLayout() != m_renderer->getGBufferPipelineLayout();
-  const BindGroupHandle packedDrawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex);
-  const bool usePackedShadowPath = hasPackedShadowPipeline
-                                   && !packedDrawBindGroupHandle.isNull()
-                                   && !context.gltfModel->shadowPackedMeshes.empty()
-                                   && context.gltfModel->shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE
-                                   && context.gltfModel->shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE;
-  if(usePackedShadowPath)
-  {
-    std::vector<VisiblePackedShadowDraw> visibleDraws;
-    visibleDraws.reserve(context.gltfModel->shadowPackedMeshes.size());
-    {
-      TRACY_ZONE_SCOPED("CSMShadowPass::collectMeshes");
-      for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(context.gltfModel->shadowPackedMeshes.size()); ++drawIndex)
-      {
-        const GltfUploadResult::ShadowPackedMesh& packedMesh = context.gltfModel->shadowPackedMeshes[drawIndex];
-        if(packedMesh.meshIndex >= context.gltfModel->meshes.size())
-        {
-          continue;
-        }
-
-        const MeshRecord* mesh = meshPool.tryGet(context.gltfModel->meshes[packedMesh.meshIndex]);
-        if(mesh == nullptr)
-        {
-          continue;
-        }
-
-        if(!isBoundingSphereVisibleInShadowCascade(mesh->worldBoundsCenter, mesh->worldBoundsRadius, cascadeFrustumPlanes))
-        {
-          continue;
-        }
-
-        visibleDraws.push_back({&packedMesh, drawIndex});
-      }
-    }
-
-    if(visibleDraws.empty())
-    {
-      return;
-    }
-
-    const VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-        m_renderer->getBindGroupDescriptorSet(packedDrawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const demo::rhi::CommandList& commandList = *context.cmd;
-    rhi::vulkan::cmdBindDescriptorSets(commandList, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, shaderio::LSetDraw, 1,
-                                       &drawDescriptorSet, 0, nullptr);
-
-    constexpr VkDeviceSize vertexOffset = 0;
-    constexpr VkDeviceSize indexOffset = 0;
-    const VkBuffer vertexBuffer = context.gltfModel->shadowPackedVertexBuffer.buffer;
-    const VkBuffer indexBuffer = context.gltfModel->shadowPackedIndexBuffer.buffer;
-    rhi::vulkan::cmdBindVertexBuffers(commandList, 0, 1, &vertexBuffer, &vertexOffset);
-    rhi::vulkan::cmdBindIndexBuffer(commandList, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
-
-    {
-      TRACY_ZONE_SCOPED("CSMShadowPass::drawLoop");
-      for(const VisiblePackedShadowDraw& draw : visibleDraws)
-      {
-        rhi::vulkan::cmdDrawIndexed(commandList, draw.packedMesh->indexCount, 1, draw.packedMesh->firstIndex,
-                                    draw.packedMesh->vertexOffset, draw.drawIndex);
-      }
-    }
-    return;
-  }
-
   const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
   if(drawBindGroupHandle.isNull())
   {
@@ -420,12 +395,17 @@ void CSMShadowPass::drawMeshesLegacy(const PassContext& context, VkPipelineLayou
   // First pass: collect visible meshes and compute DrawUniforms
   // Use pre-built shadow caster list (already excludes transparent meshes)
   std::vector<PendingLegacyDraw> pendingDraws;
-  pendingDraws.reserve(context.gltfModel->shadowCasterIndices.size());
+  pendingDraws.reserve(sceneSource.shadowCasterCount);
   {
     TRACY_ZONE_SCOPED("CSMShadowPass::collectMeshes");
-    for(size_t idx : context.gltfModel->shadowCasterIndices)
+    for(uint32_t casterListIndex = 0; casterListIndex < sceneSource.shadowCasterCount; ++casterListIndex)
     {
-      MeshHandle meshHandle = context.gltfModel->meshes[idx];
+      const size_t idx = sceneSource.shadowCasterIndices[casterListIndex];
+      if(idx >= sceneSource.meshHandleCount)
+      {
+        continue;
+      }
+      MeshHandle meshHandle = sceneSource.meshHandles[idx];
       const MeshRecord* mesh = meshPool.tryGet(meshHandle);
       if(mesh == nullptr)
       {
@@ -505,7 +485,8 @@ void CSMShadowPass::drawMeshesLegacy(const PassContext& context, VkPipelineLayou
 void CSMShadowPass::drawMeshesMultiDrawIndirect(const PassContext& context, VkPipelineLayout pipelineLayout, uint32_t cascadeIndex) const
 {
   const BindGroupHandle drawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex);
-  if(context.gltfModel == nullptr || drawBindGroupHandle.isNull() || context.gltfModel->shadowPackedMeshes.empty())
+  const ShadowSceneSource sceneSource = resolveShadowSceneSource(context);
+  if(drawBindGroupHandle.isNull() || sceneSource.shadowPackedMeshCount == 0)
   {
     return;
   }
@@ -518,15 +499,15 @@ void CSMShadowPass::drawMeshesMultiDrawIndirect(const PassContext& context, VkPi
 
   constexpr VkDeviceSize vertexOffset = 0;
   constexpr VkDeviceSize indexOffset = 0;
-  const VkBuffer vertexBuffer = context.gltfModel->shadowPackedVertexBuffer.buffer;
-  const VkBuffer indexBuffer = context.gltfModel->shadowPackedIndexBuffer.buffer;
+  const VkBuffer vertexBuffer = sceneSource.shadowPackedVertexBuffer;
+  const VkBuffer indexBuffer = sceneSource.shadowPackedIndexBuffer;
   rhi::vulkan::cmdBindVertexBuffers(commandList, 0, 1, &vertexBuffer, &vertexOffset);
   rhi::vulkan::cmdBindIndexBuffer(commandList, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
 
   {
     TRACY_ZONE_SCOPED("CSMShadowPass::drawLoopMDI");
     context.cmd->drawIndexedIndirect(m_renderer->getShadowCullingIndirectBufferOpaque(context.frameIndex), 0,
-                                     static_cast<uint32_t>(context.gltfModel->shadowPackedMeshes.size()),
+                                     sceneSource.shadowPackedMeshCount,
                                      sizeof(VkDrawIndexedIndirectCommand));
   }
 }
