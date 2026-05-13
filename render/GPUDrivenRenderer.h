@@ -84,6 +84,10 @@ public:
   void             waitForIdle() { m_renderer.waitForIdle(); }
 
   [[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const { return m_renderer.getLastGPUCullingStats(); }
+  [[nodiscard]] const shaderio::GPUCullDrawCounts& getLastGPUCullingDrawCounts() const
+  {
+    return m_renderer.getLastGPUCullingDrawCounts();
+  }
   [[nodiscard]] const std::vector<GPUCullOverlayObject>& getLastGPUCullingOverlayObjects() const
   {
     return m_renderer.getLastGPUCullingOverlayObjects();
@@ -106,8 +110,6 @@ public:
   [[nodiscard]] std::span<const uint32_t> getOpaqueDrawIndices() const { return m_opaqueDrawIndices; }
   [[nodiscard]] std::span<const uint32_t> getAlphaTestDrawIndices() const { return m_alphaTestDrawIndices; }
   [[nodiscard]] std::span<const uint32_t> getTransparentDrawIndices() const { return m_transparentDrawIndices; }
-  [[nodiscard]] std::span<const uint32_t> getVisibleOpaqueObjects() const { return m_lastVisibleOpaqueObjects; }
-  [[nodiscard]] std::span<const uint32_t> getVisibleTransparentObjects() const { return m_lastVisibleTransparentObjects; }
   [[nodiscard]] MeshPool& getMeshPool() { return m_renderer.getMeshPool(); }
   [[nodiscard]] const MeshPool& getMeshPool() const { return m_renderer.getMeshPool(); }
   [[nodiscard]] PipelineHandle getDepthPrepassOpaquePipelineHandle() const
@@ -207,6 +209,10 @@ public:
   {
     return m_renderer.getPreviousGPUCullingIndirectBufferOpaque(frameIndex);
   }
+  [[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
+  {
+    return m_renderer.getPreviousGPUCullingDrawCountBufferOpaque(frameIndex);
+  }
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t frameIndex) const
   {
     return m_renderer.getPreviousGPUCullingObjectCount(frameIndex, nullptr);
@@ -214,6 +220,10 @@ public:
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getGPUCullingIndirectBufferOpaque(frameIndex);
+  }
+  [[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUCullingDrawCountBufferOpaque(frameIndex);
   }
   [[nodiscard]] uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
@@ -243,6 +253,18 @@ public:
   [[nodiscard]] uint64_t getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
   {
     return m_renderer.getGPUDrivenBootstrapIndirectBuffer(frameIndex);
+  }
+  [[nodiscard]] uint64_t getPreviousGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUDrivenBootstrapIndirectBuffer(getPreviousFrameIndex(frameIndex));
+  }
+  [[nodiscard]] bool getPreviousSortedBootstrapState(uint32_t frameIndex,
+                                                     uint32_t& outOpaqueCapacity,
+                                                     uint32_t& outAlphaCapacity) const;
+  void invalidateSortedBootstrapStateForFrame(uint32_t frameIndex) { invalidateSortedBootstrapState(frameIndex); }
+  void publishSortedBootstrapStateForFrame(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity)
+  {
+    recordSortedBootstrapState(frameIndex, opaqueCapacity, alphaCapacity);
   }
   [[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const
   {
@@ -316,14 +338,22 @@ public:
   void bindStaticPassResources() { m_renderer.bindStaticPassResources(m_passExecutor); }
   void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }
   void executeVisibilitySortPass(const PassContext& context) const;
-  bool prepareAndDispatchTransparentVisibilityPatch(rhi::CommandList&         cmd,
-                                                    uint32_t                  frameIndex,
-                                                    std::span<const uint32_t> sortedDrawIndices,
-                                                    uint64_t                  forwardIndirectBufferHandle);
-
+  bool prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
+                                         uint32_t          frameIndex,
+                                         uint64_t          targetIndirectBufferHandle,
+                                         uint32_t          categoryValue,
+                                         uint32_t          outputOffset);
 private:
+  struct DirtyRange
+  {
+    uint32_t first{0};
+    uint32_t count{0};
+  };
+
   struct VisibilitySortFrameResources
   {
+    utils::Buffer uploadKeyBuffer{};
+    utils::Buffer uploadValueBuffer{};
     utils::Buffer keyBuffer{};
     utils::Buffer valueBuffer{};
     VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
@@ -334,11 +364,19 @@ private:
 
   struct TransparentVisibilityFrameResources
   {
-    utils::Buffer drawIndexBuffer{};
-    VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
-    uint32_t capacity{0};
-    uint64_t boundSourceIndirectHandle{0};
-    uint64_t boundForwardIndirectHandle{0};
+    std::array<VkDescriptorSet, 2> descriptorSets{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    std::array<uint64_t, 2>        boundSortKeyHandles{0, 0};
+    std::array<uint64_t, 2>        boundSortValueHandles{0, 0};
+    std::array<uint64_t, 2>        boundSourceIndirectHandles{0, 0};
+    std::array<uint64_t, 2>        boundTargetIndirectHandles{0, 0};
+  };
+
+  struct SortedBootstrapFrameState
+  {
+    uint32_t opaqueCapacity{0};
+    uint32_t alphaCapacity{0};
+    uint64_t sceneTopologyVersion{0};
+    bool     valid{false};
   };
 
   static uint64_t packMeshHandleKey(MeshHandle handle);
@@ -346,17 +384,24 @@ private:
   void            shutdownVisibilitySortResources();
   void            ensureVisibilitySortCapacity(uint32_t frameIndex, uint32_t requiredCount);
   void            updateVisibilitySortDescriptorSet(uint32_t frameIndex);
-  [[nodiscard]] bool consumeVisibilitySortOutputs(uint32_t frameIndex);
   void            prepareVisibilitySortInputs(uint32_t frameIndex);
   void            initTransparentVisibilityPatchResources();
   void            shutdownTransparentVisibilityPatchResources();
-  void            ensureTransparentVisibilityPatchCapacity(uint32_t frameIndex, uint32_t requiredCount);
   void            updateTransparentVisibilityPatchDescriptorSet(uint32_t frameIndex,
+                                                               uint64_t sortKeyBufferHandle,
+                                                               uint64_t sortValueBufferHandle,
                                                                uint64_t sourceIndirectBufferHandle,
-                                                               uint64_t forwardIndirectBufferHandle);
+                                                               uint64_t targetIndirectBufferHandle);
+  [[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
   void            rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd);
   void            clearGPUDrivenScene();
   void            flushPendingSceneUploads();
+  void            invalidateSortedBootstrapStates();
+  void            invalidateSortedBootstrapState(uint32_t frameIndex);
+  void            recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity);
+  void            markPersistentDrawDirty(uint32_t drawIndex);
+  [[nodiscard]] std::vector<DirtyRange> buildPersistentDrawDirtyRanges() const;
+  void            uploadPersistentDrawData();
   void            refreshSceneView();
   [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
 
@@ -367,10 +412,10 @@ private:
   GPUMeshletBuffer                   m_meshletBuffer;
   std::vector<shaderio::Meshlet>     m_meshletDataCpu;
   std::vector<uint32_t>              m_meshletIndicesCpu;
-  std::vector<uint32_t>              m_lastVisibleOpaqueObjects;
-  std::vector<uint32_t>              m_lastVisibleTransparentObjects;
   std::vector<uint32_t>              m_visibilitySortInputObjects;
   std::vector<uint32_t>              m_visibilitySortInputKeys;
+  std::vector<shaderio::DrawUniforms> m_persistentDrawData;
+  std::vector<uint32_t>              m_dirtyPersistentDrawIndices;
   std::unique_ptr<GPUDrivenDepthPrepass> m_depthPrepass;
   std::unique_ptr<GPUDrivenDepthPyramidPass> m_depthPyramidPass;
   std::unique_ptr<GPUDrivenCullingPass>      m_gpuCullingPass;
@@ -402,8 +447,11 @@ private:
   VkPipelineLayout                   m_transparentVisibilityPatchPipelineLayout{VK_NULL_HANDLE};
   VkPipeline                         m_transparentVisibilityPatchPipeline{VK_NULL_HANDLE};
   std::vector<TransparentVisibilityFrameResources> m_transparentVisibilityPatchFrames;
+  std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
+  uint64_t                           m_sceneTopologyVersion{1};
   bool                               m_enableExperimentalMeshletPath{false};
   bool                               m_sceneUploadPending{false};
+  bool                               m_persistentDrawDataDirty{false};
 };
 
 }  // namespace demo

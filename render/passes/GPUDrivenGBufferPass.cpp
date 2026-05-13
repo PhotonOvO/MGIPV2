@@ -8,23 +8,13 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
 namespace demo {
 
 namespace {
-
-constexpr uint32_t kDrawUniformsStride = 256;
-
-struct PendingDraw
-{
-  size_t                 meshIndex;
-  uint32_t               drawIndex;
-  const MeshRecord*      mesh;
-  shaderio::DrawUniforms uniforms;
-  PipelineHandle         pipeline;
-};
 
 [[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
 {
@@ -127,6 +117,45 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       .isSwapchain = false,
   });
 
+  uint64_t sortedIndirectBufferHandle = 0;
+  uint64_t sortedCountBufferHandle = 0;
+  uint32_t sortedOpaqueCapacity = 0;
+  uint32_t sortedAlphaCapacity = 0;
+  m_renderer->invalidateSortedBootstrapStateForFrame(context.frameIndex);
+  if(context.drawStream != nullptr)
+  {
+    sortedCountBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
+    sortedOpaqueCapacity = static_cast<uint32_t>(m_renderer->getOpaqueDrawIndices().size());
+    sortedAlphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
+    const uint32_t totalSortedCapacity = sortedOpaqueCapacity + sortedAlphaCapacity;
+    if(sortedCountBufferHandle != 0 && totalSortedCapacity > 0u)
+    {
+      std::vector<shaderio::GPUCullIndirectCommand> bootstrapCommands(totalSortedCapacity);
+      m_renderer->uploadGPUDrivenBootstrapCommands(context.frameIndex, bootstrapCommands);
+      const uint64_t bootstrapIndirectBufferHandle = m_renderer->getGPUDrivenBootstrapIndirectBuffer(context.frameIndex);
+      if(bootstrapIndirectBufferHandle != 0)
+      {
+        const bool opaquePatched = sortedOpaqueCapacity == 0u
+                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                                                                    context.frameIndex,
+                                                                                    bootstrapIndirectBufferHandle,
+                                                                                    0x00000000u,
+                                                                                    0u);
+        const bool alphaPatched = sortedAlphaCapacity == 0u
+                                  || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                                                                   context.frameIndex,
+                                                                                   bootstrapIndirectBufferHandle,
+                                                                                   0x40000000u,
+                                                                                   sortedOpaqueCapacity);
+        if(opaquePatched && alphaPatched)
+        {
+          sortedIndirectBufferHandle = bootstrapIndirectBufferHandle;
+          m_renderer->publishSortedBootstrapStateForFrame(context.frameIndex, sortedOpaqueCapacity, sortedAlphaCapacity);
+        }
+      }
+    }
+  }
+
   const rhi::RenderPassDesc passDesc{
       .renderArea       = {{0, 0}, extent},
       .colorTargets     = colorTargets.data(),
@@ -140,7 +169,12 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
   if(context.drawStream != nullptr)
   {
     MeshPool& meshPool = m_renderer->getMeshPool();
-    const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+    const uint64_t indirectBufferHandle = sortedIndirectBufferHandle != 0
+                                              ? sortedIndirectBufferHandle
+                                              : m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+    const uint64_t countBufferHandle = sortedCountBufferHandle != 0
+                                           ? sortedCountBufferHandle
+                                           : m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
     const uint32_t currentIndirectObjectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
     const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
 
@@ -155,104 +189,11 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
 
-    if(!context.globalBindlessGroup.isNull())
-    {
-      const VkPipelineLayout pipelineLayout =
-          reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsScenePipelineLayout());
-      const VkDescriptorSet textureSet =
-          reinterpret_cast<VkDescriptorSet>(m_renderer->getGraphicsMaterialDescriptorSet());
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetTextures,
-                              1,
-                              &textureSet,
-                              0,
-                              nullptr);
-    }
-
-    if(!cameraBindGroupHandle.isNull())
-    {
-      const VkPipelineLayout pipelineLayout =
-          reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsScenePipelineLayout());
-      VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      const uint32_t cameraDynamicOffset = cameraAlloc.offset;
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              1,
-                              &cameraDynamicOffset);
-    }
-
-    std::vector<PendingDraw> pendingDraws;
-    {
-      TRACY_ZONE_SCOPED("GPUDrivenGBufferPass::collectMeshes");
-      const PipelineHandle opaquePipeline = m_renderer->getGBufferOpaquePipelineHandle();
-      const PipelineHandle alphaTestPipeline = m_renderer->getGBufferAlphaTestPipelineHandle();
-      const auto opaqueDrawIndices = m_renderer->getOpaqueDrawIndices();
-      const auto alphaTestDrawIndices = m_renderer->getAlphaTestDrawIndices();
-      pendingDraws.reserve(opaqueDrawIndices.size() + alphaTestDrawIndices.size());
-      const auto appendDraws = [&](std::span<const uint32_t> drawIndices, PipelineHandle pipeline, int32_t alphaMode) {
-        for(const uint32_t drawIndex : drawIndices)
-        {
-          MeshHandle meshHandle = kNullMeshHandle;
-          if(!m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-          {
-            continue;
-          }
-
-          const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-          if(mesh == nullptr || mesh->alphaMode == shaderio::LAlphaBlend)
-          {
-            continue;
-          }
-
-          shaderio::DrawUniforms drawData{};
-          drawData.modelMatrix = mesh->transform;
-          drawData.alphaMode = alphaMode;
-          drawData.alphaCutoff = mesh->alphaCutoff;
-          drawData.baseColorFactor = mesh->baseColorFactor;
-          drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
-          drawData.normalTextureIndex = mesh->normalTextureIndex;
-          drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
-          drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
-          drawData.metallicFactor = mesh->metallicFactor;
-          drawData.roughnessFactor = mesh->roughnessFactor;
-          drawData.normalScale = mesh->normalScale;
-
-          pendingDraws.push_back({0u, drawIndex, mesh, drawData, pipeline});
-        }
-      };
-      if(!opaqueDrawIndices.empty() || !alphaTestDrawIndices.empty())
-      {
-        appendDraws(opaqueDrawIndices, opaquePipeline, shaderio::LAlphaOpaque);
-        appendDraws(alphaTestDrawIndices, alphaTestPipeline, shaderio::LAlphaMask);
-      }
-
-    }
-
-    if(!pendingDraws.empty() && !drawBindGroupHandle.isNull())
+    if(indirectBufferHandle != 0 && !drawBindGroupHandle.isNull())
     {
       const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex).isNull();
       if(useMdi)
       {
-        {
-          TRACY_ZONE_SCOPED("GPUDrivenGBufferPass::batchUpload");
-          std::vector<shaderio::DrawUniforms> mdiDrawData(m_renderer->getPersistentObjectCount());
-          for(const PendingDraw& draw : pendingDraws)
-          {
-            if(draw.drawIndex < mdiDrawData.size())
-            {
-              mdiDrawData[draw.drawIndex] = draw.uniforms;
-            }
-          }
-          m_renderer->uploadGBufferMDIDrawData(context.frameIndex, mdiDrawData);
-        }
-
         const VkPipelineLayout pipelineLayout =
             reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsMDIPipelineLayout());
         const VkDescriptorSet textureSet =
@@ -291,42 +232,77 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
                                 0,
                                 nullptr);
 
-        const uint64_t sharedVertexHandle = pendingDraws.front().mesh->vertexBufferHandle;
-        const uint64_t sharedIndexHandle = pendingDraws.front().mesh->indexBufferHandle;
+        const auto pickRepresentativeMesh = [&]() -> const MeshRecord* {
+          for(uint32_t drawIndex : m_renderer->getOpaqueDrawIndices())
+          {
+            MeshHandle meshHandle = kNullMeshHandle;
+            if(m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+            {
+              if(const MeshRecord* mesh = meshPool.tryGet(meshHandle))
+              {
+                return mesh;
+              }
+            }
+          }
+          for(uint32_t drawIndex : m_renderer->getAlphaTestDrawIndices())
+          {
+            MeshHandle meshHandle = kNullMeshHandle;
+            if(m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+            {
+              if(const MeshRecord* mesh = meshPool.tryGet(meshHandle))
+              {
+                return mesh;
+              }
+            }
+          }
+          return nullptr;
+        };
+
+        const MeshRecord* representativeMesh = pickRepresentativeMesh();
+        if(representativeMesh == nullptr)
+        {
+          context.cmd->endRenderPass();
+          context.cmd->endEvent();
+          return;
+        }
+
+        const uint64_t sharedVertexHandle = representativeMesh->vertexBufferHandle;
+        const uint64_t sharedIndexHandle = representativeMesh->indexBufferHandle;
         const uint64_t vertexOffset = 0;
         context.cmd->bindVertexBuffers(0, &sharedVertexHandle, &vertexOffset, 1);
         context.cmd->bindIndexBuffer(sharedIndexHandle, 0, rhi::IndexFormat::uint32);
 
         TRACY_ZONE_SCOPED("GPUDrivenGBufferPass::drawLoopMDI");
-        size_t runBegin = 0;
-        while(runBegin < pendingDraws.size())
-        {
-          const PipelineHandle mdiPipeline =
-              pendingDraws[runBegin].pipeline == m_renderer->getGBufferAlphaTestPipelineHandle()
-                  ? m_renderer->getGBufferAlphaTestMDIPipelineHandle()
-                  : m_renderer->getGBufferOpaqueMDIPipelineHandle();
-          const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
-              m_renderer->getNativeGraphicsPipeline(mdiPipeline));
-          rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
+        const uint64_t opaqueCommandOffset = sortedIndirectBufferHandle != 0
+                                                ? 0u
+                                                : static_cast<uint64_t>(currentIndirectObjectCount) * indirectCommandStride;
+        const uint64_t alphaCommandOffset = sortedIndirectBufferHandle != 0
+                                               ? static_cast<uint64_t>(sortedOpaqueCapacity) * indirectCommandStride
+                                               : opaqueCommandOffset * 2u;
+        const uint64_t opaqueCountOffset = offsetof(shaderio::GPUCullDrawCounts, opaqueCount);
+        const uint64_t alphaCountOffset = offsetof(shaderio::GPUCullDrawCounts, alphaTestCount);
+        const uint32_t opaqueMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedOpaqueCapacity : currentIndirectObjectCount;
+        const uint32_t alphaMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedAlphaCapacity : currentIndirectObjectCount;
 
-          size_t runEnd = runBegin + 1;
-          while(runEnd < pendingDraws.size()
-                && pendingDraws[runEnd].pipeline == pendingDraws[runBegin].pipeline
-                && pendingDraws[runEnd].drawIndex == pendingDraws[runEnd - 1].drawIndex + 1
-                && pendingDraws[runEnd].drawIndex < currentIndirectObjectCount)
-          {
-            ++runEnd;
-          }
+        const VkPipeline opaquePipeline = reinterpret_cast<VkPipeline>(
+            m_renderer->getNativeGraphicsPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle()));
+        rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline);
+        context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
+                                              opaqueCommandOffset,
+                                              countBufferHandle,
+                                              opaqueCountOffset,
+                                              opaqueMaxDrawCount,
+                                              indirectCommandStride);
 
-          if(pendingDraws[runBegin].drawIndex < currentIndirectObjectCount)
-          {
-            context.cmd->drawIndexedIndirect(indirectBufferHandle,
-                                             static_cast<uint64_t>(pendingDraws[runBegin].drawIndex) * indirectCommandStride,
-                                             static_cast<uint32_t>(runEnd - runBegin),
-                                             indirectCommandStride);
-          }
-          runBegin = runEnd;
-        }
+        const VkPipeline alphaPipeline = reinterpret_cast<VkPipeline>(
+            m_renderer->getNativeGraphicsPipeline(m_renderer->getGBufferAlphaTestMDIPipelineHandle()));
+        rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline);
+        context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
+                                              alphaCommandOffset,
+                                              countBufferHandle,
+                                              alphaCountOffset,
+                                              alphaMaxDrawCount,
+                                              indirectCommandStride);
       }
     }
   }

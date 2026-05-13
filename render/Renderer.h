@@ -310,8 +310,10 @@ public:
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   PipelineHandle getLightCullingPipelineHandle() const;
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
+  [[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getGPUCullingObjectCount(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const;
+  [[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const;
   [[nodiscard]] uint64_t getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex,
                                                           const GltfUploadResult* gltfModel) const;
@@ -321,6 +323,10 @@ public:
   }
   [[nodiscard]] uint32_t getCurrentFrameIndexHint() const;
   [[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const { return m_lastGPUCullingStats; }
+  [[nodiscard]] const shaderio::GPUCullDrawCounts& getLastGPUCullingDrawCounts() const
+  {
+    return m_lastGPUCullingDrawCounts;
+  }
   [[nodiscard]] const std::vector<GPUCullOverlayObject>& getLastGPUCullingOverlayObjects() const
   {
     return m_lastGPUCullingOverlayObjects;
@@ -365,8 +371,11 @@ public:
   BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const;
   [[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const;
   void uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
+  void uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
+  void uploadGBufferMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
+  void uploadDepthMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadGPUDrivenBootstrapCommands(uint32_t frameIndex, std::span<const shaderio::GPUCullIndirectCommand> commands);
   void uploadForwardMDICommands(uint32_t frameIndex, std::span<const shaderio::GPUCullIndirectCommand> commands);
 
@@ -582,6 +591,7 @@ private:
       utils::Buffer      lightCullingBuffer{};
       utils::Buffer      gpuCullingObjectBuffer{};
       utils::Buffer      gpuCullingIndirectBuffer{};
+      utils::Buffer      gpuCullingDrawCountBuffer{};
       utils::Buffer      gpuCullingStatsBuffer{};
       utils::Buffer      gpuCullingUniformBuffer{};
       utils::Buffer      gpuCullingResultBuffer{};
@@ -940,6 +950,7 @@ private:
   FrameLightingState          m_frameLightingState;
   DebugDrawList               m_debugDrawList;
   shaderio::GPUCullStats      m_lastGPUCullingStats{};
+  shaderio::GPUCullDrawCounts m_lastGPUCullingDrawCounts{};
   const shaderio::GPUCullObject* m_externalGPUCullingOverlayObjects{nullptr};
   uint32_t                    m_externalGPUCullingOverlayObjectCount{0};
   std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;

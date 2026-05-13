@@ -8,23 +8,13 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
 namespace demo {
 
 namespace {
-
-constexpr uint32_t kDrawUniformsStride = 256;
-
-struct PendingDraw
-{
-  size_t                  meshIndex;
-  uint32_t                drawIndex;
-  const MeshRecord*       mesh;
-  shaderio::DrawUniforms  uniforms;
-  PipelineHandle          pipeline;
-};
 
 [[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
 {
@@ -140,99 +130,23 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
   MeshPool& meshPool = m_renderer->getMeshPool();
 
-  const uint64_t indirectBufferHandle = m_renderer->getPreviousGPUCullingIndirectBufferOpaque(context.frameIndex);
+  uint32_t previousOpaqueCapacity = 0u;
+  uint32_t previousAlphaCapacity = 0u;
+  const bool previousBootstrapValid =
+      m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity, previousAlphaCapacity);
+  const uint64_t previousBootstrapIndirectBufferHandle = previousBootstrapValid
+                                                             ? m_renderer->getPreviousGPUDrivenBootstrapIndirectBuffer(context.frameIndex)
+                                                             : 0;
+  const uint64_t indirectBufferHandle = previousBootstrapIndirectBufferHandle != 0
+                                            ? previousBootstrapIndirectBufferHandle
+                                            : m_renderer->getPreviousGPUCullingIndirectBufferOpaque(context.frameIndex);
+  const uint64_t countBufferHandle = m_renderer->getPreviousGPUCullingDrawCountBufferOpaque(context.frameIndex);
   const uint32_t previousIndirectObjectCount = m_renderer->getPreviousGPUCullingObjectCount(context.frameIndex);
   const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
-
-  std::vector<PendingDraw> pendingDraws;
-    {
-      TRACY_ZONE_SCOPED("GPUDrivenDepthPrepass::collectMeshes");
-      const PipelineHandle opaquePipeline = m_renderer->getDepthPrepassOpaquePipelineHandle();
-      const PipelineHandle alphaTestPipeline = m_renderer->getDepthPrepassAlphaTestPipelineHandle();
-      const auto opaqueDrawIndices = m_renderer->getOpaqueDrawIndices();
-      const auto alphaTestDrawIndices = m_renderer->getAlphaTestDrawIndices();
-      pendingDraws.reserve(opaqueDrawIndices.size() + alphaTestDrawIndices.size());
-      const auto appendDraws = [&](std::span<const uint32_t> drawIndices, PipelineHandle pipeline, int32_t alphaMode) {
-        for(const uint32_t drawIndex : drawIndices)
-        {
-          MeshHandle meshHandle = kNullMeshHandle;
-          if(!m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-          {
-            continue;
-          }
-
-          const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-          if(mesh == nullptr || mesh->alphaMode == shaderio::LAlphaBlend)
-          {
-            continue;
-          }
-
-          shaderio::DrawUniforms drawData{};
-          drawData.modelMatrix = mesh->transform;
-          drawData.baseColorFactor = mesh->baseColorFactor;
-          drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
-          drawData.normalTextureIndex = mesh->normalTextureIndex;
-          drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
-          drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
-          drawData.metallicFactor = mesh->metallicFactor;
-          drawData.roughnessFactor = mesh->roughnessFactor;
-          drawData.normalScale = mesh->normalScale;
-          drawData.alphaMode = alphaMode;
-          drawData.alphaCutoff = mesh->alphaCutoff;
-
-          pendingDraws.push_back({0u, drawIndex, mesh, drawData, pipeline});
-        }
-      };
-      if(!opaqueDrawIndices.empty() || !alphaTestDrawIndices.empty())
-      {
-        appendDraws(opaqueDrawIndices, opaquePipeline, shaderio::LAlphaOpaque);
-        appendDraws(alphaTestDrawIndices, alphaTestPipeline, shaderio::LAlphaMask);
-      }
-    }
-
-  if(!pendingDraws.empty() && !drawBindGroupHandle.isNull())
+  if(indirectBufferHandle != 0 && countBufferHandle != 0 && previousIndirectObjectCount > 0u && !drawBindGroupHandle.isNull())
   {
     const BindGroupHandle mdiDrawBindGroupHandle = m_renderer->getDepthMDIDrawBindGroup(context.frameIndex);
-    const bool useMdi = !mdiDrawBindGroupHandle.isNull();
-    const uint32_t batchSize = static_cast<uint32_t>(pendingDraws.size()) * kDrawUniformsStride;
-    const TransientAllocator::Allocation batchAlloc =
-        useMdi ? TransientAllocator::Allocation{} : context.transientAllocator->allocate(batchSize, kDrawUniformsStride);
-
-    {
-      TRACY_ZONE_SCOPED("GPUDrivenDepthPrepass::batchUpload");
-      if(useMdi)
-      {
-        std::vector<shaderio::DrawUniforms> mdiDrawData(m_renderer->getPersistentObjectCount());
-        std::vector<shaderio::GPUCullIndirectCommand> bootstrapCommands(m_renderer->getPersistentObjectCount());
-        for(const PendingDraw& draw : pendingDraws)
-        {
-          if(draw.drawIndex < mdiDrawData.size())
-          {
-            mdiDrawData[draw.drawIndex] = draw.uniforms;
-            bootstrapCommands[draw.drawIndex] = shaderio::GPUCullIndirectCommand{
-                .indexCount = draw.mesh->indexCount,
-                .instanceCount = 1u,
-                .firstIndex = draw.mesh->firstIndex,
-                .vertexOffset = draw.mesh->vertexOffset,
-                .firstInstance = draw.drawIndex,
-            };
-          }
-        }
-        m_renderer->uploadDepthMDIDrawData(context.frameIndex, mdiDrawData);
-        m_renderer->uploadGPUDrivenBootstrapCommands(context.frameIndex, bootstrapCommands);
-      }
-      else
-      {
-        for(size_t slot = 0; slot < pendingDraws.size(); ++slot)
-        {
-          std::byte* dst = static_cast<std::byte*>(batchAlloc.cpuPtr) + static_cast<uint32_t>(slot) * kDrawUniformsStride;
-          std::memcpy(dst, &pendingDraws[slot].uniforms, sizeof(shaderio::DrawUniforms));
-        }
-        context.transientAllocator->flushAllocation(batchAlloc, batchSize);
-      }
-    }
-
-    if(useMdi)
+    if(!mdiDrawBindGroupHandle.isNull())
     {
       const VkPipelineLayout mdiPipelineLayout =
           reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsMDIPipelineLayout());
@@ -251,49 +165,79 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
       vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, mdiPipelineLayout,
                               shaderio::LSetDraw, 1, &mdiDrawDescriptorSet, 0, nullptr);
 
-      const uint64_t sharedVertexHandle = pendingDraws.front().mesh->vertexBufferHandle;
-      const uint64_t sharedIndexHandle = pendingDraws.front().mesh->indexBufferHandle;
+      const auto pickRepresentativeMesh = [&]() -> const MeshRecord* {
+        for(uint32_t drawIndex : m_renderer->getOpaqueDrawIndices())
+        {
+          MeshHandle meshHandle = kNullMeshHandle;
+          if(m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+          {
+            if(const MeshRecord* mesh = meshPool.tryGet(meshHandle))
+            {
+              return mesh;
+            }
+          }
+        }
+        for(uint32_t drawIndex : m_renderer->getAlphaTestDrawIndices())
+        {
+          MeshHandle meshHandle = kNullMeshHandle;
+          if(m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+          {
+            if(const MeshRecord* mesh = meshPool.tryGet(meshHandle))
+            {
+              return mesh;
+            }
+          }
+        }
+        return nullptr;
+      };
+
+      const MeshRecord* representativeMesh = pickRepresentativeMesh();
+      if(representativeMesh == nullptr)
+      {
+        context.cmd->endRenderPass();
+        context.cmd->endEvent();
+        return;
+      }
+
+      const uint64_t sharedVertexHandle = representativeMesh->vertexBufferHandle;
+      const uint64_t sharedIndexHandle = representativeMesh->indexBufferHandle;
       const uint64_t vertexOffset = 0;
       context.cmd->bindVertexBuffers(0, &sharedVertexHandle, &vertexOffset, 1);
       context.cmd->bindIndexBuffer(sharedIndexHandle, 0, rhi::IndexFormat::uint32);
 
       TRACY_ZONE_SCOPED("GPUDrivenDepthPrepass::drawLoopMDI");
-      const uint64_t bootstrapIndirectBufferHandle = m_renderer->getGPUDrivenBootstrapIndirectBuffer(context.frameIndex);
-      size_t runBegin = 0;
-      while(runBegin < pendingDraws.size())
-      {
-        const PipelineHandle mdiPipeline =
-            pendingDraws[runBegin].pipeline == m_renderer->getDepthPrepassAlphaTestPipelineHandle()
-                ? m_renderer->getDepthPrepassAlphaTestMDIPipelineHandle()
-                : m_renderer->getDepthPrepassOpaqueMDIPipelineHandle();
-        const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
-            m_renderer->getNativeGraphicsPipeline(mdiPipeline));
-        rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
+      const uint64_t opaqueCommandOffset = previousBootstrapIndirectBufferHandle != 0
+                                               ? 0u
+                                               : static_cast<uint64_t>(previousIndirectObjectCount) * indirectCommandStride;
+      const uint64_t alphaCommandOffset = previousBootstrapIndirectBufferHandle != 0
+                                              ? static_cast<uint64_t>(previousOpaqueCapacity) * indirectCommandStride
+                                              : opaqueCommandOffset * 2u;
+      const uint64_t opaqueCountOffset = offsetof(shaderio::GPUCullDrawCounts, opaqueCount);
+      const uint64_t alphaCountOffset = offsetof(shaderio::GPUCullDrawCounts, alphaTestCount);
+      const uint32_t opaqueMaxDrawCount =
+          previousBootstrapIndirectBufferHandle != 0 ? previousOpaqueCapacity : previousIndirectObjectCount;
+      const uint32_t alphaMaxDrawCount =
+          previousBootstrapIndirectBufferHandle != 0 ? previousAlphaCapacity : previousIndirectObjectCount;
 
-        size_t runEnd = runBegin + 1;
-        const bool usePreviousIndirect = pendingDraws[runBegin].drawIndex < previousIndirectObjectCount;
-        while(runEnd < pendingDraws.size()
-              && pendingDraws[runEnd].pipeline == pendingDraws[runBegin].pipeline
-              && pendingDraws[runEnd].drawIndex == pendingDraws[runEnd - 1].drawIndex + 1
-              && ((pendingDraws[runEnd].drawIndex < previousIndirectObjectCount) == usePreviousIndirect))
-        {
-          ++runEnd;
-        }
+      const VkPipeline opaquePipeline = reinterpret_cast<VkPipeline>(
+          m_renderer->getNativeGraphicsPipeline(m_renderer->getDepthPrepassOpaqueMDIPipelineHandle()));
+      rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline);
+      context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
+                                            opaqueCommandOffset,
+                                            countBufferHandle,
+                                            opaqueCountOffset,
+                                            opaqueMaxDrawCount,
+                                            indirectCommandStride);
 
-        const uint32_t runCount = static_cast<uint32_t>(runEnd - runBegin);
-        const uint64_t sourceIndirectBuffer = usePreviousIndirect ? indirectBufferHandle : bootstrapIndirectBufferHandle;
-        if(sourceIndirectBuffer == 0)
-        {
-          runBegin = runEnd;
-          continue;
-        }
-
-        context.cmd->drawIndexedIndirect(sourceIndirectBuffer,
-                                         static_cast<uint64_t>(pendingDraws[runBegin].drawIndex) * indirectCommandStride,
-                                         runCount,
-                                         indirectCommandStride);
-        runBegin = runEnd;
-      }
+      const VkPipeline alphaPipeline = reinterpret_cast<VkPipeline>(
+          m_renderer->getNativeGraphicsPipeline(m_renderer->getDepthPrepassAlphaTestMDIPipelineHandle()));
+      rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline);
+      context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
+                                            alphaCommandOffset,
+                                            countBufferHandle,
+                                            alphaCountOffset,
+                                            alphaMaxDrawCount,
+                                            indirectCommandStride);
     }
   }
 

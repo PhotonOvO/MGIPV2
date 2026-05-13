@@ -24,6 +24,12 @@ struct GPUSceneRegistrationDesc
 class GPUSceneRegistry
 {
 public:
+  struct DirtyRange
+  {
+    uint32_t startIndex{0};
+    uint32_t count{0};
+  };
+
   void init(VkDevice device, VmaAllocator allocator);
   void deinit();
   void clear();
@@ -52,6 +58,8 @@ private:
   };
 
   void ensureCapacity(uint32_t requiredCount);
+  void markDirtyDenseIndex(uint32_t denseIndex);
+  [[nodiscard]] std::vector<DirtyRange> buildDirtyRanges() const;
   void rebuildPackedObject(uint32_t objectID);
   void destroyBuffer(utils::Buffer& buffer);
   static shaderio::GPUSceneObject packSceneObject(const GPUSceneRegistrationDesc& desc);
@@ -64,9 +72,11 @@ private:
   utils::Buffer                m_updateBuffer{};
   uint32_t                     m_capacity{0};
   bool                         m_dirty{false};
+  bool                         m_requiresFullUpload{true};
   std::vector<ObjectSlot>      m_slots{1};
   std::vector<uint32_t>        m_freeList;
   std::vector<uint32_t>        m_denseSlotIds;
+  std::vector<uint32_t>        m_dirtyDenseIndices;
   std::vector<shaderio::GPUSceneObject> m_gpuObjects;
   std::vector<shaderio::GPUCullObject>  m_cullObjects;
 };

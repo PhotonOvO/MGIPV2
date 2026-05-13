@@ -1,6 +1,8 @@
 #include "GPUDrivenRenderer.h"
+#include "UploadUtils.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -9,9 +11,14 @@ namespace demo {
 namespace {
 
 constexpr bool kEnableExperimentalMeshletPath = false;
-constexpr bool kEnableShippingVisibilitySort = false;
+constexpr bool kEnableShippingVisibilitySort = true;
 constexpr uint32_t kDebugCullSegmentCount = 24u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
+constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
+constexpr uint32_t kVisibilitySortKeyMask = 0x3fffffffu;
+constexpr uint32_t kVisibilitySortCategoryOpaque = 0x00000000u;
+constexpr uint32_t kVisibilitySortCategoryAlpha = 0x40000000u;
+constexpr uint32_t kVisibilitySortCategoryTransparent = 0x80000000u;
 
 uint32_t buildGPUDrivenFlags(const MeshRecord& mesh)
 {
@@ -19,6 +26,10 @@ uint32_t buildGPUDrivenFlags(const MeshRecord& mesh)
   if(mesh.alphaMode == shaderio::LAlphaBlend)
   {
     flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
+  }
+  else if(mesh.alphaMode == shaderio::LAlphaMask)
+  {
+    flags |= shaderio::LGPUCullFlagAlphaMask;
   }
   return flags;
 }
@@ -54,6 +65,15 @@ utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator alloc
   };
   buffer.address = vkGetBufferDeviceAddress(device, &addressInfo);
   return buffer;
+}
+
+utils::Buffer createDeviceLocalStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
+{
+  return upload::createStaticBuffer(device,
+                                    allocator,
+                                    size,
+                                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR
+                                        | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR);
 }
 
 void destroyBuffer(VmaAllocator allocator, utils::Buffer& buffer)
@@ -92,6 +112,19 @@ uint32_t computeBitonicSortPassCount(uint32_t visibleCount)
     }
   }
   return passes;
+}
+
+uint32_t encodeSortableFloatKey(float value)
+{
+  uint32_t bits = 0u;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+uint32_t encodeVisibilitySortKey(uint32_t categoryValue, uint32_t subKey)
+{
+  return categoryValue | (subKey & kVisibilitySortKeyMask);
 }
 
 constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
@@ -163,6 +196,7 @@ void GPUDrivenRenderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSy
       .isSwapchain  = false,
   });
   initTransparentVisibilityPatchResources();
+  m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
   if(kEnableShippingVisibilitySort)
   {
     initVisibilitySortResources();
@@ -176,6 +210,7 @@ void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
     shutdownVisibilitySortResources();
   }
   shutdownTransparentVisibilityPatchResources();
+  m_sortedBootstrapFrames.clear();
   m_passExecutor.clear();
   m_imguiPass.reset();
   m_presentPass.reset();
@@ -221,85 +256,68 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   m_hiZDepthPyramid.resize(getSceneExtent());
   flushPendingSceneUploads();
   refreshSceneView();
+  uploadPersistentDrawData();
   const uint32_t safeObjectCount = getSafePersistentObjectCount();
-
-  m_lastVisibleOpaqueObjects.clear();
-  m_lastVisibleTransparentObjects.clear();
-  const auto& overlayObjectsBeforeRender = getLastGPUCullingOverlayObjects();
-  if(!overlayObjectsBeforeRender.empty())
-  {
-    m_lastVisibleOpaqueObjects.reserve(overlayObjectsBeforeRender.size());
-    m_lastVisibleTransparentObjects.reserve(overlayObjectsBeforeRender.size());
-    for(uint32_t objectIndex = 0; objectIndex < overlayObjectsBeforeRender.size(); ++objectIndex)
-    {
-      const GPUCullOverlayObject& object = overlayObjectsBeforeRender[objectIndex];
-      if(object.result != shaderio::LGPUCullResultVisible)
-      {
-        continue;
-      }
-
-      if((object.flags & shaderio::LGPUCullFlagTransparent) != 0u)
-      {
-        m_lastVisibleTransparentObjects.push_back(objectIndex);
-      }
-      else
-      {
-        m_lastVisibleOpaqueObjects.push_back(objectIndex);
-      }
-    }
-  }
-  else if(m_sceneView.overlayObjects != nullptr && m_sceneView.overlayObjectCount > 0u && safeObjectCount > 0u)
-  {
-    const uint32_t overlayCount = std::min(safeObjectCount, m_sceneView.overlayObjectCount);
-    m_lastVisibleOpaqueObjects.reserve(overlayCount);
-    m_lastVisibleTransparentObjects.reserve(overlayCount);
-    for(uint32_t objectIndex = 0; objectIndex < overlayCount; ++objectIndex)
-    {
-      const shaderio::GPUCullObject& object = m_sceneView.overlayObjects[objectIndex];
-      if((object.flags & shaderio::LGPUCullFlagTransparent) != 0u)
-      {
-        m_lastVisibleTransparentObjects.push_back(objectIndex);
-      }
-      else
-      {
-        m_lastVisibleOpaqueObjects.push_back(objectIndex);
-      }
-    }
-  }
-
-  m_visibilitySortInputObjects.clear();
-  m_visibilitySortInputKeys.clear();
-  m_visibilitySortInputObjects.reserve(m_lastVisibleOpaqueObjects.size() + m_lastVisibleTransparentObjects.size());
-  m_visibilitySortInputKeys.reserve(m_lastVisibleOpaqueObjects.size() + m_lastVisibleTransparentObjects.size());
-  for(uint32_t objectIndex : m_lastVisibleOpaqueObjects)
-  {
-    m_visibilitySortInputObjects.push_back(objectIndex);
-    m_visibilitySortInputKeys.push_back(objectIndex & 0x7fffffffu);
-  }
-  for(uint32_t objectIndex : m_lastVisibleTransparentObjects)
-  {
-    m_visibilitySortInputObjects.push_back(objectIndex);
-    m_visibilitySortInputKeys.push_back(objectIndex | 0x80000000u);
-  }
-
-  const uint32_t visibleCount =
-      static_cast<uint32_t>(m_lastVisibleOpaqueObjects.size() + m_lastVisibleTransparentObjects.size());
+  const shaderio::GPUCullDrawCounts cachedDrawCounts = getLastGPUCullingDrawCounts();
+  const uint32_t visibleCount = cachedDrawCounts.totalCount;
   m_runtimeStats.batchStats.visibleCount = visibleCount;
   m_runtimeStats.batchStats.batchCount =
-      static_cast<uint32_t>((m_lastVisibleOpaqueObjects.empty() ? 0u : 1u)
-                            + (m_lastVisibleTransparentObjects.empty() ? 0u : 1u));
-  m_runtimeStats.batchStats.sortPassCount = computeBitonicSortPassCount(visibleCount);
+      static_cast<uint32_t>((cachedDrawCounts.opaqueCount > 0u ? 1u : 0u)
+                            + (cachedDrawCounts.alphaTestCount > 0u ? 1u : 0u)
+                            + (cachedDrawCounts.transparentCount > 0u ? 1u : 0u));
+  m_runtimeStats.batchStats.sortPassCount = 0u;
   const uint32_t frameIndex = getCurrentFrameIndexHint();
-  const bool consumedVisibilitySortFeedback =
-      kEnableShippingVisibilitySort ? consumeVisibilitySortOutputs(frameIndex) : false;
-  m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::cpuBootstrap;
-  if(consumedVisibilitySortFeedback)
-  {
-    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuSortCpuFeedback;
-  }
+  m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
   if(kEnableShippingVisibilitySort)
   {
-    prepareVisibilitySortInputs(frameIndex);
+    m_visibilitySortInputObjects.clear();
+    m_visibilitySortInputKeys.clear();
+    const glm::vec3 cameraPos =
+        params.cameraUniforms != nullptr ? params.cameraUniforms->cameraPosition : glm::vec3(0.0f);
+    const size_t totalSortInputCount =
+        m_opaqueDrawIndices.size() + m_alphaTestDrawIndices.size() + m_transparentDrawIndices.size();
+    m_visibilitySortInputObjects.reserve(totalSortInputCount);
+    m_visibilitySortInputKeys.reserve(totalSortInputCount);
+    const auto appendSortedDraws = [&](std::span<const uint32_t> drawIndices, uint32_t categoryValue, bool sortByDistance) {
+      for(uint32_t drawIndex : drawIndices)
+      {
+        MeshHandle meshHandle = kNullMeshHandle;
+        if(!tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+        {
+          continue;
+        }
+
+        const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+        if(mesh == nullptr)
+        {
+          continue;
+        }
+
+        uint32_t subKey = kVisibilitySortKeyMask;
+        if(sortByDistance)
+        {
+          const glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
+          const float distanceSquared = glm::dot(meshCenter - cameraPos, meshCenter - cameraPos);
+          subKey = encodeSortableFloatKey(distanceSquared) >> 2u;
+        }
+        else if(mesh->materialIndex >= 0)
+        {
+          subKey = std::min(static_cast<uint32_t>(mesh->materialIndex), kVisibilitySortKeyMask);
+        }
+
+        m_visibilitySortInputObjects.push_back(drawIndex);
+        m_visibilitySortInputKeys.push_back(encodeVisibilitySortKey(categoryValue, subKey));
+      }
+    };
+    appendSortedDraws(m_opaqueDrawIndices, kVisibilitySortCategoryOpaque, false);
+    appendSortedDraws(m_alphaTestDrawIndices, kVisibilitySortCategoryAlpha, false);
+    appendSortedDraws(m_transparentDrawIndices, kVisibilitySortCategoryTransparent, true);
+    m_runtimeStats.batchStats.sortPassCount =
+        computeBitonicSortPassCount(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
+    for(uint32_t sortFrameIndex = 0; sortFrameIndex < static_cast<uint32_t>(m_visibilitySortFrames.size()); ++sortFrameIndex)
+    {
+      prepareVisibilitySortInputs(sortFrameIndex);
+    }
     if(frameIndex < m_visibilitySortFrames.size())
     {
       const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
@@ -315,6 +333,8 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
   else
   {
+    m_visibilitySortInputObjects.clear();
+    m_visibilitySortInputKeys.clear();
     m_passExecutor.bindBuffer({
         .handle       = kPassGPUDrivenSortKeyBufferHandle,
         .nativeBuffer = 0,
@@ -334,7 +354,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   submitPassGraph(gpuParams);
   const VkDescriptorSet gpuCullingDescriptorSet =
       reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
-  m_hiZDepthPyramid.bindForCulling(gpuCullingDescriptorSet, 4);
+  m_hiZDepthPyramid.bindForCulling(gpuCullingDescriptorSet, 5);
   m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
   m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
   m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
@@ -350,13 +370,11 @@ void GPUDrivenRenderer::render(const RenderParams& params)
       && m_hiZDepthPyramid.getSourceDepth().index == kPassSceneDepthHandle.index
       && m_hiZDepthPyramid.getSourceDepth().generation == kPassSceneDepthHandle.generation
       && m_hiZDepthPyramid.getLastBoundSet() == gpuCullingDescriptorSet
-      && m_hiZDepthPyramid.getLastBoundBinding() == 4;
+      && m_hiZDepthPyramid.getLastBoundBinding() == 5;
   if(m_sceneView.usePersistentCullingObjects
      && getGPUCullingObjectCount(frameIndex) == safeObjectCount && safeObjectCount > 0u)
   {
-    m_runtimeStats.visibilityOwnership =
-        consumedVisibilitySortFeedback ? GPUDrivenVisibilityOwnership::gpuSortCpuFeedback
-                                       : GPUDrivenVisibilityOwnership::gpuOwned;
+    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
   }
 }
 
@@ -1059,96 +1077,6 @@ void GPUDrivenRenderer::executeImguiPass(const PassContext& context)
   context.cmd->endEvent();
 }
 
-bool GPUDrivenRenderer::prepareAndDispatchTransparentVisibilityPatch(rhi::CommandList&         cmd,
-                                                                    uint32_t                  frameIndex,
-                                                                    std::span<const uint32_t> sortedDrawIndices,
-                                                                    uint64_t                  forwardIndirectBufferHandle)
-{
-  if(frameIndex >= m_transparentVisibilityPatchFrames.size() || sortedDrawIndices.empty()
-     || m_transparentVisibilityPatchPipeline == VK_NULL_HANDLE
-     || m_transparentVisibilityPatchPipelineLayout == VK_NULL_HANDLE || forwardIndirectBufferHandle == 0)
-  {
-    return false;
-  }
-
-  const uint64_t sourceIndirectBufferHandle = m_renderer.getGPUCullingIndirectBufferOpaque(frameIndex);
-  if(sourceIndirectBufferHandle == 0)
-  {
-    return false;
-  }
-
-  ensureTransparentVisibilityPatchCapacity(frameIndex, static_cast<uint32_t>(sortedDrawIndices.size()));
-  TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
-  if(frameResources.drawIndexBuffer.buffer == VK_NULL_HANDLE || frameResources.drawIndexBuffer.mapped == nullptr
-     || frameResources.descriptorSet == VK_NULL_HANDLE)
-  {
-    return false;
-  }
-
-  std::memcpy(frameResources.drawIndexBuffer.mapped,
-              sortedDrawIndices.data(),
-              sortedDrawIndices.size_bytes());
-  VK_CHECK(vmaFlushAllocation(m_renderer.getAllocatorHandle(),
-                              frameResources.drawIndexBuffer.allocation,
-                              0,
-                              sortedDrawIndices.size_bytes()));
-
-  updateTransparentVisibilityPatchDescriptorSet(frameIndex,
-                                                sourceIndirectBufferHandle,
-                                                forwardIndirectBufferHandle);
-
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const VkMemoryBarrier2 hostToComputeBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-  };
-  const VkDependencyInfo hostToComputeDependency{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &hostToComputeBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &hostToComputeDependency);
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_transparentVisibilityPatchPipeline);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_transparentVisibilityPatchPipelineLayout,
-                          0,
-                          1,
-                          &frameResources.descriptorSet,
-                          0,
-                          nullptr);
-
-  const shaderio::TransparentVisibilityPatchPushConstants pushConstants{
-      .elementCount = static_cast<uint32_t>(sortedDrawIndices.size()),
-  };
-  vkCmdPushConstants(vkCmd,
-                     m_transparentVisibilityPatchPipelineLayout,
-                     VK_SHADER_STAGE_COMPUTE_BIT,
-                     0,
-                     sizeof(pushConstants),
-                     &pushConstants);
-  vkCmdDispatch(vkCmd, (pushConstants.elementCount + 63u) / 64u, 1u, 1u);
-
-  const VkMemoryBarrier2 computeToIndirectBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-      .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-  };
-  const VkDependencyInfo computeToIndirectDependency{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &computeToIndirectBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &computeToIndirectDependency);
-  return true;
-}
-
 GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
 {
   GltfUploadResult result = m_renderer.uploadGltfModel(model, cmd);
@@ -1181,6 +1109,8 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
 {
   m_renderer.updateMeshTransform(handle, transform);
 
+  uint32_t drawIndex = 0;
+  const bool hasDrawIndex = tryGetMeshDrawIndex(handle, drawIndex);
   const auto it = m_objectIdByMeshHandle.find(packMeshHandleKey(handle));
   if(it == m_objectIdByMeshHandle.end())
   {
@@ -1197,6 +1127,14 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
                                   transform,
                                   glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius));
   m_sceneUploadPending = true;
+  if(hasDrawIndex)
+  {
+    markPersistentDrawDirty(drawIndex);
+  }
+  else
+  {
+    m_persistentDrawDataDirty = true;
+  }
   m_runtimeStats.pendingSceneUpdates = 1;
   refreshSceneView();
 }
@@ -1311,6 +1249,8 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
 
   if(appendedObjects || firstSceneBuild)
   {
+    ++m_sceneTopologyVersion;
+    invalidateSortedBootstrapStates();
     m_sceneRegistry.syncToGpu(cmd);
   }
   if(m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
@@ -1318,6 +1258,8 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
     m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu);
   }
   m_sceneUploadPending = false;
+  m_persistentDrawDataDirty = true;
+  m_dirtyPersistentDrawIndices.clear();
   m_runtimeStats.sceneUploadCount += 1;
   m_runtimeStats.pendingSceneUpdates = 0;
   m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
@@ -1327,6 +1269,8 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
 
 void GPUDrivenRenderer::clearGPUDrivenScene()
 {
+  ++m_sceneTopologyVersion;
+  invalidateSortedBootstrapStates();
   m_sceneRegistry.clear();
   if(m_enableExperimentalMeshletPath)
   {
@@ -1334,6 +1278,7 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   }
   m_meshletDataCpu.clear();
   m_meshletIndicesCpu.clear();
+  m_persistentDrawData.clear();
   m_visibilitySortInputObjects.clear();
   m_visibilitySortInputKeys.clear();
   m_objectIdByMeshHandle.clear();
@@ -1346,6 +1291,8 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_runtimeStats = {};
   m_activeUploadResult = nullptr;
   m_sceneUploadPending = false;
+  m_persistentDrawDataDirty = false;
+  m_dirtyPersistentDrawIndices.clear();
 }
 
 void GPUDrivenRenderer::flushPendingSceneUploads()
@@ -1359,9 +1306,205 @@ void GPUDrivenRenderer::flushPendingSceneUploads()
     m_sceneRegistry.syncToGpu(cmd);
   });
   m_sceneUploadPending = false;
+  m_persistentDrawDataDirty = true;
+  m_dirtyPersistentDrawIndices.clear();
   m_runtimeStats.sceneUploadCount += 1;
   m_runtimeStats.pendingSceneUpdates = 0;
   m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
+}
+
+void GPUDrivenRenderer::invalidateSortedBootstrapStates()
+{
+  for(SortedBootstrapFrameState& frameState : m_sortedBootstrapFrames)
+  {
+    frameState = {};
+  }
+}
+
+void GPUDrivenRenderer::invalidateSortedBootstrapState(uint32_t frameIndex)
+{
+  if(frameIndex < m_sortedBootstrapFrames.size())
+  {
+    m_sortedBootstrapFrames[frameIndex] = {};
+  }
+}
+
+void GPUDrivenRenderer::recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity)
+{
+  if(frameIndex >= m_sortedBootstrapFrames.size())
+  {
+    m_sortedBootstrapFrames.resize(std::max(frameIndex + 1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
+  }
+
+  m_sortedBootstrapFrames[frameIndex] = SortedBootstrapFrameState{
+      .opaqueCapacity = opaqueCapacity,
+      .alphaCapacity = alphaCapacity,
+      .sceneTopologyVersion = m_sceneTopologyVersion,
+      .valid = true,
+  };
+}
+
+bool GPUDrivenRenderer::getPreviousSortedBootstrapState(uint32_t frameIndex,
+                                                        uint32_t& outOpaqueCapacity,
+                                                        uint32_t& outAlphaCapacity) const
+{
+  outOpaqueCapacity = 0u;
+  outAlphaCapacity = 0u;
+  if(m_sortedBootstrapFrames.empty())
+  {
+    return false;
+  }
+
+  const uint32_t previousFrameIndex = getPreviousFrameIndex(frameIndex);
+  if(previousFrameIndex >= m_sortedBootstrapFrames.size())
+  {
+    return false;
+  }
+
+  const SortedBootstrapFrameState& frameState = m_sortedBootstrapFrames[previousFrameIndex];
+  if(!frameState.valid || frameState.sceneTopologyVersion != m_sceneTopologyVersion)
+  {
+    return false;
+  }
+
+  outOpaqueCapacity = frameState.opaqueCapacity;
+  outAlphaCapacity = frameState.alphaCapacity;
+  return outOpaqueCapacity + outAlphaCapacity > 0u;
+}
+
+void GPUDrivenRenderer::markPersistentDrawDirty(uint32_t drawIndex)
+{
+  m_persistentDrawDataDirty = true;
+  m_dirtyPersistentDrawIndices.push_back(drawIndex);
+}
+
+std::vector<GPUDrivenRenderer::DirtyRange> GPUDrivenRenderer::buildPersistentDrawDirtyRanges() const
+{
+  if(m_dirtyPersistentDrawIndices.empty())
+  {
+    return {};
+  }
+
+  std::vector<uint32_t> sortedIndices = m_dirtyPersistentDrawIndices;
+  std::sort(sortedIndices.begin(), sortedIndices.end());
+  sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+
+  std::vector<DirtyRange> ranges;
+  ranges.reserve(sortedIndices.size());
+
+  DirtyRange currentRange{sortedIndices.front(), 1u};
+  for(size_t i = 1; i < sortedIndices.size(); ++i)
+  {
+    const uint32_t drawIndex = sortedIndices[i];
+    if(drawIndex == currentRange.first + currentRange.count)
+    {
+      currentRange.count += 1u;
+      continue;
+    }
+
+    ranges.push_back(currentRange);
+    currentRange = DirtyRange{drawIndex, 1u};
+  }
+
+  ranges.push_back(currentRange);
+  return ranges;
+}
+
+void GPUDrivenRenderer::uploadPersistentDrawData()
+{
+  if(!m_sceneView.usePersistentCullingObjects)
+  {
+    return;
+  }
+
+  if(!m_persistentDrawDataDirty && !m_persistentDrawData.empty())
+  {
+    return;
+  }
+
+  const bool needsFullUpload = m_persistentDrawData.size() != m_sceneView.objectCount || m_persistentDrawData.empty()
+                               || m_dirtyPersistentDrawIndices.empty();
+  if(needsFullUpload)
+  {
+    m_persistentDrawData.assign(m_sceneView.objectCount, shaderio::DrawUniforms{});
+  }
+
+  const auto updateDrawPayload = [this](uint32_t drawIndex) {
+    if(drawIndex >= m_persistentDrawData.size() || drawIndex >= m_meshHandleByDrawIndex.size())
+    {
+      return;
+    }
+
+    const MeshHandle meshHandle = m_meshHandleByDrawIndex[drawIndex];
+    if(meshHandle.isNull())
+    {
+      m_persistentDrawData[drawIndex] = shaderio::DrawUniforms{};
+      return;
+    }
+
+    const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+    if(mesh == nullptr)
+    {
+      m_persistentDrawData[drawIndex] = shaderio::DrawUniforms{};
+      return;
+    }
+
+    shaderio::DrawUniforms drawData{};
+    drawData.modelMatrix = mesh->transform;
+    drawData.baseColorFactor = mesh->baseColorFactor;
+    drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
+    drawData.normalTextureIndex = mesh->normalTextureIndex;
+    drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
+    drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+    drawData.metallicFactor = mesh->metallicFactor;
+    drawData.roughnessFactor = mesh->roughnessFactor;
+    drawData.normalScale = mesh->normalScale;
+    drawData.alphaMode = mesh->alphaMode;
+    drawData.alphaCutoff = mesh->alphaCutoff;
+    m_persistentDrawData[drawIndex] = drawData;
+  };
+
+  std::vector<DirtyRange> dirtyRanges;
+  if(needsFullUpload)
+  {
+    for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_persistentDrawData.size()); ++drawIndex)
+    {
+      updateDrawPayload(drawIndex);
+    }
+  }
+  else
+  {
+    dirtyRanges = buildPersistentDrawDirtyRanges();
+    for(const DirtyRange& range : dirtyRanges)
+    {
+      for(uint32_t drawIndex = range.first; drawIndex < range.first + range.count; ++drawIndex)
+      {
+        updateDrawPayload(drawIndex);
+      }
+    }
+  }
+
+  const uint32_t frameCount = getSwapchainImageCount();
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    if(needsFullUpload)
+    {
+      m_renderer.uploadMDIDrawData(frameIndex, m_persistentDrawData);
+      m_renderer.uploadGBufferMDIDrawData(frameIndex, m_persistentDrawData);
+      m_renderer.uploadDepthMDIDrawData(frameIndex, m_persistentDrawData);
+      continue;
+    }
+
+    for(const DirtyRange& range : dirtyRanges)
+    {
+      const std::span<const shaderio::DrawUniforms> drawRange{m_persistentDrawData.data() + range.first, range.count};
+      m_renderer.uploadMDIDrawDataRange(frameIndex, range.first, drawRange);
+      m_renderer.uploadGBufferMDIDrawDataRange(frameIndex, range.first, drawRange);
+      m_renderer.uploadDepthMDIDrawDataRange(frameIndex, range.first, drawRange);
+    }
+  }
+  m_persistentDrawDataDirty = false;
+  m_dirtyPersistentDrawIndices.clear();
 }
 
 void GPUDrivenRenderer::refreshSceneView()
@@ -1563,6 +1706,8 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
   const VmaAllocator allocator = getAllocatorHandle();
   for(VisibilitySortFrameResources& frameResources : m_visibilitySortFrames)
   {
+    destroyBuffer(allocator, frameResources.uploadKeyBuffer);
+    destroyBuffer(allocator, frameResources.uploadValueBuffer);
     destroyBuffer(allocator, frameResources.keyBuffer);
     destroyBuffer(allocator, frameResources.valueBuffer);
     frameResources = {};
@@ -1606,20 +1751,21 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
 
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
   const std::array<VkDescriptorPoolSize, 1> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 3u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 8u},
   }};
   const VkDescriptorPoolCreateInfo poolInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = frameCount,
+      .maxSets = frameCount * 2u,
       .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
       .pPoolSizes = poolSizes.data(),
   };
   VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_transparentVisibilityPatchDescriptorPool));
 
-  const std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 4> bindings{{
       VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
   }};
   const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1673,12 +1819,12 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 
-  std::vector<VkDescriptorSetLayout> layouts(frameCount, m_transparentVisibilityPatchSetLayout);
-  std::vector<VkDescriptorSet> descriptorSets(frameCount, VK_NULL_HANDLE);
+  std::vector<VkDescriptorSetLayout> layouts(frameCount * 2u, m_transparentVisibilityPatchSetLayout);
+  std::vector<VkDescriptorSet> descriptorSets(frameCount * 2u, VK_NULL_HANDLE);
   const VkDescriptorSetAllocateInfo allocInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
       .descriptorPool = m_transparentVisibilityPatchDescriptorPool,
-      .descriptorSetCount = frameCount,
+      .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
       .pSetLayouts = layouts.data(),
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, descriptorSets.data()));
@@ -1686,19 +1832,14 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
   m_transparentVisibilityPatchFrames.resize(frameCount);
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_transparentVisibilityPatchFrames[frameIndex].descriptorSet = descriptorSets[frameIndex];
+    m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[0] = descriptorSets[frameIndex * 2u + 0u];
+    m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[1] = descriptorSets[frameIndex * 2u + 1u];
   }
 }
 
 void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
 {
   const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
-  for(TransparentVisibilityFrameResources& frameResources : m_transparentVisibilityPatchFrames)
-  {
-    destroyBuffer(allocator, frameResources.drawIndexBuffer);
-    frameResources = {};
-  }
   m_transparentVisibilityPatchFrames.clear();
 
   if(nativeDevice != VK_NULL_HANDLE)
@@ -1726,37 +1867,11 @@ void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
   }
 }
 
-void GPUDrivenRenderer::ensureTransparentVisibilityPatchCapacity(uint32_t frameIndex, uint32_t requiredCount)
-{
-  if(frameIndex >= m_transparentVisibilityPatchFrames.size())
-  {
-    return;
-  }
-
-  TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
-  if(frameResources.capacity >= requiredCount)
-  {
-    return;
-  }
-
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
-  if(frameResources.capacity > 0)
-  {
-    waitForIdle();
-  }
-  destroyBuffer(allocator, frameResources.drawIndexBuffer);
-
-  const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(requiredCount) * sizeof(uint32_t);
-  frameResources.drawIndexBuffer = createHostVisibleStorageBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.capacity = requiredCount;
-  frameResources.boundSourceIndirectHandle = 0;
-  frameResources.boundForwardIndirectHandle = 0;
-}
-
 void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t frameIndex,
+                                                                      uint64_t sortKeyBufferHandle,
+                                                                      uint64_t sortValueBufferHandle,
                                                                       uint64_t sourceIndirectBufferHandle,
-                                                                      uint64_t forwardIndirectBufferHandle)
+                                                                      uint64_t targetIndirectBufferHandle)
 {
   if(frameIndex >= m_transparentVisibilityPatchFrames.size())
   {
@@ -1765,28 +1880,32 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
 
   const VkDevice nativeDevice = getNativeDeviceHandle();
   TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
-  if(nativeDevice == VK_NULL_HANDLE || frameResources.descriptorSet == VK_NULL_HANDLE
-     || frameResources.drawIndexBuffer.buffer == VK_NULL_HANDLE || sourceIndirectBufferHandle == 0
-     || forwardIndirectBufferHandle == 0)
+  const uint32_t descriptorSetIndex =
+      targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
+  if(nativeDevice == VK_NULL_HANDLE || frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE || sortKeyBufferHandle == 0
+     || sortValueBufferHandle == 0 || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0)
   {
     return;
   }
 
-  if(frameResources.boundSourceIndirectHandle == sourceIndirectBufferHandle
-     && frameResources.boundForwardIndirectHandle == forwardIndirectBufferHandle)
+  if(frameResources.boundSortKeyHandles[descriptorSetIndex] == sortKeyBufferHandle
+     && frameResources.boundSortValueHandles[descriptorSetIndex] == sortValueBufferHandle
+     && frameResources.boundSourceIndirectHandles[descriptorSetIndex] == sourceIndirectBufferHandle
+     && frameResources.boundTargetIndirectHandles[descriptorSetIndex] == targetIndirectBufferHandle)
   {
     return;
   }
 
-  const std::array<VkDescriptorBufferInfo, 3> bufferInfos{{
-      VkDescriptorBufferInfo{frameResources.drawIndexBuffer.buffer, 0, VK_WHOLE_SIZE},
+  const std::array<VkDescriptorBufferInfo, 4> bufferInfos{{
+      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortKeyBufferHandle), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortValueBufferHandle), 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sourceIndirectBufferHandle), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(forwardIndirectBufferHandle), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(targetIndirectBufferHandle), 0, VK_WHOLE_SIZE},
   }};
-  const std::array<VkWriteDescriptorSet, 3> writes{{
+  const std::array<VkWriteDescriptorSet, 4> writes{{
       VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
           .dstBinding = 0,
           .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -1794,7 +1913,7 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
       },
       VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
           .dstBinding = 1,
           .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -1802,16 +1921,128 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
       },
       VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
           .dstBinding = 2,
           .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
           .pBufferInfo = &bufferInfos[2],
       },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
+          .dstBinding = 3,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &bufferInfos[3],
+      },
   }};
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-  frameResources.boundSourceIndirectHandle = sourceIndirectBufferHandle;
-  frameResources.boundForwardIndirectHandle = forwardIndirectBufferHandle;
+  frameResources.boundSortKeyHandles[descriptorSetIndex] = sortKeyBufferHandle;
+  frameResources.boundSortValueHandles[descriptorSetIndex] = sortValueBufferHandle;
+  frameResources.boundSourceIndirectHandles[descriptorSetIndex] = sourceIndirectBufferHandle;
+  frameResources.boundTargetIndirectHandles[descriptorSetIndex] = targetIndirectBufferHandle;
+}
+
+uint32_t GPUDrivenRenderer::getPreviousFrameIndex(uint32_t frameIndex) const
+{
+  const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+  return (frameIndex + frameCount - 1u) % frameCount;
+}
+
+bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
+                                                          uint32_t          frameIndex,
+                                                          uint64_t          targetIndirectBufferHandle,
+                                                          uint32_t          categoryValue,
+                                                          uint32_t          outputOffset)
+{
+  if(frameIndex >= m_transparentVisibilityPatchFrames.size()
+      || frameIndex >= m_visibilitySortFrames.size()
+      || m_transparentVisibilityPatchPipeline == VK_NULL_HANDLE
+      || m_transparentVisibilityPatchPipelineLayout == VK_NULL_HANDLE
+      || targetIndirectBufferHandle == 0)
+  {
+    return false;
+  }
+
+  const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
+  if(sortResources.activeElementCount == 0 || sortResources.valueBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return false;
+  }
+
+  const uint64_t sourceIndirectBufferHandle = m_renderer.getGPUCullingIndirectBufferOpaque(frameIndex);
+  if(sourceIndirectBufferHandle == 0)
+  {
+    return false;
+  }
+
+  updateTransparentVisibilityPatchDescriptorSet(frameIndex,
+                                                reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
+                                                reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
+                                                sourceIndirectBufferHandle,
+                                                targetIndirectBufferHandle);
+
+  const TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
+  const uint32_t descriptorSetIndex =
+      targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
+  if(frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE)
+  {
+    return false;
+  }
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const VkMemoryBarrier2 computeToComputeBarrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+  };
+  const VkDependencyInfo computeToComputeDependency{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &computeToComputeBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &computeToComputeDependency);
+
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_transparentVisibilityPatchPipeline);
+  vkCmdBindDescriptorSets(vkCmd,
+                          VK_PIPELINE_BIND_POINT_COMPUTE,
+                          m_transparentVisibilityPatchPipelineLayout,
+                          0,
+                          1,
+                          &frameResources.descriptorSets[descriptorSetIndex],
+                          0,
+                          nullptr);
+
+  const shaderio::TransparentVisibilityPatchPushConstants pushConstants{
+      .elementCount = sortResources.activeElementCount,
+      .categoryMask = kVisibilitySortCategoryMask,
+      .categoryValue = categoryValue,
+      .outputOffset = outputOffset,
+  };
+  vkCmdPushConstants(vkCmd,
+                     m_transparentVisibilityPatchPipelineLayout,
+                     VK_SHADER_STAGE_COMPUTE_BIT,
+                     0,
+                     sizeof(pushConstants),
+                     &pushConstants);
+  vkCmdDispatch(vkCmd, (pushConstants.elementCount + 63u) / 64u, 1u, 1u);
+
+  const VkMemoryBarrier2 computeToIndirectBarrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+      .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+  };
+  const VkDependencyInfo computeToIndirectDependency{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &computeToIndirectBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &computeToIndirectDependency);
+  return true;
 }
 
 void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32_t requiredCount)
@@ -1833,12 +2064,16 @@ void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32
   {
     waitForIdle();
   }
+  destroyBuffer(allocator, frameResources.uploadKeyBuffer);
+  destroyBuffer(allocator, frameResources.uploadValueBuffer);
   destroyBuffer(allocator, frameResources.keyBuffer);
   destroyBuffer(allocator, frameResources.valueBuffer);
 
   const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(requiredCount) * sizeof(uint32_t);
-  frameResources.keyBuffer = createHostVisibleStorageBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.valueBuffer = createHostVisibleStorageBuffer(nativeDevice, allocator, bufferSize);
+  frameResources.uploadKeyBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
+  frameResources.uploadValueBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
+  frameResources.keyBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+  frameResources.valueBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
   frameResources.capacity = requiredCount;
   updateVisibilitySortDescriptorSet(frameIndex);
 }
@@ -1900,7 +2135,7 @@ void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
 
   const uint32_t paddedCount = nextPowerOfTwo(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
   ensureVisibilitySortCapacity(frameIndex, paddedCount);
-  if(frameResources.keyBuffer.mapped == nullptr || frameResources.valueBuffer.mapped == nullptr)
+  if(frameResources.uploadKeyBuffer.mapped == nullptr || frameResources.uploadValueBuffer.mapped == nullptr)
   {
     return;
   }
@@ -1910,74 +2145,13 @@ void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
   std::copy(m_visibilitySortInputKeys.begin(), m_visibilitySortInputKeys.end(), paddedKeys.begin());
   std::copy(m_visibilitySortInputObjects.begin(), m_visibilitySortInputObjects.end(), paddedValues.begin());
 
-  std::memcpy(frameResources.keyBuffer.mapped, paddedKeys.data(), paddedCount * sizeof(uint32_t));
-  std::memcpy(frameResources.valueBuffer.mapped, paddedValues.data(), paddedCount * sizeof(uint32_t));
-  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.keyBuffer.allocation, 0, VK_WHOLE_SIZE));
-  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.valueBuffer.allocation, 0, VK_WHOLE_SIZE));
+  std::memcpy(frameResources.uploadKeyBuffer.mapped, paddedKeys.data(), paddedCount * sizeof(uint32_t));
+  std::memcpy(frameResources.uploadValueBuffer.mapped, paddedValues.data(), paddedCount * sizeof(uint32_t));
+  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadKeyBuffer.allocation, 0, VK_WHOLE_SIZE));
+  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadValueBuffer.allocation, 0, VK_WHOLE_SIZE));
 
   frameResources.activeElementCount = static_cast<uint32_t>(m_visibilitySortInputObjects.size());
   frameResources.paddedElementCount = paddedCount;
-}
-
-bool GPUDrivenRenderer::consumeVisibilitySortOutputs(uint32_t frameIndex)
-{
-  if(!kEnableShippingVisibilitySort)
-  {
-    return false;
-  }
-
-  if(frameIndex >= m_visibilitySortFrames.size())
-  {
-    return false;
-  }
-
-  VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
-  if(frameResources.activeElementCount == 0 || frameResources.keyBuffer.mapped == nullptr || frameResources.valueBuffer.mapped == nullptr)
-  {
-    return false;
-  }
-
-  VK_CHECK(vmaInvalidateAllocation(getAllocatorHandle(), frameResources.keyBuffer.allocation, 0, VK_WHOLE_SIZE));
-  VK_CHECK(vmaInvalidateAllocation(getAllocatorHandle(), frameResources.valueBuffer.allocation, 0, VK_WHOLE_SIZE));
-
-  const uint32_t* keyData = static_cast<const uint32_t*>(frameResources.keyBuffer.mapped);
-  const uint32_t* valueData = static_cast<const uint32_t*>(frameResources.valueBuffer.mapped);
-  std::vector<uint32_t> sortedKeys;
-  std::vector<uint32_t> sortedValues;
-  sortedKeys.reserve(frameResources.activeElementCount);
-  sortedValues.reserve(frameResources.activeElementCount);
-
-  for(uint32_t i = 0; i < frameResources.paddedElementCount && sortedValues.size() < frameResources.activeElementCount; ++i)
-  {
-    if(valueData[i] == 0xffffffffu || keyData[i] == 0xffffffffu)
-    {
-      continue;
-    }
-    sortedKeys.push_back(keyData[i]);
-    sortedValues.push_back(valueData[i]);
-  }
-
-  if(sortedValues.size() == frameResources.activeElementCount && sortedKeys.size() == sortedValues.size())
-  {
-    m_lastVisibleOpaqueObjects.clear();
-    m_lastVisibleTransparentObjects.clear();
-    m_lastVisibleOpaqueObjects.reserve(sortedValues.size());
-    m_lastVisibleTransparentObjects.reserve(sortedValues.size());
-    for(size_t i = 0; i < sortedValues.size(); ++i)
-    {
-      if((sortedKeys[i] & 0x80000000u) != 0u)
-      {
-        m_lastVisibleTransparentObjects.push_back(sortedValues[i]);
-      }
-      else
-      {
-        m_lastVisibleOpaqueObjects.push_back(sortedValues[i]);
-      }
-    }
-    return true;
-  }
-
-  return false;
 }
 
 void GPUDrivenRenderer::executeVisibilitySortPass(const PassContext& context) const
@@ -1994,12 +2168,50 @@ void GPUDrivenRenderer::executeVisibilitySortPass(const PassContext& context) co
   }
 
   const VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[context.frameIndex];
-  if(frameResources.descriptorSet == VK_NULL_HANDLE || frameResources.paddedElementCount <= 1u)
+  if(frameResources.descriptorSet == VK_NULL_HANDLE || frameResources.paddedElementCount <= 1u
+     || frameResources.uploadKeyBuffer.buffer == VK_NULL_HANDLE || frameResources.uploadValueBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
   }
 
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
+  const VkBufferCopy copyRegion{.srcOffset = 0, .dstOffset = 0, .size = static_cast<VkDeviceSize>(frameResources.paddedElementCount) * sizeof(uint32_t)};
+  vkCmdCopyBuffer(vkCmd, frameResources.uploadKeyBuffer.buffer, frameResources.keyBuffer.buffer, 1, &copyRegion);
+  vkCmdCopyBuffer(vkCmd, frameResources.uploadValueBuffer.buffer, frameResources.valueBuffer.buffer, 1, &copyRegion);
+
+  const std::array<VkBufferMemoryBarrier2, 2> transferToComputeBarriers{{
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = frameResources.keyBuffer.buffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = frameResources.valueBuffer.buffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
+  }};
+  const VkDependencyInfo transferToComputeDependency{
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = static_cast<uint32_t>(transferToComputeBarriers.size()),
+      .pBufferMemoryBarriers    = transferToComputeBarriers.data(),
+  };
+  vkCmdPipelineBarrier2(vkCmd, &transferToComputeDependency);
+
   vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_visibilitySortPipeline);
   vkCmdBindDescriptorSets(vkCmd,
                           VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -2034,7 +2246,7 @@ void GPUDrivenRenderer::executeVisibilitySortPass(const PassContext& context) co
           .elementCount = frameResources.paddedElementCount,
           .level = level,
           .levelMask = levelMask,
-          .descending = 0u,
+          .descending = 1u,
       };
       vkCmdPushConstants(vkCmd,
                          m_visibilitySortPipelineLayout,

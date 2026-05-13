@@ -503,6 +503,25 @@ void VulkanCommandList::drawIndexedIndirect(uint64_t bufferHandle, uint64_t offs
   vkCmdDrawIndexedIndirect(m_commandBuffer, nativeBuffer, offset, drawCount, stride);
 }
 
+void VulkanCommandList::drawIndexedIndirectCount(uint64_t bufferHandle,
+                                                 uint64_t offset,
+                                                 uint64_t countBufferHandle,
+                                                 uint64_t countBufferOffset,
+                                                 uint32_t maxDrawCount,
+                                                 uint32_t stride)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkBuffer nativeBuffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(bufferHandle));
+  const VkBuffer nativeCountBuffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(countBufferHandle));
+  vkCmdDrawIndexedIndirectCount(m_commandBuffer,
+                                nativeBuffer,
+                                offset,
+                                nativeCountBuffer,
+                                countBufferOffset,
+                                maxDrawCount,
+                                stride);
+}
+
 void VulkanCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
   ensureCommandBuffer(m_commandBuffer);
@@ -626,6 +645,23 @@ void cmdDrawIndexed(const demo::rhi::CommandList& commandList, uint32_t indexCou
 void cmdDrawIndexedIndirect(const demo::rhi::CommandList& commandList, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
 {
   vkCmdDrawIndexedIndirect(getNativeCommandBuffer(commandList), buffer, offset, drawCount, stride);
+}
+
+void cmdDrawIndexedIndirectCount(const demo::rhi::CommandList& commandList,
+                                 VkBuffer                       buffer,
+                                 VkDeviceSize                   offset,
+                                 VkBuffer                       countBuffer,
+                                 VkDeviceSize                   countBufferOffset,
+                                 uint32_t                       maxDrawCount,
+                                 uint32_t                       stride)
+{
+  vkCmdDrawIndexedIndirectCount(getNativeCommandBuffer(commandList),
+                                buffer,
+                                offset,
+                                countBuffer,
+                                countBufferOffset,
+                                maxDrawCount,
+                                stride);
 }
 
 void cmdDispatch(const demo::rhi::CommandList& commandList, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)

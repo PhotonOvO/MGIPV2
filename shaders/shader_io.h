@@ -272,6 +272,14 @@ struct GPUCullStats
   uint32_t transparentCount;
 };
 
+struct GPUCullDrawCounts
+{
+  uint32_t opaqueCount;
+  uint32_t alphaTestCount;
+  uint32_t transparentCount;
+  uint32_t totalCount;
+};
+
 struct GPUBatchBuildStats
 {
   uint32_t visibleCount;
@@ -291,6 +299,9 @@ struct BitonicSortPushConstants
 struct TransparentVisibilityPatchPushConstants
 {
   uint32_t elementCount;
+  uint32_t categoryMask;
+  uint32_t categoryValue;
+  uint32_t outputOffset;
 };
 
 struct Meshlet
@@ -305,6 +316,7 @@ struct Meshlet
 STATIC_CONST uint32_t LGPUCullFlagFrustumCulling = 0x1u;
 STATIC_CONST uint32_t LGPUCullFlagOcclusionCulling = 0x2u;
 STATIC_CONST uint32_t LGPUCullFlagTransparent = 0x4u;
+STATIC_CONST uint32_t LGPUCullFlagAlphaMask = 0x8u;
 
 STATIC_CONST uint32_t LGPUCullResultVisible = 0u;
 STATIC_CONST uint32_t LGPUCullResultFrustumCulled = 1u;

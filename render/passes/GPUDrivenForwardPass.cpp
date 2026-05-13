@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -88,59 +89,10 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   }
 
   MeshPool& meshPool = m_renderer->getMeshPool();
-  std::vector<uint32_t> sortedTransparentDrawIndices;
-  const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
-  sortedTransparentDrawIndices.assign(transparentDrawIndices.begin(), transparentDrawIndices.end());
-
-  std::vector<std::pair<MeshHandle, float>> transparentMeshes;
-  transparentMeshes.reserve(sortedTransparentDrawIndices.size());
-
-  glm::vec3 cameraPos(0.0f);
-  if(context.params->cameraUniforms != nullptr)
-  {
-    cameraPos = context.params->cameraUniforms->cameraPosition;
-  }
-
-  {
-    TRACY_ZONE_SCOPED("GPUDrivenForwardPass::transparentSorting");
-    const uint32_t transparentCount = static_cast<uint32_t>(sortedTransparentDrawIndices.size());
-    for(uint32_t transparentIndex = 0; transparentIndex < transparentCount; ++transparentIndex)
-    {
-      const uint32_t drawIndex = sortedTransparentDrawIndices[transparentIndex];
-      MeshHandle meshHandle = kNullMeshHandle;
-      if(!m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-      {
-        continue;
-      }
-
-      const MeshRecord* mesh = meshPool.tryGet(meshHandle);
-      if(mesh == nullptr || mesh->alphaMode != shaderio::LAlphaBlend)
-      {
-        continue;
-      }
-
-      const glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
-      transparentMeshes.push_back({meshHandle, glm::length(meshCenter - cameraPos)});
-    }
-
-    std::sort(transparentMeshes.begin(), transparentMeshes.end(), [](const auto& left, const auto& right) {
-      return left.second > right.second;
-    });
-
-    sortedTransparentDrawIndices.clear();
-    sortedTransparentDrawIndices.reserve(transparentMeshes.size());
-    for(const auto& transparentMesh : transparentMeshes)
-    {
-      uint32_t drawIndex = 0;
-      if(!m_renderer->tryGetMeshDrawIndex(transparentMesh.first, drawIndex))
-      {
-        continue;
-      }
-      sortedTransparentDrawIndices.push_back(drawIndex);
-    }
-  }
-
-  if(transparentMeshes.empty() || sortedTransparentDrawIndices.empty())
+  const uint32_t objectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
+  const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+  const uint64_t countBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
+  if(objectCount == 0 || indirectBufferHandle == 0 || countBufferHandle == 0)
   {
     restoreDepthForSampling();
     context.cmd->endEvent();
@@ -282,42 +234,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     return;
   }
 
-  std::vector<shaderio::DrawUniforms> mdiDrawData;
-  mdiDrawData.reserve(transparentMeshes.size());
-  std::vector<shaderio::GPUCullIndirectCommand> indirectCommands;
-  indirectCommands.reserve(transparentMeshes.size());
-
-  for(size_t slot = 0; slot < transparentMeshes.size(); ++slot)
-  {
-    const MeshRecord* mesh = meshPool.tryGet(transparentMeshes[slot].first);
-    if(mesh == nullptr)
-    {
-      continue;
-    }
-
-    shaderio::DrawUniforms drawData{};
-    drawData.modelMatrix = mesh->transform;
-    drawData.baseColorFactor = mesh->baseColorFactor;
-    drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
-    drawData.normalTextureIndex = mesh->normalTextureIndex;
-    drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
-    drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
-    drawData.metallicFactor = mesh->metallicFactor;
-    drawData.roughnessFactor = mesh->roughnessFactor;
-    drawData.normalScale = mesh->normalScale;
-    drawData.alphaMode = shaderio::LAlphaBlend;
-    drawData.alphaCutoff = mesh->alphaCutoff;
-    mdiDrawData.push_back(drawData);
-    indirectCommands.push_back(shaderio::GPUCullIndirectCommand{
-        .indexCount = mesh->indexCount,
-        .instanceCount = 1,
-        .firstIndex = mesh->firstIndex,
-        .vertexOffset = mesh->vertexOffset,
-        .firstInstance = static_cast<uint32_t>(slot),
-    });
-  }
-
-  if(mdiDrawData.empty() || indirectCommands.empty())
+  const uint32_t transparentCapacity = static_cast<uint32_t>(m_renderer->getTransparentDrawIndices().size());
+  if(transparentCapacity == 0u)
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
@@ -336,11 +254,15 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     return;
   }
 
-  m_renderer->uploadSharedMDIDrawData(context.frameIndex, mdiDrawData);
-  m_renderer->uploadForwardMDICommands(context.frameIndex, indirectCommands);
-
-  const uint64_t indirectBufferHandle = m_renderer->getForwardMDIIndirectBuffer(context.frameIndex);
-  if(indirectBufferHandle == 0)
+  std::vector<shaderio::GPUCullIndirectCommand> transparentBootstrap(transparentCapacity);
+  m_renderer->uploadForwardMDICommands(context.frameIndex, transparentBootstrap);
+  const uint64_t forwardIndirectBufferHandle = m_renderer->getForwardMDIIndirectBuffer(context.frameIndex);
+  if(forwardIndirectBufferHandle == 0
+     || !m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                                       context.frameIndex,
+                                                       forwardIndirectBufferHandle,
+                                                       0x80000000u,
+                                                       0u))
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
@@ -358,9 +280,6 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     context.cmd->endEvent();
     return;
   }
-
-  m_renderer->prepareAndDispatchTransparentVisibilityPatch(
-      *context.cmd, context.frameIndex, sortedTransparentDrawIndices, indirectBufferHandle);
 
   const rhi::RenderPassDesc passDesc{
       .renderArea = {{0, 0}, renderExtent},
@@ -383,39 +302,35 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
                           0,
                           nullptr);
 
-  size_t runBegin = 0;
-  while(runBegin < transparentMeshes.size())
+  const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
+  const MeshRecord* representativeMesh = nullptr;
+  for(uint32_t drawIndex : transparentDrawIndices)
   {
-    const MeshRecord* runMesh = meshPool.tryGet(transparentMeshes[runBegin].first);
-    if(runMesh == nullptr)
+    MeshHandle meshHandle = kNullMeshHandle;
+    if(m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
     {
-      ++runBegin;
-      continue;
-    }
-
-    const uint64_t vertexBufferHandle = runMesh->vertexBufferHandle;
-    const uint64_t indexBufferHandle = runMesh->indexBufferHandle;
-    size_t runEnd = runBegin + 1;
-    while(runEnd < transparentMeshes.size())
-    {
-      const MeshRecord* candidateMesh = meshPool.tryGet(transparentMeshes[runEnd].first);
-      if(candidateMesh == nullptr || candidateMesh->vertexBufferHandle != vertexBufferHandle
-         || candidateMesh->indexBufferHandle != indexBufferHandle)
+      representativeMesh = meshPool.tryGet(meshHandle);
+      if(representativeMesh != nullptr)
       {
         break;
       }
-      ++runEnd;
     }
+  }
 
+  if(representativeMesh != nullptr)
+  {
+    const uint64_t vertexBufferHandle = representativeMesh->vertexBufferHandle;
+    const uint64_t indexBufferHandle = representativeMesh->indexBufferHandle;
     const uint64_t vertexOffset = 0;
     context.cmd->bindVertexBuffers(0, &vertexBufferHandle, &vertexOffset, 1);
     context.cmd->bindIndexBuffer(indexBufferHandle, 0, rhi::IndexFormat::uint32);
-    context.cmd->drawIndexedIndirect(
-        indirectBufferHandle,
-        static_cast<uint64_t>(runBegin) * sizeof(shaderio::GPUCullIndirectCommand),
-        static_cast<uint32_t>(runEnd - runBegin),
-        static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand)));
-    runBegin = runEnd;
+
+    context.cmd->drawIndexedIndirectCount(forwardIndirectBufferHandle,
+                                          0,
+                                          countBufferHandle,
+                                          offsetof(shaderio::GPUCullDrawCounts, transparentCount),
+                                          transparentCapacity,
+                                          m_renderer->getGPUCullingIndirectCommandStride());
   }
 
   context.cmd->endRenderPass();

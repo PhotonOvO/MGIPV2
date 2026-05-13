@@ -420,6 +420,11 @@ static void destroyBuffer(const VmaAllocator allocator, utils::Buffer& buffer)
 }
 
 static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data, const VkDeviceSize size);
+static void writeHostVisibleBufferRange(const VmaAllocator allocator,
+                                        utils::Buffer&      buffer,
+                                        VkDeviceSize        offset,
+                                        const void*         data,
+                                        VkDeviceSize        size);
 
 static utils::Buffer createStagingBuffer(const VkDevice              device,
                                          const VmaAllocator          allocator,
@@ -1028,6 +1033,7 @@ void Renderer::shutdown(rhi::Surface& surface)
     destroyBuffer(m_device.allocator, frameUserData.lightCullingBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuCullingDrawCountBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
@@ -1910,6 +1916,7 @@ void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUs
 
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   if(frameUserData.gpuCullingObjectBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingIndirectBuffer.buffer != VK_NULL_HANDLE
+     || frameUserData.gpuCullingDrawCountBuffer.buffer != VK_NULL_HANDLE
      || frameUserData.gpuCullingStatsBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingResultBuffer.buffer != VK_NULL_HANDLE)
   {
     // These per-frame buffers are consumed by submitted graphics work and some
@@ -1919,6 +1926,7 @@ void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUs
   }
   destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
   destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
+  destroyBuffer(m_device.allocator, frameUserData.gpuCullingDrawCountBuffer);
   destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
   destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
 
@@ -1932,9 +1940,16 @@ void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUs
   frameUserData.gpuCullingIndirectBuffer =
       createBuffer(device,
                    m_device.allocator,
-                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity * 4u,
                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
                    VMA_MEMORY_USAGE_GPU_ONLY);
+  frameUserData.gpuCullingDrawCountBuffer =
+      createBuffer(device,
+                   m_device.allocator,
+                   sizeof(shaderio::GPUCullDrawCounts),
+                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
+                   VMA_MEMORY_USAGE_CPU_TO_GPU,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.gpuCullingStatsBuffer =
       createBuffer(device,
                    m_device.allocator,
@@ -1975,6 +1990,7 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
 
   if(frameUserData.gpuCullingObjectBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
@@ -2012,6 +2028,10 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
       {
         flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
       }
+      else if(meshRecord->alphaMode == shaderio::LAlphaMask)
+      {
+        flags |= shaderio::LGPUCullFlagAlphaMask;
+      }
 
       objects[meshIndex] = shaderio::GPUCullObject{
           .sphereCenterRadius = glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius),
@@ -2031,6 +2051,11 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
 
   const shaderio::GPUCullStats zeroStats{};
   writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer, &zeroStats, sizeof(zeroStats));
+  const shaderio::GPUCullDrawCounts zeroDrawCounts{};
+  writeHostVisibleBuffer(m_device.allocator,
+                         frameUserData.gpuCullingDrawCountBuffer,
+                         &zeroDrawCounts,
+                         sizeof(zeroDrawCounts));
 
   const shaderio::GPUCullingUniforms uniforms = buildGPUCullingUniforms(params, objectCount);
   writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
@@ -2305,7 +2330,7 @@ void Renderer::ensureGPUDrivenBootstrapIndirectBuffer(PerFrameResources::FrameUs
       createBuffer(device,
                    m_device.allocator,
                    sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
-                   VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
+                   VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
                    VMA_MEMORY_USAGE_CPU_TO_GPU,
                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.gpuDrivenBootstrapIndirectCapacity = requiredCapacity;
@@ -2542,6 +2567,17 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
 
   VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
   std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped, sizeof(m_lastGPUCullingStats));
+  m_lastGPUCullingDrawCounts = {};
+  if(frameUserData.gpuCullingDrawCountBuffer.allocation != nullptr && frameUserData.gpuCullingDrawCountBuffer.mapped != nullptr)
+  {
+    VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
+                                     frameUserData.gpuCullingDrawCountBuffer.allocation,
+                                     0,
+                                     sizeof(shaderio::GPUCullDrawCounts)));
+    std::memcpy(&m_lastGPUCullingDrawCounts,
+                frameUserData.gpuCullingDrawCountBuffer.mapped,
+                sizeof(m_lastGPUCullingDrawCounts));
+  }
 
   m_lastGPUCullingOverlayObjects.clear();
   if(frameUserData.gpuCullingResultBuffer.allocation == nullptr || frameUserData.gpuCullingResultBuffer.mapped == nullptr
@@ -2974,13 +3010,14 @@ void Renderer::createGPUCullingResources()
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
-  const std::array<VkDescriptorSetLayoutBinding, 6> bindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 7> bindings{{
       VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
   }};
 
   const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
@@ -3079,6 +3116,7 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
           : frameUserData.gpuCullingObjectBuffer.buffer;
   if(objectBuffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingUniformBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingResultBuffer.buffer == VK_NULL_HANDLE)
@@ -3094,11 +3132,12 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
   }
 
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const std::array<VkDescriptorBufferInfo, 5> bufferInfos{{
+  const std::array<VkDescriptorBufferInfo, 6> bufferInfos{{
       VkDescriptorBufferInfo{objectBuffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{frameUserData.gpuCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{frameUserData.gpuCullingStatsBuffer.buffer, 0, sizeof(shaderio::GPUCullStats)},
       VkDescriptorBufferInfo{frameUserData.gpuCullingResultBuffer.buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameUserData.gpuCullingDrawCountBuffer.buffer, 0, sizeof(shaderio::GPUCullDrawCounts)},
       VkDescriptorBufferInfo{frameUserData.gpuCullingUniformBuffer.buffer, 0, sizeof(shaderio::GPUCullingUniforms)},
   }};
 
@@ -3112,7 +3151,7 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
     };
   }
 
-  const std::array<VkWriteDescriptorSet, 6> writes{{
+  const std::array<VkWriteDescriptorSet, 7> writes{{
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
@@ -3149,6 +3188,14 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
           .dstBinding      = 4,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[4],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 5,
           .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
           .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
           .pImageInfo      = pyramidMipInfos.data(),
@@ -3156,10 +3203,10 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 5,
+          .dstBinding      = 6,
           .descriptorCount = 1,
           .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo     = &bufferInfos[4],
+          .pBufferInfo     = &bufferInfos[5],
       },
   }};
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -3903,7 +3950,8 @@ void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& 
   const uint32_t objectCount = useExternalPersistentObjects
                                    ? params.gpuDrivenSceneView->objectCount
                                    : (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
-  if(objectCount == 0 || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE)
+  if(objectCount == 0 || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
+     || frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
   }
@@ -3923,22 +3971,36 @@ void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& 
                           nullptr);
   vkCmdDispatch(vkCmd, (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount, 1u, 1u);
 
-  const VkBufferMemoryBarrier2 indirectBarrier{
-      .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-      .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .buffer              = frameUserData.gpuCullingIndirectBuffer.buffer,
-      .offset              = 0,
-      .size                = VK_WHOLE_SIZE,
+  const std::array<VkBufferMemoryBarrier2, 2> indirectBarriers{
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = frameUserData.gpuCullingIndirectBuffer.buffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = frameUserData.gpuCullingDrawCountBuffer.buffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
   };
   const VkDependencyInfo dependencyInfo{
       .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = 1,
-      .pBufferMemoryBarriers    = &indirectBarrier,
+      .bufferMemoryBarrierCount = static_cast<uint32_t>(indirectBarriers.size()),
+      .pBufferMemoryBarriers    = indirectBarriers.data(),
   };
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
@@ -6247,6 +6309,35 @@ static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& 
   }
 }
 
+static void writeHostVisibleBufferRange(const VmaAllocator allocator,
+                                        utils::Buffer&      buffer,
+                                        const VkDeviceSize  offset,
+                                        const void*         data,
+                                        const VkDeviceSize  size)
+{
+  if(buffer.allocation == nullptr || data == nullptr || size == 0)
+  {
+    return;
+  }
+
+  void* mappedData = buffer.mapped;
+  bool  mappedHere = false;
+  if(mappedData == nullptr)
+  {
+    VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
+    mappedHere = true;
+  }
+
+  std::byte* dst = static_cast<std::byte*>(mappedData) + offset;
+  std::memcpy(dst, data, static_cast<size_t>(size));
+  VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, offset, size));
+
+  if(mappedHere)
+  {
+    vmaUnmapMemory(allocator, buffer.allocation);
+  }
+}
+
 void Renderer::createMaterialBindGroup()
 {
   // Create per-frame material bind groups early - needed for pipeline layout creation
@@ -7691,6 +7782,15 @@ uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
+uint64_t Renderer::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBuffer.buffer);
+}
+
 uint32_t Renderer::getGPUCullingObjectCount(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
@@ -7719,6 +7819,18 @@ uint64_t Renderer::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFra
 
   const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer.buffer);
+}
+
+uint64_t Renderer::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const
+{
+  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
+  {
+    return 0;
+  }
+
+  const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer.buffer);
 }
 
 uint64_t Renderer::getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
@@ -7837,6 +7949,27 @@ void Renderer::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
+void Renderer::uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
+  if(frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBufferRange(m_device.allocator,
+                              frameUserData.mdiDrawDataBuffer,
+                              static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+                              drawData.data(),
+                              sizeof(shaderio::DrawUniforms) * drawData.size());
+}
+
 void Renderer::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
@@ -7855,6 +7988,29 @@ void Renderer::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const sha
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
+void Renderer::uploadGBufferMDIDrawDataRange(uint32_t frameIndex,
+                                             uint32_t firstDrawIndex,
+                                             std::span<const shaderio::DrawUniforms> drawData)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureGBufferMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
+  if(frameUserData.gbufferMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBufferRange(m_device.allocator,
+                              frameUserData.gbufferMdiDrawDataBuffer,
+                              static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+                              drawData.data(),
+                              sizeof(shaderio::DrawUniforms) * drawData.size());
+}
+
 void Renderer::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
@@ -7871,6 +8027,29 @@ void Renderer::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shade
 
   writeHostVisibleBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer, drawData.data(),
                          sizeof(shaderio::DrawUniforms) * drawData.size());
+}
+
+void Renderer::uploadDepthMDIDrawDataRange(uint32_t frameIndex,
+                                           uint32_t firstDrawIndex,
+                                           std::span<const shaderio::DrawUniforms> drawData)
+{
+  if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
+  {
+    return;
+  }
+
+  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
+  ensureDepthMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
+  if(frameUserData.depthMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  writeHostVisibleBufferRange(m_device.allocator,
+                              frameUserData.depthMdiDrawDataBuffer,
+                              static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+                              drawData.data(),
+                              sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
 void Renderer::uploadGPUDrivenBootstrapCommands(uint32_t frameIndex,

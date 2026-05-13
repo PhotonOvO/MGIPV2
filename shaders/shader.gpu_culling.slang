@@ -13,9 +13,12 @@ RWStructuredBuffer<GPUCullStats> cullStats;
 RWStructuredBuffer<uint> cullResults;
 
 [[vk::binding(4, 0)]]
-Texture2D<float> depthPyramidTexture[LDepthPyramidMaxMips];
+RWStructuredBuffer<GPUCullDrawCounts> drawCounts;
 
 [[vk::binding(5, 0)]]
+Texture2D<float> depthPyramidTexture[LDepthPyramidMaxMips];
+
+[[vk::binding(6, 0)]]
 ConstantBuffer<GPUCullingUniforms> gpuCullingUniforms;
 
 bool isInsideFrustum(float3 center, float radius)
@@ -141,6 +144,10 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if(objectIndex == 0)
     {
         cullStats[0].totalCount = objectCount;
+        drawCounts[0].opaqueCount = 0u;
+        drawCounts[0].alphaTestCount = 0u;
+        drawCounts[0].transparentCount = 0u;
+        drawCounts[0].totalCount = 0u;
     }
 
     const GPUCullObject objectData = gpuCullObjects[objectIndex];
@@ -186,14 +193,26 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     command.instanceCount = 1u;
     InterlockedAdd(cullStats[0].visibleCount, 1u);
+    uint compactIndex = 0u;
     if(isTransparent)
     {
         InterlockedAdd(cullStats[0].transparentVisibleCount, 1u);
+        InterlockedAdd(drawCounts[0].transparentCount, 1u, compactIndex);
+        compactIndex += objectCount * 3u;
+    }
+    else if((objectData.flags & LGPUCullFlagAlphaMask) != 0u)
+    {
+        InterlockedAdd(drawCounts[0].alphaTestCount, 1u, compactIndex);
+        compactIndex += objectCount * 2u;
     }
     else
     {
         InterlockedAdd(cullStats[0].opaqueVisibleCount, 1u);
+        InterlockedAdd(drawCounts[0].opaqueCount, 1u, compactIndex);
+        compactIndex += objectCount;
     }
+    InterlockedAdd(drawCounts[0].totalCount, 1u);
     cullResults[objectIndex] = LGPUCullResultVisible;
     indirectCommands[objectIndex] = command;
+    indirectCommands[compactIndex] = command;
 }

@@ -112,6 +112,12 @@ public:
                            uint32_t firstIndex, int32_t vertexOffset,
                            uint32_t firstInstance) = 0;
   virtual void drawIndexedIndirect(uint64_t bufferHandle, uint64_t offset, uint32_t drawCount, uint32_t stride) = 0;
+  virtual void drawIndexedIndirectCount(uint64_t bufferHandle,
+                                        uint64_t offset,
+                                        uint64_t countBufferHandle,
+                                        uint64_t countBufferOffset,
+                                        uint32_t maxDrawCount,
+                                        uint32_t stride) = 0;
   virtual void dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)                       = 0;
 
   // Debug marker/event support for profiling tools (RenderDoc, PIX, etc.)

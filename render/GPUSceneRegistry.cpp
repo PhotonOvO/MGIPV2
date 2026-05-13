@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <span>
 
 namespace demo {
 
@@ -48,6 +49,39 @@ glm::vec4 packRow(const glm::mat4& matrix, int row)
   return glm::vec4(matrix[0][row], matrix[1][row], matrix[2][row], matrix[3][row]);
 }
 
+template <typename T>
+void copyRangesToGpu(VkCommandBuffer          cmd,
+                     utils::Buffer&           stagingBuffer,
+                     const std::vector<T>&    source,
+                     VkBuffer                 destinationBuffer,
+                     std::span<const GPUSceneRegistry::DirtyRange> ranges,
+                     VmaAllocator             allocator)
+{
+  for(const GPUSceneRegistry::DirtyRange& range : ranges)
+  {
+    const VkDeviceSize byteCount = sizeof(T) * static_cast<VkDeviceSize>(range.count);
+    std::memcpy(stagingBuffer.mapped,
+                source.data() + range.startIndex,
+                static_cast<size_t>(byteCount));
+    VK_CHECK(vmaFlushAllocation(allocator, stagingBuffer.allocation, 0, byteCount));
+
+    const VkBufferCopy2 copyRegion{
+        .sType     = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
+        .srcOffset = 0,
+        .dstOffset = sizeof(T) * static_cast<VkDeviceSize>(range.startIndex),
+        .size      = byteCount,
+    };
+    const VkCopyBufferInfo2 copyInfo{
+        .sType       = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
+        .srcBuffer   = stagingBuffer.buffer,
+        .dstBuffer   = destinationBuffer,
+        .regionCount = 1,
+        .pRegions    = &copyRegion,
+    };
+    vkCmdCopyBuffer2(cmd, &copyInfo);
+  }
+}
+
 }  // namespace
 
 void GPUSceneRegistry::init(VkDevice device, VmaAllocator allocator)
@@ -72,9 +106,11 @@ void GPUSceneRegistry::clear()
   m_slots.assign(1, ObjectSlot{});
   m_freeList.clear();
   m_denseSlotIds.clear();
+  m_dirtyDenseIndices.clear();
   m_gpuObjects.clear();
   m_cullObjects.clear();
   m_dirty = true;
+  m_requiresFullUpload = true;
 }
 
 uint32_t GPUSceneRegistry::registerObject(const GPUSceneRegistrationDesc& desc)
@@ -101,6 +137,7 @@ uint32_t GPUSceneRegistry::registerObject(const GPUSceneRegistrationDesc& desc)
   m_denseSlotIds.push_back(objectID);
   m_gpuObjects.push_back(slot.gpuObject);
   m_cullObjects.push_back(slot.cullObject);
+  markDirtyDenseIndex(slot.denseIndex);
   m_dirty = true;
   return objectID;
 }
@@ -127,6 +164,7 @@ void GPUSceneRegistry::removeObject(uint32_t objectID)
     const uint32_t movedObjectID = m_denseSlotIds[lastDenseIndex];
     m_denseSlotIds[denseIndex] = movedObjectID;
     m_slots[movedObjectID].denseIndex = denseIndex;
+    markDirtyDenseIndex(denseIndex);
   }
 
   m_gpuObjects.pop_back();
@@ -135,7 +173,7 @@ void GPUSceneRegistry::removeObject(uint32_t objectID)
 
   slot = {};
   m_freeList.push_back(objectID);
-  m_dirty = true;
+  m_dirty = !m_dirtyDenseIndices.empty() || m_requiresFullUpload;
 }
 
 void GPUSceneRegistry::updateTransform(uint32_t objectID, const glm::mat4& newTransform, const glm::vec4& newBoundsSphere)
@@ -154,6 +192,7 @@ void GPUSceneRegistry::updateTransform(uint32_t objectID, const glm::mat4& newTr
   slot.desc.transform = newTransform;
   slot.desc.boundsSphere = newBoundsSphere;
   rebuildPackedObject(objectID);
+  markDirtyDenseIndex(slot.denseIndex);
   m_dirty = true;
 }
 
@@ -168,48 +207,58 @@ void GPUSceneRegistry::syncToGpu(VkCommandBuffer cmd)
   if(objectCount == 0)
   {
     m_dirty = false;
+    m_requiresFullUpload = false;
+    m_dirtyDenseIndices.clear();
     return;
   }
 
   ensureCapacity(objectCount);
-
   const VkDeviceSize sceneBytes = sizeof(shaderio::GPUSceneObject) * static_cast<VkDeviceSize>(objectCount);
-  std::memcpy(m_updateBuffer.mapped, m_gpuObjects.data(), static_cast<size_t>(sceneBytes));
-  VK_CHECK(vmaFlushAllocation(m_allocator, m_updateBuffer.allocation, 0, sceneBytes));
-
-  const VkBufferCopy2 sceneCopy{
-      .sType     = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-      .srcOffset = 0,
-      .dstOffset = 0,
-      .size      = sceneBytes,
-  };
-  const VkCopyBufferInfo2 sceneCopyInfo{
-      .sType       = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer   = m_updateBuffer.buffer,
-      .dstBuffer   = m_objectBuffer.buffer,
-      .regionCount = 1,
-      .pRegions    = &sceneCopy,
-  };
-  vkCmdCopyBuffer2(cmd, &sceneCopyInfo);
-
   const VkDeviceSize cullBytes = sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(objectCount);
-  std::memcpy(m_updateBuffer.mapped, m_cullObjects.data(), static_cast<size_t>(cullBytes));
-  VK_CHECK(vmaFlushAllocation(m_allocator, m_updateBuffer.allocation, 0, cullBytes));
+  if(m_requiresFullUpload)
+  {
+    std::memcpy(m_updateBuffer.mapped, m_gpuObjects.data(), static_cast<size_t>(sceneBytes));
+    VK_CHECK(vmaFlushAllocation(m_allocator, m_updateBuffer.allocation, 0, sceneBytes));
 
-  const VkBufferCopy2 cullCopy{
-      .sType     = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-      .srcOffset = 0,
-      .dstOffset = 0,
-      .size      = cullBytes,
-  };
-  const VkCopyBufferInfo2 cullCopyInfo{
-      .sType       = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer   = m_updateBuffer.buffer,
-      .dstBuffer   = m_cullObjectBuffer.buffer,
-      .regionCount = 1,
-      .pRegions    = &cullCopy,
-  };
-  vkCmdCopyBuffer2(cmd, &cullCopyInfo);
+    const VkBufferCopy2 sceneCopy{
+        .sType     = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size      = sceneBytes,
+    };
+    const VkCopyBufferInfo2 sceneCopyInfo{
+        .sType       = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
+        .srcBuffer   = m_updateBuffer.buffer,
+        .dstBuffer   = m_objectBuffer.buffer,
+        .regionCount = 1,
+        .pRegions    = &sceneCopy,
+    };
+    vkCmdCopyBuffer2(cmd, &sceneCopyInfo);
+
+    std::memcpy(m_updateBuffer.mapped, m_cullObjects.data(), static_cast<size_t>(cullBytes));
+    VK_CHECK(vmaFlushAllocation(m_allocator, m_updateBuffer.allocation, 0, cullBytes));
+
+    const VkBufferCopy2 cullCopy{
+        .sType     = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size      = cullBytes,
+    };
+    const VkCopyBufferInfo2 cullCopyInfo{
+        .sType       = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
+        .srcBuffer   = m_updateBuffer.buffer,
+        .dstBuffer   = m_cullObjectBuffer.buffer,
+        .regionCount = 1,
+        .pRegions    = &cullCopy,
+    };
+    vkCmdCopyBuffer2(cmd, &cullCopyInfo);
+  }
+  else if(!m_dirtyDenseIndices.empty())
+  {
+    const std::vector<DirtyRange> dirtyRanges = buildDirtyRanges();
+    copyRangesToGpu(cmd, m_updateBuffer, m_gpuObjects, m_objectBuffer.buffer, dirtyRanges, m_allocator);
+    copyRangesToGpu(cmd, m_updateBuffer, m_cullObjects, m_cullObjectBuffer.buffer, dirtyRanges, m_allocator);
+  }
 
   const std::array<VkBufferMemoryBarrier2, 2> barriers{{
       VkBufferMemoryBarrier2{
@@ -241,6 +290,8 @@ void GPUSceneRegistry::syncToGpu(VkCommandBuffer cmd)
   vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 
   m_dirty = false;
+  m_requiresFullUpload = false;
+  m_dirtyDenseIndices.clear();
 }
 
 void GPUSceneRegistry::ensureCapacity(uint32_t requiredCount)
@@ -269,11 +320,64 @@ void GPUSceneRegistry::ensureCapacity(uint32_t requiredCount)
                                     0);
   m_updateBuffer = createBuffer(m_device,
                                 m_allocator,
-                                sizeof(shaderio::GPUSceneObject) * static_cast<VkDeviceSize>(newCapacity),
+                                std::max(sizeof(shaderio::GPUSceneObject), sizeof(shaderio::GPUCullObject))
+                                    * static_cast<VkDeviceSize>(newCapacity),
                                 VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
                                 VMA_MEMORY_USAGE_CPU_TO_GPU,
                                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   m_capacity = newCapacity;
+  m_requiresFullUpload = true;
+}
+
+void GPUSceneRegistry::markDirtyDenseIndex(uint32_t denseIndex)
+{
+  if(denseIndex >= m_gpuObjects.size())
+  {
+    return;
+  }
+
+  if(std::find(m_dirtyDenseIndices.begin(), m_dirtyDenseIndices.end(), denseIndex) == m_dirtyDenseIndices.end())
+  {
+    m_dirtyDenseIndices.push_back(denseIndex);
+  }
+}
+
+std::vector<GPUSceneRegistry::DirtyRange> GPUSceneRegistry::buildDirtyRanges() const
+{
+  if(m_dirtyDenseIndices.empty())
+  {
+    return {};
+  }
+
+  std::vector<uint32_t> indices = m_dirtyDenseIndices;
+  std::sort(indices.begin(), indices.end());
+
+  std::vector<DirtyRange> ranges;
+  ranges.reserve(indices.size());
+  uint32_t rangeStart = indices.front();
+  uint32_t previous = indices.front();
+  for(size_t i = 1; i < indices.size(); ++i)
+  {
+    const uint32_t current = indices[i];
+    if(current == previous + 1u)
+    {
+      previous = current;
+      continue;
+    }
+
+    ranges.push_back(DirtyRange{
+        .startIndex = rangeStart,
+        .count = previous - rangeStart + 1u,
+    });
+    rangeStart = current;
+    previous = current;
+  }
+
+  ranges.push_back(DirtyRange{
+      .startIndex = rangeStart,
+      .count = previous - rangeStart + 1u,
+  });
+  return ranges;
 }
 
 void GPUSceneRegistry::rebuildPackedObject(uint32_t objectID)
