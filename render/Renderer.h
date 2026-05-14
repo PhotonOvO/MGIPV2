@@ -314,7 +314,7 @@ public:
   [[nodiscard]] uint32_t getGPUCullingObjectCount(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const;
   [[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const;
-  [[nodiscard]] uint64_t getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex,
                                                           const GltfUploadResult* gltfModel) const;
   [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
@@ -370,14 +370,13 @@ public:
   BindGroupHandle getDepthMDIDrawBindGroup(uint32_t frameIndex) const;
   BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const;
   [[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const;
+  void ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount);
   void uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadGBufferMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadDepthMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
-  void uploadGPUDrivenBootstrapCommands(uint32_t frameIndex, std::span<const shaderio::GPUCullIndirectCommand> commands);
-  void uploadForwardMDICommands(uint32_t frameIndex, std::span<const shaderio::GPUCullIndirectCommand> commands);
 
   // BindGroup creation (new RHI interface)
   rhi::BindGroupLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
@@ -609,14 +608,12 @@ private:
       utils::Buffer      mdiDrawDataBuffer{};
       utils::Buffer      gbufferMdiDrawDataBuffer{};
       utils::Buffer      depthMdiDrawDataBuffer{};
-      utils::Buffer      gpuDrivenBootstrapIndirectBuffer{};
-      utils::Buffer      forwardMdiIndirectBuffer{};
+      utils::Buffer      gpuDrivenPersistentIndirectStreamBuffer{};
       uint32_t           shadowCullingMeshCapacity{0};
       uint32_t           mdiDrawCapacity{0};
       uint32_t           gbufferMdiDrawCapacity{0};
       uint32_t           depthMdiDrawCapacity{0};
-      uint32_t           gpuDrivenBootstrapIndirectCapacity{0};
-      uint32_t           forwardMdiIndirectCapacity{0};
+      uint32_t           gpuDrivenPersistentIndirectStreamCapacity{0};
       std::vector<shaderio::ShadowCullObject> shadowCullingScratchObjects;
       std::vector<shaderio::DrawUniforms>     shadowCullingScratchDrawData;
       std::vector<VkCommandBuffer> pendingUploadCmds;
@@ -848,8 +845,8 @@ private:
   void                 ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
   void                 ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
   void                 ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
-  void                 ensureGPUDrivenBootstrapIndirectBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
-  void                 ensureForwardMdiIndirectBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
+  void                 ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
+                                                                     uint32_t requiredDrawCount);
   void                 updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 cacheGPUCullingStats(uint32_t frameIndex);
   void                 drawGPUInfoOverlay(const RenderParams& params) const;

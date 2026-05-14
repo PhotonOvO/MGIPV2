@@ -127,29 +127,29 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
     sortedCountBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
     sortedOpaqueCapacity = static_cast<uint32_t>(m_renderer->getOpaqueDrawIndices().size());
     sortedAlphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
-    const uint32_t totalSortedCapacity = sortedOpaqueCapacity + sortedAlphaCapacity;
+    const uint32_t transparentCapacity = static_cast<uint32_t>(m_renderer->getTransparentDrawIndices().size());
+    const uint32_t totalSortedCapacity = sortedOpaqueCapacity + sortedAlphaCapacity + transparentCapacity;
     if(sortedCountBufferHandle != 0 && totalSortedCapacity > 0u)
     {
-      std::vector<shaderio::GPUCullIndirectCommand> bootstrapCommands(totalSortedCapacity);
-      m_renderer->uploadGPUDrivenBootstrapCommands(context.frameIndex, bootstrapCommands);
-      const uint64_t bootstrapIndirectBufferHandle = m_renderer->getGPUDrivenBootstrapIndirectBuffer(context.frameIndex);
-      if(bootstrapIndirectBufferHandle != 0)
+      m_renderer->ensureGPUDrivenPersistentIndirectStream(context.frameIndex, totalSortedCapacity);
+      const uint64_t persistentIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(context.frameIndex);
+      if(persistentIndirectBufferHandle != 0)
       {
         const bool opaquePatched = sortedOpaqueCapacity == 0u
                                    || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
                                                                                     context.frameIndex,
-                                                                                    bootstrapIndirectBufferHandle,
+                                                                                    persistentIndirectBufferHandle,
                                                                                     0x00000000u,
                                                                                     0u);
         const bool alphaPatched = sortedAlphaCapacity == 0u
                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
                                                                                    context.frameIndex,
-                                                                                   bootstrapIndirectBufferHandle,
+                                                                                   persistentIndirectBufferHandle,
                                                                                    0x40000000u,
                                                                                    sortedOpaqueCapacity);
         if(opaquePatched && alphaPatched)
         {
-          sortedIndirectBufferHandle = bootstrapIndirectBufferHandle;
+          sortedIndirectBufferHandle = persistentIndirectBufferHandle;
           m_renderer->publishSortedBootstrapStateForFrame(context.frameIndex, sortedOpaqueCapacity, sortedAlphaCapacity);
         }
       }

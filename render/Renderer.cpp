@@ -185,6 +185,116 @@ struct DebugUnitLineSegment
   return totalSize;
 }
 
+[[nodiscard]] VkDeviceSize computeSelectedTextureUploadSize(const GltfModel& model,
+                                                            std::span<const uint32_t> textureIndices)
+{
+  VkDeviceSize totalSize = 0;
+  Ktx2Loader ktx2Loader;
+
+  for(const uint32_t textureIndex : textureIndices)
+  {
+    if(textureIndex >= model.images.size() || !isUploadableGltfImage(model.images[textureIndex]))
+    {
+      continue;
+    }
+
+    const GltfImageData& imageData = model.images[textureIndex];
+    const std::filesystem::path ktx2Path =
+        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
+
+    Ktx2Loader::Ktx2Texture ktxTexture;
+    const bool hasKtx2Sidecar =
+        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+
+    if(hasKtx2Sidecar)
+    {
+      totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
+                            static_cast<VkDeviceSize>(imageData.pixels.size()));
+      totalSize += 16;
+    }
+    else
+    {
+      totalSize += static_cast<VkDeviceSize>(imageData.pixels.size());
+      totalSize += 4;
+    }
+  }
+
+  return totalSize;
+}
+
+[[nodiscard]] VkDeviceSize computeSelectedMeshUploadSize(const GltfModel& model,
+                                                         std::span<const uint32_t> meshIndices)
+{
+  VkDeviceSize totalSize = 0;
+
+  for(const uint32_t meshIndex : meshIndices)
+  {
+    if(meshIndex >= model.meshes.size())
+    {
+      continue;
+    }
+
+    const auto& meshData = model.meshes[meshIndex];
+    if(meshData.positions.empty() || meshData.indices.empty())
+    {
+      continue;
+    }
+
+    const VkDeviceSize vertexCount = static_cast<VkDeviceSize>(meshData.positions.size() / 3);
+    totalSize += vertexCount * 48ull;
+    totalSize += static_cast<VkDeviceSize>(meshData.indices.size()) * sizeof(uint32_t);
+    totalSize += 8;
+  }
+
+  return totalSize;
+}
+
+struct TextureUploadDiagnostics
+{
+  uint32_t mipGenerationCount{0};
+  uint32_t maxWidth{0};
+  uint32_t maxHeight{0};
+};
+
+[[nodiscard]] TextureUploadDiagnostics gatherTextureUploadDiagnostics(const GltfModel& model,
+                                                                     std::span<const uint32_t> textureIndices)
+{
+  TextureUploadDiagnostics diagnostics{};
+  Ktx2Loader ktx2Loader;
+  const VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+  (void)physicalDevice;
+
+  for(const uint32_t textureIndex : textureIndices)
+  {
+    if(textureIndex >= model.images.size() || !isUploadableGltfImage(model.images[textureIndex]))
+    {
+      continue;
+    }
+
+    const GltfImageData& imageData = model.images[textureIndex];
+    diagnostics.maxWidth = std::max(diagnostics.maxWidth, static_cast<uint32_t>(imageData.width));
+    diagnostics.maxHeight = std::max(diagnostics.maxHeight, static_cast<uint32_t>(imageData.height));
+
+    const std::filesystem::path ktx2Path =
+        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
+    Ktx2Loader::Ktx2Texture ktxTexture;
+    const bool hasKtx2Sidecar =
+        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+
+    if(!hasKtx2Sidecar)
+    {
+      const uint32_t width = static_cast<uint32_t>(imageData.width);
+      const uint32_t height = static_cast<uint32_t>(imageData.height);
+      if(MipmapGenerator::calculateMipLevelCount(width, height) > 1u)
+      {
+        ++diagnostics.mipGenerationCount;
+      }
+    }
+  }
+
+  return diagnostics;
+}
+
 struct PendingMipGeneration
 {
   VkImage  image{VK_NULL_HANDLE};
@@ -1043,8 +1153,7 @@ void Renderer::shutdown(rhi::Surface& surface)
     destroyBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer);
     destroyBuffer(m_device.allocator, frameUserData.gbufferMdiDrawDataBuffer);
     destroyBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer);
-    destroyBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer);
-    destroyBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer);
+    destroyBuffer(m_device.allocator, frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
     frameUserData.transientAllocator.destroy();
   }
   m_perFrame.frameUserData.clear();
@@ -2285,55 +2394,29 @@ void Renderer::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& fr
   updateDepthMdiDrawDataDescriptorSet(frameIndex);
 }
 
-void Renderer::ensureForwardMdiIndirectBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+void Renderer::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
+                                                             uint32_t                          requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
-  if(frameUserData.forwardMdiIndirectCapacity >= requiredCapacity)
+  if(frameUserData.gpuDrivenPersistentIndirectStreamCapacity >= requiredCapacity)
   {
     return;
   }
 
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  if(frameUserData.forwardMdiIndirectBuffer.buffer != VK_NULL_HANDLE)
+  if(frameUserData.gpuDrivenPersistentIndirectStreamBuffer.buffer != VK_NULL_HANDLE)
   {
     waitForAllFrameSlots();
   }
 
-  destroyBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer);
-  frameUserData.forwardMdiIndirectBuffer =
+  destroyBuffer(m_device.allocator, frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
+  frameUserData.gpuDrivenPersistentIndirectStreamBuffer =
       createBuffer(device,
                    m_device.allocator,
                    sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
                    VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-                   VMA_MEMORY_USAGE_CPU_TO_GPU,
-                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-  frameUserData.forwardMdiIndirectCapacity = requiredCapacity;
-}
-
-void Renderer::ensureGPUDrivenBootstrapIndirectBuffer(PerFrameResources::FrameUserData& frameUserData,
-                                                      uint32_t                          requiredDrawCount)
-{
-  const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
-  if(frameUserData.gpuDrivenBootstrapIndirectCapacity >= requiredCapacity)
-  {
-    return;
-  }
-
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  if(frameUserData.gpuDrivenBootstrapIndirectBuffer.buffer != VK_NULL_HANDLE)
-  {
-    waitForAllFrameSlots();
-  }
-
-  destroyBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer);
-  frameUserData.gpuDrivenBootstrapIndirectBuffer =
-      createBuffer(device,
-                   m_device.allocator,
-                   sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
-                   VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-                   VMA_MEMORY_USAGE_CPU_TO_GPU,
-                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-  frameUserData.gpuDrivenBootstrapIndirectCapacity = requiredCapacity;
+                   VMA_MEMORY_USAGE_GPU_ONLY);
+  frameUserData.gpuDrivenPersistentIndirectStreamCapacity = requiredCapacity;
 }
 
 void Renderer::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
@@ -7207,7 +7290,47 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
   }
 
   BatchUploadContext batchUpload;
-  batchUpload.init(device, m_device.allocator, computeSelectedBatchUploadSize(model, textureIndices, meshIndices));
+  const VkDeviceSize estimatedTextureUploadBytes = computeSelectedTextureUploadSize(model, textureIndices);
+  const VkDeviceSize estimatedMeshUploadBytes = computeSelectedMeshUploadSize(model, meshIndices);
+  const VkDeviceSize estimatedBatchUploadBytes = estimatedTextureUploadBytes + estimatedMeshUploadBytes;
+  const TextureUploadDiagnostics textureDiagnostics = gatherTextureUploadDiagnostics(model, textureIndices);
+  LOGI("glTF upload batch: textures=%zu materials=%zu meshes=%zu textureBytes=%llu meshBytes=%llu totalBytes=%llu mipGenTextures=%u maxTexture=%ux%u",
+       textureIndices.size(),
+       materialIndices.size(),
+       meshIndices.size(),
+       static_cast<unsigned long long>(estimatedTextureUploadBytes),
+       static_cast<unsigned long long>(estimatedMeshUploadBytes),
+       static_cast<unsigned long long>(estimatedBatchUploadBytes),
+       textureDiagnostics.mipGenerationCount,
+       textureDiagnostics.maxWidth,
+       textureDiagnostics.maxHeight);
+  for(const uint32_t textureIndex : textureIndices)
+  {
+    if(textureIndex >= model.images.size())
+    {
+      continue;
+    }
+
+    const GltfImageData& imageData = model.images[textureIndex];
+    const std::filesystem::path ktx2Path =
+        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
+    Ktx2Loader::Ktx2Texture ktxTexture;
+    const bool hasKtx2Sidecar =
+        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const uint32_t width = hasKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
+    const uint32_t height = hasKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
+    const uint32_t mipLevels = hasKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
+                                              : MipmapGenerator::calculateMipLevelCount(width, height);
+    LOGI("  glTF texture[%u]: uri=%s size=%ux%u pixels=%zu ktx2=%d mipLevels=%u",
+         textureIndex,
+         imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+         width,
+         height,
+         imageData.pixels.size(),
+         hasKtx2Sidecar ? 1 : 0,
+         mipLevels);
+  }
+  batchUpload.init(device, m_device.allocator, estimatedBatchUploadBytes);
 
   VkDeviceSize selectedVertexBytes = 0;
   VkDeviceSize selectedIndexBytes = 0;
@@ -7833,13 +7956,13 @@ uint64_t Renderer::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFr
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer.buffer);
 }
 
-uint64_t Renderer::getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
+uint64_t Renderer::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
     return 0;
   }
-  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenBootstrapIndirectBuffer.buffer);
+  return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer.buffer);
 }
 
 uint32_t Renderer::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, const GltfUploadResult* gltfModel) const
@@ -7924,11 +8047,7 @@ BindGroupHandle Renderer::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint
 
 uint64_t Renderer::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
 {
-  if(frameIndex < m_perFrame.frameUserData.size())
-  {
-    return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].forwardMdiIndirectBuffer.buffer);
-  }
-  return 0;
+  return getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
 }
 
 void Renderer::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
@@ -8052,42 +8171,15 @@ void Renderer::uploadDepthMDIDrawDataRange(uint32_t frameIndex,
                               sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadGPUDrivenBootstrapCommands(uint32_t frameIndex,
-                                                std::span<const shaderio::GPUCullIndirectCommand> commands)
+void Renderer::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount)
 {
-  if(frameIndex >= m_perFrame.frameUserData.size() || commands.empty())
+  if(frameIndex >= m_perFrame.frameUserData.size())
   {
     return;
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  ensureGPUDrivenBootstrapIndirectBuffer(frameUserData, static_cast<uint32_t>(commands.size()));
-  if(frameUserData.gpuDrivenBootstrapIndirectBuffer.buffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuDrivenBootstrapIndirectBuffer, commands.data(),
-                         sizeof(shaderio::GPUCullIndirectCommand) * commands.size());
-}
-
-void Renderer::uploadForwardMDICommands(uint32_t frameIndex,
-                                        std::span<const shaderio::GPUCullIndirectCommand> commands)
-{
-  if(frameIndex >= m_perFrame.frameUserData.size() || commands.empty())
-  {
-    return;
-  }
-
-  PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  ensureForwardMdiIndirectBuffer(frameUserData, static_cast<uint32_t>(commands.size()));
-  if(frameUserData.forwardMdiIndirectBuffer.buffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  writeHostVisibleBuffer(m_device.allocator, frameUserData.forwardMdiIndirectBuffer, commands.data(),
-                         sizeof(shaderio::GPUCullIndirectCommand) * commands.size());
+  ensureGPUDrivenPersistentIndirectStreamBuffer(frameUserData, requiredDrawCount);
 }
 
 rhi::BindGroupHandle Renderer::getGlobalBindlessGroup() const

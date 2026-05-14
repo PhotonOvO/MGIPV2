@@ -135,7 +135,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   const bool previousBootstrapValid =
       m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity, previousAlphaCapacity);
   const uint64_t previousBootstrapIndirectBufferHandle = previousBootstrapValid
-                                                             ? m_renderer->getPreviousGPUDrivenBootstrapIndirectBuffer(context.frameIndex)
+                                                             ? m_renderer->getPreviousGPUDrivenPersistentIndirectStreamBuffer(context.frameIndex)
                                                              : 0;
   const uint64_t indirectBufferHandle = previousBootstrapIndirectBufferHandle != 0
                                             ? previousBootstrapIndirectBufferHandle

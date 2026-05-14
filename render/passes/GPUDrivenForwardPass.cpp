@@ -254,15 +254,17 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     return;
   }
 
-  std::vector<shaderio::GPUCullIndirectCommand> transparentBootstrap(transparentCapacity);
-  m_renderer->uploadForwardMDICommands(context.frameIndex, transparentBootstrap);
-  const uint64_t forwardIndirectBufferHandle = m_renderer->getForwardMDIIndirectBuffer(context.frameIndex);
+  const uint32_t opaqueCapacity = static_cast<uint32_t>(m_renderer->getOpaqueDrawIndices().size());
+  const uint32_t alphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
+  const uint32_t totalPersistentCapacity = opaqueCapacity + alphaCapacity + transparentCapacity;
+  m_renderer->ensureGPUDrivenPersistentIndirectStream(context.frameIndex, totalPersistentCapacity);
+  const uint64_t forwardIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(context.frameIndex);
   if(forwardIndirectBufferHandle == 0
      || !m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
-                                                       context.frameIndex,
-                                                       forwardIndirectBufferHandle,
-                                                       0x80000000u,
-                                                       0u))
+                                                        context.frameIndex,
+                                                        forwardIndirectBufferHandle,
+                                                        0x80000000u,
+                                                        opaqueCapacity + alphaCapacity))
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
@@ -322,11 +324,13 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     const uint64_t vertexBufferHandle = representativeMesh->vertexBufferHandle;
     const uint64_t indexBufferHandle = representativeMesh->indexBufferHandle;
     const uint64_t vertexOffset = 0;
+    const uint64_t transparentCommandOffset =
+        static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * m_renderer->getGPUCullingIndirectCommandStride();
     context.cmd->bindVertexBuffers(0, &vertexBufferHandle, &vertexOffset, 1);
     context.cmd->bindIndexBuffer(indexBufferHandle, 0, rhi::IndexFormat::uint32);
 
     context.cmd->drawIndexedIndirectCount(forwardIndirectBufferHandle,
-                                          0,
+                                          transparentCommandOffset,
                                           countBufferHandle,
                                           offsetof(shaderio::GPUCullDrawCounts, transparentCount),
                                           transparentCapacity,

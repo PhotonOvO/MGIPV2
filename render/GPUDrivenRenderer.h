@@ -250,13 +250,13 @@ public:
   {
     return m_renderer.getGPUCullingIndirectCommandStride();
   }
-  [[nodiscard]] uint64_t getGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
+  [[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
   {
-    return m_renderer.getGPUDrivenBootstrapIndirectBuffer(frameIndex);
+    return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
   }
-  [[nodiscard]] uint64_t getPreviousGPUDrivenBootstrapIndirectBuffer(uint32_t frameIndex) const
+  [[nodiscard]] uint64_t getPreviousGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
   {
-    return m_renderer.getGPUDrivenBootstrapIndirectBuffer(getPreviousFrameIndex(frameIndex));
+    return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(getPreviousFrameIndex(frameIndex));
   }
   [[nodiscard]] bool getPreviousSortedBootstrapState(uint32_t frameIndex,
                                                      uint32_t& outOpaqueCapacity,
@@ -316,14 +316,9 @@ public:
   {
     m_renderer.uploadGBufferMDIDrawData(frameIndex, drawData);
   }
-  void uploadGPUDrivenBootstrapCommands(uint32_t frameIndex,
-                                        std::span<const shaderio::GPUCullIndirectCommand> commands)
+  void ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount)
   {
-    m_renderer.uploadGPUDrivenBootstrapCommands(frameIndex, commands);
-  }
-  void uploadForwardMDICommands(uint32_t frameIndex, std::span<const shaderio::GPUCullIndirectCommand> commands)
-  {
-    m_renderer.uploadForwardMDICommands(frameIndex, commands);
+    m_renderer.ensureGPUDrivenPersistentIndirectStream(frameIndex, requiredDrawCount);
   }
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
