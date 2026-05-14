@@ -53,6 +53,10 @@ private:
   size_t                   m_nextMeshCursor{0};
   uint32_t                 m_firstBatchMeshBudget{24};
   uint32_t                 m_batchMeshBudget{64};
+  uint64_t                 m_firstBatchTextureBudgetBytes{32ull << 20};
+  uint64_t                 m_batchTextureBudgetBytes{64ull << 20};
+  uint64_t                 m_firstBatchMeshUploadBudgetBytes{16ull << 20};
+  uint64_t                 m_batchMeshUploadBudgetBytes{32ull << 20};
   LoadProgress             m_progress{};
 
   void refreshProgress();

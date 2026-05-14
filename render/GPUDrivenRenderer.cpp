@@ -253,6 +253,7 @@ void GPUDrivenRenderer::resize(rhi::Extent2D size)
 
 void GPUDrivenRenderer::render(const RenderParams& params)
 {
+  const bool sceneRenderingSuspended = m_suspendSceneRendering;
   m_hiZDepthPyramid.resize(getSceneExtent());
   flushPendingSceneUploads();
   refreshSceneView();
@@ -268,7 +269,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   m_runtimeStats.batchStats.sortPassCount = 0u;
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
-  if(kEnableShippingVisibilitySort)
+  if(kEnableShippingVisibilitySort && !sceneRenderingSuspended)
   {
     m_visibilitySortInputObjects.clear();
     m_visibilitySortInputKeys.clear();
@@ -346,8 +347,9 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
 
   RenderParams gpuParams = params;
-  gpuParams.gpuDrivenSceneView = m_sceneView.usePersistentCullingObjects ? &m_sceneView : nullptr;
-  if(gpuParams.gpuDrivenSceneView != nullptr)
+  gpuParams.gpuDrivenSceneView =
+      (!sceneRenderingSuspended && m_sceneView.usePersistentCullingObjects) ? &m_sceneView : nullptr;
+  if(sceneRenderingSuspended || gpuParams.gpuDrivenSceneView != nullptr)
   {
     gpuParams.gltfModel = nullptr;
   }
@@ -579,8 +581,15 @@ void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
   const uint32_t frameIndex = context.frameIndex;
   const bool hasShadowIndirectBuffer = getShadowCullingIndirectBufferOpaque(frameIndex) != 0;
   const bool hasDrawBindGroups = !getCSMShadowMDIDrawBindGroup(frameIndex, 0).isNull();
-  if(!hasShadowIndirectBuffer || !hasDrawBindGroups)
+  const uint32_t shadowIndirectCapacity = getShadowCullingMeshCapacity(frameIndex);
+  if(!hasShadowIndirectBuffer || !hasDrawBindGroups || shadowIndirectCapacity < m_sceneView.shadowPackedMeshCount)
   {
+    if(hasShadowIndirectBuffer && hasDrawBindGroups && shadowIndirectCapacity < m_sceneView.shadowPackedMeshCount)
+    {
+      LOGW("Skipping GPUDrivenCSMShadow: indirect capacity %u smaller than shadow mesh count %u",
+           shadowIndirectCapacity,
+           m_sceneView.shadowPackedMeshCount);
+    }
     context.cmd->endEvent();
     return;
   }

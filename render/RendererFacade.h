@@ -24,6 +24,8 @@ public:
   [[nodiscard]] uint32_t getSwapchainImageCount() const;
   void resize(rhi::Extent2D size);
   void render(const RenderParams& params);
+  void setSceneRenderingSuspended(bool suspended);
+  [[nodiscard]] bool isSceneRenderingSuspended() const;
 
   [[nodiscard]] TextureHandle  getViewportTextureHandle() const;
   [[nodiscard]] ImTextureID    getViewportTextureID(TextureHandle handle) const;

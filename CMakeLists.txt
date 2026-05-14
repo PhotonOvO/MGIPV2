@@ -428,27 +428,48 @@ add_executable(texture_converter
   tools/texture_converter.cpp
 )
 
-find_package(KtxCli REQUIRED)
-file(TO_NATIVE_PATH "${KtxCli_EXECUTABLE}" KTXCLI_EXECUTABLE_NATIVE)
+set(NVTT_ROOT "C:/Program Files/NVIDIA Corporation/NVIDIA Texture Tools" CACHE PATH "Path to the NVIDIA Texture Tools install root")
+set(NVTT_INCLUDE_DIR "${NVTT_ROOT}/include")
+set(NVTT_LIBRARY "${NVTT_ROOT}/lib/x64-v142/nvtt30205.lib")
+set(NVTT_DLL "${NVTT_ROOT}/nvtt30205.dll")
+
+if(NOT EXISTS "${NVTT_INCLUDE_DIR}/nvtt/nvtt.h")
+  message(FATAL_ERROR "NVTT headers were not found under ${NVTT_INCLUDE_DIR}")
+endif()
+if(NOT EXISTS "${NVTT_LIBRARY}")
+  message(FATAL_ERROR "NVTT import library was not found at ${NVTT_LIBRARY}")
+endif()
+if(NOT EXISTS "${NVTT_DLL}")
+  message(FATAL_ERROR "NVTT runtime DLL was not found at ${NVTT_DLL}")
+endif()
+
+target_compile_definitions(texture_converter PRIVATE NVTT_SHARED=1)
+target_include_directories(texture_converter PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${volk_SOURCE_DIR}
+  ${NVTT_INCLUDE_DIR}
+)
+target_link_libraries(texture_converter PRIVATE "${NVTT_LIBRARY}")
+
+add_custom_command(TARGET texture_converter POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${NVTT_DLL}"
+          "$<TARGET_FILE_DIR:texture_converter>/nvtt30205.dll"
+)
+
 set(COMPRESS_TEXTURES_SCRIPT_TEMPLATE [=[@echo off
 setlocal
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-set "KTX_CLI=%~1"
-if "%KTX_CLI%"=="" set "KTX_CLI=@KTXCLI_EXECUTABLE_NATIVE@"
 set "CONVERTER=%SCRIPT_DIR%\..\texture_converter.exe"
 if not exist "%CONVERTER%" (
   echo texture_converter.exe was not found next to the Demo executable.
   exit /b 1
 )
-if not exist "%KTX_CLI%" (
-  echo KTX CLI was not found: "%KTX_CLI%"
-  exit /b 1
-)
-echo Using KTX CLI: %KTX_CLI%
-"%CONVERTER%" "%SCRIPT_DIR%" "%SCRIPT_DIR%" "%KTX_CLI%"
+"%CONVERTER%" "%SCRIPT_DIR%" "%SCRIPT_DIR%"
 ]=])
 string(CONFIGURE "${COMPRESS_TEXTURES_SCRIPT_TEMPLATE}" COMPRESS_TEXTURES_SCRIPT @ONLY)
+set(COMPRESS_RESOURCES_BC7_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/compress_resources_bc7_ktx2.cmd")
 
 #====================================================================================
 # RESOURCE PREP - Copy resources and generate a manual texture conversion script
@@ -467,6 +488,9 @@ add_custom_target(copy_demo_resources
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_CURRENT_BINARY_DIR}/compress_textures_$<CONFIG>.cmd"
           "${DEMO_RESOURCES_OUTPUT_DIR}/compress_textures.cmd"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${COMPRESS_RESOURCES_BC7_SCRIPT_SOURCE}"
+          "$<TARGET_FILE_DIR:Demo>/compress_resources_bc7_ktx2.cmd"
   COMMENT "Copying resources to build directory..."
 )
 

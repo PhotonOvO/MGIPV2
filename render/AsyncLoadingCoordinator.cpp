@@ -63,6 +63,22 @@ void appendTextureIndex(std::vector<uint32_t>& indices, uint32_t textureIndex, s
   indices.push_back(textureIndex);
 }
 
+uint64_t estimateTextureUploadBytes(const GltfModel& model, uint32_t textureIndex)
+{
+  if(textureIndex >= model.images.size())
+  {
+    return 0;
+  }
+
+  return static_cast<uint64_t>(model.images[textureIndex].pixels.size());
+}
+
+uint64_t estimateMeshUploadBytes(const GltfMeshData& mesh)
+{
+  const uint64_t vertexCount = static_cast<uint64_t>(mesh.positions.size() / 3u);
+  return vertexCount * 48ull + static_cast<uint64_t>(mesh.indices.size()) * sizeof(uint32_t);
+}
+
 }  // namespace
 
 void AsyncLoadingCoordinator::begin(const GltfModel& model,
@@ -74,6 +90,10 @@ void AsyncLoadingCoordinator::begin(const GltfModel& model,
   m_nextMeshCursor       = 0;
   m_firstBatchMeshBudget = std::max(firstBatchMeshBudget, 1u);
   m_batchMeshBudget      = std::max(batchMeshBudget, 1u);
+  m_firstBatchTextureBudgetBytes = 32ull << 20;
+  m_batchTextureBudgetBytes = 64ull << 20;
+  m_firstBatchMeshUploadBudgetBytes = 16ull << 20;
+  m_batchMeshUploadBudgetBytes = 32ull << 20;
   m_sortedMeshIndices.clear();
 
   m_queuedTextures.assign(model.images.size(), false);
@@ -137,7 +157,13 @@ AsyncLoadingCoordinator::UploadBatch AsyncLoadingCoordinator::takeNextBatch()
   }
 
   const uint32_t meshBudget = m_progress.meshesLoaded == 0 ? m_firstBatchMeshBudget : m_batchMeshBudget;
+  const uint64_t textureBudgetBytes =
+      m_progress.meshesLoaded == 0 ? m_firstBatchTextureBudgetBytes : m_batchTextureBudgetBytes;
+  const uint64_t meshUploadBudgetBytes =
+      m_progress.meshesLoaded == 0 ? m_firstBatchMeshUploadBudgetBytes : m_batchMeshUploadBudgetBytes;
   batch.criticalBatch = (m_progress.meshesLoaded == 0);
+  uint64_t batchTextureBytes = 0;
+  uint64_t batchMeshBytes = 0;
 
   while(m_nextMeshCursor < m_sortedMeshIndices.size() && batch.meshIndices.size() < meshBudget)
   {
@@ -147,56 +173,73 @@ AsyncLoadingCoordinator::UploadBatch AsyncLoadingCoordinator::takeNextBatch()
       continue;
     }
 
-    m_queuedMeshes[meshIndex] = true;
-    batch.meshIndices.push_back(meshIndex);
-
-    const int materialIndex = m_model->meshes[meshIndex].materialIndex;
+    const GltfMeshData& mesh = m_model->meshes[meshIndex];
+    std::vector<uint32_t> candidateTextures;
+    uint64_t candidateTextureBytes = 0;
+    uint64_t candidateMeshBytes = estimateMeshUploadBytes(mesh);
+    const int materialIndex = mesh.materialIndex;
     if(materialIndex >= 0 && materialIndex < static_cast<int>(m_model->materials.size()))
     {
       const uint32_t materialSlot = static_cast<uint32_t>(materialIndex);
+      const GltfMaterialData& material = m_model->materials[materialSlot];
+      auto stageTexture = [&](int textureIndex) {
+        if(textureIndex < 0)
+        {
+          return;
+        }
+
+        const uint32_t textureSlot = static_cast<uint32_t>(textureIndex);
+        if(textureSlot >= m_queuedTextures.size() || m_queuedTextures[textureSlot] || m_uploadedTextures[textureSlot])
+        {
+          return;
+        }
+
+        if(std::find(candidateTextures.begin(), candidateTextures.end(), textureSlot) != candidateTextures.end())
+        {
+          return;
+        }
+
+        candidateTextures.push_back(textureSlot);
+        candidateTextureBytes += estimateTextureUploadBytes(*m_model, textureSlot);
+      };
+
+      stageTexture(material.baseColorTexture);
+      stageTexture(material.normalTexture);
+      stageTexture(material.metallicRoughnessTexture);
+      stageTexture(material.occlusionTexture);
+      stageTexture(material.emissiveTexture);
+
+      const bool exceedsTextureBudget =
+          batchTextureBytes + candidateTextureBytes > textureBudgetBytes;
+      const bool exceedsMeshBudget =
+          batchMeshBytes + candidateMeshBytes > meshUploadBudgetBytes;
+      if((exceedsTextureBudget || exceedsMeshBudget) && !batch.meshIndices.empty())
+      {
+        --m_nextMeshCursor;
+        break;
+      }
+
       if(!m_queuedMaterials[materialSlot] && !m_uploadedMaterials[materialSlot])
       {
         m_queuedMaterials[materialSlot] = true;
         batch.materialIndices.push_back(materialSlot);
       }
 
-      const GltfMaterialData& material = m_model->materials[materialSlot];
-      if(material.baseColorTexture >= 0)
+      for(uint32_t textureSlot : candidateTextures)
       {
-        appendTextureIndex(batch.textureIndices,
-                           static_cast<uint32_t>(material.baseColorTexture),
-                           m_queuedTextures,
-                           m_uploadedTextures);
+        appendTextureIndex(batch.textureIndices, textureSlot, m_queuedTextures, m_uploadedTextures);
       }
-      if(material.normalTexture >= 0)
-      {
-        appendTextureIndex(batch.textureIndices,
-                           static_cast<uint32_t>(material.normalTexture),
-                           m_queuedTextures,
-                           m_uploadedTextures);
-      }
-      if(material.metallicRoughnessTexture >= 0)
-      {
-        appendTextureIndex(batch.textureIndices,
-                           static_cast<uint32_t>(material.metallicRoughnessTexture),
-                           m_queuedTextures,
-                           m_uploadedTextures);
-      }
-      if(material.occlusionTexture >= 0)
-      {
-        appendTextureIndex(batch.textureIndices,
-                           static_cast<uint32_t>(material.occlusionTexture),
-                           m_queuedTextures,
-                           m_uploadedTextures);
-      }
-      if(material.emissiveTexture >= 0)
-      {
-        appendTextureIndex(batch.textureIndices,
-                           static_cast<uint32_t>(material.emissiveTexture),
-                           m_queuedTextures,
-                           m_uploadedTextures);
-      }
+      batchTextureBytes += candidateTextureBytes;
     }
+    else if(batchMeshBytes + candidateMeshBytes > meshUploadBudgetBytes && !batch.meshIndices.empty())
+    {
+      --m_nextMeshCursor;
+      break;
+    }
+
+    m_queuedMeshes[meshIndex] = true;
+    batch.meshIndices.push_back(meshIndex);
+    batchMeshBytes += candidateMeshBytes;
   }
 
   batch.finalBatch = !hasPendingBatches();

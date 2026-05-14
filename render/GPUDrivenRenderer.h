@@ -63,6 +63,8 @@ public:
   [[nodiscard]] uint32_t getSwapchainImageCount() const { return m_renderer.getSwapchainImageCount(); }
   void resize(rhi::Extent2D size);
   void render(const RenderParams& params);
+  void setSceneRenderingSuspended(bool suspended) { m_suspendSceneRendering = suspended; }
+  [[nodiscard]] bool isSceneRenderingSuspended() const { return m_suspendSceneRendering; }
 
   TextureHandle  getViewportTextureHandle() const { return m_renderer.getViewportTextureHandle(); }
   ImTextureID    getViewportTextureID(TextureHandle handle) const { return m_renderer.getViewportTextureID(handle); }
@@ -228,6 +230,10 @@ public:
   [[nodiscard]] uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getShadowCullingIndirectBufferOpaque(frameIndex);
+  }
+  [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const
+  {
+    return m_renderer.getShadowCullingMeshCapacity(frameIndex);
   }
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
   {
@@ -445,6 +451,7 @@ private:
   std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
   uint64_t                           m_sceneTopologyVersion{1};
   bool                               m_enableExperimentalMeshletPath{false};
+  bool                               m_suspendSceneRendering{false};
   bool                               m_sceneUploadPending{false};
   bool                               m_persistentDrawDataDirty{false};
 };

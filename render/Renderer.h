@@ -308,6 +308,7 @@ public:
   uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
   uint64_t       getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const;
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
+  [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const;
   PipelineHandle getLightCullingPipelineHandle() const;
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const;

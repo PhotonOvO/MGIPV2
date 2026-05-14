@@ -128,6 +128,22 @@ struct DebugUnitLineSegment
   return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
 }
 
+[[nodiscard]] bool tryLoadKtx2Sidecar(const GltfModel&         model,
+                                      const GltfImageData&     imageData,
+                                      Ktx2Loader&              loader,
+                                      Ktx2Loader::Ktx2Texture& outTexture,
+                                      std::filesystem::path*   outPath = nullptr)
+{
+  const std::filesystem::path ktx2Path =
+      Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
+  if(outPath != nullptr)
+  {
+    *outPath = ktx2Path;
+  }
+
+  return !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && loader.load(ktx2Path, outTexture);
+}
+
 [[nodiscard]] VkDeviceSize computeSelectedBatchUploadSize(const GltfModel&              model,
                                                           std::span<const uint32_t>     textureIndices,
                                                           std::span<const uint32_t>     meshIndices)
@@ -143,12 +159,8 @@ struct DebugUnitLineSegment
     }
 
     const GltfImageData& imageData = model.images[textureIndex];
-    const std::filesystem::path ktx2Path =
-        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
-
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar =
-        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
 
     if(hasKtx2Sidecar)
     {
@@ -199,12 +211,8 @@ struct DebugUnitLineSegment
     }
 
     const GltfImageData& imageData = model.images[textureIndex];
-    const std::filesystem::path ktx2Path =
-        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
-
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar =
-        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
 
     if(hasKtx2Sidecar)
     {
@@ -275,11 +283,8 @@ struct TextureUploadDiagnostics
     diagnostics.maxWidth = std::max(diagnostics.maxWidth, static_cast<uint32_t>(imageData.width));
     diagnostics.maxHeight = std::max(diagnostics.maxHeight, static_cast<uint32_t>(imageData.height));
 
-    const std::filesystem::path ktx2Path =
-        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar =
-        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
 
     if(!hasKtx2Sidecar)
     {
@@ -1432,6 +1437,15 @@ uint64_t Renderer::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) con
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer.buffer);
+}
+
+uint32_t Renderer::getShadowCullingMeshCapacity(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return 0;
+  }
+  return m_perFrame.frameUserData[frameIndex].shadowCullingMeshCapacity;
 }
 
 PipelineHandle Renderer::getLightCullingPipelineHandle() const
@@ -6629,6 +6643,30 @@ void Renderer::syncMaterialBindGroup(uint32_t frameIndex)
     return;
   }
 
+  // Resolve a safe placeholder for invalid/stale descriptor slots so the GPU
+  // never samples a destroyed imageView after scene switches or partial uploads.
+  VkImageView placeholderImageView = VK_NULL_HANDLE;
+  VkImageLayout placeholderImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if(const MaterialResources::MaterialRecord* placeholderMaterial = tryGetMaterial(m_materials.sampleMaterials[0]))
+  {
+    if(const MaterialResources::TextureHotData* placeholderTexture = tryGetTextureHot(placeholderMaterial->sampledTexture))
+    {
+      placeholderImageView   = placeholderTexture->sampledImageView;
+      placeholderImageLayout = placeholderTexture->sampledImageLayout;
+    }
+  }
+
+  const VkSampler placeholderSampler = m_device.samplerPool.acquireSampler({
+      .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter    = VK_FILTER_LINEAR,
+      .minFilter    = VK_FILTER_LINEAR,
+      .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .maxLod       = VK_LOD_CLAMP_NONE,
+  });
+
   std::vector<rhi::BindTableWrite> writes;
   std::vector<rhi::DescriptorImageInfo> imageInfos;
   writes.reserve(m_materials.materialDescriptorImageInfos.size());
@@ -6638,6 +6676,25 @@ void Renderer::syncMaterialBindGroup(uint32_t frameIndex)
   {
     if(m_materials.materialDescriptorValid[index] == 0)
     {
+      // Overwrite stale descriptors with a safe placeholder instead of leaving
+      // dangling imageViews that can cause device loss when sampled.
+      if(placeholderImageView != VK_NULL_HANDLE)
+      {
+        imageInfos.push_back(rhi::DescriptorImageInfo{
+            .sampler     = reinterpret_cast<uint64_t>(placeholderSampler),
+            .imageView   = reinterpret_cast<uint64_t>(placeholderImageView),
+            .imageLayout = static_cast<uint32_t>(placeholderImageLayout),
+        });
+        writes.push_back(rhi::BindTableWrite{
+            .dstIndex        = kMaterialBindlessTexturesIndex,
+            .dstArrayElement = index,
+            .resourceType    = rhi::BindlessResourceType::sampledTexture,
+            .descriptorCount = 1,
+            .pImageInfo      = &imageInfos.back(),
+            .visibility      = rhi::ResourceVisibility::allGraphics,
+            .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
+        });
+      }
       continue;
     }
 
@@ -7304,6 +7361,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
        textureDiagnostics.mipGenerationCount,
        textureDiagnostics.maxWidth,
        textureDiagnostics.maxHeight);
+  Ktx2Loader batchKtx2Loader;
   for(const uint32_t textureIndex : textureIndices)
   {
     if(textureIndex >= model.images.size())
@@ -7312,11 +7370,8 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     }
 
     const GltfImageData& imageData = model.images[textureIndex];
-    const std::filesystem::path ktx2Path =
-        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar =
-        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, batchKtx2Loader, ktxTexture);
     const uint32_t width = hasKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
     const uint32_t height = hasKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
     const uint32_t mipLevels = hasKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
@@ -7364,11 +7419,8 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
 
     Ktx2Loader              ktx2Loader;
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const std::filesystem::path ktx2Path =
-        Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
-
-    const bool loadedKtx2Sidecar =
-        !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && ktx2Loader.load(ktx2Path, ktxTexture);
+    std::filesystem::path   ktx2Path;
+    const bool loadedKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
     const bool hasSupportedKtx2Sidecar =
         loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, ktxTexture.format);
     if(loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
@@ -7381,8 +7433,9 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     const VkFormat format = hasSupportedKtx2Sidecar ? ktxTexture.format : VK_FORMAT_R8G8B8A8_UNORM;
     const uint32_t width = hasSupportedKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
     const uint32_t height = hasSupportedKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
-    const uint32_t mipLevels = hasSupportedKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
-                                              : MipmapGenerator::calculateMipLevelCount(width, height);
+    const uint32_t requestedMipLevels =
+        hasSupportedKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u) : MipmapGenerator::calculateMipLevelCount(width, height);
+    const uint32_t mipLevels = hasSupportedKtx2Sidecar ? requestedMipLevels : 1u;
 
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if(!hasSupportedKtx2Sidecar && mipLevels > 1)
@@ -7431,15 +7484,15 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
               .imageExtent      = {width, height, 1},
           });
 
-      if(mipLevels > 1)
+      // Temporary validation path: keep raw glTF texture uploads at base mip only
+      // so we can isolate device-loss issues from the runtime mip-generation chain.
+      if(requestedMipLevels > 1)
       {
-        pendingMipGenerations.push_back(PendingMipGeneration{
-            .image = image.image,
-            .format = format,
-            .width = width,
-            .height = height,
-            .mipLevels = mipLevels,
-        });
+        LOGI("Skipping runtime mip generation for raw glTF texture: uri=%s size=%ux%u requestedMipLevels=%u",
+             imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+             width,
+             height,
+             requestedMipLevels);
       }
     }
 

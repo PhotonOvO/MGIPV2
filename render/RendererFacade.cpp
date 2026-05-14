@@ -105,6 +105,19 @@ void RendererFacade::render(const RenderParams& params)
   legacy().render(params);
 }
 
+void RendererFacade::setSceneRenderingSuspended(bool suspended)
+{
+  if(m_backend == RendererBackend::gpuDriven)
+  {
+    gpuDriven().setSceneRenderingSuspended(suspended);
+  }
+}
+
+bool RendererFacade::isSceneRenderingSuspended() const
+{
+  return m_backend == RendererBackend::gpuDriven ? gpuDriven().isSceneRenderingSuspended() : false;
+}
+
 TextureHandle RendererFacade::getViewportTextureHandle() const
 {
   return m_backend == RendererBackend::gpuDriven ? gpuDriven().getViewportTextureHandle() : legacy().getViewportTextureHandle();

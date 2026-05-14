@@ -391,7 +391,11 @@ public:
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
       };
 
-      m_renderer.render(frameParams);
+      const bool freezeRenderingForStreamingUpload = m_isLoading && m_renderer.isSceneRenderingSuspended();
+      if(!freezeRenderingForStreamingUpload)
+      {
+        m_renderer.render(frameParams);
+      }
 
       ImGui::EndFrame();
       if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
@@ -494,9 +498,16 @@ private:
   int m_selectedPreset = 0;
 
   // Async loading state
-  std::future<std::optional<demo::GltfModel>> m_loadFuture;
+  struct AsyncLoadResult
+  {
+    std::optional<demo::GltfModel> model;
+    std::string error;
+  };
+
+  std::future<AsyncLoadResult> m_loadFuture;
   std::optional<demo::AsyncLoadingCoordinator> m_asyncLoadingCoordinator;
   std::string m_pendingModelPath;
+  std::string m_lastLoadError;
   bool m_isLoading = false;
   float m_loadProgress = 0.0f;
   std::string m_loadStatus;
@@ -565,10 +576,12 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
   m_loadProgress = 0.0f;
   m_loadStatus = "Starting load...";
   m_pendingModelPath = path;
+  m_lastLoadError.clear();
   m_asyncLoadingCoordinator.reset();
 
   // Start async loading (only file parsing, no member access)
-  m_loadFuture = std::async(std::launch::async, [path]() -> std::optional<demo::GltfModel> {
+  m_loadFuture = std::async(std::launch::async, [path]() -> AsyncLoadResult {
+    AsyncLoadResult result;
     demo::SceneCacheSerializer cacheSerializer;
     demo::GltfLoader loader;
     demo::GltfModel model;
@@ -583,7 +596,8 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
         if(cacheSerializer.loadCache(cachePath, model))
         {
           LOGI("Loaded scene cache: %s", cachePath.string().c_str());
-          return model;
+          result.model = std::move(model);
+          return result;
         }
 
         LOGW("Ignoring invalid scene cache %s: %s",
@@ -595,7 +609,8 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
 
       if(!loader.load(path, model))
       {
-        return std::nullopt;
+        result.error = loader.getLastError();
+        return result;
       }
 
       if(!cacheSerializer.saveCache(cachePath, model, sourcePath))
@@ -603,17 +618,20 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
         LOGW("Failed to save scene cache %s: %s", cachePath.string().c_str(), cacheSerializer.getLastError().c_str());
       }
 
-      return model;
+      result.model = std::move(model);
+      return result;
     }
     catch(const std::bad_alloc&)
     {
       LOGE("Out of memory while loading scene: %s", path.c_str());
-      return std::nullopt;
+      result.error = "Out of memory while loading scene";
+      return result;
     }
     catch(const std::exception& e)
     {
       LOGE("Scene load failed with exception for %s: %s", path.c_str(), e.what());
-      return std::nullopt;
+      result.error = e.what();
+      return result;
     }
   });
 }
@@ -636,10 +654,10 @@ inline void MinimalLatestApp::updateAsyncLoading()
     auto status = m_loadFuture.wait_for(std::chrono::milliseconds(0));
     if(status == std::future_status::ready)
     {
-      std::optional<demo::GltfModel> result;
+      AsyncLoadResult loadResult;
       try
       {
-        result = m_loadFuture.get();
+        loadResult = m_loadFuture.get();
       }
       catch(const std::bad_alloc&)
       {
@@ -658,7 +676,8 @@ inline void MinimalLatestApp::updateAsyncLoading()
         return;
       }
 
-      if(result.has_value())
+      m_lastLoadError = std::move(loadResult.error);
+      if(loadResult.model.has_value())
       {
         try
         {
@@ -668,16 +687,17 @@ inline void MinimalLatestApp::updateAsyncLoading()
           m_renderer.waitForIdle();
           unloadModel();
 
-          m_sceneModel = std::move(*result);
+          m_sceneModel = std::move(*loadResult.model);
           m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
 
           m_currentModel.emplace();
           m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
           m_asyncLoadingCoordinator.emplace();
           m_asyncLoadingCoordinator->begin(*m_sceneModel, m_camera.getPosition(), 24, 96);
+          m_renderer.setSceneRenderingSuspended(true);
 
           m_modelPath = m_pendingModelPath;
-          m_modelLoaded = true;
+          m_modelLoaded = false;
 
           LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
                m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
@@ -700,7 +720,9 @@ inline void MinimalLatestApp::updateAsyncLoading()
         m_loadStatus = "Failed to load model";
         m_loadProgress = 0.0f;
         m_isLoading = false;
-        LOGE("Failed to load model: %s", m_pendingModelPath.c_str());
+        LOGE("Failed to load model: %s (%s)",
+             m_pendingModelPath.c_str(),
+             m_lastLoadError.empty() ? "unknown error" : m_lastLoadError.c_str());
         return;
       }
     }
@@ -714,6 +736,12 @@ inline void MinimalLatestApp::updateAsyncLoading()
       demo::AsyncLoadingCoordinator::UploadBatch batch = m_asyncLoadingCoordinator->takeNextBatch();
       if(!batch.meshIndices.empty() || !batch.materialIndices.empty() || !batch.textureIndices.empty())
       {
+        LOGI("Scene upload batch: critical=%d final=%d textures=%zu materials=%zu meshes=%zu",
+             batch.criticalBatch ? 1 : 0,
+             batch.finalBatch ? 1 : 0,
+             batch.textureIndices.size(),
+             batch.materialIndices.size(),
+             batch.meshIndices.size());
         m_loadStatus = batch.criticalBatch ? "Uploading critical scene assets..." : "Streaming remaining scene assets...";
         m_renderer.executeUploadCommand([this, batch](VkCommandBuffer cmd) {
           m_renderer.uploadGltfModelBatch(*m_sceneModel,
@@ -731,8 +759,12 @@ inline void MinimalLatestApp::updateAsyncLoading()
     m_loadProgress = 0.35f + progress.progressPercent * 0.65f;
     if(progress.isComplete)
     {
+      m_loadStatus = "Finalizing uploads...";
+      m_renderer.waitForIdle();
       m_loadProgress = 1.0f;
       m_loadStatus = "Done!";
+      m_modelLoaded = true;
+      m_renderer.setSceneRenderingSuspended(false);
       m_isLoading = false;
     }
   }
@@ -741,7 +773,8 @@ inline void MinimalLatestApp::updateAsyncLoading()
 inline void MinimalLatestApp::unloadModel()
 {
   m_asyncLoadingCoordinator.reset();
-  if(m_modelLoaded && m_currentModel.has_value())
+  m_renderer.setSceneRenderingSuspended(false);
+  if(m_currentModel.has_value())
   {
     m_renderer.waitForIdle();
     m_renderer.destroyGltfResources(*m_currentModel);

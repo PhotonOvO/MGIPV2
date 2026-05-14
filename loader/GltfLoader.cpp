@@ -27,7 +27,9 @@ constexpr size_t kMaxReasonableImages = 1u << 14;
 constexpr size_t kMaxReasonableImageDimension = 1u << 14;
 constexpr size_t kMaxReasonableImageBytes = 1u << 28;
 constexpr size_t kMaxReasonableAccessorElements = 1u << 24;
-constexpr uint64_t kMaxReasonableModelPayloadBytes = 512ull << 20;
+// Bistro-scale scenes legitimately exceed a 512 MiB decoded payload once
+// textures are expanded to RGBA8, so keep a higher but still explicit cap.
+constexpr uint64_t kMaxReasonableModelPayloadBytes = 4ull << 30;
 
 bool hasReasonableModelShape(const tinygltf::Model& model)
 {
@@ -229,8 +231,13 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
         }
     }
 
-    if(estimateModelPayloadBytes(outModel) > kMaxReasonableModelPayloadBytes) {
-        m_lastError = "glTF payload exceeds safe memory budget";
+    const uint64_t estimatedPayloadBytes = estimateModelPayloadBytes(outModel);
+    if(estimatedPayloadBytes > kMaxReasonableModelPayloadBytes) {
+        m_lastError = "glTF payload exceeds safe memory budget (estimated "
+                    + std::to_string(estimatedPayloadBytes)
+                    + " bytes, limit "
+                    + std::to_string(kMaxReasonableModelPayloadBytes)
+                    + " bytes)";
         return false;
     }
 
