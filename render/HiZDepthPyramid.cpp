@@ -188,6 +188,7 @@ void HiZDepthPyramid::shutdown()
   m_lastBoundBinding = 0;
   m_generationCount = 0;
   m_valid = false;
+  m_layoutInitialized = false;
   m_frameCount = 0;
   m_mipCount = 0;
   m_size = {};
@@ -257,9 +258,37 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
   std::memcpy(frameResources.uniformBuffer.mapped, &uniforms, sizeof(uniforms));
   VK_CHECK(vmaFlushAllocation(m_allocator, frameResources.uniformBuffer.allocation, 0, sizeof(uniforms)));
 
+  if(!m_layoutInitialized)
+  {
+    const VkImageMemoryBarrier2 initPyramidBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = m_image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = m_mipCount,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    const VkDependencyInfo initPyramidDependency{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &initPyramidBarrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &initPyramidDependency);
+    m_layoutInitialized = true;
+  }
+
   const VkImageMemoryBarrier2 sourceBarrier{
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+      .srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
       .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
@@ -286,6 +315,30 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &frameResources.descriptorSet, 0, nullptr);
   vkCmdDispatch(cmd, (m_size.width + 7u) / 8u, (m_size.height + 7u) / 8u, 1u);
 
+  const VkImageMemoryBarrier2 pyramidBarrier{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .image = m_image,
+      .subresourceRange = {
+          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+          .baseMipLevel = 0,
+          .levelCount = std::min<uint32_t>(m_mipCount, shaderio::LDepthPyramidMaxMips),
+          .baseArrayLayer = 0,
+          .layerCount = 1,
+      },
+  };
+  const VkDependencyInfo pyramidDependency{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers = &pyramidBarrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &pyramidDependency);
+
   ++m_generationCount;
 }
 
@@ -293,6 +346,31 @@ void HiZDepthPyramid::bindForCulling(VkDescriptorSet set, uint32_t binding)
 {
   m_lastBoundSet = set;
   m_lastBoundBinding = binding;
+  if(m_device == VK_NULL_HANDLE || set == VK_NULL_HANDLE || m_mipViews.empty())
+  {
+    return;
+  }
+
+  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
+  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
+  {
+    pyramidMipInfos[i] = VkDescriptorImageInfo{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))],
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+  }
+
+  const VkWriteDescriptorSet write{
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = binding,
+      .dstArrayElement = 0,
+      .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
+      .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+      .pImageInfo = pyramidMipInfos.data(),
+  };
+  vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
 VkImageView HiZDepthPyramid::getMipView(uint32_t mipLevel) const
@@ -437,6 +515,7 @@ void HiZDepthPyramid::destroyImageResources()
     m_image = VK_NULL_HANDLE;
     m_imageAllocation = nullptr;
   }
+  m_layoutInitialized = false;
 }
 
 }  // namespace demo

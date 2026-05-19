@@ -107,6 +107,15 @@ public:
   [[nodiscard]] CSMShadowResources& getCSMShadowResources() { return m_renderer.getCSMShadowResources(); }
   [[nodiscard]] uint32_t             getPersistentObjectCount() const { return m_sceneView.objectCount; }
   [[nodiscard]] bool                 isExperimentalMeshletPathEnabled() const { return m_enableExperimentalMeshletPath; }
+  [[nodiscard]] bool                 isMeshletRenderingActive() const
+  {
+    return m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
+           && m_meshletBuffer.getMeshletIndexBufferHandle() != 0;
+  }
+  [[nodiscard]] uint64_t             getMeshletIndexBufferHandle() const
+  {
+    return m_meshletBuffer.getMeshletIndexBufferHandle();
+  }
   [[nodiscard]] bool                 tryGetMeshDrawIndex(MeshHandle handle, uint32_t& outDrawIndex) const;
   [[nodiscard]] bool                 tryGetMeshHandleForDrawIndex(uint32_t drawIndex, MeshHandle& outHandle) const;
   [[nodiscard]] std::span<const uint32_t> getOpaqueDrawIndices() const { return m_opaqueDrawIndices; }
@@ -413,6 +422,7 @@ private:
   GPUMeshletBuffer                   m_meshletBuffer;
   std::vector<shaderio::Meshlet>     m_meshletDataCpu;
   std::vector<uint32_t>              m_meshletIndicesCpu;
+  std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
   std::vector<uint32_t>              m_visibilitySortInputObjects;
   std::vector<uint32_t>              m_visibilitySortInputKeys;
   std::vector<shaderio::DrawUniforms> m_persistentDrawData;

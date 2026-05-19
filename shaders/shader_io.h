@@ -332,6 +332,7 @@ struct GPUCullingUniforms
   vec4 cameraUp;
   vec4 screenSizeAndPyramidSize;  // xy = screen size, zw = depth pyramid size
   vec4 cullingInfo;               // x = object count, y = mip count, z = use occlusion, w = depth epsilon
+  vec4 cullingControls;           // x = enable frustum, y = enable occlusion
 };
 
 // Light parameters for PBR lighting pass (scene-level UBO)

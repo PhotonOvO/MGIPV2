@@ -53,7 +53,7 @@ void GPUMeshletBuffer::init(VkDevice device, VmaAllocator allocator)
 void GPUMeshletBuffer::deinit()
 {
   destroyBuffer(m_meshletDataBuffer);
-  destroyBuffer(m_meshletVertexBuffer);
+  destroyBuffer(m_meshletCullObjectBuffer);
   destroyBuffer(m_meshletIndexBuffer);
   m_meshletCount = 0;
   m_meshletIndexCount = 0;
@@ -66,7 +66,7 @@ void GPUMeshletBuffer::deinit()
 void GPUMeshletBuffer::clear()
 {
   destroyBuffer(m_meshletDataBuffer);
-  destroyBuffer(m_meshletVertexBuffer);
+  destroyBuffer(m_meshletCullObjectBuffer);
   destroyBuffer(m_meshletIndexBuffer);
   m_meshletCount = 0;
   m_meshletIndexCount = 0;
@@ -76,7 +76,8 @@ void GPUMeshletBuffer::clear()
 
 void GPUMeshletBuffer::uploadMeshlets(VkCommandBuffer cmd,
                                       const std::vector<shaderio::Meshlet>& meshlets,
-                                      const std::vector<uint32_t>& meshletIndices)
+                                      const std::vector<uint32_t>& meshletIndices,
+                                      const std::vector<shaderio::GPUCullObject>& meshletCullObjects)
 {
   (void)cmd;
   const uint32_t newMeshletCount = static_cast<uint32_t>(meshlets.size());
@@ -114,6 +115,21 @@ void GPUMeshletBuffer::uploadMeshlets(VkCommandBuffer cmd,
     VK_CHECK(vmaFlushAllocation(m_allocator, m_meshletDataBuffer.allocation, meshletOffsetBytes, meshletUploadBytes));
   }
 
+  if(!meshletCullObjects.empty())
+  {
+    const uint32_t cullObjectUploadCount = std::min(newMeshletCount, static_cast<uint32_t>(meshletCullObjects.size()));
+    const VkDeviceSize cullObjectOffsetBytes = 0;
+    const VkDeviceSize cullObjectUploadBytes =
+        sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(cullObjectUploadCount);
+    std::memcpy(static_cast<std::byte*>(m_meshletCullObjectBuffer.mapped),
+                meshletCullObjects.data(),
+                static_cast<size_t>(cullObjectUploadBytes));
+    VK_CHECK(vmaFlushAllocation(m_allocator,
+                                m_meshletCullObjectBuffer.allocation,
+                                cullObjectOffsetBytes,
+                                cullObjectUploadBytes));
+  }
+
   const uint32_t indexStart = rewriteAll ? 0u : std::min(previousIndexCount, newIndexCount);
   const uint32_t indexUploadCount = newIndexCount - indexStart;
   if(indexUploadCount > 0)
@@ -132,6 +148,7 @@ void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t 
   if(requiredMeshletCount > m_meshletCapacity)
   {
     destroyBuffer(m_meshletDataBuffer);
+    destroyBuffer(m_meshletCullObjectBuffer);
     m_meshletCapacity = std::max(requiredMeshletCount, std::max(64u, m_meshletCapacity * 2u));
     const VkDeviceSize meshletBytes = sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(m_meshletCapacity);
     m_meshletDataBuffer = createBuffer(m_device,
@@ -140,6 +157,14 @@ void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t 
                                        VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
                                        VMA_MEMORY_USAGE_CPU_TO_GPU,
                                        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+    const VkDeviceSize cullObjectBytes =
+        sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(m_meshletCapacity);
+    m_meshletCullObjectBuffer = createBuffer(m_device,
+                                             m_allocator,
+                                             cullObjectBytes,
+                                             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                                             VMA_MEMORY_USAGE_CPU_TO_GPU,
+                                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   }
 
   if(requiredIndexCount > 0 && requiredIndexCount > m_meshletIndexCapacity)
@@ -150,7 +175,7 @@ void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t 
     m_meshletIndexBuffer = createBuffer(m_device,
                                         m_allocator,
                                         indexBytes,
-                                        VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
+                                        VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
                                         VMA_MEMORY_USAGE_CPU_TO_GPU,
                                         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   }

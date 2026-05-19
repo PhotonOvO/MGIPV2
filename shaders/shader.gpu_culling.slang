@@ -48,17 +48,7 @@ uint selectMip(float2 pixelMin, float2 pixelMax, uint mipCount)
 
 float sampleHiZCenterClusterDepth(uint mipLevel, int2 centerCoord, int2 mipExtent)
 {
-    const int2 leftCoord = clamp(centerCoord + int2(-1, 0), int2(0, 0), mipExtent - int2(1, 1));
-    const int2 rightCoord = clamp(centerCoord + int2(1, 0), int2(0, 0), mipExtent - int2(1, 1));
-    const int2 upCoord = clamp(centerCoord + int2(0, -1), int2(0, 0), mipExtent - int2(1, 1));
-    const int2 downCoord = clamp(centerCoord + int2(0, 1), int2(0, 0), mipExtent - int2(1, 1));
-
-    float representativeDepth = depthPyramidTexture[mipLevel].Load(int3(centerCoord, 0));
-    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(leftCoord, 0)));
-    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(rightCoord, 0)));
-    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(upCoord, 0)));
-    representativeDepth = max(representativeDepth, depthPyramidTexture[mipLevel].Load(int3(downCoord, 0)));
-    return representativeDepth;
+    return depthPyramidTexture[mipLevel].Load(int3(centerCoord, 0));
 }
 
 bool isOccluded(float3 center, float radius)
@@ -127,7 +117,7 @@ bool isOccluded(float3 center, float radius)
 
     const float nearestDepth = saturate(nearestClip.z / nearestClip.w);
     const float depthEpsilon = gpuCullingUniforms.cullingInfo.w;
-    return nearestDepth > hizDepth + depthEpsilon;
+    return nearestDepth + depthEpsilon < hizDepth;
 }
 
 [numthreads(LGPUCullingThreadCount, 1, 1)]
@@ -144,10 +134,6 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if(objectIndex == 0)
     {
         cullStats[0].totalCount = objectCount;
-        drawCounts[0].opaqueCount = 0u;
-        drawCounts[0].alphaTestCount = 0u;
-        drawCounts[0].transparentCount = 0u;
-        drawCounts[0].totalCount = 0u;
     }
 
     const GPUCullObject objectData = gpuCullObjects[objectIndex];
@@ -171,8 +157,10 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 center = objectData.sphereCenterRadius.xyz;
     const float radius = max(objectData.sphereCenterRadius.w, 0.0);
 
-    const bool enableFrustumCulling = (objectData.flags & LGPUCullFlagFrustumCulling) != 0u;
-    const bool enableOcclusionCulling = (objectData.flags & LGPUCullFlagOcclusionCulling) != 0u;
+    const bool enableFrustumCulling = (objectData.flags & LGPUCullFlagFrustumCulling) != 0u
+                                      && gpuCullingUniforms.cullingControls.x > 0.5;
+    const bool enableOcclusionCulling = (objectData.flags & LGPUCullFlagOcclusionCulling) != 0u
+                                        && gpuCullingUniforms.cullingControls.y > 0.5;
 
     if(enableFrustumCulling && !isInsideFrustum(center, radius))
     {

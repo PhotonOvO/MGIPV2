@@ -322,7 +322,28 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   if(representativeMesh != nullptr)
   {
     const uint64_t vertexBufferHandle = representativeMesh->vertexBufferHandle;
-    const uint64_t indexBufferHandle = representativeMesh->indexBufferHandle;
+    const uint64_t indexBufferHandle = m_renderer->isMeshletRenderingActive()
+                                           ? m_renderer->getMeshletIndexBufferHandle()
+                                           : representativeMesh->indexBufferHandle;
+    if(indexBufferHandle == 0)
+    {
+      context.cmd->endRenderPass();
+      context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+          .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+          .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+          .aspect = rhi::TextureAspect::color,
+          .srcStage = rhi::PipelineStage::FragmentShader,
+          .dstStage = rhi::PipelineStage::FragmentShader,
+          .srcAccess = rhi::ResourceAccess::write,
+          .dstAccess = rhi::ResourceAccess::read,
+          .oldState = rhi::ResourceState::ColorAttachment,
+          .newState = rhi::ResourceState::General,
+          .isSwapchain = false,
+      });
+      restoreDepthForSampling();
+      context.cmd->endEvent();
+      return;
+    }
     const uint64_t vertexOffset = 0;
     const uint64_t transparentCommandOffset =
         static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * m_renderer->getGPUCullingIndirectCommandStride();

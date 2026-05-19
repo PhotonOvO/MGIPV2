@@ -38,9 +38,9 @@ float loadSourceDepthClamped(uint2 coord)
     return depthTexture.Load(int3(coord, 0));
 }
 
-float min4(float a, float b, float c, float d)
+float max4(float a, float b, float c, float d)
 {
-    return min(min(a, b), min(c, d));
+    return max(max(a, b), max(c, d));
 }
 
 [numthreads(kGroupSizeX, kGroupSizeY, 1)]
@@ -59,7 +59,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
     uint2 mip0Coord = groupId.xy * uint2(kGroupSizeX, kGroupSizeY) + localXY;
     uint2 mip0Size = getMipSize(0);
 
-    float v = 1.0;
+    float v = 0.0;
 
     if (mip0Coord.x < mip0Size.x && mip0Coord.y < mip0Size.y)
     {
@@ -71,7 +71,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
         float d2 = loadSourceDepthClamped(srcBase + uint2(0, 1));
         float d3 = loadSourceDepthClamped(srcBase + uint2(1, 1));
 
-        v = min4(d0, d1, d2, d3);
+        v = max4(d0, d1, d2, d3);
 
         if (mipCount > 0)
         {
@@ -92,7 +92,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip1Coord = groupId.xy * uint2(8, 8) + localXY;
             uint2 mip1Size = getMipSize(1);
 
-            float r = min4(
+            float r = max4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -119,7 +119,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip2Coord = groupId.xy * uint2(4, 4) + localXY;
             uint2 mip2Size = getMipSize(2);
 
-            float r = min4(
+            float r = max4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -146,7 +146,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip3Coord = groupId.xy * uint2(2, 2) + localXY;
             uint2 mip3Size = getMipSize(3);
 
-            float r = min4(
+            float r = max4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -173,7 +173,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip4Coord = groupId.xy;
             uint2 mip4Size = getMipSize(4);
 
-            float r = min4(
+            float r = max4(
                 gsMip[0][0],
                 gsMip[0][1],
                 gsMip[1][0],

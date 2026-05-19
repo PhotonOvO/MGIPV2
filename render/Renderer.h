@@ -78,6 +78,9 @@ struct DebugPassOptions
   bool  showLightCoarseCullingHeatmap{false};
   bool  showGPUCullingOverlay{true};
   bool  showPassGpuProfile{true};
+  bool  enableGPUFrustumCulling{true};
+  bool  enableGPUOcclusionCulling{true};
+  bool  enableGPUMeshletOcclusionCulling{false};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};

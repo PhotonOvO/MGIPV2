@@ -60,6 +60,7 @@ private:
   uint32_t        m_lastBoundBinding{0};
   uint64_t        m_generationCount{0};
   bool            m_valid{false};
+  bool            m_layoutInitialized{false};
 };
 
 }  // namespace demo

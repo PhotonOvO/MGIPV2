@@ -200,7 +200,15 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
       }
 
       const uint64_t sharedVertexHandle = representativeMesh->vertexBufferHandle;
-      const uint64_t sharedIndexHandle = representativeMesh->indexBufferHandle;
+      const uint64_t sharedIndexHandle = m_renderer->isMeshletRenderingActive()
+                                             ? m_renderer->getMeshletIndexBufferHandle()
+                                             : representativeMesh->indexBufferHandle;
+      if(sharedIndexHandle == 0)
+      {
+        context.cmd->endRenderPass();
+        context.cmd->endEvent();
+        return;
+      }
       const uint64_t vertexOffset = 0;
       context.cmd->bindVertexBuffers(0, &sharedVertexHandle, &vertexOffset, 1);
       context.cmd->bindIndexBuffer(sharedIndexHandle, 0, rhi::IndexFormat::uint32);

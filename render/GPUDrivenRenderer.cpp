@@ -10,7 +10,7 @@ namespace demo {
 
 namespace {
 
-constexpr bool kEnableExperimentalMeshletPath = false;
+constexpr bool kEnableExperimentalMeshletPath = true;
 constexpr bool kEnableShippingVisibilitySort = true;
 constexpr uint32_t kDebugCullSegmentCount = 24u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
@@ -32,6 +32,30 @@ uint32_t buildGPUDrivenFlags(const MeshRecord& mesh)
     flags |= shaderio::LGPUCullFlagAlphaMask;
   }
   return flags;
+}
+
+uint32_t buildMeshletGPUDrivenFlags(const MeshRecord& mesh)
+{
+  uint32_t flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagOcclusionCulling;
+  if(mesh.alphaMode == shaderio::LAlphaBlend)
+  {
+    flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
+  }
+  else if(mesh.alphaMode == shaderio::LAlphaMask)
+  {
+    flags |= shaderio::LGPUCullFlagAlphaMask;
+  }
+  return flags;
+}
+
+glm::vec4 transformBoundsSphere(const glm::mat4& transform, const glm::vec4& localSphere)
+{
+  const glm::vec3 worldCenter = glm::vec3(transform * glm::vec4(glm::vec3(localSphere), 1.0f));
+  const float scaleX = glm::length(glm::vec3(transform[0]));
+  const float scaleY = glm::length(glm::vec3(transform[1]));
+  const float scaleZ = glm::length(glm::vec3(transform[2]));
+  const float maxScale = std::max(scaleX, std::max(scaleY, scaleZ));
+  return glm::vec4(worldCenter, std::max(localSphere.w * maxScale, 0.0f));
 }
 
 utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
@@ -347,6 +371,10 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
 
   RenderParams gpuParams = params;
+  if(isMeshletRenderingActive())
+  {
+    gpuParams.debugOptions.enableGPUOcclusionCulling = params.debugOptions.enableGPUMeshletOcclusionCulling;
+  }
   gpuParams.gpuDrivenSceneView =
       (!sceneRenderingSuspended && m_sceneView.usePersistentCullingObjects) ? &m_sceneView : nullptr;
   if(sceneRenderingSuspended || gpuParams.gpuDrivenSceneView != nullptr)
@@ -356,7 +384,6 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   submitPassGraph(gpuParams);
   const VkDescriptorSet gpuCullingDescriptorSet =
       reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
-  m_hiZDepthPyramid.bindForCulling(gpuCullingDescriptorSet, 5);
   m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
   m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
   m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
@@ -392,6 +419,12 @@ void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandList& cmd, const Ren
                              sourceDepthImage,
                              sourceDepthView,
                              kPassSceneDepthHandle);
+  const VkDescriptorSet gpuCullingDescriptorSet =
+      reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
+  if(gpuCullingDescriptorSet != VK_NULL_HANDLE)
+  {
+    m_hiZDepthPyramid.bindForCulling(gpuCullingDescriptorSet, 5);
+  }
   m_passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
@@ -421,7 +454,9 @@ void GPUDrivenRenderer::executeGPUCullingPass(rhi::CommandList& cmd, const Rende
                                    : (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
   const VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(currentFrameIndex));
   const VkBuffer indirectBuffer = reinterpret_cast<VkBuffer>(getGPUCullingIndirectBufferOpaque(currentFrameIndex));
-  if(objectCount == 0u || descriptorSet == VK_NULL_HANDLE || indirectBuffer == VK_NULL_HANDLE)
+  const VkBuffer drawCountBuffer = reinterpret_cast<VkBuffer>(getGPUCullingDrawCountBufferOpaque(currentFrameIndex));
+  if(objectCount == 0u || descriptorSet == VK_NULL_HANDLE || indirectBuffer == VK_NULL_HANDLE
+     || drawCountBuffer == VK_NULL_HANDLE)
   {
     return;
   }
@@ -440,22 +475,36 @@ void GPUDrivenRenderer::executeGPUCullingPass(rhi::CommandList& cmd, const Rende
                           nullptr);
   vkCmdDispatch(vkCmd, (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount, 1u, 1u);
 
-  const VkBufferMemoryBarrier2 indirectBarrier{
-      .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-      .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .buffer              = indirectBuffer,
-      .offset              = 0,
-      .size                = VK_WHOLE_SIZE,
-  };
+  const std::array<VkBufferMemoryBarrier2, 2> indirectBarriers{{
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = indirectBuffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
+      VkBufferMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .buffer              = drawCountBuffer,
+          .offset              = 0,
+          .size                = VK_WHOLE_SIZE,
+      },
+  }};
   const VkDependencyInfo dependencyInfo{
       .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = 1,
-      .pBufferMemoryBarriers    = &indirectBarrier,
+      .bufferMemoryBarrierCount = static_cast<uint32_t>(indirectBarriers.size()),
+      .pBufferMemoryBarriers    = indirectBarriers.data(),
   };
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
@@ -1135,8 +1184,22 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
   m_sceneRegistry.updateTransform(it->second,
                                   transform,
                                   glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius));
+  if(m_enableExperimentalMeshletPath && !m_meshletCullObjectsCpu.empty())
+  {
+    for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
+    {
+      if(packMeshHandleKey(m_meshHandleByDrawIndex[drawIndex]) != packMeshHandleKey(handle)
+         || drawIndex >= m_meshletDataCpu.size() || drawIndex >= m_meshletCullObjectsCpu.size())
+      {
+        continue;
+      }
+      m_meshletCullObjectsCpu[drawIndex].sphereCenterRadius =
+          transformBoundsSphere(meshRecord->transform, m_meshletDataCpu[drawIndex].boundsSphere);
+      markPersistentDrawDirty(drawIndex);
+    }
+  }
   m_sceneUploadPending = true;
-  if(hasDrawIndex)
+  if(hasDrawIndex && !m_enableExperimentalMeshletPath)
   {
     markPersistentDrawDirty(drawIndex);
   }
@@ -1213,46 +1276,87 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
     desc.firstIndex = meshRecord->firstIndex;
     desc.vertexOffset = meshRecord->vertexOffset;
 
-    const uint32_t drawIndex = m_sceneRegistry.getObjectCount();
+    const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
     const uint32_t objectId = m_sceneRegistry.registerObject(desc);
     m_objectIdByMeshHandle[meshKey] = objectId;
-    m_drawIndexByMeshHandle[meshKey] = drawIndex;
-    if(drawIndex >= m_meshHandleByDrawIndex.size())
-    {
-      m_meshHandleByDrawIndex.resize(drawIndex + 1u, kNullMeshHandle);
-    }
-    m_meshHandleByDrawIndex[drawIndex] = meshHandle;
-    if(meshRecord->alphaMode == shaderio::LAlphaBlend)
-    {
-      m_transparentDrawIndices.push_back(drawIndex);
-    }
-    else if(meshRecord->alphaMode == shaderio::LAlphaMask)
-    {
-      m_alphaTestDrawIndices.push_back(drawIndex);
-    }
-    else
-    {
-      m_opaqueDrawIndices.push_back(drawIndex);
-    }
     appendedObjects = true;
 
     if(m_enableExperimentalMeshletPath)
     {
       MeshletConversionResult meshlets = MeshletConverter::convert(model.meshes[meshIndex]);
+      const uint32_t baseMeshletIndex = static_cast<uint32_t>(m_meshletDataCpu.size());
+      const uint32_t baseIndexOffset = static_cast<uint32_t>(m_meshletIndicesCpu.size());
+      const uint32_t flags = buildMeshletGPUDrivenFlags(*meshRecord);
       for(shaderio::Meshlet& meshlet : meshlets.meshlets)
       {
         meshlet.materialIndex = desc.materialIndex;
+        meshlet.indexOffset += baseIndexOffset;
       }
       if(!meshlets.meshlets.empty())
       {
+        m_drawIndexByMeshHandle.emplace(meshKey, baseMeshletIndex);
         m_meshletDataCpu.insert(m_meshletDataCpu.end(), meshlets.meshlets.begin(), meshlets.meshlets.end());
         appendedMeshlets = true;
+        if(m_meshHandleByDrawIndex.size() < m_meshletDataCpu.size())
+        {
+          m_meshHandleByDrawIndex.resize(m_meshletDataCpu.size(), kNullMeshHandle);
+        }
+        for(uint32_t localMeshletIndex = 0; localMeshletIndex < static_cast<uint32_t>(meshlets.meshlets.size());
+            ++localMeshletIndex)
+        {
+          const shaderio::Meshlet& meshlet = meshlets.meshlets[localMeshletIndex];
+          const uint32_t drawIndex = baseMeshletIndex + localMeshletIndex;
+          m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+          if(meshRecord->alphaMode == shaderio::LAlphaBlend)
+          {
+            m_transparentDrawIndices.push_back(drawIndex);
+          }
+          else if(meshRecord->alphaMode == shaderio::LAlphaMask)
+          {
+            m_alphaTestDrawIndices.push_back(drawIndex);
+          }
+          else
+          {
+            m_opaqueDrawIndices.push_back(drawIndex);
+          }
+
+          m_meshletCullObjectsCpu.push_back(shaderio::GPUCullObject{
+              .sphereCenterRadius = transformBoundsSphere(meshRecord->transform, meshlet.boundsSphere),
+              .indexCount = meshlet.triangleCount * 3u,
+              .firstIndex = meshlet.indexOffset,
+              .vertexOffset = meshRecord->vertexOffset,
+              .flags = flags,
+          });
+        }
       }
       if(!meshlets.packedIndices.empty())
       {
         m_meshletIndicesCpu.insert(m_meshletIndicesCpu.end(), meshlets.packedIndices.begin(), meshlets.packedIndices.end());
       }
       m_runtimeStats.meshletTriangleCount += meshlets.triangleCount;
+      if(!meshlets.meshlets.empty())
+      {
+        continue;
+      }
+    }
+
+    m_drawIndexByMeshHandle[meshKey] = objectDrawIndex;
+    if(objectDrawIndex >= m_meshHandleByDrawIndex.size())
+    {
+      m_meshHandleByDrawIndex.resize(objectDrawIndex + 1u, kNullMeshHandle);
+    }
+    m_meshHandleByDrawIndex[objectDrawIndex] = meshHandle;
+    if(meshRecord->alphaMode == shaderio::LAlphaBlend)
+    {
+      m_transparentDrawIndices.push_back(objectDrawIndex);
+    }
+    else if(meshRecord->alphaMode == shaderio::LAlphaMask)
+    {
+      m_alphaTestDrawIndices.push_back(objectDrawIndex);
+    }
+    else
+    {
+      m_opaqueDrawIndices.push_back(objectDrawIndex);
     }
   }
 
@@ -1264,7 +1368,7 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
   }
   if(m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
   {
-    m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu);
+    m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
   }
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = true;
@@ -1287,6 +1391,7 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   }
   m_meshletDataCpu.clear();
   m_meshletIndicesCpu.clear();
+  m_meshletCullObjectsCpu.clear();
   m_persistentDrawData.clear();
   m_visibilitySortInputObjects.clear();
   m_visibilitySortInputKeys.clear();
@@ -1306,13 +1411,20 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
 
 void GPUDrivenRenderer::flushPendingSceneUploads()
 {
-  if(!m_sceneUploadPending || !m_sceneRegistry.isDirty())
+  if(!m_sceneUploadPending || (!m_sceneRegistry.isDirty() && !m_enableExperimentalMeshletPath))
   {
     return;
   }
 
   m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
-    m_sceneRegistry.syncToGpu(cmd);
+    if(m_sceneRegistry.isDirty())
+    {
+      m_sceneRegistry.syncToGpu(cmd);
+    }
+    if(m_enableExperimentalMeshletPath && !m_meshletDataCpu.empty())
+    {
+      m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+    }
   });
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = true;
@@ -1537,6 +1649,19 @@ void GPUDrivenRenderer::refreshSceneView()
                                    : GPUDrivenIndirectSourceKind::none;
   m_sceneView.indirectCommandStride =
       m_sceneView.usePersistentCullingObjects ? m_renderer.getGPUCullingIndirectCommandStride() : 0;
+  if(m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
+     && m_meshletBuffer.getMeshletCullObjectBuffer() != VK_NULL_HANDLE)
+  {
+    m_sceneView.gpuCullObjectBufferAddress = m_meshletBuffer.getMeshletCullObjectAddress();
+    m_sceneView.gpuCullObjectBuffer = m_meshletBuffer.getMeshletCullObjectBuffer();
+    m_sceneView.objectCount = m_meshletBuffer.getMeshletCount();
+    m_sceneView.overlayObjects = m_meshletCullObjectsCpu.empty() ? nullptr : m_meshletCullObjectsCpu.data();
+    m_sceneView.overlayObjectCount = static_cast<uint32_t>(m_meshletCullObjectsCpu.size());
+    m_sceneView.usePersistentCullingObjects = true;
+    m_sceneView.authority = GPUDrivenSceneAuthority::persistentCullObjects;
+    m_sceneView.indirectSource = GPUDrivenIndirectSourceKind::gpuCullingOpaqueIndirect;
+    m_sceneView.indirectCommandStride = m_renderer.getGPUCullingIndirectCommandStride();
+  }
   m_sceneView.meshHandles = m_activeUploadResult != nullptr && !m_activeUploadResult->meshes.empty()
                                 ? m_activeUploadResult->meshes.data()
                                 : nullptr;
@@ -1615,7 +1740,10 @@ void GPUDrivenRenderer::refreshSceneView()
 uint32_t GPUDrivenRenderer::getSafePersistentObjectCount() const
 {
   uint32_t safeCount = m_sceneView.objectCount;
-  if(m_sceneView.meshHandleCount > 0u)
+  const bool meshletCullStreamActive =
+      m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
+      && m_sceneView.gpuCullObjectBuffer == m_meshletBuffer.getMeshletCullObjectBuffer();
+  if(!meshletCullStreamActive && m_sceneView.meshHandleCount > 0u)
   {
     safeCount = std::min(safeCount, m_sceneView.meshHandleCount);
   }
@@ -2025,7 +2153,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
                           nullptr);
 
   const shaderio::TransparentVisibilityPatchPushConstants pushConstants{
-      .elementCount = sortResources.activeElementCount,
+      .elementCount = sortResources.paddedElementCount,
       .categoryMask = kVisibilitySortCategoryMask,
       .categoryValue = categoryValue,
       .outputOffset = outputOffset,

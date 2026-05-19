@@ -102,6 +102,13 @@ set(TINYGLTF_BUILD_VALIDATION_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(tinygltf)
 
 FetchContent_Declare(
+  meshoptimizer
+  GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+  GIT_TAG v0.23
+)
+FetchContent_MakeAvailable(meshoptimizer)
+
+FetchContent_Declare(
   VulkanMemoryAllocator
   GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
   GIT_TAG master
@@ -386,6 +393,7 @@ target_include_directories(demo_core
     ${volk_SOURCE_DIR}
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${meshoptimizer_SOURCE_DIR}/src
     ${vulkanmemoryallocator_SOURCE_DIR}/include
 )
 
@@ -406,6 +414,7 @@ target_link_libraries(demo_core
     imgui_demo
     glm
     tinygltf
+    meshoptimizer
     Vulkan::Vulkan
 )
 

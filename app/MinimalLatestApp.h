@@ -282,6 +282,9 @@ public:
 
         ImGui::Separator();
         ImGui::Text("GPU Culling");
+        ImGui::Checkbox("Frustum Culling", &m_debugOptions.enableGPUFrustumCulling);
+        ImGui::Checkbox("Hi-Z Occlusion Culling", &m_debugOptions.enableGPUOcclusionCulling);
+        ImGui::Checkbox("Meshlet Hi-Z Occlusion", &m_debugOptions.enableGPUMeshletOcclusionCulling);
         const shaderio::GPUCullStats& gpuCullStats = m_renderer.getLastGPUCullingStats();
         const uint32_t totalCullEvaluated = gpuCullStats.totalCount > 0 ? gpuCullStats.totalCount : 1u;
         ImGui::Text("Visible: %u", gpuCullStats.visibleCount);

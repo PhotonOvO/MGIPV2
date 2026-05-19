@@ -4476,7 +4476,14 @@ shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParam
                 static_cast<float>(screenExtent.height),
                 static_cast<float>(pyramidExtent.width),
                 static_cast<float>(pyramidExtent.height));
-  uniforms.cullingInfo = glm::vec4(static_cast<float>(objectCount), static_cast<float>(mipCount), 1.0f, 2e-3f);
+  uniforms.cullingInfo = glm::vec4(static_cast<float>(objectCount),
+                                   static_cast<float>(mipCount),
+                                   params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
+                                   2e-3f);
+  uniforms.cullingControls = glm::vec4(params.debugOptions.enableGPUFrustumCulling ? 1.0f : 0.0f,
+                                       params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
+                                       0.0f,
+                                       0.0f);
   return uniforms;
 }
 

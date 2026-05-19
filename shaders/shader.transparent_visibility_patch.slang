@@ -34,6 +34,11 @@ void transparentVisibilityPatchMain(uint3 dispatchThreadId : SV_DispatchThreadID
         }
 
         const uint drawIndex = sortedDrawIndices[index];
+        if(drawIndex == 0xffffffffu)
+        {
+            continue;
+        }
+
         GPUCullIndirectCommand command = gpuCullingIndirectCommands[drawIndex];
         if(command.instanceCount == 0u)
         {
