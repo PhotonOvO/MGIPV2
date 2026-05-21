@@ -19,6 +19,7 @@ public:
                       const std::vector<shaderio::GPUCullObject>& meshletCullObjects);
 
   [[nodiscard]] uint64_t getMeshletDataAddress() const { return static_cast<uint64_t>(m_meshletDataBuffer.address); }
+  [[nodiscard]] VkBuffer getMeshletDataBuffer() const { return m_meshletDataBuffer.buffer; }
   [[nodiscard]] uint64_t getMeshletCullObjectAddress() const { return static_cast<uint64_t>(m_meshletCullObjectBuffer.address); }
   [[nodiscard]] VkBuffer getMeshletCullObjectBuffer() const { return m_meshletCullObjectBuffer.buffer; }
   [[nodiscard]] uint64_t getMeshletIndexBufferHandle() const

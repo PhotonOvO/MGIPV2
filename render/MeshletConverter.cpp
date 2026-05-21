@@ -69,10 +69,15 @@ MeshletConversionResult MeshletConverter::convert(const GltfMeshData& mesh, uint
 
     shaderio::Meshlet meshlet{};
     meshlet.boundsSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+    meshlet.coneAxisCutoff =
+        glm::vec4(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2], bounds.cone_cutoff);
     meshlet.vertexOffset = 0u;
     meshlet.indexOffset = static_cast<uint32_t>(result.packedIndices.size());
-    meshlet.triangleCount = sourceMeshlet.triangle_count;
+    meshlet.indexCount = sourceMeshlet.triangle_count * 3u;
     meshlet.materialIndex = mesh.materialIndex >= 0 ? static_cast<uint32_t>(mesh.materialIndex) : UINT32_MAX;
+    meshlet.objectIndex = UINT32_MAX;
+    meshlet.flags = 0u;
+    meshlet.localIndex = static_cast<uint32_t>(meshletIndex);
     result.meshlets.push_back(meshlet);
 
     for(uint32_t triangleIndex = 0; triangleIndex < sourceMeshlet.triangle_count; ++triangleIndex)

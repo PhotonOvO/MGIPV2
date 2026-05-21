@@ -41,6 +41,7 @@ public:
   void syncToGpu(VkCommandBuffer cmd);
 
   [[nodiscard]] uint64_t getBufferAddress() const { return static_cast<uint64_t>(m_objectBuffer.address); }
+  [[nodiscard]] VkBuffer getBufferHandle() const { return m_objectBuffer.buffer; }
   [[nodiscard]] uint64_t getCullBufferAddress() const { return static_cast<uint64_t>(m_cullObjectBuffer.address); }
   [[nodiscard]] VkBuffer getCullBufferHandle() const { return m_cullObjectBuffer.buffer; }
   [[nodiscard]] uint32_t getObjectCount() const { return static_cast<uint32_t>(m_gpuObjects.size()); }

@@ -2,6 +2,7 @@
 
 #include <cassert>
 
+#include "../../common/TracyProfiling.h"
 #include "volk.h"
 
 namespace demo {
@@ -67,7 +68,10 @@ void VulkanFence::wait(uint64_t timeout)
 {
   ASSERT(m_device != VK_NULL_HANDLE, "VulkanFence::wait requires VkDevice");
   ASSERT(m_fence != VK_NULL_HANDLE, "VulkanFence::wait requires VkFence");
-  checkVk(vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout), "VulkanFence::wait failed");
+  {
+    TRACY_ZONE_SCOPED("vkWaitForFences");
+    checkVk(vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout), "VulkanFence::wait failed");
+  }
 }
 
 void VulkanFence::reset()
@@ -163,7 +167,10 @@ void VulkanTimelineSemaphore::wait(uint64_t value, uint64_t timeout)
       .pSemaphores    = &semaphore,
       .pValues        = &value,
   };
-  checkVk(vkWaitSemaphores(m_device, &waitInfo, timeout), "VulkanTimelineSemaphore::wait failed");
+  {
+    TRACY_ZONE_SCOPED("vkWaitSemaphores");
+    checkVk(vkWaitSemaphores(m_device, &waitInfo, timeout), "VulkanTimelineSemaphore::wait failed");
+  }
 }
 
 uint64_t VulkanTimelineSemaphore::getCurrentValue() const

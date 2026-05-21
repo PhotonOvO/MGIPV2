@@ -54,6 +54,8 @@ private:
 
   Extent2D createResources(bool vSync);
   void     destroyResources();
+  void     acquireFullScreenExclusiveMode();
+  void     releaseFullScreenExclusiveMode();
 
   VkSurfaceFormat2KHR selectSwapSurfaceFormat(const std::vector<VkSurfaceFormat2KHR>& availableFormats) const;
   VkPresentModeKHR selectSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes, bool vSync) const;
@@ -79,6 +81,7 @@ private:
   bool     m_needsRebuild{false};
   VkPresentModeKHR m_presentMode{VK_PRESENT_MODE_FIFO_KHR};
   bool     m_fullscreen{false};
+  bool     m_fullscreenExclusiveAcquired{false};
   void*    m_platform_handle{nullptr};
 };
 

@@ -74,13 +74,15 @@ struct DebugPassOptions
   bool  showViewFrustum{false};
   bool  showLightDirection{true};
   bool  showPointLights{true};
+  bool  enablePointLights{true};
   bool  showViewportAxis{true};
   bool  showLightCoarseCullingHeatmap{false};
-  bool  showGPUCullingOverlay{true};
+  bool  showGPUCullingOverlay{false};
   bool  showPassGpuProfile{true};
   bool  enableGPUFrustumCulling{true};
   bool  enableGPUOcclusionCulling{true};
   bool  enableGPUMeshletOcclusionCulling{false};
+  bool  enableGPUMeshletConeCulling{true};
   bool  showCullDistance{false};
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};
@@ -121,6 +123,8 @@ struct GPUDrivenSceneView
   // Phase 1 authoritative object source for GPU culling and indirect command generation.
   uint64_t                           gpuCullObjectBufferAddress{0};
   VkBuffer                           gpuCullObjectBuffer{VK_NULL_HANDLE};
+  VkBuffer                           gpuCullMeshletBuffer{VK_NULL_HANDLE};
+  VkBuffer                           gpuCullSceneObjectBuffer{VK_NULL_HANDLE};
   uint32_t                           objectCount{0};
   const shaderio::GPUCullObject*     overlayObjects{nullptr};
   uint32_t                           overlayObjectCount{0};
@@ -226,7 +230,7 @@ public:
 
   Renderer() = default;
 
-  void init(GLFWwindow* window, rhi::Surface& surface, bool vSync);
+  void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
   void setVSync(bool enabled);
   [[nodiscard]] bool        getVSync() const { return m_swapchainDependent.vSync; }
@@ -599,8 +603,11 @@ private:
       utils::Buffer      gpuCullingUniformBuffer{};
       utils::Buffer      gpuCullingResultBuffer{};
       VkBuffer           externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
+      VkBuffer           externalGPUCullingMeshletBuffer{VK_NULL_HANDLE};
+      VkBuffer           externalGPUCullingSceneObjectBuffer{VK_NULL_HANDLE};
       uint64_t           externalGPUCullingObjectBufferAddress{0};
       bool               useExternalGPUCullingObjectBuffer{false};
+      bool               useExternalGPUCullingMeshletData{false};
       const GltfUploadResult* gpuCullingSourceModel{nullptr};
       uint32_t           gpuCullingObjectCount{0};
       uint32_t           gpuCullingMeshCapacity{0};
@@ -852,7 +859,7 @@ private:
   void                 ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
                                                                      uint32_t requiredDrawCount);
   void                 updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params);
-  void                 cacheGPUCullingStats(uint32_t frameIndex);
+  void                 cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects);
   void                 drawGPUInfoOverlay(const RenderParams& params) const;
   void                 drawGPUCullingOverlay(const RenderParams& params) const;
   void                 createPassGpuProfileResources(const PassExecutor& passExecutor);
@@ -861,7 +868,7 @@ private:
   void                 resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex);
   void                 writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const;
   void                 drawPassGpuProfileOverlay(const RenderParams& params) const;
-  void                 initImGui(GLFWwindow* window);
+  void                 initImGui(void* window);
   void                 createDescriptorPool();
   void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
   void                 createGraphicDescriptorSet();

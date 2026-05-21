@@ -54,6 +54,9 @@ private:
 // Helper to return the minimum refresh rate of all monitors.
 static double getMonitorsMinRefreshRate()
 {
+#ifdef __ANDROID__
+  return 60.0;
+#else
   // We need our target frame rate. We get this once per frame in case the
   // user changes their monitor's frame rate.
   // Ideally we'd get the exact composition rate for the current swapchain;
@@ -83,6 +86,7 @@ static double getMonitorsMinRefreshRate()
   }
 
   return refreshRate;
+#endif
 }
 
 }  // namespace utils

@@ -1,6 +1,10 @@
 #include "VulkanSurface.h"
 #include "../../common/Common.h"
 
+#ifdef __ANDROID__
+#include <vulkan/vulkan_android.h>
+#endif
+
 namespace demo {
 namespace rhi {
 namespace vulkan {
@@ -15,8 +19,16 @@ void VulkanSurface::init(void* nativeInstance, void* nativePhysicalDevice, const
   ASSERT(m_surface == VK_NULL_HANDLE, "VulkanSurface::init called while surface is already initialized");
   ASSERT(window.nativeWindow != nullptr, "VulkanSurface requires a valid native window handle");
 
+#ifdef __ANDROID__
+  const VkAndroidSurfaceCreateInfoKHR surfaceInfo{
+      .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+      .window = static_cast<ANativeWindow*>(window.nativeWindow),
+  };
+  VK_CHECK(vkCreateAndroidSurfaceKHR(m_instance, &surfaceInfo, nullptr, &m_surface));
+#else
   GLFWwindow* glfwWindow = static_cast<GLFWwindow*>(window.nativeWindow);
   VK_CHECK(glfwCreateWindowSurface(m_instance, glfwWindow, nullptr, &m_surface));
+#endif
 }
 
 void VulkanSurface::deinit()

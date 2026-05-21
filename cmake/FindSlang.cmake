@@ -14,6 +14,12 @@
 
 set(Slang_VERSION "2025.13.1" CACHE STRING "Slang version. If you change this and ran CMake before, you will need to delete the other Slang_* cache variables")
 
+set(_SLANG_USING_PROVIDED_ROOT FALSE)
+if(DEFINED Slang_ROOT AND EXISTS "${Slang_ROOT}/bin" AND EXISTS "${Slang_ROOT}/include")
+  set(_SLANG_USING_PROVIDED_ROOT TRUE)
+  set(Slang_SOURCE_DIR "${Slang_ROOT}" CACHE PATH "Path to the Slang SDK root directory" FORCE)
+else()
+
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH_PROC)
 if(ARCH_PROC MATCHES "^(arm|aarch64)")
     if(WIN32)
@@ -55,11 +61,12 @@ download_package(
   VERSION ${Slang_VERSION}
   LOCATION Slang_SOURCE_DIR
 )
+endif()
 
 # On Linux, the Cloudfront download of Slang might not have the executable bit
 # set on its executables and DLLs. This causes find_program to fail. To fix this,
 # call chmod a+rwx on those directories:
-if(UNIX)
+if(UNIX AND NOT _SLANG_USING_PROVIDED_ROOT)
   file(CHMOD_RECURSE ${Slang_SOURCE_DIR}/bin ${Slang_SOURCE_DIR}/lib
        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_WRITE GROUP_EXECUTE WORLD_READ WORLD_WRITE WORLD_EXECUTE
   )
@@ -68,39 +75,82 @@ endif()
 set(Slang_ROOT ${Slang_SOURCE_DIR} CACHE PATH "Path to the Slang SDK root directory")
 mark_as_advanced(Slang_ROOT)
 
-find_path(Slang_INCLUDE_DIR
-  slang.h
-  HINTS ${Slang_ROOT}/include
-  NO_DEFAULT_PATH
-  DOC "Directory that includes slang.h."
-)
+set(_SLANG_HOST_TOOL_ONLY FALSE)
+if(_SLANG_USING_PROVIDED_ROOT AND CMAKE_CROSSCOMPILING)
+  set(_SLANG_HOST_TOOL_ONLY TRUE)
+endif()
+
+if(_SLANG_HOST_TOOL_ONLY)
+  set(Slang_INCLUDE_DIR "${Slang_ROOT}/include" CACHE PATH "Directory that includes slang.h." FORCE)
+else()
+  find_path(Slang_INCLUDE_DIR
+    slang.h
+    HINTS ${Slang_ROOT}/include
+    NO_DEFAULT_PATH
+    DOC "Directory that includes slang.h."
+  )
+endif()
 mark_as_advanced(Slang_INCLUDE_DIR)
 
-find_program(Slang_SLANGC_EXECUTABLE
-  NAMES slangc 
-  HINTS ${Slang_SOURCE_DIR}/bin
-  NO_DEFAULT_PATH
-  DOC "Slang compiler (slangc)"
-)
+if(_SLANG_HOST_TOOL_ONLY)
+  find_program(Slang_SLANGC_EXECUTABLE
+    NAMES slangc.exe slangc
+    HINTS ${Slang_SOURCE_DIR}/bin
+    NO_DEFAULT_PATH
+    DOC "Slang compiler (slangc)"
+  )
+else()
+  find_program(Slang_SLANGC_EXECUTABLE
+    NAMES slangc
+    HINTS ${Slang_SOURCE_DIR}/bin
+    NO_DEFAULT_PATH
+    DOC "Slang compiler (slangc)"
+  )
+endif()
 mark_as_advanced(Slang_SLANGC_EXECUTABLE)
 
-find_program(Slang_SLANGD_EXECUTABLE
-  NAMES slangd
-  HINTS ${Slang_SOURCE_DIR}/bin
-  NO_DEFAULT_PATH
-  DOC "Slang language server (slangd)"
-)
+if(_SLANG_HOST_TOOL_ONLY)
+  find_program(Slang_SLANGD_EXECUTABLE
+    NAMES slangd.exe slangd
+    HINTS ${Slang_SOURCE_DIR}/bin
+    NO_DEFAULT_PATH
+    DOC "Slang language server (slangd)"
+  )
+else()
+  find_program(Slang_SLANGD_EXECUTABLE
+    NAMES slangd
+    HINTS ${Slang_SOURCE_DIR}/bin
+    NO_DEFAULT_PATH
+    DOC "Slang language server (slangd)"
+  )
+endif()
 mark_as_advanced(Slang_SLANGD_EXECUTABLE)
 
-find_library(Slang_LIBRARY
-  NAMES slang
-  HINTS ${Slang_SOURCE_DIR}/lib
-  NO_DEFAULT_PATH
-  DOC "Slang linker library"
-)
+if(_SLANG_HOST_TOOL_ONLY)
+  if(EXISTS "${Slang_SOURCE_DIR}/lib/slang.lib")
+    set(Slang_LIBRARY "${Slang_SOURCE_DIR}/lib/slang.lib" CACHE FILEPATH "Slang linker library" FORCE)
+  elseif(EXISTS "${Slang_SOURCE_DIR}/lib/libslang.so")
+    set(Slang_LIBRARY "${Slang_SOURCE_DIR}/lib/libslang.so" CACHE FILEPATH "Slang linker library" FORCE)
+  else()
+    set(Slang_LIBRARY "${Slang_SOURCE_DIR}/bin/slang.dll" CACHE FILEPATH "Slang linker library" FORCE)
+  endif()
+else()
+  find_library(Slang_LIBRARY
+    NAMES slang
+    HINTS ${Slang_SOURCE_DIR}/lib
+    NO_DEFAULT_PATH
+    DOC "Slang linker library"
+  )
+endif()
 mark_as_advanced(Slang_LIBRARY)
 
-if(WIN32)
+if(_SLANG_HOST_TOOL_ONLY)
+  if(EXISTS "${Slang_SOURCE_DIR}/bin/slang.dll")
+    set(Slang_DLL "${Slang_SOURCE_DIR}/bin/slang.dll" CACHE FILEPATH "Slang shared library" FORCE)
+  else()
+    set(Slang_DLL "${Slang_LIBRARY}" CACHE FILEPATH "Slang shared library" FORCE)
+  endif()
+elseif(WIN32)
   find_file(Slang_DLL
     NAMES slang.dll
     HINTS ${Slang_SOURCE_DIR}/bin
@@ -142,13 +192,26 @@ endif()
 # on PATH), which may be incompatible.
 # To make this work, we make the GLSL module an IMPORTED library, with the same
 # IMPLIB as core Slang.
-find_file(Slang_GLSL_MODULE
-  NAMES ${CMAKE_SHARED_LIBRARY_PREFIX}slang-glsl-module${CMAKE_SHARED_LIBRARY_SUFFIX}
-  HINTS ${Slang_SOURCE_DIR}/bin
-        ${Slang_SOURCE_DIR}/lib
-  NO_DEFAULT_PATH
-  DOC "Slang embedded GLSL module"
-)
+if(_SLANG_HOST_TOOL_ONLY)
+  if(EXISTS "${Slang_SOURCE_DIR}/bin/slang-glsl-module.dll")
+    set(Slang_GLSL_MODULE "${Slang_SOURCE_DIR}/bin/slang-glsl-module.dll" CACHE FILEPATH "Slang embedded GLSL module" FORCE)
+  else()
+    find_file(Slang_GLSL_MODULE
+      NAMES libslang-glsl-module.so
+      HINTS ${Slang_SOURCE_DIR}/lib
+      NO_DEFAULT_PATH
+      DOC "Slang embedded GLSL module"
+    )
+  endif()
+else()
+  find_file(Slang_GLSL_MODULE
+    NAMES ${CMAKE_SHARED_LIBRARY_PREFIX}slang-glsl-module${CMAKE_SHARED_LIBRARY_SUFFIX}
+    HINTS ${Slang_SOURCE_DIR}/bin
+          ${Slang_SOURCE_DIR}/lib
+    NO_DEFAULT_PATH
+    DOC "Slang embedded GLSL module"
+  )
+endif()
 mark_as_advanced(Slang_GLSL_MODULE)
 
 if(NOT TARGET SlangGlslModule)
@@ -164,13 +227,26 @@ endif()
 
 # Additionally, SLANG_OPTIMIZATION_LEVEL_HIGH requires slang-glslang.dll.
 # Find it and link with it by default:
-find_file(Slang_GLSLANG
-  NAMES ${CMAKE_SHARED_LIBRARY_PREFIX}slang-glslang${CMAKE_SHARED_LIBRARY_SUFFIX}
-  HINTS ${Slang_SOURCE_DIR}/bin
-        ${Slang_SOURCE_DIR}/lib
-  NO_DEFAULT_PATH
-  DOC "slang-glslang shared library"
-)
+if(_SLANG_HOST_TOOL_ONLY)
+  if(EXISTS "${Slang_SOURCE_DIR}/bin/slang-glslang.dll")
+    set(Slang_GLSLANG "${Slang_SOURCE_DIR}/bin/slang-glslang.dll" CACHE FILEPATH "slang-glslang shared library" FORCE)
+  else()
+    find_file(Slang_GLSLANG
+      NAMES libslang-glslang.so
+      HINTS ${Slang_SOURCE_DIR}/lib
+      NO_DEFAULT_PATH
+      DOC "slang-glslang shared library"
+    )
+  endif()
+else()
+  find_file(Slang_GLSLANG
+    NAMES ${CMAKE_SHARED_LIBRARY_PREFIX}slang-glslang${CMAKE_SHARED_LIBRARY_SUFFIX}
+    HINTS ${Slang_SOURCE_DIR}/bin
+          ${Slang_SOURCE_DIR}/lib
+    NO_DEFAULT_PATH
+    DOC "slang-glslang shared library"
+  )
+endif()
 mark_as_advanced(Slang_GLSLANG)
 
 if(NOT TARGET SlangGlslang)

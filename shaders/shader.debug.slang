@@ -33,6 +33,10 @@ float4 getGPUCullDebugColor(uint result, uint flags)
     {
         return float4(1.0, 0.69, 0.36, 0.92);
     }
+    if(result == LGPUCullResultConeCulled)
+    {
+        return float4(0.72, 0.48, 1.0, 0.90);
+    }
     if((flags & LGPUCullFlagTransparent) != 0u)
     {
         return float4(0.36, 0.82, 1.0, 0.78);

@@ -22,12 +22,17 @@
 #endif
 
 #include "vulkan/vk_enum_string_helper.h"
-#ifdef _WIN32
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <android/native_window.h>
+#elif defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
 #elif defined(__linux__)
 #include <signal.h>
 #endif
+#ifndef __ANDROID__
 #include <GLFW/glfw3.h>
+#endif
 
 // GLM configuration for Vulkan:
 // - Depth range [0, 1] (Vulkan standard, OpenGL uses [-1, 1])
@@ -36,7 +41,11 @@
 #include <glm/glm.hpp>
 #include "logger.h"
 #include "debug_util.h"
+#ifdef __ANDROID__
+#include "backends/imgui_impl_android.h"
+#else
 #include "backends/imgui_impl_glfw.h"
+#endif
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -581,7 +590,11 @@ struct ContextCreateInfo
   std::vector<const char*> instanceLayers;
 
   // API version
+#ifdef VK_API_VERSION_1_4
   uint32_t apiVersion = VK_API_VERSION_1_4;
+#else
+  uint32_t apiVersion = VK_API_VERSION_1_3;
+#endif
 
   // Validation layers
 #ifdef NDEBUG

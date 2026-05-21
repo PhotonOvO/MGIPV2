@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common/Common.h"
+#include "../common/TracyProfiling.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -76,14 +77,21 @@ public:
       // Let the renderer/present path control pacing. Adding an app-side sleep
       // here only reduces CPU/GPU overlap and steady-state utilization.
       framePhase = "PollEvents";
-      glfwPollEvents();
+      {
+        TRACY_ZONE_SCOPED("App::PollEvents");
+        glfwPollEvents();
+      }
 
       // Check async loading progress
       framePhase = "UpdateAsyncLoading";
-      updateAsyncLoading();
+      {
+        TRACY_ZONE_SCOPED("App::UpdateAsyncLoading");
+        updateAsyncLoading();
+      }
 
       // Camera input handling
       {
+          TRACY_ZONE_SCOPED("App::InputCamera");
           // Keyboard movement
           glm::vec3 moveDir{0.0f};
           if(glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) moveDir.z += 1.0f;
@@ -161,71 +169,87 @@ public:
       }
 
       framePhase = "ImGuiVulkanNewFrame";
-      ImGui_ImplVulkan_NewFrame();
-      framePhase = "ImGuiGlfwNewFrame";
-      ImGui_ImplGlfw_NewFrame();
-      framePhase = "ImGuiFrameBegin";
-      ImGui::NewFrame();
+      {
+        TRACY_ZONE_SCOPED("App::ImGuiNewFrame");
+        ImGui_ImplVulkan_NewFrame();
+        framePhase = "ImGuiGlfwNewFrame";
+        ImGui_ImplGlfw_NewFrame();
+        framePhase = "ImGuiFrameBegin";
+        ImGui::NewFrame();
+      }
       framePhase = "RuntimeProfiler";
-      if(!m_runtimeProfilerDisabled)
       {
-        updateRuntimeProfiler();
-      }
-
-      const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
-      ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
-      if(!ImGui::DockBuilderGetNode(dockID)->IsSplitNode() && !ImGui::FindWindowByName("Viewport"))
-      {
-        ImGui::DockBuilderDockWindow("Viewport", dockID);
-        ImGui::DockBuilderGetCentralNode(dockID)->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-        ImGuiID leftID = ImGui::DockBuilderSplitNode(dockID, ImGuiDir_Left, 0.2f, nullptr, &dockID);
-        ImGui::DockBuilderDockWindow("Settings", leftID);
-      }
-
-      if(ImGui::BeginMainMenuBar())
-      {
-        if(ImGui::BeginMenu("File"))
+        TRACY_ZONE_SCOPED("App::UpdateRuntimeProfiler");
+        if(!m_runtimeProfilerDisabled)
         {
-          if(ImGui::MenuItem("vSync", "", &m_vSync))
-          {
-            m_renderer.setVSync(m_vSync);
-          }
-          ImGui::Separator();
-          if(ImGui::MenuItem("Exit"))
-            glfwSetWindowShouldClose(m_window, true);
-          ImGui::EndMenu();
+          updateRuntimeProfiler();
         }
-        ImGui::EndMainMenuBar();
       }
 
-      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-      ImGui::Begin("Viewport");
-      glm::vec4 viewportImageRect{0.0f};
-      ImVec2              viewportContentSize = ImGui::GetContentRegionAvail();
-      demo::rhi::Extent2D requestedViewportSize{uint32_t(viewportContentSize.x), uint32_t(viewportContentSize.y)};
-      if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
-         && (requestedViewportSize.width != m_viewportSize.width || requestedViewportSize.height != m_viewportSize.height))
       {
-        m_viewportSize = requestedViewportSize;
-        m_renderer.resize(m_viewportSize);
-        m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
+        TRACY_ZONE_SCOPED("App::Dockspace");
+        const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
+        ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
+        if(!ImGui::DockBuilderGetNode(dockID)->IsSplitNode() && !ImGui::FindWindowByName("Viewport"))
+        {
+          ImGui::DockBuilderDockWindow("Viewport", dockID);
+          ImGui::DockBuilderGetCentralNode(dockID)->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
+          ImGuiID leftID = ImGui::DockBuilderSplitNode(dockID, ImGuiDir_Left, 0.2f, nullptr, &dockID);
+          ImGui::DockBuilderDockWindow("Settings", leftID);
+        }
       }
 
-      const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
-      ImGui::Image(m_renderer.getViewportTextureID(viewportTextureHandle), viewportContentSize);
-      const ImVec2 viewportImageMin = ImGui::GetItemRectMin();
-      const ImVec2 viewportImageMax = ImGui::GetItemRectMax();
-      viewportImageRect = glm::vec4(viewportImageMin.x,
-                                    viewportImageMin.y,
-                                    viewportImageMax.x - viewportImageMin.x,
-                                    viewportImageMax.y - viewportImageMin.y);
-      ImGui::SetCursorPos(ImVec2(0, 0));
-      ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-      ImGui::End();
-      ImGui::PopStyleVar();
+      {
+        TRACY_ZONE_SCOPED("App::MainMenu");
+        if(ImGui::BeginMainMenuBar())
+        {
+          if(ImGui::BeginMenu("File"))
+          {
+            if(ImGui::MenuItem("vSync", "", &m_vSync))
+            {
+              m_renderer.setVSync(m_vSync);
+            }
+            ImGui::Separator();
+            if(ImGui::MenuItem("Exit"))
+              glfwSetWindowShouldClose(m_window, true);
+            ImGui::EndMenu();
+          }
+          ImGui::EndMainMenuBar();
+        }
+      }
+
+      glm::vec4 viewportImageRect{0.0f};
+      {
+        TRACY_ZONE_SCOPED("App::ViewportPanel");
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("Viewport");
+        ImVec2              viewportContentSize = ImGui::GetContentRegionAvail();
+        demo::rhi::Extent2D requestedViewportSize{uint32_t(viewportContentSize.x), uint32_t(viewportContentSize.y)};
+        if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
+           && (requestedViewportSize.width != m_viewportSize.width || requestedViewportSize.height != m_viewportSize.height))
+        {
+          m_viewportSize = requestedViewportSize;
+          m_renderer.resize(m_viewportSize);
+          m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
+        }
+
+        const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
+        ImGui::Image(m_renderer.getViewportTextureID(viewportTextureHandle), viewportContentSize);
+        const ImVec2 viewportImageMin = ImGui::GetItemRectMin();
+        const ImVec2 viewportImageMax = ImGui::GetItemRectMax();
+        viewportImageRect = glm::vec4(viewportImageMin.x,
+                                      viewportImageMin.y,
+                                      viewportImageMax.x - viewportImageMin.x,
+                                      viewportImageMax.y - viewportImageMin.y);
+        ImGui::SetCursorPos(ImVec2(0, 0));
+        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+        ImGui::End();
+        ImGui::PopStyleVar();
+      }
 
       if(ImGui::Begin("Settings"))
       {
+        TRACY_ZONE_SCOPED("App::SettingsPanel");
         // Camera coordinates display
         ImGui::Separator();
         ImGui::Text("Camera Position:");
@@ -267,6 +291,7 @@ public:
         ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
         ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
         ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
+        ImGui::Checkbox("Random Point Lights", &m_debugOptions.enablePointLights);
         ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
         ImGui::Checkbox("Viewport Axis", &m_debugOptions.showViewportAxis);
         ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
@@ -278,13 +303,17 @@ public:
         ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
 
         // CSM Shadow debug panel
-        drawCSMDebugPanel();
+        {
+          TRACY_ZONE_SCOPED("App::CSMDebugPanel");
+          drawCSMDebugPanel();
+        }
 
         ImGui::Separator();
         ImGui::Text("GPU Culling");
         ImGui::Checkbox("Frustum Culling", &m_debugOptions.enableGPUFrustumCulling);
         ImGui::Checkbox("Hi-Z Occlusion Culling", &m_debugOptions.enableGPUOcclusionCulling);
         ImGui::Checkbox("Meshlet Hi-Z Occlusion", &m_debugOptions.enableGPUMeshletOcclusionCulling);
+        ImGui::Checkbox("Meshlet Cone Culling", &m_debugOptions.enableGPUMeshletConeCulling);
         const shaderio::GPUCullStats& gpuCullStats = m_renderer.getLastGPUCullingStats();
         const uint32_t totalCullEvaluated = gpuCullStats.totalCount > 0 ? gpuCullStats.totalCount : 1u;
         ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
@@ -292,13 +321,22 @@ public:
         ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
         ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
         ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
+        ImGui::Text("Hi-Z Candidates: %u", gpuCullStats.hizCandidateCount);
+        ImGui::Text("Hi-Z Tested: %u", gpuCullStats.hizTestedCount);
+        ImGui::Text("Hi-Z Skipped Large: %u", gpuCullStats.hizRejectedLargeCount);
+        ImGui::Text("Hi-Z Skipped Near: %u", gpuCullStats.hizRejectedNearCount);
+        ImGui::Text("Hi-Z Skipped Offscreen: %u", gpuCullStats.hizRejectedOffscreenCount);
+        ImGui::Text("Meshlet Cone Culled: %u", gpuCullStats.meshletConeCulledCount);
         ImGui::Text("Total: %u", gpuCullStats.totalCount);
         ImGui::Text("Visible Ratio: %.1f%%", 100.0f * static_cast<float>(gpuCullStats.visibleCount) / static_cast<float>(totalCullEvaluated));
 
         // Swapchain diagnostics
         ImGui::Separator();
         ImGui::Text("Renderer Backend: %s", m_renderer.getBackendName());
-        drawRuntimeProfilerPanel();
+        {
+          TRACY_ZONE_SCOPED("App::RuntimeProfilerPanel");
+          drawRuntimeProfilerPanel();
+        }
         if(m_renderer.getBackend() == demo::RendererBackend::gpuDriven)
         {
           const demo::GPUDrivenRuntimeStats gpuDrivenStats = m_renderer.getGPUDrivenRuntimeStats();
@@ -368,41 +406,56 @@ public:
       }
       ImGui::End();
 
-      drawModelLoaderUI();
-      drawSceneGraphUI();
+      {
+        TRACY_ZONE_SCOPED("App::ModelLoaderUI");
+        drawModelLoaderUI();
+      }
+      {
+        TRACY_ZONE_SCOPED("App::SceneGraphUI");
+        drawSceneGraphUI();
+      }
 
       framePhase = "Render";
       demo::RenderParams frameParams{};
-      frameParams.viewportSize   = m_viewportSize;
-      frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
-      frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
-      frameParams.materialHandle = m_selectedMaterial;
-      frameParams.clearColor     = m_clearColor;
-      frameParams.viewportImageRect = viewportImageRect;
-      frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
-      frameParams.cameraUniforms = &m_cameraUniforms;
-      frameParams.lightSettings  = m_lightSettings;
-      frameParams.debugOptions   = m_debugOptions;
-      frameParams.useCsmShadowMultiDrawIndirect = m_useCsmShadowMultiDrawIndirect;
-      // Copy CSM debug settings to debugOptions
-      frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
-      frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
-      frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
-      frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
-      frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
-        ImGui::Render();
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
-      };
+      {
+        TRACY_ZONE_SCOPED("App::BuildRenderParams");
+        frameParams.viewportSize   = m_viewportSize;
+        frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
+        frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
+        frameParams.materialHandle = m_selectedMaterial;
+        frameParams.clearColor     = m_clearColor;
+        frameParams.viewportImageRect = viewportImageRect;
+        frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
+        frameParams.cameraUniforms = &m_cameraUniforms;
+        frameParams.lightSettings  = m_lightSettings;
+        frameParams.debugOptions   = m_debugOptions;
+        frameParams.useCsmShadowMultiDrawIndirect = m_useCsmShadowMultiDrawIndirect;
+        // Copy CSM debug settings to debugOptions
+        frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
+        frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
+        frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
+        frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
+        frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
+          TRACY_ZONE_SCOPED("App::RenderImGuiDrawData");
+          ImGui::Render();
+          ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
+        };
+      }
 
       const bool freezeRenderingForStreamingUpload = m_isLoading && m_renderer.isSceneRenderingSuspended();
       if(!freezeRenderingForStreamingUpload)
       {
+        TRACY_ZONE_SCOPED("App::RendererFacade::render");
         m_renderer.render(frameParams);
       }
 
-      ImGui::EndFrame();
+      {
+        TRACY_ZONE_SCOPED("App::ImGuiEndFrame");
+        ImGui::EndFrame();
+      }
       if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
       {
+        TRACY_ZONE_SCOPED("App::ImGuiPlatformWindows");
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
       }
@@ -420,10 +473,11 @@ private:
   {
     if(m_fullscreen)
     {
-      // Restore windowed mode
+      m_renderer.setFullscreen(false, nullptr);
+      glfwSetWindowAttrib(m_window, GLFW_FLOATING, GLFW_FALSE);
+      glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_TRUE);
       glfwSetWindowMonitor(m_window, nullptr, m_windowedX, m_windowedY, m_windowedWidth, m_windowedHeight, 0);
       m_fullscreen = false;
-      m_renderer.setFullscreen(false, nullptr);
     }
     else
     {
@@ -434,7 +488,10 @@ private:
       // Switch to fullscreen on primary monitor
       GLFWmonitor* monitor = glfwGetPrimaryMonitor();
       const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+      glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_FALSE);
+      glfwSetWindowAttrib(m_window, GLFW_FLOATING, GLFW_TRUE);
       glfwSetWindowMonitor(m_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+      glfwFocusWindow(m_window);
       m_fullscreen = true;
 #ifdef _WIN32
       HMONITOR hmonitor = MonitorFromWindow(glfwGetWin32Window(m_window), MONITOR_DEFAULTTONEAREST);

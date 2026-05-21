@@ -1,0 +1,41 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.vkdemo"
+    compileSdk 35
+    ndkVersion "28.2.13676358"
+
+    defaultConfig {
+        applicationId "com.vkdemo"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DUSE_SLANG=ON",
+                          "-DTRACY_ENABLE=OFF",
+                          "-DDEMO_VULKAN_HEADER_DIR=C:/VulkanSDK/1.4.335.0/Include",
+                          "-DSlang_ROOT=H:/GitHub/VKDemo/build/_deps/Slang-windows-x86_64-2026.3.1",
+                          "-DFETCHCONTENT_SOURCE_DIR_GLM=H:/GitHub/VKDemo/build/_deps/glm-src",
+                          "-DFETCHCONTENT_SOURCE_DIR_VOLK=H:/GitHub/VKDemo/build/_deps/volk-src",
+                          "-DFETCHCONTENT_SOURCE_DIR_TINYGLTF=H:/GitHub/VKDemo/build/_deps/tinygltf-src",
+                          "-DFETCHCONTENT_SOURCE_DIR_MESHOPTIMIZER=H:/GitHub/VKDemo/build/_deps/meshoptimizer-src",
+                          "-DFETCHCONTENT_SOURCE_DIR_VULKANMEMORYALLOCATOR=H:/GitHub/VKDemo/build/_deps/vulkanmemoryallocator-src",
+                          "-DFETCHCONTENT_SOURCE_DIR_IMGUI=H:/GitHub/VKDemo/build/_deps/imgui-src"
+                targets "DemoAndroid"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "../../CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+}

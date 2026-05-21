@@ -15,7 +15,7 @@ class RendererFacade
 public:
   RendererFacade();
 
-  void init(GLFWwindow* window, rhi::Surface& surface, bool vSync);
+  void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
   void setVSync(bool enabled);
   [[nodiscard]] bool getVSync() const;

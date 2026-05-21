@@ -118,7 +118,12 @@ void VulkanDevice::deinit()
   m_features11                    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
   m_features12                    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   m_features13                    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
   m_features14                    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+#else
+  m_maintenance5Features          = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
+  m_maintenance6Features          = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR};
+#endif
   m_meshShaderFeatures            = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
   m_accelerationStructureFeatures = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
   m_rayTracingPipelineFeatures    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
@@ -222,7 +227,11 @@ void VulkanDevice::initInstance()
 {
   ensure(vkCreateInstance != nullptr, "Vulkan loader is not initialized. Call volkInitialize() before VulkanDevice::init");
   checkVk(vkEnumerateInstanceVersion(&m_apiVersion), "Failed to enumerate Vulkan instance version");
+#ifdef VK_API_VERSION_1_4
   ensure(m_apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0), "Require Vulkan 1.4 loader");
+#else
+  ensure(m_apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0), "Require Vulkan 1.3 loader");
+#endif
 
   queryInstanceExtensions();
   queryInstanceLayers();
@@ -330,7 +339,11 @@ void VulkanDevice::selectPhysicalDevice()
   m_physicalDeviceInfo.deviceId      = m_vkProperties2.properties.deviceID;
   m_physicalDeviceInfo.deviceType    = static_cast<uint32_t>(m_vkProperties2.properties.deviceType);
 
+#ifdef VK_API_VERSION_1_4
   ensure(m_physicalDeviceInfo.apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0), "Require Vulkan 1.4 physical device");
+#else
+  ensure(m_physicalDeviceInfo.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0), "Require Vulkan 1.3 physical device");
+#endif
 
   queryDeviceExtensions();
   queryMemoryProperties();
@@ -369,12 +382,30 @@ void VulkanDevice::initLogicalDevice()
   m_features11     = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
   m_features12     = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   m_features13     = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
   m_features14     = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+#else
+  m_maintenance5Features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
+  m_maintenance6Features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR};
+#endif
 
   m_enabledDeviceExtensions.clear();
 
   VkBaseOutStructure* featureChain = nullptr;
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
   appendFeatureNode(featureChain, &m_features14);
+#else
+  if(extensionAvailable(VK_KHR_MAINTENANCE_5_EXTENSION_NAME, m_availableDeviceExtensions))
+  {
+    pushUnique(m_enabledDeviceExtensions, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+    appendFeatureNode(featureChain, &m_maintenance5Features);
+  }
+  if(extensionAvailable(VK_KHR_MAINTENANCE_6_EXTENSION_NAME, m_availableDeviceExtensions))
+  {
+    pushUnique(m_enabledDeviceExtensions, VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
+    appendFeatureNode(featureChain, &m_maintenance6Features);
+  }
+#endif
   appendFeatureNode(featureChain, &m_features13);
   appendFeatureNode(featureChain, &m_features12);
   appendFeatureNode(featureChain, &m_features11);
@@ -400,8 +431,13 @@ void VulkanDevice::initLogicalDevice()
   m_featureInfo.timelineSemaphore = m_features12.timelineSemaphore == VK_TRUE;
   m_featureInfo.synchronization2  = m_features13.synchronization2 == VK_TRUE;
   m_featureInfo.dynamicRendering  = m_features13.dynamicRendering == VK_TRUE;
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
   m_featureInfo.maintenance5      = m_features14.maintenance5 == VK_TRUE;
   m_featureInfo.maintenance6      = m_features14.maintenance6 == VK_TRUE;
+#else
+  m_featureInfo.maintenance5      = m_maintenance5Features.maintenance5 == VK_TRUE;
+  m_featureInfo.maintenance6      = m_maintenance6Features.maintenance6 == VK_TRUE;
+#endif
 
   detectCapabilities();
   m_capabilityError = validateCapabilities();

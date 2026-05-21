@@ -83,7 +83,8 @@ struct DebugUnitLineSegment
 [[nodiscard]] bool needsCpuDebugLineBuild(const DebugPassOptions& debugOptions)
 {
   return debugOptions.showSceneBounds || debugOptions.showShadowFrustum || debugOptions.showViewFrustum
-         || debugOptions.showLightDirection || debugOptions.showPointLights || debugOptions.showCullDistance;
+         || debugOptions.showLightDirection || (debugOptions.enablePointLights && debugOptions.showPointLights)
+         || debugOptions.showCullDistance;
 }
 
 [[nodiscard]] bool hasStencilComponent(VkFormat format)
@@ -695,7 +696,7 @@ std::optional<uint32_t> Renderer::mapSetSlotToLegacyShaderSet(BindGroupSetSlot s
   }
 }
 
-void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
+void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_swapchainDependent.vSync = vSync;
   m_materials                = MaterialResources{};
@@ -706,12 +707,17 @@ void Renderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
 
   rhi::DeviceCreateInfo deviceCreateInfo;
-  uint32_t              glfwExtensionCount = 0;
-  const char**          glfwExtensions     = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+#ifdef __ANDROID__
+  deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+  deviceCreateInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#else
+  uint32_t     glfwExtensionCount = 0;
+  const char** glfwExtensions     = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
   for(uint32_t i = 0; i < glfwExtensionCount; ++i)
   {
     deviceCreateInfo.instanceExtensions.push_back(glfwExtensions[i]);
   }
+#endif
   // Debug utils for event markers (RenderDoc, PIX, etc.)
   deviceCreateInfo.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
   deviceCreateInfo.deviceExtensions.push_back({VK_KHR_SWAPCHAIN_EXTENSION_NAME, true, nullptr});
@@ -1020,7 +1026,11 @@ void Renderer::shutdown(rhi::Surface& surface)
   // Shutdown ImGui Vulkan backend BEFORE destroying uiDescriptorPool
   // ImGui_ImplVulkan_Shutdown() frees descriptor sets from uiDescriptorPool
   ImGui_ImplVulkan_Shutdown();
+#ifdef __ANDROID__
+  ImGui_ImplAndroid_Shutdown();
+#else
   ImGui_ImplGlfw_Shutdown();
+#endif
   ImGui::DestroyContext();
 
   // Destroy Vulkan objects that are not managed by smart pointers
@@ -1521,46 +1531,62 @@ void Renderer::render(const RenderParams& params)
 
 void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
 {
+  TRACY_ZONE_SCOPED("Renderer::renderWithPassExecutor");
+
   m_presentPassActive = false;
 
-  if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
   {
-    createPassGpuProfileResources(passExecutor);
-  }
-  else
-  {
-    bool needsProfileRebuild = false;
-    for(size_t passIndex = 0; passIndex < passExecutor.getPassCount(); ++passIndex)
-    {
-      const PassNode* pass = passExecutor.getPass(passIndex);
-      const char* passName = pass != nullptr ? pass->getName() : "Unknown";
-      if(m_passGpuProfile.passNames[passIndex] != passName)
-      {
-        needsProfileRebuild = true;
-        break;
-      }
-    }
-    if(needsProfileRebuild)
+    TRACY_ZONE_SCOPED("Renderer::ProfileSetup");
+    if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
     {
       createPassGpuProfileResources(passExecutor);
     }
+    else
+    {
+      bool needsProfileRebuild = false;
+      for(size_t passIndex = 0; passIndex < passExecutor.getPassCount(); ++passIndex)
+      {
+        const PassNode* pass = passExecutor.getPass(passIndex);
+        const char* passName = pass != nullptr ? pass->getName() : "Unknown";
+        if(m_passGpuProfile.passNames[passIndex] != passName)
+        {
+          needsProfileRebuild = true;
+          break;
+        }
+      }
+      if(needsProfileRebuild)
+      {
+        createPassGpuProfileResources(passExecutor);
+      }
+    }
   }
 
-  if(params.viewportSize.width > 0 && params.viewportSize.height > 0
-     && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
-         || params.viewportSize.height != m_swapchainDependent.viewportSize.height))
   {
-    resize(params.viewportSize);
+    TRACY_ZONE_SCOPED("Renderer::ResizeCheck");
+    if(params.viewportSize.width > 0 && params.viewportSize.height > 0
+       && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
+           || params.viewportSize.height != m_swapchainDependent.viewportSize.height))
+    {
+      resize(params.viewportSize);
+    }
   }
 
   if(!prepareFrameResources())
     return;
 
-  cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex());
+  {
+    TRACY_ZONE_SCOPED("Renderer::CacheGPUCullingStats");
+    cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex(), params.debugOptions.showGPUCullingOverlay);
+  }
 
-  rhi::CommandList& cmd = beginCommandRecording();
-  drawFrame(cmd, params, passExecutor);
-  endFrame(cmd);
+  rhi::CommandList* cmd = nullptr;
+  {
+    TRACY_ZONE_SCOPED("Renderer::beginCommandRecording");
+    cmd = &beginCommandRecording();
+  }
+  ASSERT(cmd != nullptr, "Renderer::renderWithPassExecutor requires a command list");
+  drawFrame(*cmd, params, passExecutor);
+  endFrame(*cmd);
 }
 
 // Pass execution wrappers (used by PassNode implementations)
@@ -2122,8 +2148,16 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
   frameUserData.useExternalGPUCullingObjectBuffer = useExternalPersistentObjects;
   frameUserData.externalGPUCullingObjectBuffer =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBuffer : VK_NULL_HANDLE;
+  frameUserData.externalGPUCullingMeshletBuffer =
+      useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullMeshletBuffer : VK_NULL_HANDLE;
+  frameUserData.externalGPUCullingSceneObjectBuffer =
+      useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullSceneObjectBuffer : VK_NULL_HANDLE;
   frameUserData.externalGPUCullingObjectBufferAddress =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : 0;
+  frameUserData.useExternalGPUCullingMeshletData =
+      useExternalPersistentObjects
+      && frameUserData.externalGPUCullingMeshletBuffer != VK_NULL_HANDLE
+      && frameUserData.externalGPUCullingSceneObjectBuffer != VK_NULL_HANDLE;
   frameUserData.gpuCullingSourceModel = useExternalPersistentObjects ? nullptr : params.gltfModel;
   frameUserData.gpuCullingObjectCount = objectCount;
   m_externalGPUCullingOverlayObjects =
@@ -2649,7 +2683,7 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
   }
 }
 
-void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
+void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2662,11 +2696,15 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
     return;
   }
 
-  VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
-  std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped, sizeof(m_lastGPUCullingStats));
+  {
+    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullStats");
+    VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
+    std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped, sizeof(m_lastGPUCullingStats));
+  }
   m_lastGPUCullingDrawCounts = {};
   if(frameUserData.gpuCullingDrawCountBuffer.allocation != nullptr && frameUserData.gpuCullingDrawCountBuffer.mapped != nullptr)
   {
+    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullDrawCounts");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                      frameUserData.gpuCullingDrawCountBuffer.allocation,
                                      0,
@@ -2677,19 +2715,26 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
   }
 
   m_lastGPUCullingOverlayObjects.clear();
+  if(!readOverlayObjects)
+  {
+    return;
+  }
   if(frameUserData.gpuCullingResultBuffer.allocation == nullptr || frameUserData.gpuCullingResultBuffer.mapped == nullptr
      || frameUserData.gpuCullingResults.empty())
   {
     return;
   }
 
-  VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
-                                   frameUserData.gpuCullingResultBuffer.allocation,
-                                   0,
-                                   sizeof(uint32_t) * frameUserData.gpuCullingResults.size()));
-  std::memcpy(frameUserData.gpuCullingResults.data(),
-              frameUserData.gpuCullingResultBuffer.mapped,
-              sizeof(uint32_t) * frameUserData.gpuCullingResults.size());
+  {
+    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullResults");
+    VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
+                                     frameUserData.gpuCullingResultBuffer.allocation,
+                                     0,
+                                     sizeof(uint32_t) * frameUserData.gpuCullingResults.size()));
+    std::memcpy(frameUserData.gpuCullingResults.data(),
+                frameUserData.gpuCullingResultBuffer.mapped,
+                sizeof(uint32_t) * frameUserData.gpuCullingResults.size());
+  }
 
   const size_t objectCount = std::min<size_t>(m_lastGPUCullingStats.totalCount, frameUserData.gpuCullingResults.size());
   m_lastGPUCullingOverlayObjects.reserve(objectCount);
@@ -2714,30 +2759,36 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex)
       return;
     }
 
-    VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
-                                     frameUserData.gpuCullingObjectBuffer.allocation,
-                                     0,
-                                     sizeof(shaderio::GPUCullObject) * objectCount));
+    {
+      TRACY_ZONE_SCOPED("Renderer::ReadGPUCullObjects");
+      VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
+                                       frameUserData.gpuCullingObjectBuffer.allocation,
+                                       0,
+                                       sizeof(shaderio::GPUCullObject) * objectCount));
+    }
     objectData = static_cast<const shaderio::GPUCullObject*>(frameUserData.gpuCullingObjectBuffer.mapped);
   }
 
   const size_t safeObjectCount = frameUserData.useExternalGPUCullingObjectBuffer
                                      ? std::min<size_t>(objectCount, m_externalGPUCullingOverlayObjectCount)
                                      : objectCount;
-  for(size_t objectIndex = 0; objectIndex < safeObjectCount; ++objectIndex)
   {
-    const shaderio::GPUCullObject& object = objectData[objectIndex];
-    if(object.indexCount == 0u && object.sphereCenterRadius.w == 0.0f)
+    TRACY_ZONE_SCOPED("Renderer::BuildGPUCullOverlayObjects");
+    for(size_t objectIndex = 0; objectIndex < safeObjectCount; ++objectIndex)
     {
-      continue;
-    }
+      const shaderio::GPUCullObject& object = objectData[objectIndex];
+      if(object.indexCount == 0u && object.sphereCenterRadius.w == 0.0f)
+      {
+        continue;
+      }
 
-    m_lastGPUCullingOverlayObjects.push_back(GPUCullOverlayObject{
-        .center = glm::vec3(object.sphereCenterRadius),
-        .radius = object.sphereCenterRadius.w,
-        .flags  = object.flags,
-        .result = frameUserData.gpuCullingResults[objectIndex],
-    });
+      m_lastGPUCullingOverlayObjects.push_back(GPUCullOverlayObject{
+          .center = glm::vec3(object.sphereCenterRadius),
+          .radius = object.sphereCenterRadius.w,
+          .flags  = object.flags,
+          .result = frameUserData.gpuCullingResults[objectIndex],
+      });
+    }
   }
 }
 
@@ -2750,6 +2801,10 @@ void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
               m_lastGPUCullingStats.transparentCount);
   ImGui::Text("Frustum Culled %u", m_lastGPUCullingStats.frustumCulledCount);
   ImGui::Text("Occlusion Culled %u", m_lastGPUCullingStats.occlusionCulledCount);
+  ImGui::Text("Hi-Z Tested %u / %u",
+              m_lastGPUCullingStats.hizTestedCount,
+              m_lastGPUCullingStats.hizCandidateCount);
+  ImGui::Text("Meshlet Cone Culled %u", m_lastGPUCullingStats.meshletConeCulledCount);
 
   ImGui::SeparatorText("Legend");
   const struct LegendEntry
@@ -2761,6 +2816,7 @@ void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
       {"Visible Transparent", IM_COL32(92, 210, 255, 210)},
       {"Frustum Culled", IM_COL32(255, 92, 92, 210)},
       {"Occlusion Culled", IM_COL32(255, 176, 92, 210)},
+      {"Cone Culled", IM_COL32(184, 122, 255, 210)},
   };
 
   for(const LegendEntry& entry : legends)
@@ -3107,7 +3163,7 @@ void Renderer::createGPUCullingResources()
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
-  const std::array<VkDescriptorSetLayoutBinding, 7> bindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 9> bindings{{
       VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -3115,6 +3171,8 @@ void Renderer::createGPUCullingResources()
       VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
   }};
 
   const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
@@ -3211,7 +3269,13 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
       frameUserData.useExternalGPUCullingObjectBuffer
           ? frameUserData.externalGPUCullingObjectBuffer
           : frameUserData.gpuCullingObjectBuffer.buffer;
+  const VkBuffer meshletBuffer =
+      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingMeshletBuffer : objectBuffer;
+  const VkBuffer sceneObjectBuffer =
+      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingSceneObjectBuffer : objectBuffer;
   if(objectBuffer == VK_NULL_HANDLE
+     || meshletBuffer == VK_NULL_HANDLE
+     || sceneObjectBuffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE
      || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE
@@ -3229,13 +3293,15 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
   }
 
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const std::array<VkDescriptorBufferInfo, 6> bufferInfos{{
+  const std::array<VkDescriptorBufferInfo, 8> bufferInfos{{
       VkDescriptorBufferInfo{objectBuffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{frameUserData.gpuCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{frameUserData.gpuCullingStatsBuffer.buffer, 0, sizeof(shaderio::GPUCullStats)},
       VkDescriptorBufferInfo{frameUserData.gpuCullingResultBuffer.buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{frameUserData.gpuCullingDrawCountBuffer.buffer, 0, sizeof(shaderio::GPUCullDrawCounts)},
       VkDescriptorBufferInfo{frameUserData.gpuCullingUniformBuffer.buffer, 0, sizeof(shaderio::GPUCullingUniforms)},
+      VkDescriptorBufferInfo{meshletBuffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{sceneObjectBuffer, 0, VK_WHOLE_SIZE},
   }};
 
   std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
@@ -3248,7 +3314,7 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
     };
   }
 
-  const std::array<VkWriteDescriptorSet, 7> writes{{
+  const std::array<VkWriteDescriptorSet, 9> writes{{
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
@@ -3304,6 +3370,22 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
           .descriptorCount = 1,
           .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
           .pBufferInfo     = &bufferInfos[5],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 7,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[6],
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
+          .dstBinding      = 8,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo     = &bufferInfos[7],
       },
   }};
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -3662,7 +3744,17 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
     }
 
     m_frameLightingState = buildFrameLightingState(params);
-    ensureTestPointLights(params);
+    if(params.debugOptions.enablePointLights)
+    {
+      ensureTestPointLights(params);
+    }
+    else
+    {
+      m_testPointLights.clear();
+      m_testPointLightMotions.clear();
+      m_testPointLightSceneBounds = {};
+      m_testSpotLights.clear();
+    }
     buildDebugDrawList(params);
     updateLightingUniformBuffer(currentFrameIndex, shaderio::LightingUniforms{m_frameLightingState.lightParams});
     updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
@@ -3762,7 +3854,11 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
 
   {
     TRACY_ZONE_SCOPED("drawFrame.passExecution");
+#ifdef TRACY_ENABLE
     passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
+#else
+    passExecutor.execute(context, &m_passProfilingHooks, nullptr);
+#endif
   }
 
   if(currentFrameIndex < m_passGpuProfile.frames.size())
@@ -4480,10 +4576,15 @@ shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParam
                                    static_cast<float>(mipCount),
                                    params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
                                    2e-3f);
+  const bool meshletCulling =
+      params.gpuDrivenSceneView != nullptr
+      && params.gpuDrivenSceneView->gpuCullMeshletBuffer != VK_NULL_HANDLE
+      && params.gpuDrivenSceneView->gpuCullSceneObjectBuffer != VK_NULL_HANDLE;
   uniforms.cullingControls = glm::vec4(params.debugOptions.enableGPUFrustumCulling ? 1.0f : 0.0f,
                                        params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
-                                       0.0f,
-                                       0.0f);
+                                       meshletCulling ? 1.0f : 0.0f,
+                                       (meshletCulling && params.debugOptions.enableGPUMeshletConeCulling) ? 1.0f : 0.0f);
+  uniforms.cameraPositionAndMeshletInfo = glm::vec4(camera.cameraPosition, 0.0f);
   return uniforms;
 }
 
@@ -4655,7 +4756,7 @@ void Renderer::buildDebugDrawList(const RenderParams& params)
     m_debugDrawList.addArrow(m_frameLightingState.lightAnchor, glm::normalize(params.lightSettings.direction), 6.0f,
                              glm::vec4(1.00f, 0.55f, 0.10f, 0.95f));
   }
-  if(params.debugOptions.showPointLights)
+  if(params.debugOptions.enablePointLights && params.debugOptions.showPointLights)
   {
     float markerRadius = 0.18f;
     if(m_frameLightingState.sceneBounds.valid)
@@ -6290,13 +6391,17 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   }
 }
 
-void Renderer::initImGui(GLFWwindow* window)
+void Renderer::initImGui(void* window)
 {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::StyleColorsDark();
 
-  ImGui_ImplGlfw_InitForVulkan(window, true);
+#ifdef __ANDROID__
+  ImGui_ImplAndroid_Init(static_cast<ANativeWindow*>(window));
+#else
+  ImGui_ImplGlfw_InitForVulkan(static_cast<GLFWwindow*>(window), true);
+#endif
   static VkFormat           imageFormats[] = {m_swapchainDependent.swapchainImageFormat};
   const rhi::QueueInfo      graphicsQueue  = m_device.device->getGraphicsQueue();
   ImGui_ImplVulkan_InitInfo initInfo       = {
@@ -6345,7 +6450,7 @@ void Renderer::createDescriptorPool()
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6U + frameCount * 3U},  // LightPass camera + pre-scene UBOs + GPU culling UBOs
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 10U},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 16U},
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,

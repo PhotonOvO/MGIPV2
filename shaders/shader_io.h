@@ -270,6 +270,14 @@ struct GPUCullStats
   uint32_t transparentVisibleCount;
   uint32_t opaqueCount;
   uint32_t transparentCount;
+  uint32_t hizCandidateCount;
+  uint32_t hizTestedCount;
+  uint32_t hizRejectedLargeCount;
+  uint32_t hizRejectedNearCount;
+  uint32_t hizRejectedOffscreenCount;
+  uint32_t meshletConeCulledCount;
+  uint32_t _padding1;
+  uint32_t _padding2;
 };
 
 struct GPUCullDrawCounts
@@ -302,15 +310,24 @@ struct TransparentVisibilityPatchPushConstants
   uint32_t categoryMask;
   uint32_t categoryValue;
   uint32_t outputOffset;
+  uint32_t mode;
+  uint32_t scanOffset;
+  uint32_t scanBufferIndex;
+  uint32_t _padding0;
 };
 
 struct Meshlet
 {
   vec4     boundsSphere;
+  vec4     coneAxisCutoff;
   uint32_t vertexOffset;
   uint32_t indexOffset;
-  uint32_t triangleCount;
+  uint32_t indexCount;
   uint32_t materialIndex;
+  uint32_t objectIndex;
+  uint32_t flags;
+  uint32_t localIndex;
+  uint32_t _padding;
 };
 
 STATIC_CONST uint32_t LGPUCullFlagFrustumCulling = 0x1u;
@@ -321,6 +338,7 @@ STATIC_CONST uint32_t LGPUCullFlagAlphaMask = 0x8u;
 STATIC_CONST uint32_t LGPUCullResultVisible = 0u;
 STATIC_CONST uint32_t LGPUCullResultFrustumCulled = 1u;
 STATIC_CONST uint32_t LGPUCullResultOcclusionCulled = 2u;
+STATIC_CONST uint32_t LGPUCullResultConeCulled = 3u;
 
 struct GPUCullingUniforms
 {
@@ -332,7 +350,8 @@ struct GPUCullingUniforms
   vec4 cameraUp;
   vec4 screenSizeAndPyramidSize;  // xy = screen size, zw = depth pyramid size
   vec4 cullingInfo;               // x = object count, y = mip count, z = use occlusion, w = depth epsilon
-  vec4 cullingControls;           // x = enable frustum, y = enable occlusion
+  vec4 cullingControls;           // x = enable frustum, y = enable occlusion, z = meshlet path, w = meshlet cone
+  vec4 cameraPositionAndMeshletInfo;  // xyz = camera position, w = reserved
 };
 
 // Light parameters for PBR lighting pass (scene-level UBO)

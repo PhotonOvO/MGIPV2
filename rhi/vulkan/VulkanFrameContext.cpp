@@ -2,6 +2,7 @@
 #include "VulkanSwapchain.h"
 #include "VulkanCommandList.h"
 #include "../../common/Common.h"
+#include "../../common/TracyProfiling.h"
 
 #include <array>
 #include <cassert>
@@ -349,7 +350,10 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
       .pSignalSemaphoreInfos    = signalInfos.data(),
   };
 
-  checkVk(vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE), "VulkanFrameContext::submitCurrentFrame vkQueueSubmit2 failed");
+  {
+    TRACY_ZONE_SCOPED("vkQueueSubmit2");
+    checkVk(vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE), "VulkanFrameContext::submitCurrentFrame vkQueueSubmit2 failed");
+  }
   return SubmissionReceipt{.timelineValue = signalValue};
 }
 

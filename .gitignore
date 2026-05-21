@@ -2,5 +2,12 @@ out/
 .vs/
 resources/
 build/
+build_*/
+.worktrees/
+.superpowers/
+android/.gradle/
+android/app/build/
+android/app/.cxx/
+android/local-maven/
 .claude/
 imgui.ini

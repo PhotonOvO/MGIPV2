@@ -1,5 +1,6 @@
 #include "GPUDrivenRenderer.h"
 #include "UploadUtils.h"
+#include "../common/TracyProfiling.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
 
 #include <algorithm>
@@ -168,7 +169,7 @@ constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
 
 }  // namespace
 
-void GPUDrivenRenderer::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
+void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_renderer.init(window, surface, vSync);
   m_sceneRegistry.init(getNativeDeviceHandle(), getAllocatorHandle());
@@ -277,11 +278,25 @@ void GPUDrivenRenderer::resize(rhi::Extent2D size)
 
 void GPUDrivenRenderer::render(const RenderParams& params)
 {
+  TRACY_ZONE_SCOPED("GPUDrivenRenderer::render");
+
   const bool sceneRenderingSuspended = m_suspendSceneRendering;
-  m_hiZDepthPyramid.resize(getSceneExtent());
-  flushPendingSceneUploads();
-  refreshSceneView();
-  uploadPersistentDrawData();
+  {
+    TRACY_ZONE_SCOPED("GPUDriven::HiZResize");
+    m_hiZDepthPyramid.resize(getSceneExtent());
+  }
+  {
+    TRACY_ZONE_SCOPED("GPUDriven::FlushSceneUploads");
+    flushPendingSceneUploads();
+  }
+  {
+    TRACY_ZONE_SCOPED("GPUDriven::RefreshSceneView");
+    refreshSceneView();
+  }
+  {
+    TRACY_ZONE_SCOPED("GPUDriven::UploadPersistentDrawData");
+    uploadPersistentDrawData();
+  }
   const uint32_t safeObjectCount = getSafePersistentObjectCount();
   const shaderio::GPUCullDrawCounts cachedDrawCounts = getLastGPUCullingDrawCounts();
   const uint32_t visibleCount = cachedDrawCounts.totalCount;
@@ -295,53 +310,86 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
   if(kEnableShippingVisibilitySort && !sceneRenderingSuspended)
   {
-    m_visibilitySortInputObjects.clear();
-    m_visibilitySortInputKeys.clear();
-    const glm::vec3 cameraPos =
-        params.cameraUniforms != nullptr ? params.cameraUniforms->cameraPosition : glm::vec3(0.0f);
-    const size_t totalSortInputCount =
-        m_opaqueDrawIndices.size() + m_alphaTestDrawIndices.size() + m_transparentDrawIndices.size();
-    m_visibilitySortInputObjects.reserve(totalSortInputCount);
-    m_visibilitySortInputKeys.reserve(totalSortInputCount);
-    const auto appendSortedDraws = [&](std::span<const uint32_t> drawIndices, uint32_t categoryValue, bool sortByDistance) {
-      for(uint32_t drawIndex : drawIndices)
+    {
+      TRACY_ZONE_SCOPED("GPUDriven::BuildVisibilitySortInputs");
+      if(m_cachedStaticVisibilitySortTopologyVersion != m_sceneTopologyVersion)
       {
-        MeshHandle meshHandle = kNullMeshHandle;
-        if(!tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-        {
-          continue;
-        }
+        TRACY_ZONE_SCOPED("GPUDriven::BuildStaticVisibilitySortInputs");
+        m_cachedStaticVisibilitySortObjects.clear();
+        m_cachedStaticVisibilitySortKeys.clear();
+        const size_t staticSortInputCount = m_opaqueDrawIndices.size() + m_alphaTestDrawIndices.size();
+        m_cachedStaticVisibilitySortObjects.reserve(staticSortInputCount);
+        m_cachedStaticVisibilitySortKeys.reserve(staticSortInputCount);
+        const auto appendStaticDraws = [&](std::span<const uint32_t> drawIndices, uint32_t categoryValue) {
+          for(uint32_t drawIndex : drawIndices)
+          {
+            MeshHandle meshHandle = kNullMeshHandle;
+            if(!tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+            {
+              continue;
+            }
 
-        const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
-        if(mesh == nullptr)
-        {
-          continue;
-        }
+            const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+            if(mesh == nullptr)
+            {
+              continue;
+            }
 
-        uint32_t subKey = kVisibilitySortKeyMask;
-        if(sortByDistance)
+            const uint32_t subKey =
+                mesh->materialIndex >= 0 ? std::min(static_cast<uint32_t>(mesh->materialIndex), kVisibilitySortKeyMask)
+                                         : kVisibilitySortKeyMask;
+            m_cachedStaticVisibilitySortObjects.push_back(drawIndex);
+            m_cachedStaticVisibilitySortKeys.push_back(encodeVisibilitySortKey(categoryValue, subKey));
+          }
+        };
+        appendStaticDraws(m_opaqueDrawIndices, kVisibilitySortCategoryOpaque);
+        appendStaticDraws(m_alphaTestDrawIndices, kVisibilitySortCategoryAlpha);
+        m_cachedStaticVisibilitySortTopologyVersion = m_sceneTopologyVersion;
+      }
+
+      const glm::vec3 cameraPos =
+          params.cameraUniforms != nullptr ? params.cameraUniforms->cameraPosition : glm::vec3(0.0f);
+      const size_t totalSortInputCount = m_cachedStaticVisibilitySortObjects.size() + m_transparentDrawIndices.size();
+      m_visibilitySortInputObjects.clear();
+      m_visibilitySortInputKeys.clear();
+      m_visibilitySortInputObjects.reserve(totalSortInputCount);
+      m_visibilitySortInputKeys.reserve(totalSortInputCount);
+      m_visibilitySortInputObjects.insert(m_visibilitySortInputObjects.end(),
+                                          m_cachedStaticVisibilitySortObjects.begin(),
+                                          m_cachedStaticVisibilitySortObjects.end());
+      m_visibilitySortInputKeys.insert(m_visibilitySortInputKeys.end(),
+                                       m_cachedStaticVisibilitySortKeys.begin(),
+                                       m_cachedStaticVisibilitySortKeys.end());
+      const auto appendTransparentDraws = [&](std::span<const uint32_t> drawIndices) {
+        for(uint32_t drawIndex : drawIndices)
         {
+          MeshHandle meshHandle = kNullMeshHandle;
+          if(!tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+          {
+            continue;
+          }
+
+          const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+          if(mesh == nullptr)
+          {
+            continue;
+          }
+
           const glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
           const float distanceSquared = glm::dot(meshCenter - cameraPos, meshCenter - cameraPos);
-          subKey = encodeSortableFloatKey(distanceSquared) >> 2u;
-        }
-        else if(mesh->materialIndex >= 0)
-        {
-          subKey = std::min(static_cast<uint32_t>(mesh->materialIndex), kVisibilitySortKeyMask);
-        }
+          const uint32_t subKey = encodeSortableFloatKey(distanceSquared) >> 2u;
 
-        m_visibilitySortInputObjects.push_back(drawIndex);
-        m_visibilitySortInputKeys.push_back(encodeVisibilitySortKey(categoryValue, subKey));
-      }
-    };
-    appendSortedDraws(m_opaqueDrawIndices, kVisibilitySortCategoryOpaque, false);
-    appendSortedDraws(m_alphaTestDrawIndices, kVisibilitySortCategoryAlpha, false);
-    appendSortedDraws(m_transparentDrawIndices, kVisibilitySortCategoryTransparent, true);
-    m_runtimeStats.batchStats.sortPassCount =
-        computeBitonicSortPassCount(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
-    for(uint32_t sortFrameIndex = 0; sortFrameIndex < static_cast<uint32_t>(m_visibilitySortFrames.size()); ++sortFrameIndex)
+          m_visibilitySortInputObjects.push_back(drawIndex);
+          m_visibilitySortInputKeys.push_back(encodeVisibilitySortKey(kVisibilitySortCategoryTransparent, subKey));
+        }
+      };
+      appendTransparentDraws(m_transparentDrawIndices);
+      m_runtimeStats.batchStats.sortPassCount =
+          computeBitonicSortPassCount(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
+    }
     {
-      prepareVisibilitySortInputs(sortFrameIndex);
+      TRACY_ZONE_SCOPED("GPUDriven::PrepareVisibilitySortInputs");
+      prepareVisibilitySortInputs(frameIndex);
     }
     if(frameIndex < m_visibilitySortFrames.size())
     {
@@ -371,39 +419,48 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
 
   RenderParams gpuParams = params;
-  if(isMeshletRenderingActive())
   {
-    gpuParams.debugOptions.enableGPUOcclusionCulling = params.debugOptions.enableGPUMeshletOcclusionCulling;
+    TRACY_ZONE_SCOPED("GPUDriven::BuildRenderParams");
+    if(isMeshletRenderingActive())
+    {
+      gpuParams.debugOptions.enableGPUOcclusionCulling = params.debugOptions.enableGPUMeshletOcclusionCulling;
+    }
+    gpuParams.gpuDrivenSceneView =
+        (!sceneRenderingSuspended && m_sceneView.usePersistentCullingObjects) ? &m_sceneView : nullptr;
+    if(sceneRenderingSuspended || gpuParams.gpuDrivenSceneView != nullptr)
+    {
+      gpuParams.gltfModel = nullptr;
+    }
   }
-  gpuParams.gpuDrivenSceneView =
-      (!sceneRenderingSuspended && m_sceneView.usePersistentCullingObjects) ? &m_sceneView : nullptr;
-  if(sceneRenderingSuspended || gpuParams.gpuDrivenSceneView != nullptr)
   {
-    gpuParams.gltfModel = nullptr;
+    TRACY_ZONE_SCOPED("GPUDriven::submitPassGraph");
+    submitPassGraph(gpuParams);
   }
-  submitPassGraph(gpuParams);
   const VkDescriptorSet gpuCullingDescriptorSet =
       reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
-  m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
-  m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
-  m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
-  m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
-  m_sceneView.depthPyramidGeneration = m_hiZDepthPyramid.getGenerationCount();
-  m_sceneView.depthPyramidValid = m_hiZDepthPyramid.isValid();
-  m_runtimeStats.indirectDrawCount = m_runtimeStats.batchStats.visibleCount;
-  m_runtimeStats.indirectCommandStride = getGPUCullingIndirectCommandStride();
-  m_runtimeStats.ownsFullRenderChain = true;
-  m_runtimeStats.hiZGeneration = m_hiZDepthPyramid.getGenerationCount();
-  m_runtimeStats.ownsHiZVisibilityChain =
-      m_hiZDepthPyramid.isValid()
-      && m_hiZDepthPyramid.getSourceDepth().index == kPassSceneDepthHandle.index
-      && m_hiZDepthPyramid.getSourceDepth().generation == kPassSceneDepthHandle.generation
-      && m_hiZDepthPyramid.getLastBoundSet() == gpuCullingDescriptorSet
-      && m_hiZDepthPyramid.getLastBoundBinding() == 5;
-  if(m_sceneView.usePersistentCullingObjects
-     && getGPUCullingObjectCount(frameIndex) == safeObjectCount && safeObjectCount > 0u)
   {
-    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
+    TRACY_ZONE_SCOPED("GPUDriven::PostSubmitStats");
+    m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
+    m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
+    m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
+    m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
+    m_sceneView.depthPyramidGeneration = m_hiZDepthPyramid.getGenerationCount();
+    m_sceneView.depthPyramidValid = m_hiZDepthPyramid.isValid();
+    m_runtimeStats.indirectDrawCount = m_runtimeStats.batchStats.visibleCount;
+    m_runtimeStats.indirectCommandStride = getGPUCullingIndirectCommandStride();
+    m_runtimeStats.ownsFullRenderChain = true;
+    m_runtimeStats.hiZGeneration = m_hiZDepthPyramid.getGenerationCount();
+    m_runtimeStats.ownsHiZVisibilityChain =
+        m_hiZDepthPyramid.isValid()
+        && m_hiZDepthPyramid.getSourceDepth().index == kPassSceneDepthHandle.index
+        && m_hiZDepthPyramid.getSourceDepth().generation == kPassSceneDepthHandle.generation
+        && m_hiZDepthPyramid.getLastBoundSet() == gpuCullingDescriptorSet
+        && m_hiZDepthPyramid.getLastBoundBinding() == 5;
+    if(m_sceneView.usePersistentCullingObjects
+       && getGPUCullingObjectCount(frameIndex) == safeObjectCount && safeObjectCount > 0u)
+    {
+      m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
+    }
   }
 }
 
@@ -1287,9 +1344,14 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
       const uint32_t baseMeshletIndex = static_cast<uint32_t>(m_meshletDataCpu.size());
       const uint32_t baseIndexOffset = static_cast<uint32_t>(m_meshletIndicesCpu.size());
       const uint32_t flags = buildMeshletGPUDrivenFlags(*meshRecord);
-      for(shaderio::Meshlet& meshlet : meshlets.meshlets)
+      for(uint32_t localMeshletIndex = 0; localMeshletIndex < static_cast<uint32_t>(meshlets.meshlets.size());
+          ++localMeshletIndex)
       {
+        shaderio::Meshlet& meshlet = meshlets.meshlets[localMeshletIndex];
         meshlet.materialIndex = desc.materialIndex;
+        meshlet.objectIndex = objectId;
+        meshlet.flags = flags;
+        meshlet.localIndex = localMeshletIndex;
         meshlet.indexOffset += baseIndexOffset;
       }
       if(!meshlets.meshlets.empty())
@@ -1322,7 +1384,7 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
 
           m_meshletCullObjectsCpu.push_back(shaderio::GPUCullObject{
               .sphereCenterRadius = transformBoundsSphere(meshRecord->transform, meshlet.boundsSphere),
-              .indexCount = meshlet.triangleCount * 3u,
+              .indexCount = meshlet.indexCount,
               .firstIndex = meshlet.indexOffset,
               .vertexOffset = meshRecord->vertexOffset,
               .flags = flags,
@@ -1395,6 +1457,9 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_persistentDrawData.clear();
   m_visibilitySortInputObjects.clear();
   m_visibilitySortInputKeys.clear();
+  m_cachedStaticVisibilitySortObjects.clear();
+  m_cachedStaticVisibilitySortKeys.clear();
+  m_cachedStaticVisibilitySortTopologyVersion = 0;
   m_objectIdByMeshHandle.clear();
   m_drawIndexByMeshHandle.clear();
   m_meshHandleByDrawIndex.clear();
@@ -1633,6 +1698,8 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.gpuSceneObjectBufferAddress = m_sceneRegistry.getBufferAddress();
   m_sceneView.gpuCullObjectBufferAddress = m_sceneRegistry.getCullBufferAddress();
   m_sceneView.gpuCullObjectBuffer = m_sceneRegistry.getCullBufferHandle();
+  m_sceneView.gpuCullSceneObjectBuffer = m_sceneRegistry.getBufferHandle();
+  m_sceneView.gpuCullMeshletBuffer = VK_NULL_HANDLE;
   m_sceneView.objectCount = m_sceneRegistry.getObjectCount();
   m_sceneView.overlayObjects = m_sceneRegistry.getOverlayObjects().empty() ? nullptr : m_sceneRegistry.getOverlayObjects().data();
   m_sceneView.overlayObjectCount = static_cast<uint32_t>(m_sceneRegistry.getOverlayObjects().size());
@@ -1654,6 +1721,7 @@ void GPUDrivenRenderer::refreshSceneView()
   {
     m_sceneView.gpuCullObjectBufferAddress = m_meshletBuffer.getMeshletCullObjectAddress();
     m_sceneView.gpuCullObjectBuffer = m_meshletBuffer.getMeshletCullObjectBuffer();
+    m_sceneView.gpuCullMeshletBuffer = m_meshletBuffer.getMeshletDataBuffer();
     m_sceneView.objectCount = m_meshletBuffer.getMeshletCount();
     m_sceneView.overlayObjects = m_meshletCullObjectsCpu.empty() ? nullptr : m_meshletCullObjectsCpu.data();
     m_sceneView.overlayObjectCount = static_cast<uint32_t>(m_meshletCullObjectsCpu.size());
@@ -1888,7 +1956,7 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
 
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
   const std::array<VkDescriptorPoolSize, 1> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 8u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 12u},
   }};
   const VkDescriptorPoolCreateInfo poolInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1898,11 +1966,13 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
   };
   VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_transparentVisibilityPatchDescriptorPool));
 
-  const std::array<VkDescriptorSetLayoutBinding, 4> bindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 6> bindings{{
       VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
   }};
   const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1977,6 +2047,12 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
 void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
 {
   const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VmaAllocator allocator = getAllocatorHandle();
+  for(TransparentVisibilityFrameResources& frameResources : m_transparentVisibilityPatchFrames)
+  {
+    destroyBuffer(allocator, frameResources.prefixBuffers[0]);
+    destroyBuffer(allocator, frameResources.prefixBuffers[1]);
+  }
   m_transparentVisibilityPatchFrames.clear();
 
   if(nativeDevice != VK_NULL_HANDLE)
@@ -2019,8 +2095,11 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
   TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
   const uint32_t descriptorSetIndex =
       targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
+  const uint64_t prefixABufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[0].buffer);
+  const uint64_t prefixBBufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[1].buffer);
   if(nativeDevice == VK_NULL_HANDLE || frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE || sortKeyBufferHandle == 0
-     || sortValueBufferHandle == 0 || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0)
+     || sortValueBufferHandle == 0 || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0
+     || prefixABufferHandle == 0 || prefixBBufferHandle == 0)
   {
     return;
   }
@@ -2028,18 +2107,22 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
   if(frameResources.boundSortKeyHandles[descriptorSetIndex] == sortKeyBufferHandle
      && frameResources.boundSortValueHandles[descriptorSetIndex] == sortValueBufferHandle
      && frameResources.boundSourceIndirectHandles[descriptorSetIndex] == sourceIndirectBufferHandle
-     && frameResources.boundTargetIndirectHandles[descriptorSetIndex] == targetIndirectBufferHandle)
+     && frameResources.boundTargetIndirectHandles[descriptorSetIndex] == targetIndirectBufferHandle
+     && frameResources.boundPrefixAHandles[descriptorSetIndex] == prefixABufferHandle
+     && frameResources.boundPrefixBHandles[descriptorSetIndex] == prefixBBufferHandle)
   {
     return;
   }
 
-  const std::array<VkDescriptorBufferInfo, 4> bufferInfos{{
+  const std::array<VkDescriptorBufferInfo, 6> bufferInfos{{
       VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortKeyBufferHandle), 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortValueBufferHandle), 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sourceIndirectBufferHandle), 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(targetIndirectBufferHandle), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameResources.prefixBuffers[0].buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{frameResources.prefixBuffers[1].buffer, 0, VK_WHOLE_SIZE},
   }};
-  const std::array<VkWriteDescriptorSet, 4> writes{{
+  const std::array<VkWriteDescriptorSet, 6> writes{{
       VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = frameResources.descriptorSets[descriptorSetIndex],
@@ -2072,12 +2155,30 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
           .pBufferInfo = &bufferInfos[3],
       },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
+          .dstBinding = 4,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &bufferInfos[4],
+      },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
+          .dstBinding = 5,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &bufferInfos[5],
+      },
   }};
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
   frameResources.boundSortKeyHandles[descriptorSetIndex] = sortKeyBufferHandle;
   frameResources.boundSortValueHandles[descriptorSetIndex] = sortValueBufferHandle;
   frameResources.boundSourceIndirectHandles[descriptorSetIndex] = sourceIndirectBufferHandle;
   frameResources.boundTargetIndirectHandles[descriptorSetIndex] = targetIndirectBufferHandle;
+  frameResources.boundPrefixAHandles[descriptorSetIndex] = prefixABufferHandle;
+  frameResources.boundPrefixBHandles[descriptorSetIndex] = prefixBBufferHandle;
 }
 
 uint32_t GPUDrivenRenderer::getPreviousFrameIndex(uint32_t frameIndex) const
@@ -2122,7 +2223,10 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
   const TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
   const uint32_t descriptorSetIndex =
       targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
-  if(frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE)
+  if(frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE
+     || frameResources.prefixBuffers[0].buffer == VK_NULL_HANDLE
+     || frameResources.prefixBuffers[1].buffer == VK_NULL_HANDLE
+     || frameResources.prefixCapacity < sortResources.paddedElementCount)
   {
     return false;
   }
@@ -2140,7 +2244,9 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
       .memoryBarrierCount = 1,
       .pMemoryBarriers = &computeToComputeBarrier,
   };
-  vkCmdPipelineBarrier2(vkCmd, &computeToComputeDependency);
+  const auto barrierComputeToCompute = [&]() {
+    vkCmdPipelineBarrier2(vkCmd, &computeToComputeDependency);
+  };
 
   vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_transparentVisibilityPatchPipeline);
   vkCmdBindDescriptorSets(vkCmd,
@@ -2152,11 +2258,18 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
                           0,
                           nullptr);
 
-  const shaderio::TransparentVisibilityPatchPushConstants pushConstants{
+  const uint32_t elementCount = sortResources.paddedElementCount;
+  const uint32_t groupCount = (elementCount + 63u) / 64u;
+
+  shaderio::TransparentVisibilityPatchPushConstants pushConstants{
       .elementCount = sortResources.paddedElementCount,
       .categoryMask = kVisibilitySortCategoryMask,
       .categoryValue = categoryValue,
       .outputOffset = outputOffset,
+      .mode = 0u,
+      .scanOffset = 0u,
+      .scanBufferIndex = 0u,
+      ._padding0 = 0u,
   };
   vkCmdPushConstants(vkCmd,
                      m_transparentVisibilityPatchPipelineLayout,
@@ -2164,7 +2277,36 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
                      0,
                      sizeof(pushConstants),
                      &pushConstants);
-  vkCmdDispatch(vkCmd, (pushConstants.elementCount + 63u) / 64u, 1u, 1u);
+  vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
+  barrierComputeToCompute();
+
+  uint32_t scanBufferIndex = 0u;
+  for(uint32_t scanOffset = 1u; scanOffset < elementCount; scanOffset <<= 1u)
+  {
+    pushConstants.mode = 1u;
+    pushConstants.scanOffset = scanOffset;
+    pushConstants.scanBufferIndex = scanBufferIndex;
+    vkCmdPushConstants(vkCmd,
+                       m_transparentVisibilityPatchPipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0,
+                       sizeof(pushConstants),
+                       &pushConstants);
+    vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
+    barrierComputeToCompute();
+    scanBufferIndex = 1u - scanBufferIndex;
+  }
+
+  pushConstants.mode = 2u;
+  pushConstants.scanOffset = 0u;
+  pushConstants.scanBufferIndex = scanBufferIndex;
+  vkCmdPushConstants(vkCmd,
+                     m_transparentVisibilityPatchPipelineLayout,
+                     VK_SHADER_STAGE_COMPUTE_BIT,
+                     0,
+                     sizeof(pushConstants),
+                     &pushConstants);
+  vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
 
   const VkMemoryBarrier2 computeToIndirectBarrier{
       .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -2190,29 +2332,49 @@ void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32
   }
 
   VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
-  if(frameResources.capacity >= requiredCount)
+  TransparentVisibilityFrameResources* patchFrameResources = frameIndex < m_transparentVisibilityPatchFrames.size()
+                                                               ? &m_transparentVisibilityPatchFrames[frameIndex]
+                                                               : nullptr;
+  const bool growSortBuffers = frameResources.capacity < requiredCount;
+  const bool growPatchBuffers = patchFrameResources != nullptr && patchFrameResources->prefixCapacity < requiredCount;
+  if(!growSortBuffers && !growPatchBuffers)
   {
     return;
   }
 
   const VkDevice nativeDevice = getNativeDeviceHandle();
   const VmaAllocator allocator = getAllocatorHandle();
-  if(frameResources.capacity > 0)
+  if((growSortBuffers && frameResources.capacity > 0) || (growPatchBuffers && patchFrameResources->prefixCapacity > 0))
   {
     waitForIdle();
   }
-  destroyBuffer(allocator, frameResources.uploadKeyBuffer);
-  destroyBuffer(allocator, frameResources.uploadValueBuffer);
-  destroyBuffer(allocator, frameResources.keyBuffer);
-  destroyBuffer(allocator, frameResources.valueBuffer);
 
   const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(requiredCount) * sizeof(uint32_t);
-  frameResources.uploadKeyBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.uploadValueBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.keyBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.valueBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
-  frameResources.capacity = requiredCount;
-  updateVisibilitySortDescriptorSet(frameIndex);
+  if(growSortBuffers)
+  {
+    destroyBuffer(allocator, frameResources.uploadKeyBuffer);
+    destroyBuffer(allocator, frameResources.uploadValueBuffer);
+    destroyBuffer(allocator, frameResources.keyBuffer);
+    destroyBuffer(allocator, frameResources.valueBuffer);
+
+    frameResources.uploadKeyBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
+    frameResources.uploadValueBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
+    frameResources.keyBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+    frameResources.valueBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+    frameResources.capacity = requiredCount;
+    updateVisibilitySortDescriptorSet(frameIndex);
+  }
+
+  if(growPatchBuffers)
+  {
+    destroyBuffer(allocator, patchFrameResources->prefixBuffers[0]);
+    destroyBuffer(allocator, patchFrameResources->prefixBuffers[1]);
+    patchFrameResources->prefixBuffers[0] = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+    patchFrameResources->prefixBuffers[1] = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+    patchFrameResources->prefixCapacity = requiredCount;
+    patchFrameResources->boundPrefixAHandles = {};
+    patchFrameResources->boundPrefixBHandles = {};
+  }
 }
 
 void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
@@ -2277,17 +2439,20 @@ void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
     return;
   }
 
-  std::vector<uint32_t> paddedKeys(paddedCount, 0xffffffffu);
-  std::vector<uint32_t> paddedValues(paddedCount, 0xffffffffu);
-  std::copy(m_visibilitySortInputKeys.begin(), m_visibilitySortInputKeys.end(), paddedKeys.begin());
-  std::copy(m_visibilitySortInputObjects.begin(), m_visibilitySortInputObjects.end(), paddedValues.begin());
-
-  std::memcpy(frameResources.uploadKeyBuffer.mapped, paddedKeys.data(), paddedCount * sizeof(uint32_t));
-  std::memcpy(frameResources.uploadValueBuffer.mapped, paddedValues.data(), paddedCount * sizeof(uint32_t));
+  auto* mappedKeys = static_cast<uint32_t*>(frameResources.uploadKeyBuffer.mapped);
+  auto* mappedValues = static_cast<uint32_t*>(frameResources.uploadValueBuffer.mapped);
+  const uint32_t activeCount = static_cast<uint32_t>(m_visibilitySortInputObjects.size());
+  std::memcpy(mappedKeys, m_visibilitySortInputKeys.data(), activeCount * sizeof(uint32_t));
+  std::memcpy(mappedValues, m_visibilitySortInputObjects.data(), activeCount * sizeof(uint32_t));
+  if(paddedCount > activeCount)
+  {
+    std::fill(mappedKeys + activeCount, mappedKeys + paddedCount, 0xffffffffu);
+    std::fill(mappedValues + activeCount, mappedValues + paddedCount, 0xffffffffu);
+  }
   VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadKeyBuffer.allocation, 0, VK_WHOLE_SIZE));
   VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadValueBuffer.allocation, 0, VK_WHOLE_SIZE));
 
-  frameResources.activeElementCount = static_cast<uint32_t>(m_visibilitySortInputObjects.size());
+  frameResources.activeElementCount = activeCount;
   frameResources.paddedElementCount = paddedCount;
 }
 

@@ -1,0 +1,21 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00400000" android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:label="VKDemo">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="DemoAndroid" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

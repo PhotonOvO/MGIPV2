@@ -30,7 +30,7 @@ RendererFacade::RendererFacade()
 {
 }
 
-void RendererFacade::init(GLFWwindow* window, rhi::Surface& surface, bool vSync)
+void RendererFacade::init(void* window, rhi::Surface& surface, bool vSync)
 {
   if(m_backend == RendererBackend::gpuDriven)
   {

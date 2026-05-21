@@ -21,6 +21,12 @@ Texture2D<float> depthPyramidTexture[LDepthPyramidMaxMips];
 [[vk::binding(6, 0)]]
 ConstantBuffer<GPUCullingUniforms> gpuCullingUniforms;
 
+[[vk::binding(7, 0)]]
+StructuredBuffer<Meshlet> meshlets;
+
+[[vk::binding(8, 0)]]
+StructuredBuffer<GPUSceneObject> sceneObjects;
+
 bool isInsideFrustum(float3 center, float radius)
 {
     const float conservativeRadius = radius * 1.05 + 0.05;
@@ -58,12 +64,14 @@ bool isOccluded(float3 center, float radius)
     const float nearestPositiveZ = -centerView.z - conservativeRadius;
     if(nearestPositiveZ <= 1e-4)
     {
+        InterlockedAdd(cullStats[0].hizRejectedNearCount, 1u);
         return false;
     }
 
     const float4 clipCenter = mul(gpuCullingUniforms.projectionMatrix, float4(centerView, 1.0));
     if(abs(clipCenter.w) <= 1e-5)
     {
+        InterlockedAdd(cullStats[0].hizRejectedNearCount, 1u);
         return false;
     }
 
@@ -77,6 +85,7 @@ bool isOccluded(float3 center, float radius)
     float2 maxNdc = centerNdc + radiusNdc + guardBandNdc;
     if(maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
     {
+        InterlockedAdd(cullStats[0].hizRejectedOffscreenCount, 1u);
         return false;
     }
 
@@ -93,6 +102,7 @@ bool isOccluded(float3 center, float radius)
     const float footprint = max(extentPixels.x, extentPixels.y);
     if(footprint >= 192.0)
     {
+        InterlockedAdd(cullStats[0].hizRejectedLargeCount, 1u);
         return false;
     }
     const uint mipLevel = selectMip(minPixel, maxPixel, mipCount);
@@ -101,23 +111,77 @@ bool isOccluded(float3 center, float radius)
     const int2 mipExtent = max(int2(1, 1), int2(pyramidSize) >> int(mipLevel));
     const float2 centerPixel = 0.5 * (minPixel + maxPixel);
     const int2 centerCoord = clamp(int2(centerPixel / sourceFootprint), int2(0, 0), mipExtent - int2(1, 1));
+    InterlockedAdd(cullStats[0].hizTestedCount, 1u);
     const float hizDepth = sampleHiZCenterClusterDepth(mipLevel, centerCoord, mipExtent);
 
     const float nearestViewZ = centerView.z + conservativeRadius;
     if(nearestViewZ >= -1e-4)
     {
+        InterlockedAdd(cullStats[0].hizRejectedNearCount, 1u);
         return false;
     }
 
     const float4 nearestClip = mul(gpuCullingUniforms.projectionMatrix, float4(centerView.xy, nearestViewZ, 1.0));
     if(abs(nearestClip.w) <= 1e-5)
     {
+        InterlockedAdd(cullStats[0].hizRejectedNearCount, 1u);
         return false;
     }
 
     const float nearestDepth = saturate(nearestClip.z / nearestClip.w);
     const float depthEpsilon = gpuCullingUniforms.cullingInfo.w;
     return nearestDepth + depthEpsilon < hizDepth;
+}
+
+float3 transformMeshletConeAxis(uint objectIndex, float3 localAxis)
+{
+    const GPUSceneObject sceneObject = sceneObjects[objectIndex];
+    const float3 worldAxis = float3(dot(sceneObject.worldMatrixRows[0].xyz, localAxis),
+                                    dot(sceneObject.worldMatrixRows[1].xyz, localAxis),
+                                    dot(sceneObject.worldMatrixRows[2].xyz, localAxis));
+    const float axisLength = length(worldAxis);
+    if(axisLength <= 1e-5)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return worldAxis / axisLength;
+}
+
+bool isMeshletConeCulled(uint meshletIndex, float3 center, float radius)
+{
+    if(gpuCullingUniforms.cullingControls.z <= 0.5 || gpuCullingUniforms.cullingControls.w <= 0.5)
+    {
+        return false;
+    }
+
+    const Meshlet meshlet = meshlets[meshletIndex];
+    if(meshlet.objectIndex == 0xffffffffu)
+    {
+        return false;
+    }
+
+    const float3 localAxis = meshlet.coneAxisCutoff.xyz;
+    const float coneCutoff = meshlet.coneAxisCutoff.w;
+    if(dot(localAxis, localAxis) <= 1e-5 || coneCutoff <= -1.0 || coneCutoff >= 1.0)
+    {
+        return false;
+    }
+
+    const float3 worldAxis = transformMeshletConeAxis(meshlet.objectIndex, localAxis);
+    if(dot(worldAxis, worldAxis) <= 1e-5)
+    {
+        return false;
+    }
+
+    const float3 cameraToCenter = center - gpuCullingUniforms.cameraPositionAndMeshletInfo.xyz;
+    const float distanceToCamera = length(cameraToCenter);
+    if(distanceToCamera <= max(radius * 2.0, 1e-4))
+    {
+        return false;
+    }
+
+    const float radiusSlack = min(0.15, radius / distanceToCamera);
+    return dot(cameraToCenter / distanceToCamera, worldAxis) >= coneCutoff + radiusSlack;
 }
 
 [numthreads(LGPUCullingThreadCount, 1, 1)]
@@ -170,13 +234,25 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    const bool useOcclusion = gpuCullingUniforms.cullingInfo.z > 0.5;
-    if(enableOcclusionCulling && useOcclusion && isOccluded(center, radius))
+    if(isMeshletConeCulled(objectIndex, center, radius))
     {
-        InterlockedAdd(cullStats[0].occlusionCulledCount, 1u);
-        cullResults[objectIndex] = LGPUCullResultOcclusionCulled;
+        InterlockedAdd(cullStats[0].meshletConeCulledCount, 1u);
+        cullResults[objectIndex] = LGPUCullResultConeCulled;
         indirectCommands[objectIndex] = command;
         return;
+    }
+
+    const bool useOcclusion = gpuCullingUniforms.cullingInfo.z > 0.5;
+    if(enableOcclusionCulling && useOcclusion)
+    {
+        InterlockedAdd(cullStats[0].hizCandidateCount, 1u);
+        if(isOccluded(center, radius))
+        {
+            InterlockedAdd(cullStats[0].occlusionCulledCount, 1u);
+            cullResults[objectIndex] = LGPUCullResultOcclusionCulled;
+            indirectCommands[objectIndex] = command;
+            return;
+        }
     }
 
     command.instanceCount = 1u;

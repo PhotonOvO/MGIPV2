@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "../../common/TracyProfiling.h"
+#include "../../common/logger.h"
 #include "volk.h"
 #include "vulkan/vk_enum_string_helper.h"
 
@@ -24,6 +26,8 @@ typedef struct VkSurfaceFullScreenExclusiveInfoEXT {
     const void*                pNext;
     VkFullScreenExclusiveEXT   fullScreenExclusive;
 } VkSurfaceFullScreenExclusiveInfoEXT;
+typedef VkResult (VKAPI_PTR *PFN_vkAcquireFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
+typedef VkResult (VKAPI_PTR *PFN_vkReleaseFullScreenExclusiveModeEXT)(VkDevice device, VkSwapchainKHR swapchain);
 #ifdef _WIN32
 typedef struct VkSurfaceFullScreenExclusiveWin32InfoEXT {
     VkStructureType sType;
@@ -66,6 +70,18 @@ bool isSwapchainInvalidPresentResult(VkResult result)
       ;
 }
 
+PFN_vkAcquireFullScreenExclusiveModeEXT getAcquireFullScreenExclusiveModeFn(VkDevice device)
+{
+  return reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
+      vkGetDeviceProcAddr(device, "vkAcquireFullScreenExclusiveModeEXT"));
+}
+
+PFN_vkReleaseFullScreenExclusiveModeEXT getReleaseFullScreenExclusiveModeFn(VkDevice device)
+{
+  return reinterpret_cast<PFN_vkReleaseFullScreenExclusiveModeEXT>(
+      vkGetDeviceProcAddr(device, "vkReleaseFullScreenExclusiveModeEXT"));
+}
+
 }  // namespace
 
 void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync)
@@ -98,6 +114,9 @@ void VulkanSwapchain::deinit()
   m_hasAcquiredImage = false;
   m_needsRebuild   = false;
   m_presentMode    = VK_PRESENT_MODE_FIFO_KHR;
+  m_fullscreen     = false;
+  m_fullscreenExclusiveAcquired = false;
+  m_platform_handle = nullptr;
 }
 
 void VulkanSwapchain::setVSync(bool vSync)
@@ -116,6 +135,11 @@ void VulkanSwapchain::set_fullscreen(bool fullscreen, void* platform_handle)
   if(m_fullscreen == fullscreen && m_platform_handle == platform_handle)
   {
     return;
+  }
+
+  if(!fullscreen)
+  {
+    releaseFullScreenExclusiveMode();
   }
 
   m_fullscreen = fullscreen;
@@ -155,8 +179,12 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   // Block in the presentation engine instead of busy retrying on the CPU.
   // This removes frame skipping and sleep-based bubbles when the swapchain is
   // pacing the app under FIFO or waiting for an image to recycle.
-  const VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
-                                                frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
+  VkResult result = VK_SUCCESS;
+  {
+    TRACY_ZONE_SCOPED("vkAcquireNextImageKHR");
+    result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
+                                   frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
+  }
   if(isSwapchainInvalidPresentResult(result))
   {
     m_hasAcquiredImage = false;
@@ -212,7 +240,11 @@ PresentResult VulkanSwapchain::present()
       .pImageIndices      = &m_frameImageIndex,
   };
 
-  const VkResult result = vkQueuePresentKHR(m_queue, &presentInfo);
+  VkResult result = VK_SUCCESS;
+  {
+    TRACY_ZONE_SCOPED("vkQueuePresentKHR");
+    result = vkQueuePresentKHR(m_queue, &presentInfo);
+  }
   PresentResult  presentResult{};
   if(isSwapchainInvalidPresentResult(result))
   {
@@ -318,8 +350,26 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   ensure(m_device != VK_NULL_HANDLE, "VulkanSwapchain::createResources requires VkDevice");
   ensure(m_surface != VK_NULL_HANDLE, "VulkanSwapchain::createResources requires VkSurfaceKHR");
 
-  const VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo2{.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
-                                                     .surface = m_surface};
+  VkSurfaceFullScreenExclusiveInfoEXT fullScreenExclusiveInfo{};
+  fullScreenExclusiveInfo.sType = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT);
+  fullScreenExclusiveInfo.fullScreenExclusive =
+      static_cast<VkFullScreenExclusiveEXT>(VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT);
+
+#ifdef _WIN32
+  VkSurfaceFullScreenExclusiveWin32InfoEXT fullScreenExclusiveWin32Info{};
+  fullScreenExclusiveWin32Info.sType = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT);
+  fullScreenExclusiveWin32Info.hmonitor = m_platform_handle;
+  if(m_platform_handle != nullptr)
+  {
+    fullScreenExclusiveInfo.pNext = &fullScreenExclusiveWin32Info;
+  }
+#endif
+
+  const VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo2{
+      .sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
+      .pNext   = m_fullscreen ? &fullScreenExclusiveInfo : nullptr,
+      .surface = m_surface,
+  };
   VkSurfaceCapabilities2KHR             capabilities2{.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR};
   checkVk(vkGetPhysicalDeviceSurfaceCapabilities2KHR(m_physicalDevice, &surfaceInfo2, &capabilities2),
           "VulkanSwapchain::createResources failed querying surface capabilities");
@@ -357,17 +407,6 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   m_maxFramesInFlight   = m_requestedImageCount;
   m_imageFormat       = surfaceFormat2.surfaceFormat.format;
 
-  VkSurfaceFullScreenExclusiveInfoEXT fullScreenExclusiveInfo{};
-  fullScreenExclusiveInfo.sType               = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT);
-  fullScreenExclusiveInfo.fullScreenExclusive = static_cast<VkFullScreenExclusiveEXT>(VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT);
-
-#ifdef _WIN32
-  VkSurfaceFullScreenExclusiveWin32InfoEXT fullScreenExclusiveWin32Info{};
-  fullScreenExclusiveWin32Info.sType    = static_cast<VkStructureType>(VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT);
-  fullScreenExclusiveWin32Info.hmonitor = m_platform_handle;
-  fullScreenExclusiveInfo.pNext = &fullScreenExclusiveWin32Info;
-#endif
-
   VkSwapchainCreateInfoKHR swapchainCreateInfo{};
   swapchainCreateInfo.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
   swapchainCreateInfo.pNext            = m_fullscreen ? &fullScreenExclusiveInfo : nullptr;
@@ -385,6 +424,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   swapchainCreateInfo.clipped          = VK_TRUE;
   checkVk(vkCreateSwapchainKHR(m_device, &swapchainCreateInfo, nullptr, &m_swapchain),
           "VulkanSwapchain::createResources failed creating swapchain");
+  acquireFullScreenExclusiveMode();
 
   uint32_t imageCount = 0;
   checkVk(vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, nullptr),
@@ -431,6 +471,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 void VulkanSwapchain::destroyResources()
 {
   m_hasAcquiredImage = false;
+  releaseFullScreenExclusiveMode();
   if(m_device == VK_NULL_HANDLE)
   {
     m_images.clear();
@@ -472,6 +513,52 @@ void VulkanSwapchain::destroyResources()
 
   m_images.clear();
   m_frameResources.clear();
+}
+
+void VulkanSwapchain::acquireFullScreenExclusiveMode()
+{
+  if(!m_fullscreen || m_swapchain == VK_NULL_HANDLE || m_fullscreenExclusiveAcquired)
+  {
+    return;
+  }
+
+  const PFN_vkAcquireFullScreenExclusiveModeEXT acquireFn = getAcquireFullScreenExclusiveModeFn(m_device);
+  if(acquireFn == nullptr)
+  {
+    LOGW("VK_EXT_full_screen_exclusive is unavailable; fullscreen will remain DWM-composed");
+    return;
+  }
+
+  const VkResult result = acquireFn(m_device, m_swapchain);
+  if(result == VK_SUCCESS)
+  {
+    m_fullscreenExclusiveAcquired = true;
+    LOGI("Acquired Vulkan fullscreen exclusive mode");
+    return;
+  }
+
+  LOGW("Failed to acquire Vulkan fullscreen exclusive mode: %s", string_VkResult(result));
+}
+
+void VulkanSwapchain::releaseFullScreenExclusiveMode()
+{
+  if(!m_fullscreenExclusiveAcquired || m_swapchain == VK_NULL_HANDLE)
+  {
+    m_fullscreenExclusiveAcquired = false;
+    return;
+  }
+
+  const PFN_vkReleaseFullScreenExclusiveModeEXT releaseFn = getReleaseFullScreenExclusiveModeFn(m_device);
+  if(releaseFn != nullptr)
+  {
+    const VkResult result = releaseFn(m_device, m_swapchain);
+    if(result != VK_SUCCESS)
+    {
+      LOGW("Failed to release Vulkan fullscreen exclusive mode: %s", string_VkResult(result));
+    }
+  }
+
+  m_fullscreenExclusiveAcquired = false;
 }
 
 VkSurfaceFormat2KHR VulkanSwapchain::selectSwapSurfaceFormat(const std::vector<VkSurfaceFormat2KHR>& availableFormats) const

@@ -54,7 +54,7 @@ struct GPUDrivenRuntimeStats
 class GPUDrivenRenderer
 {
 public:
-  void init(GLFWwindow* window, rhi::Surface& surface, bool vSync);
+  void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
   void setVSync(bool enabled) { m_renderer.setVSync(enabled); }
   [[nodiscard]] bool getVSync() const { return m_renderer.getVSync(); }
@@ -115,6 +115,10 @@ public:
   [[nodiscard]] uint64_t             getMeshletIndexBufferHandle() const
   {
     return m_meshletBuffer.getMeshletIndexBufferHandle();
+  }
+  [[nodiscard]] VkBuffer             getMeshletDataBuffer() const
+  {
+    return m_meshletBuffer.getMeshletDataBuffer();
   }
   [[nodiscard]] bool                 tryGetMeshDrawIndex(MeshHandle handle, uint32_t& outDrawIndex) const;
   [[nodiscard]] bool                 tryGetMeshHandleForDrawIndex(uint32_t drawIndex, MeshHandle& outHandle) const;
@@ -374,11 +378,15 @@ private:
 
   struct TransparentVisibilityFrameResources
   {
+    std::array<utils::Buffer, 2>   prefixBuffers{};
     std::array<VkDescriptorSet, 2> descriptorSets{VK_NULL_HANDLE, VK_NULL_HANDLE};
     std::array<uint64_t, 2>        boundSortKeyHandles{0, 0};
     std::array<uint64_t, 2>        boundSortValueHandles{0, 0};
     std::array<uint64_t, 2>        boundSourceIndirectHandles{0, 0};
     std::array<uint64_t, 2>        boundTargetIndirectHandles{0, 0};
+    std::array<uint64_t, 2>        boundPrefixAHandles{0, 0};
+    std::array<uint64_t, 2>        boundPrefixBHandles{0, 0};
+    uint32_t                       prefixCapacity{0};
   };
 
   struct SortedBootstrapFrameState
@@ -425,6 +433,9 @@ private:
   std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
   std::vector<uint32_t>              m_visibilitySortInputObjects;
   std::vector<uint32_t>              m_visibilitySortInputKeys;
+  std::vector<uint32_t>              m_cachedStaticVisibilitySortObjects;
+  std::vector<uint32_t>              m_cachedStaticVisibilitySortKeys;
+  uint64_t                           m_cachedStaticVisibilitySortTopologyVersion{0};
   std::vector<shaderio::DrawUniforms> m_persistentDrawData;
   std::vector<uint32_t>              m_dirtyPersistentDrawIndices;
   std::unique_ptr<GPUDrivenDepthPrepass> m_depthPrepass;

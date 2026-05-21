@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Demo VERSION 1.0 LANGUAGES CXX)
+project(Demo VERSION 1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +39,10 @@ endif()
 
 option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
 option(TRACY_ENABLE "Enable Tracy profiler integration" ON)
+if(ANDROID AND TRACY_ENABLE)
+  message(STATUS "Tracy profiler: disabled for Android")
+  set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiler integration" FORCE)
+endif()
 
 include(FetchContent)
 
@@ -50,6 +54,16 @@ include(CompilerGlslShader)
 include(DownloadPackage)
 
 find_package(Vulkan REQUIRED)
+
+set(DEMO_VULKAN_HEADER_DIR "" CACHE PATH "Optional Vulkan header directory to use before the platform SDK headers")
+if(DEMO_VULKAN_HEADER_DIR)
+  include_directories(BEFORE "${DEMO_VULKAN_HEADER_DIR}")
+endif()
+
+if(ANDROID)
+  add_compile_definitions(VK_USE_PLATFORM_ANDROID_KHR)
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -u ANativeActivity_onCreate")
+endif()
 
 if(USE_SLANG)
   set(Slang_VERSION "2026.3.1")
@@ -64,17 +78,19 @@ if(USE_SLANG)
   find_package(Slang REQUIRED)
 endif()
 
-FetchContent_Declare(
-  glfw
-  GIT_REPOSITORY https://github.com/glfw/glfw.git
-  GIT_TAG 3.4
-)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(glfw)
+if(NOT ANDROID)
+  FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+  )
+  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+  set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(glfw)
+endif()
 
 FetchContent_Declare(
   glm
@@ -129,17 +145,31 @@ add_library(imgui_demo STATIC
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_tables.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.h
   ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.h
 )
+if(ANDROID)
+  target_sources(imgui_demo PRIVATE
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_android.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_android.h
+  )
+else()
+  target_sources(imgui_demo PRIVATE
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.h
+  )
+endif()
 target_include_directories(imgui_demo PUBLIC
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
 )
 target_compile_definitions(imgui_demo PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
-target_link_libraries(imgui_demo PUBLIC volk glfw)
+target_link_libraries(imgui_demo PUBLIC volk)
+if(ANDROID)
+  target_link_libraries(imgui_demo PUBLIC android)
+else()
+  target_link_libraries(imgui_demo PUBLIC glfw)
+endif()
 
 #====================================================================================
 # Tracy Profiler - CPU/GPU profiling
@@ -165,7 +195,7 @@ if(NOT EXISTS "${STB_IMAGE_PATH}")
   file(DOWNLOAD "${STB_IMAGE_URL}" "${STB_IMAGE_PATH}")
 endif()
 
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
   find_package(X11 REQUIRED)
   find_package(Threads REQUIRED)
 endif()
@@ -199,7 +229,6 @@ compile_glsl(
 )
 
 add_library(demo_core STATIC
-  app/MinimalLatestApp.h
   rhi/RHITypes.h
   rhi/RHIHandles.h
   rhi/RHIBindlessTypes.h
@@ -376,6 +405,19 @@ add_library(demo_core STATIC
   render/CSMShadowResources.cpp
 )
 
+if(NOT ANDROID)
+  target_sources(demo_core PRIVATE app/MinimalLatestApp.h)
+endif()
+
+if(ANDROID)
+  add_library(native_app_glue STATIC
+    ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
+  )
+  target_include_directories(native_app_glue PUBLIC
+    ${ANDROID_NDK}/sources/android/native_app_glue
+  )
+endif()
+
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
@@ -409,7 +451,6 @@ target_sources(demo_core PRIVATE
 
 target_link_libraries(demo_core
   PUBLIC
-    glfw
     volk
     imgui_demo
     glm
@@ -418,11 +459,17 @@ target_link_libraries(demo_core
     Vulkan::Vulkan
 )
 
+if(ANDROID)
+  target_link_libraries(demo_core PUBLIC android log native_app_glue)
+else()
+  target_link_libraries(demo_core PUBLIC glfw)
+endif()
+
 if(TRACY_ENABLE)
   target_link_libraries(demo_core PUBLIC TracyClient)
 endif()
 
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
   target_link_libraries(demo_core PUBLIC ${X11_LIBRARIES} Threads::Threads)
 endif()
 
@@ -430,21 +477,27 @@ if(WIN32)
   target_link_libraries(demo_core PUBLIC winmm.lib)
 endif()
 
-add_executable(Demo app/MinimalLatestApp.cpp)
-target_link_libraries(Demo PRIVATE demo_core)
+if(ANDROID)
+  add_library(DemoAndroid SHARED app/AndroidNativeApp.cpp)
+  target_link_libraries(DemoAndroid PRIVATE demo_core)
+else()
+  add_executable(Demo app/MinimalLatestApp.cpp)
+  target_link_libraries(Demo PRIVATE demo_core)
+endif()
 
-add_executable(texture_converter
+if(NOT ANDROID)
+add_executable(texture_converter  
   tools/texture_converter.cpp
 )
 
 set(NVTT_ROOT "C:/Program Files/NVIDIA Corporation/NVIDIA Texture Tools" CACHE PATH "Path to the NVIDIA Texture Tools install root")
 set(NVTT_INCLUDE_DIR "${NVTT_ROOT}/include")
-set(NVTT_LIBRARY "${NVTT_ROOT}/lib/x64-v142/nvtt30205.lib")
+set(NVTT_LIBRARY "${NVTT_ROOT}/lib/x64-v142/nvtt30205.lib")    
 set(NVTT_DLL "${NVTT_ROOT}/nvtt30205.dll")
 
 if(NOT EXISTS "${NVTT_INCLUDE_DIR}/nvtt/nvtt.h")
   message(FATAL_ERROR "NVTT headers were not found under ${NVTT_INCLUDE_DIR}")
-endif()
+endif()  
 if(NOT EXISTS "${NVTT_LIBRARY}")
   message(FATAL_ERROR "NVTT import library was not found at ${NVTT_LIBRARY}")
 endif()
@@ -504,3 +557,4 @@ add_custom_target(copy_demo_resources
 )
 
 add_dependencies(Demo texture_converter copy_demo_resources)
+endif()
