@@ -26,7 +26,7 @@ void GPUDrivenDebugPass::execute(const PassContext& context) const
 {
   if(m_renderer != nullptr && context.cmd != nullptr && context.params != nullptr && context.transientAllocator != nullptr)
   {
-    m_renderer->executeDebugPass(context);
+    // m_renderer->executeDebugPass(context);
   }
 }
 

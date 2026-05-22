@@ -9,5 +9,6 @@ android/.gradle/
 android/app/build/
 android/app/.cxx/
 android/local-maven/
+android/local.properties
 .claude/
 imgui.ini

@@ -46,7 +46,7 @@ endif()
 
 include(FetchContent)
 
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CompilerSlangShader)
@@ -63,6 +63,7 @@ endif()
 if(ANDROID)
   add_compile_definitions(VK_USE_PLATFORM_ANDROID_KHR)
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -u ANativeActivity_onCreate")
+  add_compile_definitions(NDEBUG)
 endif()
 
 if(USE_SLANG)
@@ -191,8 +192,14 @@ endif()
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
 set(STB_IMAGE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
 if(NOT EXISTS "${STB_IMAGE_PATH}")
-  message(STATUS "Downloading stb_image.h for Demo...") 
-  file(DOWNLOAD "${STB_IMAGE_URL}" "${STB_IMAGE_PATH}")
+  set(STB_IMAGE_CACHED_PATH "${REPO_ROOT}/out/build/x64-Debug/stb_image.h")
+  if(EXISTS "${STB_IMAGE_CACHED_PATH}")
+    message(STATUS "Copying cached stb_image.h for Demo...")
+    file(COPY_FILE "${STB_IMAGE_CACHED_PATH}" "${STB_IMAGE_PATH}")
+  else()
+    message(STATUS "Downloading stb_image.h for Demo...")
+    file(DOWNLOAD "${STB_IMAGE_URL}" "${STB_IMAGE_PATH}")
+  endif()
 endif()
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
@@ -265,31 +272,6 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanPipelines.cpp
   rhi/vulkan/VulkanSwapchain.h
   rhi/vulkan/VulkanSwapchain.cpp
-  rhi/metal/MetalDevice.h
-  rhi/metal/MetalDevice.cpp
-  rhi/metal/MetalSwapchain.h
-  rhi/metal/MetalSwapchain.cpp
-  rhi/metal/MetalCommandList.h
-  rhi/metal/MetalCommandList.cpp
-  rhi/metal/MetalDescriptor.h
-  rhi/metal/MetalDescriptor.cpp
-  rhi/metal/MetalPipelines.h
-  rhi/metal/MetalPipelines.cpp
-  rhi/metal/MetalFrameContext.h
-  rhi/metal/MetalFrameContext.cpp
-  # D3D12 backend scaffold (Windows only)
-  rhi/d3d12/D3D12Device.h
-  rhi/d3d12/D3D12Device.cpp
-  rhi/d3d12/D3D12Swapchain.h
-  rhi/d3d12/D3D12Swapchain.cpp
-  rhi/d3d12/D3D12CommandList.h
-  rhi/d3d12/D3D12CommandList.cpp
-  rhi/d3d12/D3D12Descriptor.h
-  rhi/d3d12/D3D12Descriptor.cpp
-  rhi/d3d12/D3D12Pipelines.h
-  rhi/d3d12/D3D12Pipelines.cpp
-  rhi/d3d12/D3D12FrameContext.h
-  rhi/d3d12/D3D12FrameContext.cpp
   render/Renderer.cpp
   render/Renderer.h
   render/RendererFacade.h
@@ -406,7 +388,33 @@ add_library(demo_core STATIC
 )
 
 if(NOT ANDROID)
-  target_sources(demo_core PRIVATE app/MinimalLatestApp.h)
+  target_sources(demo_core PRIVATE
+    app/MinimalLatestApp.h
+    rhi/metal/MetalDevice.h
+    rhi/metal/MetalDevice.cpp
+    rhi/metal/MetalSwapchain.h
+    rhi/metal/MetalSwapchain.cpp
+    rhi/metal/MetalCommandList.h
+    rhi/metal/MetalCommandList.cpp
+    rhi/metal/MetalDescriptor.h
+    rhi/metal/MetalDescriptor.cpp
+    rhi/metal/MetalPipelines.h
+    rhi/metal/MetalPipelines.cpp
+    rhi/metal/MetalFrameContext.h
+    rhi/metal/MetalFrameContext.cpp
+    rhi/d3d12/D3D12Device.h
+    rhi/d3d12/D3D12Device.cpp
+    rhi/d3d12/D3D12Swapchain.h
+    rhi/d3d12/D3D12Swapchain.cpp
+    rhi/d3d12/D3D12CommandList.h
+    rhi/d3d12/D3D12CommandList.cpp
+    rhi/d3d12/D3D12Descriptor.h
+    rhi/d3d12/D3D12Descriptor.cpp
+    rhi/d3d12/D3D12Pipelines.h
+    rhi/d3d12/D3D12Pipelines.cpp
+    rhi/d3d12/D3D12FrameContext.h
+    rhi/d3d12/D3D12FrameContext.cpp
+  )
 endif()
 
 if(ANDROID)
@@ -431,6 +439,7 @@ endif()
 
 target_include_directories(demo_core
   PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
     ${volk_SOURCE_DIR}
     ${imgui_SOURCE_DIR}

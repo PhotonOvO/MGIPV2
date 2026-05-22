@@ -203,10 +203,12 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   {
     throw std::runtime_error(std::string("VulkanSwapchain::acquireNextImage failed: ") + string_VkResult(result));
   }
+#ifndef __ANDROID__
   if(result == VK_SUBOPTIMAL_KHR)
   {
     m_needsRebuild = true;
   }
+#endif
   m_hasAcquiredImage = true;
   ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::acquireNextImage invalid image index");
   return AcquireResult{.texture    = m_images[m_frameImageIndex].texture,
@@ -257,10 +259,12 @@ PresentResult VulkanSwapchain::present()
     {
       throw std::runtime_error(std::string("VulkanSwapchain::present failed: ") + string_VkResult(result));
     }
+#ifndef __ANDROID__
     if(result == VK_SUBOPTIMAL_KHR)
     {
       m_needsRebuild = true;
     }
+#endif
     presentResult.status = result == VK_SUBOPTIMAL_KHR ? PresentResult::Status::suboptimal : PresentResult::Status::success;
   }
 
@@ -418,7 +422,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   swapchainCreateInfo.imageArrayLayers = 1;
   swapchainCreateInfo.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  swapchainCreateInfo.preTransform     = capabilities2.surfaceCapabilities.currentTransform;
+  swapchainCreateInfo.preTransform     = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
   swapchainCreateInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   swapchainCreateInfo.presentMode      = presentMode;
   swapchainCreateInfo.clipped          = VK_TRUE;

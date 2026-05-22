@@ -708,6 +708,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
 
   rhi::DeviceCreateInfo deviceCreateInfo;
 #ifdef __ANDROID__
+  deviceCreateInfo.enableValidationLayers = false;
   deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
   deviceCreateInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #else
@@ -905,6 +906,12 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
 
     const std::vector<std::string> searchPaths = {".", "resources", "../resources", "../../resources"};
     std::string                    filename    = utils::findFile("image1.jpg", searchPaths);
+#ifdef __ANDROID__
+    if(filename.empty())
+    {
+      filename = "image1.jpg";
+    }
+#endif
     ASSERT(!filename.empty(), "Could not load texture image!");
     rhi::vulkan::VulkanCommandList initCommandList{};
     initCommandList.setCommandBuffer(cmd);
@@ -924,6 +931,12 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
     });
 
     filename = utils::findFile("image2.jpg", searchPaths);
+#ifdef __ANDROID__
+    if(filename.empty())
+    {
+      filename = "image2.jpg";
+    }
+#endif
     ASSERT(!filename.empty(), "Could not load texture image!");
     utils::ImageResource materialImage1   = loadAndCreateImage(initCommandList, filename);
     const TextureHandle  materialTexture1 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
@@ -3587,6 +3600,10 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 {
   if(requestedViewportSize.has_value() && isValidExtent(requestedViewportSize.value()))
   {
+    if(extentChanged(m_swapchainDependent.viewportSize, requestedViewportSize.value()))
+    {
+      m_swapchainDependent.swapchain->requestRebuild();
+    }
     m_swapchainDependent.viewportSize = requestedViewportSize.value();
   }
 
@@ -6981,6 +6998,23 @@ utils::ImageResource Renderer::loadAndCreateImage(rhi::CommandList& cmd, const s
 {
   int            w = 0, h = 0, comp = 0, req_comp{4};
   const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
+#ifdef __ANDROID__
+  std::array<stbi_uc, 16> fallbackPixels{};
+  if(data == nullptr)
+  {
+    const bool useBlue = filename.find("image2") != std::string::npos;
+    const std::array<stbi_uc, 4> color = useBlue ? std::array<stbi_uc, 4>{64, 128, 255, 255}
+                                                 : std::array<stbi_uc, 4>{255, 128, 64, 255};
+    for(size_t i = 0; i < fallbackPixels.size(); i += color.size())
+    {
+      std::copy(color.begin(), color.end(), fallbackPixels.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    data = fallbackPixels.data();
+    w    = 2;
+    h    = 2;
+    comp = req_comp;
+  }
+#endif
   ASSERT(data != nullptr, "Could not load texture image!");
   const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
   const uint32_t mipLevels = MipmapGenerator::calculateMipLevelCount(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
@@ -7023,7 +7057,12 @@ utils::ImageResource Renderer::loadAndCreateImage(rhi::CommandList& cmd, const s
   };
   VK_CHECK(vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &viewInfo, nullptr, &image.view));
   DBG_VK_NAME(image.view);
-  stbi_image_free(const_cast<stbi_uc*>(data));
+#ifdef __ANDROID__
+  if(data != fallbackPixels.data())
+#endif
+  {
+    stbi_image_free(const_cast<stbi_uc*>(data));
+  }
 
   return image;
 }

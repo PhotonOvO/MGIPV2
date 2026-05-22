@@ -2,10 +2,42 @@ plugins {
     id "com.android.application"
 }
 
+def repoRoot = rootProject.file("..")
+def cachedDeps = rootProject.file("../out/build/x64-Debug/_deps")
+def cmakeArguments = [
+        "-DANDROID_STL=c++_shared",
+        "-DUSE_SLANG=ON",
+        "-DTRACY_ENABLE=OFF"
+]
+
+def addCmakePathIfExists = { name, path ->
+    if (path.exists()) {
+        cmakeArguments.add("-D${name}=${path.absolutePath.replace('\\', '/')}")
+    }
+}
+
+addCmakePathIfExists("Slang_ROOT", new File(cachedDeps, "Slang-windows-x86_64-2026.3.1"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_GLM", new File(cachedDeps, "glm-src"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_VOLK", new File(cachedDeps, "volk-src"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_TINYGLTF", new File(cachedDeps, "tinygltf-src"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_MESHOPTIMIZER", new File(cachedDeps, "meshoptimizer-src"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_VULKANMEMORYALLOCATOR", new File(cachedDeps, "vulkanmemoryallocator-src"))
+addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_IMGUI", new File(cachedDeps, "imgui-src"))
+
+def vulkanSdkRoot = new File("C:/VulkanSDK")
+if (vulkanSdkRoot.exists()) {
+    def vulkanSdkVersions = vulkanSdkRoot.listFiles()
+            ?.findAll { new File(it, "Include/vulkan/vulkan_core.h").exists() }
+            ?.sort { a, b -> a.name <=> b.name }
+    if (vulkanSdkVersions && !vulkanSdkVersions.isEmpty()) {
+        addCmakePathIfExists("DEMO_VULKAN_HEADER_DIR", new File(vulkanSdkVersions.last(), "Include"))
+    }
+}
+
 android {
     namespace "com.vkdemo"
     compileSdk 35
-    ndkVersion "28.2.13676358"
+    ndkVersion "23.1.7779620"
 
     defaultConfig {
         applicationId "com.vkdemo"
@@ -16,26 +48,25 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_STL=c++_shared",
-                          "-DUSE_SLANG=ON",
-                          "-DTRACY_ENABLE=OFF",
-                          "-DDEMO_VULKAN_HEADER_DIR=C:/VulkanSDK/1.4.335.0/Include",
-                          "-DSlang_ROOT=H:/GitHub/VKDemo/build/_deps/Slang-windows-x86_64-2026.3.1",
-                          "-DFETCHCONTENT_SOURCE_DIR_GLM=H:/GitHub/VKDemo/build/_deps/glm-src",
-                          "-DFETCHCONTENT_SOURCE_DIR_VOLK=H:/GitHub/VKDemo/build/_deps/volk-src",
-                          "-DFETCHCONTENT_SOURCE_DIR_TINYGLTF=H:/GitHub/VKDemo/build/_deps/tinygltf-src",
-                          "-DFETCHCONTENT_SOURCE_DIR_MESHOPTIMIZER=H:/GitHub/VKDemo/build/_deps/meshoptimizer-src",
-                          "-DFETCHCONTENT_SOURCE_DIR_VULKANMEMORYALLOCATOR=H:/GitHub/VKDemo/build/_deps/vulkanmemoryallocator-src",
-                          "-DFETCHCONTENT_SOURCE_DIR_IMGUI=H:/GitHub/VKDemo/build/_deps/imgui-src"
+                arguments.addAll(cmakeArguments)
                 targets "DemoAndroid"
             }
+        }
+
+        ndk {
+            abiFilters "arm64-v8a"
         }
     }
 
     externalNativeBuild {
         cmake {
             path "../../CMakeLists.txt"
-            version "3.22.1"
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = [new File(repoRoot, "resources")]
         }
     }
 }

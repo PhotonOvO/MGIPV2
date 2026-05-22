@@ -56,14 +56,17 @@
 #define LOGGER_HPP
 
 #include <cstdarg>
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
