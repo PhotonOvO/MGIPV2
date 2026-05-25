@@ -372,6 +372,7 @@ add_library(demo_core STATIC
   common/Common.h
   common/Handles.h
   common/HandlePool.h
+  common/ProfilerMarkers.h
   common/TracyProfiling.h
   loader/GltfLoader.h
   loader/GltfLoader.cpp
@@ -447,6 +448,28 @@ target_include_directories(demo_core
     ${meshoptimizer_SOURCE_DIR}/src
     ${vulkanmemoryallocator_SOURCE_DIR}/include
 )
+
+set(VKDEMO_NVTX_INCLUDE_DIR "" CACHE PATH "Optional NVTX3 include directory")
+if(NOT VKDEMO_NVTX_INCLUDE_DIR)
+  set(VKDEMO_NVTX_CANDIDATES
+    "C:/Program Files/NVIDIA Corporation/Nsight Systems 2025.5.1/target-windows-x64/nvtx/include"
+    "C:/Program Files/NVIDIA Corporation/Nsight Graphics 2025.5.0/target/Resources/NVTX3/include"
+  )
+  foreach(VKDEMO_NVTX_CANDIDATE IN LISTS VKDEMO_NVTX_CANDIDATES)
+    if(EXISTS "${VKDEMO_NVTX_CANDIDATE}/nvtx3/nvToolsExt.h")
+      set(VKDEMO_NVTX_INCLUDE_DIR "${VKDEMO_NVTX_CANDIDATE}" CACHE PATH "Optional NVTX3 include directory" FORCE)
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(VKDEMO_NVTX_INCLUDE_DIR AND EXISTS "${VKDEMO_NVTX_INCLUDE_DIR}/nvtx3/nvToolsExt.h")
+  message(STATUS "NVTX markers: enabled (${VKDEMO_NVTX_INCLUDE_DIR})")
+  target_include_directories(demo_core PUBLIC "${VKDEMO_NVTX_INCLUDE_DIR}")
+  target_compile_definitions(demo_core PUBLIC VKDEMO_HAS_NVTX=1)
+else()
+  message(STATUS "NVTX markers: disabled (set VKDEMO_NVTX_INCLUDE_DIR to enable)")
+endif()
 
    
 target_sources(demo_core PRIVATE
@@ -541,6 +564,7 @@ if not exist "%CONVERTER%" (
 ]=])
 string(CONFIGURE "${COMPRESS_TEXTURES_SCRIPT_TEMPLATE}" COMPRESS_TEXTURES_SCRIPT @ONLY)
 set(COMPRESS_RESOURCES_BC7_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/compress_resources_bc7_ktx2.cmd")
+set(COMPRESS_RESOURCES_ASTC_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/compress_resources_astc_ktx2.cmd")
 
 #====================================================================================
 # RESOURCE PREP - Copy resources and generate a manual texture conversion script
@@ -562,6 +586,9 @@ add_custom_target(copy_demo_resources
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${COMPRESS_RESOURCES_BC7_SCRIPT_SOURCE}"
           "$<TARGET_FILE_DIR:Demo>/compress_resources_bc7_ktx2.cmd"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${COMPRESS_RESOURCES_ASTC_SCRIPT_SOURCE}"
+          "$<TARGET_FILE_DIR:Demo>/compress_resources_astc_ktx2.cmd"
   COMMENT "Copying resources to build directory..."
 )
 

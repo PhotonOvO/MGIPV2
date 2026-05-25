@@ -342,6 +342,29 @@ uint64_t MeshPool::getSharedIndexBufferHandle() const
     return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedIndexBuffer.buffer.buffer));
 }
 
+size_t MeshPool::getDeferredStagingBufferCount() const
+{
+    return m_stagingBuffers.size();
+}
+
+VkDeviceSize MeshPool::getDeferredStagingBufferBytes() const
+{
+    VkDeviceSize totalBytes = 0;
+    for(const utils::Buffer& buffer : m_stagingBuffers)
+    {
+        if(buffer.allocation == nullptr)
+        {
+            continue;
+        }
+
+        VmaAllocationInfo allocationInfo{};
+        vmaGetAllocationInfo(m_allocator, buffer.allocation, &allocationInfo);
+        totalBytes += allocationInfo.size;
+    }
+
+    return totalBytes;
+}
+
 void MeshPool::resetSharedBuffers()
 {
     if(m_sharedVertexBuffer.buffer.buffer != VK_NULL_HANDLE)

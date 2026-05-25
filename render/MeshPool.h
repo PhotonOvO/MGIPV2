@@ -94,6 +94,8 @@ public:
     void reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd);
     [[nodiscard]] uint64_t getSharedVertexBufferHandle() const;
     [[nodiscard]] uint64_t getSharedIndexBufferHandle() const;
+    [[nodiscard]] size_t getDeferredStagingBufferCount() const;
+    [[nodiscard]] VkDeviceSize getDeferredStagingBufferBytes() const;
 
     // Free staging buffers after GPU sync (call after command buffer completes)
     void freeStagingBuffers();

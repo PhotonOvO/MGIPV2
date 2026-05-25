@@ -225,16 +225,6 @@ private:
       m_descriptorSet.clear();
     }
 
-    for(utils::Image bc : m_res.gBufferColor)
-    {
-      m_createInfo.alloc->destroyImage(bc);
-    }
-
-    if(m_res.gBufferDepth.image != VK_NULL_HANDLE)
-    {
-      m_createInfo.alloc->destroyImage(m_res.gBufferDepth);
-    }
-
     vkDestroyImageView(m_createInfo.device, m_res.depthView, nullptr);
 
     for(const VkDescriptorImageInfo& desc : m_res.descriptor)
@@ -245,6 +235,16 @@ private:
     for(const VkImageView& view : m_res.uiImageViews)
     {
       vkDestroyImageView(m_createInfo.device, view, nullptr);
+    }
+
+    for(utils::Image bc : m_res.gBufferColor)
+    {
+      m_createInfo.alloc->destroyImage(bc);
+    }
+
+    if(m_res.gBufferDepth.image != VK_NULL_HANDLE)
+    {
+      m_createInfo.alloc->destroyImage(m_res.gBufferDepth);
     }
   }
 

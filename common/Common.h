@@ -501,7 +501,7 @@ struct ValidationSettings
   VkBool32 unique_handles{VK_TRUE};
   VkBool32 object_lifetime{VK_TRUE};
   VkBool32 stateless_param{VK_TRUE};
-  std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG", "VK_DBG_LAYER_ACTION_BREAK"};  // Log and break on validation errors
+  std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG"};  // Keep tool-injected validation messages non-fatal.
   std::vector<const char*> report_flags{"error", "warn"};  // Enable both errors and warnings
   std::vector<const char*> message_id_filter{
       "WARNING-legacy-gpdp2",

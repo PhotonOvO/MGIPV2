@@ -110,13 +110,27 @@ VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstan
 // Fragment Shader (MRT Output)
 //------------------------------------------------------------------------------
 
+float2 signNotZero(float2 v)
+{
+    return float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+float2 encodeNormalOct(float3 n)
+{
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-6);
+    if(n.z < 0.0)
+    {
+        n.xy = (1.0 - abs(n.yx)) * signNotZero(n.xy);
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
 [shader("fragment")]
 void fragmentMain(
     VertexOutput input,
     bool isFrontFace : SV_IsFrontFace,
     out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1,
-    out float4 outGBuffer2 : SV_Target2
+    out float4 outGBuffer1 : SV_Target1
 ) {
     // 1. BaseColor: sample texture if available, otherwise use factor
     float4 color = draw.baseColorFactor;
@@ -184,9 +198,8 @@ void fragmentMain(
     }
 
     // Pack outputs
-    outGBuffer0 = float4(color.rgb, color.a);
-    outGBuffer1 = float4(worldNormal * 0.5 + 0.5, 0.0);
-    outGBuffer2 = float4(metallic, roughness, ao, 0.0);
+    outGBuffer0 = float4(color.rgb, roughness);
+    outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
 }
 
 [shader("fragment")]
@@ -194,8 +207,7 @@ void fragmentMdiMain(
     VertexOutputMdi input,
     bool isFrontFace : SV_IsFrontFace,
     out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1,
-    out float4 outGBuffer2 : SV_Target2
+    out float4 outGBuffer1 : SV_Target1
 ) {
     const DrawUniforms draw = drawData[input.drawIndex];
     float4 color = draw.baseColorFactor;
@@ -243,7 +255,6 @@ void fragmentMdiMain(
         ao = inTexture[draw.occlusionTextureIndex].Sample(input.uv).r;
     }
 
-    outGBuffer0 = float4(color.rgb, 0.0);
-    outGBuffer1 = float4(worldNormal * 0.5 + 0.5, 0.0);
-    outGBuffer2 = float4(metallic, roughness, ao, 0.0);
+    outGBuffer0 = float4(color.rgb, roughness);
+    outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
 }

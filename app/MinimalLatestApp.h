@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common/Common.h"
+#include "../common/ProfilerMarkers.h"
 #include "../common/TracyProfiling.h"
 
 #ifdef _WIN32
@@ -71,13 +72,17 @@ public:
   {
     while(!glfwWindowShouldClose(m_window))
     {
+      demo::profiling::ScopedCpuRange frameCpuRange("Frame");
       const char* framePhase = "FrameStart";
       try
       {
+      {
+      demo::profiling::ScopedCpuRange updateCpuRange("Update");
       // Let the renderer/present path control pacing. Adding an app-side sleep
       // here only reduces CPU/GPU overlap and steady-state utilization.
       framePhase = "PollEvents";
       {
+        demo::profiling::ScopedCpuRange pollEventsRange("AppPreRecord.PollEvents");
         TRACY_ZONE_SCOPED("App::PollEvents");
         glfwPollEvents();
       }
@@ -85,12 +90,14 @@ public:
       // Check async loading progress
       framePhase = "UpdateAsyncLoading";
       {
+        demo::profiling::ScopedCpuRange asyncLoadingRange("AppPreRecord.UpdateAsyncLoading");
         TRACY_ZONE_SCOPED("App::UpdateAsyncLoading");
         updateAsyncLoading();
       }
 
       // Camera input handling
       {
+          demo::profiling::ScopedCpuRange inputCameraRange("AppPreRecord.InputCamera");
           TRACY_ZONE_SCOPED("App::InputCamera");
           // Keyboard movement
           glm::vec3 moveDir{0.0f};
@@ -161,6 +168,7 @@ public:
           m_cameraUniforms.shadowConstantBias = 0.0f;
           m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
       }
+      }
 
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
       {
@@ -168,8 +176,13 @@ public:
         continue;
       }
 
+      demo::RenderParams frameParams{};
+      {
+      demo::profiling::ScopedCpuRange appPreRecordRange("AppPreRecord");
+
       framePhase = "ImGuiVulkanNewFrame";
       {
+        demo::profiling::ScopedCpuRange imguiNewFrameRange("AppPreRecord.ImGuiNewFrame");
         TRACY_ZONE_SCOPED("App::ImGuiNewFrame");
         ImGui_ImplVulkan_NewFrame();
         framePhase = "ImGuiGlfwNewFrame";
@@ -179,6 +192,7 @@ public:
       }
       framePhase = "RuntimeProfiler";
       {
+        demo::profiling::ScopedCpuRange runtimeProfilerRange("AppPreRecord.RuntimeProfiler");
         TRACY_ZONE_SCOPED("App::UpdateRuntimeProfiler");
         if(!m_runtimeProfilerDisabled)
         {
@@ -187,6 +201,7 @@ public:
       }
 
       {
+        demo::profiling::ScopedCpuRange dockspaceRange("AppPreRecord.ImGuiDockspace");
         TRACY_ZONE_SCOPED("App::Dockspace");
         const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
         ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
@@ -200,6 +215,7 @@ public:
       }
 
       {
+        demo::profiling::ScopedCpuRange mainMenuRange("AppPreRecord.ImGuiMainMenu");
         TRACY_ZONE_SCOPED("App::MainMenu");
         if(ImGui::BeginMainMenuBar())
         {
@@ -220,6 +236,7 @@ public:
 
       glm::vec4 viewportImageRect{0.0f};
       {
+        demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.ViewportPanel");
         TRACY_ZONE_SCOPED("App::ViewportPanel");
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::Begin("Viewport");
@@ -249,6 +266,7 @@ public:
 
       if(ImGui::Begin("Settings"))
       {
+        demo::profiling::ScopedCpuRange settingsPanelRange("AppPreRecord.SettingsPanel");
         TRACY_ZONE_SCOPED("App::SettingsPanel");
         // Camera coordinates display
         ImGui::Separator();
@@ -304,6 +322,7 @@ public:
 
         // CSM Shadow debug panel
         {
+          demo::profiling::ScopedCpuRange csmDebugPanelRange("AppPreRecord.CSMDebugPanel");
           TRACY_ZONE_SCOPED("App::CSMDebugPanel");
           drawCSMDebugPanel();
         }
@@ -334,6 +353,7 @@ public:
         ImGui::Separator();
         ImGui::Text("Renderer Backend: %s", m_renderer.getBackendName());
         {
+          demo::profiling::ScopedCpuRange runtimeProfilerPanelRange("AppPreRecord.RuntimeProfilerPanel");
           TRACY_ZONE_SCOPED("App::RuntimeProfilerPanel");
           drawRuntimeProfilerPanel();
         }
@@ -407,17 +427,19 @@ public:
       ImGui::End();
 
       {
+        demo::profiling::ScopedCpuRange modelLoaderUiRange("AppPreRecord.ModelLoaderUI");
         TRACY_ZONE_SCOPED("App::ModelLoaderUI");
         drawModelLoaderUI();
       }
       {
+        demo::profiling::ScopedCpuRange sceneGraphUiRange("AppPreRecord.SceneGraphUI");
         TRACY_ZONE_SCOPED("App::SceneGraphUI");
         drawSceneGraphUI();
       }
 
       framePhase = "Render";
-      demo::RenderParams frameParams{};
       {
+        demo::profiling::ScopedCpuRange buildRenderParamsRange("AppPreRecord.BuildRenderParams");
         TRACY_ZONE_SCOPED("App::BuildRenderParams");
         frameParams.viewportSize   = m_viewportSize;
         frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
@@ -436,25 +458,30 @@ public:
         frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
         frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
         frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
+          demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
           TRACY_ZONE_SCOPED("App::RenderImGuiDrawData");
           ImGui::Render();
           ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
         };
       }
+      }
 
       const bool freezeRenderingForStreamingUpload = m_isLoading && m_renderer.isSceneRenderingSuspended();
       if(!freezeRenderingForStreamingUpload)
       {
+        demo::profiling::ScopedCpuRange rendererFacadeRange("App.RendererFacadeRender");
         TRACY_ZONE_SCOPED("App::RendererFacade::render");
         m_renderer.render(frameParams);
       }
 
       {
+        demo::profiling::ScopedCpuRange imguiEndFrameRange("AppPostRecord.ImGuiEndFrame");
         TRACY_ZONE_SCOPED("App::ImGuiEndFrame");
         ImGui::EndFrame();
       }
       if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
       {
+        demo::profiling::ScopedCpuRange platformWindowsRange("AppPostRecord.ImGuiPlatformWindows");
         TRACY_ZONE_SCOPED("App::ImGuiPlatformWindows");
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();

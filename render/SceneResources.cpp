@@ -303,33 +303,17 @@ void SceneResources::create(VkCommandBuffer cmd)
 
 void SceneResources::destroy()
 {
-  // Cleanup output texture
   if(m_resources.outputTextureImID && ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().BackendPlatformUserData != nullptr)
   {
     using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
     ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<ImGuiTextureHandle>(m_resources.outputTextureImID));
   }
   m_resources.outputTextureImID = {};
-  if(m_resources.outputTextureImage.image != VK_NULL_HANDLE)
-  {
-    vmaDestroyImage(m_allocator, m_resources.outputTextureImage.image, m_resources.outputTextureImage.allocation);
-    m_resources.outputTextureImage = {};
-  }
+
   if(m_resources.outputTextureView != VK_NULL_HANDLE)
   {
     vkDestroyImageView(m_device, m_resources.outputTextureView, nullptr);
     m_resources.outputTextureView = VK_NULL_HANDLE;
-  }
-
-  if(m_resources.shadowMapView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.shadowMapView, nullptr);
-    m_resources.shadowMapView = VK_NULL_HANDLE;
-  }
-  if(m_resources.shadowMapImage.image != VK_NULL_HANDLE)
-  {
-    vmaDestroyImage(m_allocator, m_resources.shadowMapImage.image, m_resources.shadowMapImage.allocation);
-    m_resources.shadowMapImage = {};
   }
 
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -342,24 +326,6 @@ void SceneResources::destroy()
   }
   m_imguiTextureIds.clear();
 
-  for(const utils::Image& image : m_resources.colorImages)
-  {
-    if(image.image != VK_NULL_HANDLE)
-    {
-      vmaDestroyImage(m_allocator, image.image, image.allocation);
-    }
-  }
-
-  if(m_resources.depthImage.image != VK_NULL_HANDLE)
-  {
-    vmaDestroyImage(m_allocator, m_resources.depthImage.image, m_resources.depthImage.allocation);
-  }
-
-  if(m_resources.depthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.depthView, nullptr);
-  }
-
   for(VkImageView view : m_resources.depthPyramidMipViews)
   {
     if(view != VK_NULL_HANDLE)
@@ -368,11 +334,6 @@ void SceneResources::destroy()
     }
   }
   m_resources.depthPyramidMipViews.clear();
-
-  if(m_resources.depthPyramidImage.image != VK_NULL_HANDLE)
-  {
-    vmaDestroyImage(m_allocator, m_resources.depthPyramidImage.image, m_resources.depthPyramidImage.allocation);
-  }
 
   for(const VkDescriptorImageInfo& descriptor : m_resources.descriptors)
   {
@@ -388,6 +349,44 @@ void SceneResources::destroy()
     {
       vkDestroyImageView(m_device, view, nullptr);
     }
+  }
+
+  if(m_resources.depthView != VK_NULL_HANDLE)
+  {
+    vkDestroyImageView(m_device, m_resources.depthView, nullptr);
+  }
+
+  if(m_resources.shadowMapView != VK_NULL_HANDLE)
+  {
+    vkDestroyImageView(m_device, m_resources.shadowMapView, nullptr);
+  }
+
+  if(m_resources.outputTextureImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.outputTextureImage.image, m_resources.outputTextureImage.allocation);
+  }
+
+  if(m_resources.shadowMapImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.shadowMapImage.image, m_resources.shadowMapImage.allocation);
+  }
+
+  for(const utils::Image& image : m_resources.colorImages)
+  {
+    if(image.image != VK_NULL_HANDLE)
+    {
+      vmaDestroyImage(m_allocator, image.image, image.allocation);
+    }
+  }
+
+  if(m_resources.depthImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.depthImage.image, m_resources.depthImage.allocation);
+  }
+
+  if(m_resources.depthPyramidImage.image != VK_NULL_HANDLE)
+  {
+    vmaDestroyImage(m_allocator, m_resources.depthPyramidImage.image, m_resources.depthPyramidImage.allocation);
   }
 
   m_resources = {};

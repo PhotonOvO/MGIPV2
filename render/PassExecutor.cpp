@@ -1,4 +1,5 @@
 #include "PassExecutor.h"
+#include "../common/ProfilerMarkers.h"
 #include "../common/TracyProfiling.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -8,6 +9,33 @@
 namespace demo {
 
 namespace {
+
+class ScopedCommandEvent
+{
+public:
+  ScopedCommandEvent(rhi::CommandList* cmd, const char* name)
+      : m_cmd(cmd)
+  {
+    if(m_cmd != nullptr)
+    {
+      m_cmd->beginEvent(name);
+    }
+  }
+
+  ~ScopedCommandEvent()
+  {
+    if(m_cmd != nullptr)
+    {
+      m_cmd->endEvent();
+    }
+  }
+
+  ScopedCommandEvent(const ScopedCommandEvent&)            = delete;
+  ScopedCommandEvent& operator=(const ScopedCommandEvent&) = delete;
+
+private:
+  rhi::CommandList* m_cmd{nullptr};
+};
 
 rhi::PipelineStage toPipelineStage(demo::rhi::ShaderStage stageMask)
 {
@@ -330,6 +358,8 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
     scopedContext.passIndex   = passIndex;
 
     // CPU Tracy zone for pass execution (pass-specific zones inside execute() provide breakdown)
+    demo::profiling::ScopedCpuRange passCpuRange(pass->getName());
+    ScopedCommandEvent              passCommandEvent(context.cmd, pass->getName());
     TRACY_ZONE_SCOPED("PassExecutor::executePass");
     pass->execute(scopedContext);
 

@@ -147,8 +147,8 @@ struct GPUDrivenSceneView
   VkImage                            sceneDepthImage{VK_NULL_HANDLE};
   VkImageView                        sceneDepthView{VK_NULL_HANDLE};
   VkExtent2D                         sceneDepthExtent{};
-  std::array<VkImage, 3>             gbufferImages{VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-  std::array<VkImageView, 3>         gbufferViews{VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+  std::array<VkImage, kPackedGBufferTargetCount>     gbufferImages{};
+  std::array<VkImageView, kPackedGBufferTargetCount> gbufferViews{};
   VkImage                            outputImage{VK_NULL_HANDLE};
   VkImageView                        outputView{VK_NULL_HANDLE};
   VkImage                            depthPyramidImage{VK_NULL_HANDLE};

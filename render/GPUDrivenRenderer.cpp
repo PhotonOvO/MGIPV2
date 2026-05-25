@@ -1758,7 +1758,7 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.sceneDepthImage = getSceneDepthImage();
   m_sceneView.sceneDepthView = getSceneDepthImageView();
   m_sceneView.sceneDepthExtent = getSceneExtent();
-  for(uint32_t i = 0; i < 3; ++i)
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
     m_sceneView.gbufferImages[i] = getSceneGBufferImage(i);
     m_sceneView.gbufferViews[i] = getSceneGBufferImageView(i);

@@ -14,11 +14,45 @@
 #include <stb_image.h>
 
 #include <nvtt/nvtt.h>
+#include <nvtt/nvtt_lowlevel.h>
 
 namespace {
 
 constexpr uint32_t kVkFormatBc7UnormBlock = 145u;
 constexpr uint32_t kVkFormatBc7SrgbBlock = 146u;
+
+enum class OutputFormat
+{
+  Bc7,
+  Astc
+};
+
+struct AstcBlockFormat
+{
+  int width{6};
+  int height{6};
+  nvtt::Format nvttFormat{nvtt::Format_ASTC_LDR_6x6};
+  uint32_t vkUnormFormat{165u};
+  uint32_t vkSrgbFormat{166u};
+  const char* label{"6x6"};
+};
+
+constexpr std::array<AstcBlockFormat, 14> kAstcBlockFormats{{
+    {4, 4, nvtt::Format_ASTC_LDR_4x4, 157u, 158u, "4x4"},
+    {5, 4, nvtt::Format_ASTC_LDR_5x4, 159u, 160u, "5x4"},
+    {5, 5, nvtt::Format_ASTC_LDR_5x5, 161u, 162u, "5x5"},
+    {6, 5, nvtt::Format_ASTC_LDR_6x5, 163u, 164u, "6x5"},
+    {6, 6, nvtt::Format_ASTC_LDR_6x6, 165u, 166u, "6x6"},
+    {8, 5, nvtt::Format_ASTC_LDR_8x5, 167u, 168u, "8x5"},
+    {8, 6, nvtt::Format_ASTC_LDR_8x6, 169u, 170u, "8x6"},
+    {8, 8, nvtt::Format_ASTC_LDR_8x8, 171u, 172u, "8x8"},
+    {10, 5, nvtt::Format_ASTC_LDR_10x5, 173u, 174u, "10x5"},
+    {10, 6, nvtt::Format_ASTC_LDR_10x6, 175u, 176u, "10x6"},
+    {10, 8, nvtt::Format_ASTC_LDR_10x8, 177u, 178u, "10x8"},
+    {10, 10, nvtt::Format_ASTC_LDR_10x10, 179u, 180u, "10x10"},
+    {12, 10, nvtt::Format_ASTC_LDR_12x10, 181u, 182u, "12x10"},
+    {12, 12, nvtt::Format_ASTC_LDR_12x12, 183u, 184u, "12x12"},
+}};
 
 struct Ktx2Header
 {
@@ -59,6 +93,13 @@ struct CompressionProfile
   nvtt::Quality quality{nvtt::Quality_Normal};
   bool preferCuda{true};
   const char* label{"normal"};
+};
+
+struct ConverterOptions
+{
+  CompressionProfile profile{};
+  OutputFormat outputFormat{OutputFormat::Bc7};
+  AstcBlockFormat astcBlock{};
 };
 
 class NvttMipCollector final : public nvtt::OutputHandler
@@ -130,9 +171,50 @@ bool isNormalTexture(const std::filesystem::path& inputPath)
   return stemContains(stem, "normal") || stemContains(stem, "nrm");
 }
 
-uint32_t selectVkFormat(const std::filesystem::path& inputPath)
+uint32_t selectVkFormat(const std::filesystem::path& inputPath, OutputFormat outputFormat, const AstcBlockFormat& astcBlock)
 {
-  return isSrgbTexture(inputPath) ? kVkFormatBc7SrgbBlock : kVkFormatBc7UnormBlock;
+  const bool srgb = isSrgbTexture(inputPath);
+  if(outputFormat == OutputFormat::Astc)
+  {
+    return srgb ? astcBlock.vkSrgbFormat : astcBlock.vkUnormFormat;
+  }
+
+  return srgb ? kVkFormatBc7SrgbBlock : kVkFormatBc7UnormBlock;
+}
+
+const AstcBlockFormat* findAstcBlockFormat(const std::string& label)
+{
+  for(const AstcBlockFormat& block : kAstcBlockFormats)
+  {
+    if(label == block.label)
+    {
+      return &block;
+    }
+  }
+
+  return nullptr;
+}
+
+std::string formatName(uint32_t vkFormat, const AstcBlockFormat& astcBlock)
+{
+  if(vkFormat == kVkFormatBc7SrgbBlock)
+  {
+    return "BC7_SRGB";
+  }
+  if(vkFormat == kVkFormatBc7UnormBlock)
+  {
+    return "BC7_UNORM";
+  }
+  if(vkFormat == astcBlock.vkSrgbFormat)
+  {
+    return "ASTC_" + std::string(astcBlock.label) + "_SRGB";
+  }
+  if(vkFormat == astcBlock.vkUnormFormat)
+  {
+    return "ASTC_" + std::string(astcBlock.label) + "_UNORM";
+  }
+
+  return "UNKNOWN";
 }
 
 bool loadImageRgba8(const std::filesystem::path& inputPath, int& outWidth, int& outHeight, std::vector<uint8_t>& outPixels)
@@ -196,8 +278,50 @@ std::vector<nvtt::Surface> buildMipChain(const std::filesystem::path& inputPath,
 std::vector<EncodedMip> compressMipChain(const std::filesystem::path& inputPath,
                                          const std::vector<nvtt::Surface>& mipChain,
                                          bool useCuda,
-                                         nvtt::Quality quality)
+                                         nvtt::Quality quality,
+                                         OutputFormat outputFormat,
+                                         const AstcBlockFormat& astcBlock)
 {
+  if(outputFormat == OutputFormat::Astc)
+  {
+    std::vector<EncodedMip> encodedMips;
+    encodedMips.reserve(mipChain.size());
+
+    const nvtt::EncodeSettings settings = nvtt::EncodeSettings()
+                                              .SetFormat(astcBlock.nvttFormat)
+                                              .SetQuality(quality)
+                                              .SetUseGPU(useCuda);
+
+    for(const nvtt::Surface& mip : mipChain)
+    {
+      nvtt::RefImage image{};
+      image.data = mip.data();
+      image.width = mip.width();
+      image.height = mip.height();
+      image.depth = 1;
+      image.num_channels = 4;
+      image.channel_interleave = false;
+
+      nvtt::CPUInputBuffer input(&image, nvtt::FLOAT32, 1, astcBlock.width, astcBlock.height);
+
+      EncodedMip encoded{};
+      encoded.width = mip.width();
+      encoded.height = mip.height();
+      const int blockColumns = (encoded.width + astcBlock.width - 1) / astcBlock.width;
+      const int blockRows = (encoded.height + astcBlock.height - 1) / astcBlock.height;
+      encoded.bytes.resize(static_cast<size_t>(blockColumns) * static_cast<size_t>(blockRows) * 16u);
+
+      if(!nvtt::nvtt_encode(input, encoded.bytes.data(), settings))
+      {
+        throw std::runtime_error("NVTT ASTC compression failed");
+      }
+
+      encodedMips.push_back(std::move(encoded));
+    }
+
+    return encodedMips;
+  }
+
   nvtt::CompressionOptions compressionOptions;
   compressionOptions.setFormat(nvtt::Format_BC7);
   compressionOptions.setQuality(quality);
@@ -284,14 +408,16 @@ int main(int argc, char** argv)
 {
   if(argc < 3)
   {
-    std::cerr << "Usage: texture_converter <input_dir> <output_dir> [--quality fastest|normal|production|highest]\n";
-    std::cerr << "Offline-compresses PNG/JPG textures to BC7 KTX2 sidecars with NVTT-generated mip chains.\n";
+    std::cerr << "Usage: texture_converter <input_dir> <output_dir> [--format bc7|astc] "
+                 "[--astc-block 4x4|5x4|5x5|6x5|6x6|8x5|8x6|8x8|10x5|10x6|10x8|10x10|12x10|12x12] "
+                 "[--quality fastest|normal|production|highest]\n";
+    std::cerr << "Offline-compresses PNG/JPG textures to BC7 or ASTC KTX2 sidecars with NVTT-generated mip chains.\n";
     return 1;
   }
 
   const std::filesystem::path inputDir = argv[1];
   const std::filesystem::path outputDir = argv[2];
-  CompressionProfile profile{};
+  ConverterOptions options{};
   for(int argIndex = 3; argIndex < argc; ++argIndex)
   {
     const std::string arg = toLower(argv[argIndex]);
@@ -306,33 +432,74 @@ int main(int argc, char** argv)
       const std::string qualityArg = toLower(argv[++argIndex]);
       if(qualityArg == "fastest")
       {
-        profile.quality = nvtt::Quality_Fastest;
-        profile.preferCuda = true;
-        profile.label = "fastest";
+        options.profile.quality = nvtt::Quality_Fastest;
+        options.profile.preferCuda = true;
+        options.profile.label = "fastest";
       }
       else if(qualityArg == "normal")
       {
-        profile.quality = nvtt::Quality_Normal;
-        profile.preferCuda = true;
-        profile.label = "normal";
+        options.profile.quality = nvtt::Quality_Normal;
+        options.profile.preferCuda = true;
+        options.profile.label = "normal";
       }
       else if(qualityArg == "production")
       {
-        profile.quality = nvtt::Quality_Production;
-        profile.preferCuda = false;
-        profile.label = "production";
+        options.profile.quality = nvtt::Quality_Production;
+        options.profile.preferCuda = false;
+        options.profile.label = "production";
       }
       else if(qualityArg == "highest")
       {
-        profile.quality = nvtt::Quality_Highest;
-        profile.preferCuda = false;
-        profile.label = "highest";
+        options.profile.quality = nvtt::Quality_Highest;
+        options.profile.preferCuda = false;
+        options.profile.label = "highest";
       }
       else
       {
         std::cerr << "Unsupported quality: " << qualityArg << "\n";
         return 1;
       }
+    }
+    else if(arg == "--format" || arg == "--codec")
+    {
+      if(argIndex + 1 >= argc)
+      {
+        std::cerr << arg << " requires a value.\n";
+        return 1;
+      }
+
+      const std::string formatArg = toLower(argv[++argIndex]);
+      if(formatArg == "bc7")
+      {
+        options.outputFormat = OutputFormat::Bc7;
+      }
+      else if(formatArg == "astc")
+      {
+        options.outputFormat = OutputFormat::Astc;
+      }
+      else
+      {
+        std::cerr << "Unsupported format: " << formatArg << "\n";
+        return 1;
+      }
+    }
+    else if(arg == "--astc-block")
+    {
+      if(argIndex + 1 >= argc)
+      {
+        std::cerr << "--astc-block requires a value.\n";
+        return 1;
+      }
+
+      const std::string blockArg = toLower(argv[++argIndex]);
+      const AstcBlockFormat* block = findAstcBlockFormat(blockArg);
+      if(block == nullptr)
+      {
+        std::cerr << "Unsupported ASTC block: " << blockArg << "\n";
+        return 1;
+      }
+
+      options.astcBlock = *block;
     }
     else
     {
@@ -342,7 +509,7 @@ int main(int argc, char** argv)
   }
 
   const bool cudaSupported = nvtt::isCudaSupported();
-  const bool useCuda = cudaSupported && profile.preferCuda;
+  const bool useCuda = cudaSupported && options.profile.preferCuda;
 
   if(!std::filesystem::exists(inputDir))
   {
@@ -352,7 +519,13 @@ int main(int argc, char** argv)
 
   std::filesystem::create_directories(outputDir);
   std::cout << "NVTT backend: " << (useCuda ? "CUDA" : "CPU")
-            << " quality=" << profile.label << "\n";
+            << " quality=" << options.profile.label
+            << " format=" << (options.outputFormat == OutputFormat::Astc ? "ASTC" : "BC7");
+  if(options.outputFormat == OutputFormat::Astc)
+  {
+    std::cout << " block=" << options.astcBlock.label;
+  }
+  std::cout << "\n";
 
   uint32_t convertedCount = 0;
   for(const auto& entry : std::filesystem::recursive_directory_iterator(inputDir))
@@ -380,12 +553,12 @@ int main(int argc, char** argv)
 
       const std::vector<uint8_t> bgraPixels = rgbaToBgra(rgbaPixels);
       const std::vector<nvtt::Surface> mipChain = buildMipChain(entry.path(), width, height, bgraPixels);
-      const std::vector<EncodedMip> encodedMips = compressMipChain(entry.path(), mipChain, useCuda, profile.quality);
-      const uint32_t vkFormat = selectVkFormat(entry.path());
+      const std::vector<EncodedMip> encodedMips =
+          compressMipChain(entry.path(), mipChain, useCuda, options.profile.quality, options.outputFormat, options.astcBlock);
+      const uint32_t vkFormat = selectVkFormat(entry.path(), options.outputFormat, options.astcBlock);
 
       std::cout << "Converting " << entry.path() << " -> " << outputPath << " ("
-                << (vkFormat == kVkFormatBc7SrgbBlock ? "BC7_SRGB" : "BC7_UNORM")
-                << ", mips=" << encodedMips.size() << ")\n";
+                << formatName(vkFormat, options.astcBlock) << ", mips=" << encodedMips.size() << ")\n";
       writeKtx2File(outputPath, vkFormat, width, height, encodedMips);
       ++convertedCount;
     }

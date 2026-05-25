@@ -2,6 +2,7 @@
 
 #include "../common/Common.h"
 #include "../rhi/RHIDevice.h"
+#include "Pass.h"
 
 namespace demo {
 
@@ -41,7 +42,7 @@ public:
   [[nodiscard]] const VkDescriptorImageInfo& getGBufferDescriptor(uint32_t index) const { return getDescriptorImageInfo(index); }
 
   // Output texture for PBR lighting result (follows screen size, like Unity/UE)
-  static constexpr uint32_t kOutputTextureIndex = 3;  // After GBuffer[0-2]
+  static constexpr uint32_t kOutputTextureIndex = kPackedGBufferTargetCount;  // After packed GBuffer targets
 
   [[nodiscard]] VkImageView getOutputTextureView() const;
   [[nodiscard]] ImTextureID getOutputTextureImID() const;

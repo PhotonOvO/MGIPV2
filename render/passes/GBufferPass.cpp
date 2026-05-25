@@ -48,7 +48,7 @@ GBufferPass::GBufferPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 5> dependencies = {
+    static const std::array<PassResourceDependency, 4> dependencies = {
         PassResourceDependency::buffer(
             kPassVertexBufferHandle,
             ResourceAccess::read,
@@ -62,12 +62,6 @@ PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() con
         ),
         PassResourceDependency::texture(
             kPassGBuffer1Handle,
-            ResourceAccess::write,
-            rhi::ShaderStage::fragment,
-            rhi::ResourceState::ColorAttachment
-        ),
-        PassResourceDependency::texture(
-            kPassGBuffer2Handle,
             ResourceAccess::write,
             rhi::ShaderStage::fragment,
             rhi::ResourceState::ColorAttachment
@@ -98,9 +92,9 @@ void GBufferPass::execute(const PassContext& context) const
         sceneResources.getSize().height
     };
 
-    // Setup MRT color attachments (GBuffer0/1/2) using RHI RenderTargetDesc
-    std::array<rhi::RenderTargetDesc, 3> colorTargets{};
-    for(uint32_t i = 0; i < 3; ++i)
+    // Setup packed MRT color attachments using RHI RenderTargetDesc
+    std::array<rhi::RenderTargetDesc, kPackedGBufferTargetCount> colorTargets{};
+    for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
     {
         context.cmd->transitionTexture(rhi::TextureBarrierDesc{
             .texture     = rhi::TextureHandle{static_cast<uint32_t>(kPassGBuffer0Handle.index + i), kPassGBuffer0Handle.generation},
@@ -416,10 +410,9 @@ void GBufferPass::execute(const PassContext& context) const
     // End render pass using RHI interface
     context.cmd->endRenderPass();
 
-    const std::array<std::pair<TextureHandle, VkImage>, 3> colorImages{{
+    const std::array<std::pair<TextureHandle, VkImage>, kPackedGBufferTargetCount> colorImages{{
         {kPassGBuffer0Handle, sceneResources.getColorImage(0)},
         {kPassGBuffer1Handle, sceneResources.getColorImage(1)},
-        {kPassGBuffer2Handle, sceneResources.getColorImage(2)},
     }};
     for(const auto& [handle, image] : colorImages)
     {

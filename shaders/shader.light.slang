@@ -24,10 +24,25 @@ ConstantBuffer<CameraUniforms> camera;
 ConstantBuffer<LightingUniforms> lighting;
 
 STATIC_CONST int kGBufferBaseColorIndex = 0;
-STATIC_CONST int kGBufferNormalIndex    = 1;
-STATIC_CONST int kGBufferMaterialIndex  = 2;
-STATIC_CONST int kGBufferDepthIndex     = 3;
+STATIC_CONST int kGBufferPackedNormalMaterialIndex = 1;
+STATIC_CONST int kGBufferDepthIndex                = 2;
 STATIC_CONST float PI                   = 3.14159265359;
+
+float2 signNotZero(float2 v)
+{
+    return float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+float3 decodeNormalOct(float2 encoded)
+{
+    float2 f = encoded * 2.0 - 1.0;
+    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    if(n.z < 0.0)
+    {
+        n.xy = (1.0 - abs(n.yx)) * signNotZero(n.xy);
+    }
+    return normalize(n);
+}
 
 float saturateRoughness(float roughness)
 {
@@ -313,8 +328,7 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
 float4 fragmentMain(VSOutput input) : SV_Target
 {
     float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
-    float4 normalSample    = inTexture[kGBufferNormalIndex].Sample(input.uv);
-    float4 materialSample  = inTexture[kGBufferMaterialIndex].Sample(input.uv);
+    float4 packedSample    = inTexture[kGBufferPackedNormalMaterialIndex].Sample(input.uv);
     float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
 
     if(lightCoarseCulling.debugInfo.x > 0.5)
@@ -328,12 +342,12 @@ float4 fragmentMain(VSOutput input) : SV_Target
     }
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
-    vec3 N = normalize(normalSample.rgb * 2.0 - 1.0);
+    vec3 N = decodeNormalOct(packedSample.rg);
     vec3 V = normalize(camera.cameraPosition - worldPos);
     vec3 baseColor = saturate(baseColorSample.rgb);
-    float metallic = saturate(materialSample.r);
-    float roughness = saturateRoughness(materialSample.g);
-    float ao = saturate(materialSample.b);
+    float metallic = saturate(packedSample.b);
+    float roughness = saturateRoughness(baseColorSample.a);
+    float ao = saturate(packedSample.a);
     float viewDepth = computeViewDepth(worldPos);
 
     vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;

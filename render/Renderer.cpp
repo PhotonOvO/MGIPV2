@@ -10,6 +10,7 @@
 #include "BatchUploadContext.h"
 #include "CSMShadowResources.h"
 #include "MipmapGenerator.h"
+#include "../common/ProfilerMarkers.h"
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include "../loader/Ktx2Loader.h"
 
@@ -29,7 +30,7 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
-constexpr uint32_t kLightPassTextureCount         = 4;
+constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 1u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
 
@@ -621,6 +622,23 @@ static void freeStagingBuffers(const VmaAllocator allocator, std::vector<utils::
   stagingBuffers.clear();
 }
 
+static VkDeviceSize getStagingBufferBytes(const VmaAllocator allocator, const std::vector<utils::Buffer>& stagingBuffers)
+{
+  VkDeviceSize totalBytes = 0;
+  for(const utils::Buffer& buffer : stagingBuffers)
+  {
+    if(buffer.allocation == nullptr)
+    {
+      continue;
+    }
+
+    VmaAllocationInfo allocationInfo{};
+    vmaGetAllocationInfo(allocator, buffer.allocation, &allocationInfo);
+    totalBytes += allocationInfo.size;
+  }
+  return totalBytes;
+}
+
 static rhi::TextureFormat toPortableTextureFormat(VkFormat format)
 {
   switch(format)
@@ -707,6 +725,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
 
   rhi::DeviceCreateInfo deviceCreateInfo;
+  deviceCreateInfo.enableValidationLayers = false;
 #ifdef __ANDROID__
   deviceCreateInfo.enableValidationLayers = false;
   deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
@@ -799,9 +818,8 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
     SceneResources::CreateInfo sceneResourcesInit{
         .size          = m_swapchainDependent.windowSize,
         .color         = {
-            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer0: BaseColor
-            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer1: Normal
-            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer2: MaterialParams
+            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer0: BaseColor.rgb + roughness
+            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer1: oct normal.xy + metallic + AO
         },
         .depth         = depthFormat,
         .linearSampler = linearSampler,
@@ -822,7 +840,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
 
     // Create per-frame GBuffer descriptor sets for LightPass.
     {
-      // Binding 0: Array of 5 sampled images (GBuffer0/1/2 + Depth + Shadow)
+      // Binding 0: sampled images (packed GBuffer0/1 + Depth)
       const VkDescriptorSetLayoutBinding textureBinding{
           shaderio::LBindTextures,
           VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -1549,6 +1567,10 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
   m_presentPassActive = false;
 
   {
+  demo::profiling::ScopedCpuRange rendererPreRecordRange("RendererPreRecord");
+
+  {
+    demo::profiling::ScopedCpuRange profileSetupRange("RendererPreRecord.ProfileSetup");
     TRACY_ZONE_SCOPED("Renderer::ProfileSetup");
     if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
     {
@@ -1575,6 +1597,7 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
   }
 
   {
+    demo::profiling::ScopedCpuRange resizeCheckRange("RendererPreRecord.ResizeCheck");
     TRACY_ZONE_SCOPED("Renderer::ResizeCheck");
     if(params.viewportSize.width > 0 && params.viewportSize.height > 0
        && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
@@ -1588,17 +1611,21 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
     return;
 
   {
+    demo::profiling::ScopedCpuRange cacheStatsRange("RendererPreRecord.CacheGPUCullingStats");
     TRACY_ZONE_SCOPED("Renderer::CacheGPUCullingStats");
     cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex(), params.debugOptions.showGPUCullingOverlay);
+  }
   }
 
   rhi::CommandList* cmd = nullptr;
   {
+    demo::profiling::ScopedCpuRange recordCommandBufferRange("RecordCommandBuffer");
     TRACY_ZONE_SCOPED("Renderer::beginCommandRecording");
     cmd = &beginCommandRecording();
+    ASSERT(cmd != nullptr, "Renderer::renderWithPassExecutor requires a command list");
+    drawFrame(*cmd, params, passExecutor);
   }
   ASSERT(cmd != nullptr, "Renderer::renderWithPassExecutor requires a command list");
-  drawFrame(*cmd, params, passExecutor);
   endFrame(*cmd);
 }
 
@@ -1818,9 +1845,13 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
 
 bool Renderer::prepareFrameResources()
 {
+  demo::profiling::ScopedCpuRange prepareFrameRange("RendererPreRecord.PrepareFrameResources");
   TRACY_ZONE_SCOPED("prepareFrameResources");
 
-  rebuildSwapchainDependentResources();
+  {
+    demo::profiling::ScopedCpuRange rebuildSwapchainRange("PrepareFrameResources.RebuildSwapchainDependentResources");
+    rebuildSwapchainDependentResources();
+  }
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
@@ -1835,20 +1866,36 @@ bool Renderer::prepareFrameResources()
   // Keeping the order as wait(current) -> begin(current) -> submit(current) ->
   // advance(next) preserves actual CPU/GPU overlap across the frame ring.
   {
+    demo::profiling::ScopedCpuRange waitFrameRange("PrepareFrameResources.WaitForFrameCompletion");
     TRACY_ZONE_SCOPED("waitForFrameCompletion");
     m_perFrame.frameContext->waitForFrameCompletion();
   }
 
-  m_perFrame.frameContext->beginFrame();
+  {
+    demo::profiling::ScopedCpuRange beginFrameRange("PrepareFrameResources.BeginFrame");
+    m_perFrame.frameContext->beginFrame();
+  }
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
-  syncMaterialBindGroup(currentFrameIndex);
+  {
+    demo::profiling::ScopedCpuRange syncMaterialRange("PrepareFrameResources.SyncMaterialBindGroup");
+    syncMaterialBindGroup(currentFrameIndex);
+  }
 
-  flushPendingUploadCommands(false);
+  {
+    demo::profiling::ScopedCpuRange flushUploadsRange("PrepareFrameResources.FlushPendingUploads");
+    flushPendingUploadCommands(false);
+  }
   auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
-  resolvePassGpuProfileResults(currentFrameIndex);
-  m_perFrame.frameUserData[currentFrameIndex].transientAllocator.reset();
+  {
+    demo::profiling::ScopedCpuRange resolveProfileRange("PrepareFrameResources.ResolvePassGpuProfileResults");
+    resolvePassGpuProfileResults(currentFrameIndex);
+  }
+  {
+    demo::profiling::ScopedCpuRange resetTransientRange("PrepareFrameResources.ResetTransientAllocator");
+    frameUserData.transientAllocator.reset();
+  }
   m_swapchainDependent.hasAcquiredImage = false;
 
   return true;
@@ -1907,7 +1954,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
   SceneResources& sceneResources = m_swapchainDependent.sceneResources;
 
   // Verify the SceneResources has valid image views
-  for(uint32_t i = 0; i < 3; ++i)
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
     const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
     if(sceneDesc.imageView == VK_NULL_HANDLE)
@@ -1937,9 +1984,9 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .maxLod      = VK_LOD_CLAMP_NONE,
   });
 
-  // Write descriptor array for GBuffer textures (indices 0-2) + scene depth (index 3).
+  // Write descriptor array for packed GBuffer textures followed by scene depth.
   std::array<VkDescriptorImageInfo, kLightPassTextureCount> imageInfos{};
-  for(uint32_t i = 0; i < 3; ++i)
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
     const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
     imageInfos[i] = VkDescriptorImageInfo{
@@ -1948,8 +1995,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
-  // Depth texture at index 3
-  imageInfos[3] = VkDescriptorImageInfo{
+  imageInfos[kPackedGBufferTargetCount] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
       .imageView   = sceneResources.getDepthImageView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -3683,13 +3729,6 @@ void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
-      .handle       = kPassGBuffer2Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = rhi::ResourceState::general,
-      .isSwapchain  = false,
-  });
-  passExecutor.bindTexture({
       .handle       = kPassSceneDepthHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
       .aspect       = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
@@ -3752,6 +3791,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
   auto&          frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
 
   {
+    demo::profiling::ScopedCpuRange buildRenderItemsRange("BuildRenderItems");
     TRACY_ZONE_SCOPED("drawFrame.cpuFrontEnd");
 
     // Update CSM cascade matrices based on current camera and light direction
@@ -3931,6 +3971,7 @@ void Renderer::endFrame(rhi::CommandList& cmd)
 #endif
 
   {
+    demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
     TRACY_ZONE_SCOPED("submitFrame");
     submitFrame(*m_perFrame.frameContext, cmd);
   }
@@ -3939,6 +3980,7 @@ void Renderer::endFrame(rhi::CommandList& cmd)
   // GPU executes frame N while CPU records frame N+1
 
   {
+    demo::profiling::ScopedCpuRange presentRange("Present");
     TRACY_ZONE_SCOPED("presentFrame");
     presentFrame(*m_swapchainDependent.swapchain);
   }
@@ -5925,17 +5967,15 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     }};
 
     // No blending for GBuffer
-    const std::array<rhi::BlendAttachmentState, 3> gbufferBlendStates{{
-        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+    const std::array<rhi::BlendAttachmentState, kPackedGBufferTargetCount> gbufferBlendStates{{
         rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
         rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
     }};
 
-    // GBuffer formats: 3 color attachments + depth
-    const std::array<rhi::TextureFormat, 3> gbufferColorFormats{{
-        rhi::TextureFormat::rgba8Unorm,  // GBuffer0: BaseColor
-        rhi::TextureFormat::rgba8Unorm,  // GBuffer1: Normal
-        rhi::TextureFormat::rgba8Unorm,  // GBuffer2: Material
+    // Packed GBuffer formats: 2 color attachments + depth
+    const std::array<rhi::TextureFormat, kPackedGBufferTargetCount> gbufferColorFormats{{
+        rhi::TextureFormat::rgba8Unorm,  // GBuffer0: BaseColor.rgb + Roughness
+        rhi::TextureFormat::rgba8Unorm,  // GBuffer1: OctNormal.xy + Metallic + AO
     }};
 
     // Specialization constant for alpha test (must be VkBool32 = uint32_t = 4 bytes)
@@ -7421,6 +7461,7 @@ void Renderer::flushPendingUploadCommands(bool waitForCompletion)
   }
 
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  bool           completedAnyUpload = false;
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
     if(frameUserData.pendingUploadFences.empty())
@@ -7452,6 +7493,35 @@ void Renderer::flushPendingUploadCommands(bool waitForCompletion)
       vkDestroyFence(device, frameUserData.pendingUploadFences[*it], nullptr);
       frameUserData.pendingUploadCmds.erase(frameUserData.pendingUploadCmds.begin() + *it);
       frameUserData.pendingUploadFences.erase(frameUserData.pendingUploadFences.begin() + *it);
+      completedAnyUpload = true;
+    }
+  }
+
+  if(completedAnyUpload)
+  {
+    bool hasPendingUpload = false;
+    for(const auto& frameUserData : m_perFrame.frameUserData)
+    {
+      hasPendingUpload = hasPendingUpload || !frameUserData.pendingUploadFences.empty();
+    }
+
+    const VkDeviceSize rendererStagingBytes = getStagingBufferBytes(m_device.allocator, m_device.stagingBuffers);
+    const VkDeviceSize meshPoolStagingBytes = m_meshPool.getDeferredStagingBufferBytes();
+    LOGI("Upload memory snapshot: pendingUploads=%d rendererStaging=%zu buffers %.2f MiB meshPoolDeferred=%zu buffers %.2f MiB",
+         hasPendingUpload ? 1 : 0,
+         m_device.stagingBuffers.size(),
+         static_cast<double>(rendererStagingBytes) / (1024.0 * 1024.0),
+         m_meshPool.getDeferredStagingBufferCount(),
+         static_cast<double>(meshPoolStagingBytes) / (1024.0 * 1024.0));
+
+    if(!hasPendingUpload)
+    {
+      freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+      m_meshPool.freeStagingBuffers();
+      LOGI("Upload memory snapshot after renderer staging free: rendererStaging=%zu buffers meshPoolDeferred=%zu buffers %.2f MiB",
+           m_device.stagingBuffers.size(),
+           m_meshPool.getDeferredStagingBufferCount(),
+           static_cast<double>(m_meshPool.getDeferredStagingBufferBytes()) / (1024.0 * 1024.0));
     }
   }
 }
