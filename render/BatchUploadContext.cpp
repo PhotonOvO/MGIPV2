@@ -73,6 +73,9 @@ void BatchUploadContext::executeUploads(VkCommandBuffer cmd) const
     return;
   }
 
+  std::vector<VkImageMemoryBarrier2> imageBarriers;
+  imageBarriers.reserve(m_pendingUploads.size());
+
   for(const UploadOperation& op : m_pendingUploads)
   {
     if(op.type == UploadType::buffer)
@@ -82,7 +85,37 @@ void BatchUploadContext::executeUploads(VkCommandBuffer cmd) const
     else
     {
       vkCmdCopyBufferToImage(cmd, m_stagingBuffer.buffer, op.dstImage, VK_IMAGE_LAYOUT_GENERAL, 1, &op.imageRegion);
+      imageBarriers.push_back(VkImageMemoryBarrier2{
+          .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask        = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT,
+          .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
+          .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image               = op.dstImage,
+          .subresourceRange =
+              {
+                  .aspectMask     = op.imageRegion.imageSubresource.aspectMask,
+                  .baseMipLevel   = op.imageRegion.imageSubresource.mipLevel,
+                  .levelCount     = 1,
+                  .baseArrayLayer = op.imageRegion.imageSubresource.baseArrayLayer,
+                  .layerCount     = op.imageRegion.imageSubresource.layerCount,
+              },
+      });
     }
+  }
+
+  if(!imageBarriers.empty())
+  {
+    const VkDependencyInfo dependencyInfo{
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = static_cast<uint32_t>(imageBarriers.size()),
+        .pImageMemoryBarriers    = imageBarriers.data(),
+    };
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
   }
 }
 

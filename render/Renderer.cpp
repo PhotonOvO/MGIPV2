@@ -115,7 +115,8 @@ struct DebugUnitLineSegment
 
 [[nodiscard]] bool isUploadableGltfImage(const GltfImageData& imageData)
 {
-  return !imageData.pixels.empty() && imageData.width > 0 && imageData.height > 0;
+  return (!imageData.pixels.empty() && imageData.width > 0 && imageData.height > 0)
+         || (imageData.isKtx2 && (!imageData.ktx2Data.empty() || !imageData.uri.empty()));
 }
 
 [[nodiscard]] bool supportsSampledImageFormat(VkPhysicalDevice physicalDevice, VkFormat format)
@@ -130,20 +131,56 @@ struct DebugUnitLineSegment
   return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
 }
 
-[[nodiscard]] bool tryLoadKtx2Sidecar(const GltfModel&         model,
+[[nodiscard]] bool tryLoadKtx2Texture(const GltfModel&         model,
                                       const GltfImageData&     imageData,
                                       Ktx2Loader&              loader,
                                       Ktx2Loader::Ktx2Texture& outTexture,
                                       std::filesystem::path*   outPath = nullptr)
 {
-  const std::filesystem::path ktx2Path =
-      Ktx2Loader::buildSidecarPath(std::filesystem::path(model.sourceDirectory), imageData.uri);
-  if(outPath != nullptr)
+  if(imageData.isKtx2 && !imageData.ktx2Data.empty())
   {
-    *outPath = ktx2Path;
+    if(outPath != nullptr)
+    {
+      *outPath = imageData.uri.empty() ? std::filesystem::path("<embedded KTX2>") : std::filesystem::path(imageData.uri);
+    }
+    return loader.loadFromMemory(imageData.ktx2Data.data(), imageData.ktx2Data.size(), outTexture);
   }
 
-  return !ktx2Path.empty() && std::filesystem::exists(ktx2Path) && loader.load(ktx2Path, outTexture);
+  const std::filesystem::path sourceDirectory(model.sourceDirectory);
+  const std::filesystem::path imagePath = imageData.isKtx2 && !imageData.uri.empty()
+                                            ? sourceDirectory / std::filesystem::path(imageData.uri)
+                                            : Ktx2Loader::buildSidecarPath(sourceDirectory, imageData.uri);
+  if(outPath != nullptr)
+  {
+    *outPath = imagePath;
+  }
+
+  return !imagePath.empty() && std::filesystem::exists(imagePath) && loader.load(imagePath, outTexture);
+}
+
+[[nodiscard]] const GltfImageData* findRawImageFallback(const GltfModel& model, const GltfImageData& imageData)
+{
+  if(!imageData.pixels.empty() && imageData.width > 0 && imageData.height > 0)
+  {
+    return &imageData;
+  }
+
+  if(imageData.fallbackImage >= 0 && static_cast<size_t>(imageData.fallbackImage) < model.images.size())
+  {
+    const GltfImageData& fallback = model.images[static_cast<size_t>(imageData.fallbackImage)];
+    if(!fallback.pixels.empty() && fallback.width > 0 && fallback.height > 0)
+    {
+      return &fallback;
+    }
+  }
+
+  return nullptr;
+}
+
+[[nodiscard]] VkDeviceSize rawImageUploadBytes(const GltfModel& model, const GltfImageData& imageData)
+{
+  const GltfImageData* rawImage = findRawImageFallback(model, imageData);
+  return rawImage != nullptr ? static_cast<VkDeviceSize>(rawImage->pixels.size()) : 0;
 }
 
 [[nodiscard]] VkDeviceSize computeSelectedBatchUploadSize(const GltfModel&              model,
@@ -162,17 +199,17 @@ struct DebugUnitLineSegment
 
     const GltfImageData& imageData = model.images[textureIndex];
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture);
 
     if(hasKtx2Sidecar)
     {
       totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
-                            static_cast<VkDeviceSize>(imageData.pixels.size()));
+                            rawImageUploadBytes(model, imageData));
       totalSize += 16;  // alignment padding for KTX allocations
     }
     else
     {
-      totalSize += static_cast<VkDeviceSize>(imageData.pixels.size());
+      totalSize += rawImageUploadBytes(model, imageData);
       totalSize += 4;  // alignment padding for raw pixel allocations
     }
   }
@@ -214,17 +251,17 @@ struct DebugUnitLineSegment
 
     const GltfImageData& imageData = model.images[textureIndex];
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture);
 
     if(hasKtx2Sidecar)
     {
       totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
-                            static_cast<VkDeviceSize>(imageData.pixels.size()));
+                            rawImageUploadBytes(model, imageData));
       totalSize += 16;
     }
     else
     {
-      totalSize += static_cast<VkDeviceSize>(imageData.pixels.size());
+      totalSize += rawImageUploadBytes(model, imageData);
       totalSize += 4;
     }
   }
@@ -286,7 +323,7 @@ struct TextureUploadDiagnostics
     diagnostics.maxHeight = std::max(diagnostics.maxHeight, static_cast<uint32_t>(imageData.height));
 
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture);
 
     if(!hasKtx2Sidecar)
     {
@@ -7592,7 +7629,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
 
     const GltfImageData& imageData = model.images[textureIndex];
     Ktx2Loader::Ktx2Texture ktxTexture;
-    const bool hasKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, batchKtx2Loader, ktxTexture);
+    const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, batchKtx2Loader, ktxTexture);
     const uint32_t width = hasKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
     const uint32_t height = hasKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
     const uint32_t mipLevels = hasKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u)
@@ -7641,7 +7678,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     Ktx2Loader              ktx2Loader;
     Ktx2Loader::Ktx2Texture ktxTexture;
     std::filesystem::path   ktx2Path;
-    const bool loadedKtx2Sidecar = tryLoadKtx2Sidecar(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
+    const bool loadedKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
     const bool hasSupportedKtx2Sidecar =
         loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, ktxTexture.format);
     if(loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
@@ -7650,10 +7687,19 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
            string_VkFormat(ktxTexture.format),
            ktx2Path.string().c_str());
     }
+    const GltfImageData* rawImageData = hasSupportedKtx2Sidecar ? nullptr : findRawImageFallback(model, imageData);
+    if(!hasSupportedKtx2Sidecar && rawImageData == nullptr)
+    {
+      LOGW("Skipping glTF KTX2 texture without a raw image fallback: uri=%s path=%s reason=%s",
+           imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+           ktx2Path.empty() ? "<none>" : ktx2Path.string().c_str(),
+           ktx2Loader.getLastError().empty() ? "unsupported or missing KTX2" : ktx2Loader.getLastError().c_str());
+      continue;
+    }
 
     const VkFormat format = hasSupportedKtx2Sidecar ? ktxTexture.format : VK_FORMAT_R8G8B8A8_UNORM;
-    const uint32_t width = hasSupportedKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
-    const uint32_t height = hasSupportedKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
+    const uint32_t width = hasSupportedKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(rawImageData->width);
+    const uint32_t height = hasSupportedKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(rawImageData->height);
     const uint32_t requestedMipLevels =
         hasSupportedKtx2Sidecar ? std::max(ktxTexture.mipLevels, 1u) : MipmapGenerator::calculateMipLevelCount(width, height);
     const uint32_t mipLevels = hasSupportedKtx2Sidecar ? requestedMipLevels : 1u;
@@ -7695,8 +7741,8 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
     }
     else
     {
-      const BatchUploadContext::Slice slice = batchUpload.allocate(imageData.pixels.size(), 4);
-      std::memcpy(slice.cpuPtr, imageData.pixels.data(), imageData.pixels.size());
+      const BatchUploadContext::Slice slice = batchUpload.allocate(rawImageData->pixels.size(), 4);
+      std::memcpy(slice.cpuPtr, rawImageData->pixels.data(), rawImageData->pixels.size());
       batchUpload.recordTextureUpload(
           slice,
           image.image,
@@ -7710,7 +7756,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
       if(requestedMipLevels > 1)
       {
         LOGI("Skipping runtime mip generation for raw glTF texture: uri=%s size=%ux%u requestedMipLevels=%u",
-             imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+             rawImageData->uri.empty() ? "<embedded>" : rawImageData->uri.c_str(),
              width,
              height,
              requestedMipLevels);

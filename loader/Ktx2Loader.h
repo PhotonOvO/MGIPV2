@@ -25,6 +25,7 @@ public:
                                                               const std::string&          imageUri);
 
   bool load(const std::filesystem::path& filepath, Ktx2Texture& outTexture);
+  bool loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& outTexture);
   [[nodiscard]] const std::string& getLastError() const { return m_lastError; }
 
 private:

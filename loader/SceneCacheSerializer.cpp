@@ -87,8 +87,15 @@ struct CacheHeader
   }
 
   const uint64_t expectedBytes = width * height * channels;
+  if(image.isKtx2)
+  {
+    return image.pixels.empty()
+           && image.ktx2Data.size() <= kMaxReasonableImagePixels;
+  }
+
   return expectedBytes <= kMaxReasonableImagePixels
          && image.pixels.size() <= kMaxReasonableImagePixels
+         && image.ktx2Data.empty()
          && (expectedBytes == 0 || image.pixels.size() == expectedBytes);
 }
 
@@ -288,19 +295,27 @@ bool readMaterial(std::istream& stream, GltfMaterialData& material)
 void writeImage(std::ostream& stream, const GltfImageData& image)
 {
   writeVector(stream, image.pixels);
+  writeVector(stream, image.ktx2Data);
   writePod(stream, image.width);
   writePod(stream, image.height);
   writePod(stream, image.channels);
   writeString(stream, image.uri);
+  writeString(stream, image.mimeType);
+  writePod(stream, image.fallbackImage);
+  writePod(stream, image.isKtx2);
 }
 
 bool readImage(std::istream& stream, GltfImageData& image)
 {
   return readVector(stream, image.pixels)
+         && readVector(stream, image.ktx2Data)
          && readPod(stream, image.width)
          && readPod(stream, image.height)
          && readPod(stream, image.channels)
-         && readString(stream, image.uri);
+         && readString(stream, image.uri)
+         && readString(stream, image.mimeType)
+         && readPod(stream, image.fallbackImage)
+         && readPod(stream, image.isKtx2);
 }
 
 void writeNode(std::ostream& stream, const GltfNodeData& node)

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <type_traits>
 
 namespace demo {
@@ -74,12 +75,39 @@ bool Ktx2Loader::load(const std::filesystem::path& filepath, Ktx2Texture& outTex
     return false;
   }
 
-  Ktx2Header header{};
-  if(!readPod(stream, header))
+  stream.seekg(0, std::ios::end);
+  const std::streamoff fileSize = stream.tellg();
+  if(fileSize <= 0 || static_cast<uint64_t>(fileSize) > std::numeric_limits<size_t>::max())
+  {
+    m_lastError = "Invalid KTX2 file size";
+    return false;
+  }
+
+  std::vector<uint8_t> fileData(static_cast<size_t>(fileSize));
+  stream.seekg(0, std::ios::beg);
+  stream.read(reinterpret_cast<char*>(fileData.data()), fileSize);
+  if(!stream)
+  {
+    m_lastError = "Failed to read KTX2 file";
+    return false;
+  }
+
+  return loadFromMemory(fileData.data(), fileData.size(), outTexture);
+}
+
+bool Ktx2Loader::loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& outTexture)
+{
+  m_lastError.clear();
+  outTexture = {};
+
+  if(data == nullptr || size < sizeof(Ktx2Header))
   {
     m_lastError = "Failed to read KTX2 header";
     return false;
   }
+
+  Ktx2Header header{};
+  std::memcpy(&header, data, sizeof(Ktx2Header));
 
   if(std::memcmp(header.identifier, kKtx2Identifier.data(), kKtx2Identifier.size()) != 0)
   {
@@ -100,28 +128,30 @@ bool Ktx2Loader::load(const std::filesystem::path& filepath, Ktx2Texture& outTex
   }
 
   const uint32_t levelCount = std::max(header.levelCount, 1u);
-  std::vector<Ktx2LevelIndex> levels(levelCount);
-  for(Ktx2LevelIndex& level : levels)
+  if(sizeof(Ktx2Header) + static_cast<size_t>(levelCount) * sizeof(Ktx2LevelIndex) > size)
   {
-    if(!readPod(stream, level))
-    {
-      m_lastError = "Failed to read KTX2 level index";
-      return false;
-    }
+    m_lastError = "Failed to read KTX2 level index";
+    return false;
   }
 
-  stream.seekg(0, std::ios::end);
-  const uint64_t fileSize = static_cast<uint64_t>(stream.tellg());
+  std::vector<Ktx2LevelIndex> levels(levelCount);
+  std::memcpy(levels.data(), data + sizeof(Ktx2Header), levels.size() * sizeof(Ktx2LevelIndex));
 
   uint64_t totalBytes = 0;
   for(const Ktx2LevelIndex& level : levels)
   {
-    if(level.byteOffset + level.byteLength > fileSize)
+    if(level.byteOffset > size || level.byteLength > size - level.byteOffset)
     {
       m_lastError = "KTX2 level range exceeds file size";
       return false;
     }
     totalBytes += level.byteLength;
+  }
+
+  if(totalBytes > std::numeric_limits<size_t>::max())
+  {
+    m_lastError = "KTX2 payload is too large";
+    return false;
   }
 
   outTexture.format    = static_cast<VkFormat>(header.vkFormat);
@@ -138,15 +168,7 @@ bool Ktx2Loader::load(const std::filesystem::path& filepath, Ktx2Texture& outTex
     const Ktx2LevelIndex& level = levels[mip];
     outTexture.mipOffsets[mip]  = packedOffset;
     outTexture.mipSizes[mip]    = level.byteLength;
-
-    stream.seekg(static_cast<std::streamoff>(level.byteOffset), std::ios::beg);
-    stream.read(reinterpret_cast<char*>(outTexture.data.data() + packedOffset),
-                static_cast<std::streamsize>(level.byteLength));
-    if(!stream)
-    {
-      m_lastError = "Failed to read KTX2 mip payload";
-      return false;
-    }
+    std::memcpy(outTexture.data.data() + packedOffset, data + level.byteOffset, static_cast<size_t>(level.byteLength));
 
     packedOffset += level.byteLength;
   }

@@ -59,10 +59,14 @@ struct GltfMaterialData {
 
 struct GltfImageData {
     std::vector<uint8_t> pixels;
+    std::vector<uint8_t> ktx2Data;
     int width = 0;
     int height = 0;
     int channels = 0;
     std::string uri;
+    std::string mimeType;
+    int fallbackImage = -1;
+    bool isKtx2 = false;
 };
 
 struct GltfNodeData {

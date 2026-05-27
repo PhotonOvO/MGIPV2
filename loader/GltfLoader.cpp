@@ -10,6 +10,9 @@
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstring>
 #include <cmath>
 #include <filesystem>
@@ -17,6 +20,8 @@
 #include <limits>
 
 namespace demo {
+
+static int resolveTextureSourceIndex(const tinygltf::Model& model, int textureIndex);
 
 namespace {
 
@@ -30,6 +35,8 @@ constexpr size_t kMaxReasonableAccessorElements = 1u << 24;
 // Bistro-scale scenes legitimately exceed a 512 MiB decoded payload once
 // textures are expanded to RGBA8, so keep a higher but still explicit cap.
 constexpr uint64_t kMaxReasonableModelPayloadBytes = 4ull << 30;
+constexpr std::array<uint8_t, 12> kKtx2Identifier{
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
 
 bool hasReasonableModelShape(const tinygltf::Model& model)
 {
@@ -131,6 +138,123 @@ std::vector<uint8_t> expandToRgba8(const std::vector<uint8_t>& pixels, int width
     return rgba;
 }
 
+bool hasExtension(const std::filesystem::path& path, const char* extension)
+{
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == extension;
+}
+
+bool hasKtx2Identifier(const unsigned char* bytes, int size)
+{
+    return bytes != nullptr
+        && size >= static_cast<int>(kKtx2Identifier.size())
+        && std::memcmp(bytes, kKtx2Identifier.data(), kKtx2Identifier.size()) == 0;
+}
+
+bool loadImageDataPreservingKtx2(tinygltf::Image* image,
+                                 const int        imageIndex,
+                                 std::string*     err,
+                                 std::string*     warn,
+                                 int              reqWidth,
+                                 int              reqHeight,
+                                 const unsigned char* bytes,
+                                 int              size,
+                                 void*            userData)
+{
+    (void)imageIndex;
+
+    const bool isKtx2 = image != nullptr
+        && (image->mimeType == "image/ktx2"
+            || hasExtension(std::filesystem::path(image->uri), ".ktx2")
+            || hasKtx2Identifier(bytes, size));
+    if(isKtx2)
+    {
+        image->image.assign(bytes, bytes + size);
+        image->component = 0;
+        image->bits = 8;
+        image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+
+        if(size >= 32)
+        {
+            uint32_t width = 0;
+            uint32_t height = 0;
+            std::memcpy(&width, bytes + 20, sizeof(uint32_t));
+            std::memcpy(&height, bytes + 24, sizeof(uint32_t));
+            image->width = static_cast<int>(width);
+            image->height = static_cast<int>(height);
+        }
+
+        return true;
+    }
+
+    return tinygltf::LoadImageData(image, imageIndex, err, warn, reqWidth, reqHeight, bytes, size, userData);
+}
+
+bool readTinyGltfInt(const tinygltf::Value& value, int& out)
+{
+    if(value.IsNumber())
+    {
+        out = value.GetNumberAsInt();
+        return true;
+    }
+    return false;
+}
+
+bool readExtensionTextureIndex(const tinygltf::Model& model, const tinygltf::Value& extension, const char* textureInfoName, int& out)
+{
+    if(!extension.IsObject())
+    {
+        return false;
+    }
+
+    const tinygltf::Value& textureInfo = extension.Get(textureInfoName);
+    if(!textureInfo.IsObject())
+    {
+        return false;
+    }
+
+    int textureIndex = -1;
+    if(!readTinyGltfInt(textureInfo.Get("index"), textureIndex))
+    {
+        return false;
+    }
+
+    const int imageIndex = resolveTextureSourceIndex(model, textureIndex);
+    if(imageIndex < 0)
+    {
+        return false;
+    }
+
+    out = imageIndex;
+    return true;
+}
+
+glm::vec4 readVec4ExtensionFactor(const tinygltf::Value& extension, const char* name, const glm::vec4& fallback)
+{
+    if(!extension.IsObject())
+    {
+        return fallback;
+    }
+
+    const tinygltf::Value& value = extension.Get(name);
+    if(!value.IsArray() || value.ArrayLen() < 4)
+    {
+        return fallback;
+    }
+
+    glm::vec4 result = fallback;
+    for(size_t i = 0; i < 4; ++i)
+    {
+        const tinygltf::Value& component = value.Get(i);
+        if(component.IsNumber())
+        {
+            result[static_cast<glm::length_t>(i)] = static_cast<float>(component.GetNumberAsDouble());
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
 // Forward declarations for tangent generation
@@ -142,6 +266,7 @@ static std::vector<float> computeTangents(
 );
 static void generateTangentsIfMissing(GltfMeshData& mesh);
 static int resolveTextureSourceIndex(const tinygltf::Model& model, int textureIndex);
+static void recordBasisuFallbackImages(const tinygltf::Model& model, GltfModel& outModel);
 static bool readFloatAccessor(
     const tinygltf::Model& model,
     const tinygltf::Accessor& accessor,
@@ -158,6 +283,8 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
 
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
+    tinygltf::LoadImageDataOption imageLoadOptions;
+    loader.SetImageLoader(loadImageDataPreservingKtx2, &imageLoadOptions);
     std::string err;
     std::string warn;
 
@@ -198,6 +325,7 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     // Process materials and images first (they are referenced by meshes)
     processMaterials(model, outModel);
     processImages(model, std::filesystem::path(filepath), outModel);
+    recordBasisuFallbackImages(model, outModel);
 
     // Set model name from file
     size_t lastSlash = filepath.find_last_of("/\\");
@@ -561,6 +689,18 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
             data.emissiveTexture = resolveTextureSourceIndex(model, mat.emissiveTexture.index);
         }
 
+        const auto specGlossIt = mat.extensions.find("KHR_materials_pbrSpecularGlossiness");
+        if(specGlossIt != mat.extensions.end() && specGlossIt->second.IsObject())
+        {
+            const tinygltf::Value& specGloss = specGlossIt->second;
+            int diffuseTexture = -1;
+            if(readExtensionTextureIndex(model, specGloss, "diffuseTexture", diffuseTexture))
+            {
+                data.baseColorTexture = diffuseTexture;
+            }
+            data.baseColorFactor = readVec4ExtensionFactor(specGloss, "diffuseFactor", data.baseColorFactor);
+        }
+
         // Alpha mode (glTF spec)
         std::string alphaModeStr = mat.alphaMode;
         if (alphaModeStr == "MASK") {
@@ -581,12 +721,15 @@ void GltfLoader::processImages(const tinygltf::Model& model, const std::filesyst
     outModel.images.reserve(model.images.size());
 
     for (const auto& image : model.images) {
+        const bool isKtx2 = image.mimeType == "image/ktx2"
+                         || hasExtension(std::filesystem::path(image.uri), ".ktx2")
+                         || hasKtx2Identifier(image.image.data(), static_cast<int>(image.image.size()));
         if(image.width < 0 || image.height < 0 || image.component < 0) {
             continue;
         }
         if(static_cast<size_t>(image.width) > kMaxReasonableImageDimension
            || static_cast<size_t>(image.height) > kMaxReasonableImageDimension
-           || image.component > 4) {
+           || (!isKtx2 && image.component > 4)) {
             continue;
         }
         if(image.image.size() > kMaxReasonableImageBytes) {
@@ -598,9 +741,18 @@ void GltfLoader::processImages(const tinygltf::Model& model, const std::filesyst
         imageData.height = image.height;
         imageData.channels = 4;
         imageData.uri = image.uri;
+        imageData.mimeType = image.mimeType;
+        imageData.isKtx2 = isKtx2;
 
-        // Normalize to RGBA8 so the upload path can generate mipmaps reliably.
-        imageData.pixels = expandToRgba8(image.image, image.width, image.height, image.component);
+        if(isKtx2)
+        {
+            imageData.ktx2Data = image.image;
+        }
+        else
+        {
+            // Normalize to RGBA8 so the upload path can generate mipmaps reliably.
+            imageData.pixels = expandToRgba8(image.image, image.width, image.height, image.component);
+        }
 
         if(imageData.uri.empty() && !image.name.empty())
         {
@@ -687,12 +839,47 @@ static int resolveTextureSourceIndex(const tinygltf::Model& model, int textureIn
         return -1;
     }
 
-    const int imageIndex = model.textures[textureIndex].source;
+    const tinygltf::Texture& texture = model.textures[textureIndex];
+    int imageIndex = texture.source;
+    const auto basisuIt = texture.extensions.find("KHR_texture_basisu");
+    if(basisuIt != texture.extensions.end() && basisuIt->second.IsObject())
+    {
+        const tinygltf::Value& sourceValue = basisuIt->second.Get("source");
+        readTinyGltfInt(sourceValue, imageIndex);
+    }
+
     if (imageIndex < 0 || imageIndex >= static_cast<int>(model.images.size())) {
         return -1;
     }
 
     return imageIndex;
+}
+
+static void recordBasisuFallbackImages(const tinygltf::Model& model, GltfModel& outModel) {
+    for(const tinygltf::Texture& texture : model.textures)
+    {
+        const auto basisuIt = texture.extensions.find("KHR_texture_basisu");
+        if(basisuIt == texture.extensions.end() || !basisuIt->second.IsObject())
+        {
+            continue;
+        }
+
+        const tinygltf::Value& sourceValue = basisuIt->second.Get("source");
+        int basisImage = -1;
+        if(!readTinyGltfInt(sourceValue, basisImage))
+        {
+            continue;
+        }
+        const int fallbackImage = texture.source;
+        if(basisImage < 0 || fallbackImage < 0
+           || basisImage >= static_cast<int>(outModel.images.size())
+           || fallbackImage >= static_cast<int>(outModel.images.size()))
+        {
+            continue;
+        }
+
+        outModel.images[static_cast<size_t>(basisImage)].fallbackImage = fallbackImage;
+    }
 }
 
 static bool readFloatAccessor(

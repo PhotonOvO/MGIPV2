@@ -70,7 +70,20 @@ uint64_t estimateTextureUploadBytes(const GltfModel& model, uint32_t textureInde
     return 0;
   }
 
-  return static_cast<uint64_t>(model.images[textureIndex].pixels.size());
+  const GltfImageData& image = model.images[textureIndex];
+  if(image.isKtx2)
+  {
+    return static_cast<uint64_t>(image.ktx2Data.size());
+  }
+  return static_cast<uint64_t>(image.pixels.size());
+}
+
+void markReferencedTexture(std::vector<bool>& referenced, int textureIndex)
+{
+  if(textureIndex >= 0 && static_cast<size_t>(textureIndex) < referenced.size())
+  {
+    referenced[static_cast<size_t>(textureIndex)] = true;
+  }
 }
 
 uint64_t estimateMeshUploadBytes(const GltfMeshData& mesh)
@@ -102,6 +115,23 @@ void AsyncLoadingCoordinator::begin(const GltfModel& model,
   m_uploadedTextures.assign(model.images.size(), false);
   m_uploadedMaterials.assign(model.materials.size(), false);
   m_uploadedMeshes.assign(model.meshes.size(), false);
+
+  std::vector<bool> referencedTextures(model.images.size(), false);
+  for(const GltfMaterialData& material : model.materials)
+  {
+    markReferencedTexture(referencedTextures, material.baseColorTexture);
+    markReferencedTexture(referencedTextures, material.normalTexture);
+    markReferencedTexture(referencedTextures, material.metallicRoughnessTexture);
+    markReferencedTexture(referencedTextures, material.occlusionTexture);
+    markReferencedTexture(referencedTextures, material.emissiveTexture);
+  }
+  for(size_t textureIndex = 0; textureIndex < referencedTextures.size(); ++textureIndex)
+  {
+    if(!referencedTextures[textureIndex])
+    {
+      m_uploadedTextures[textureIndex] = true;
+    }
+  }
 
   std::vector<PrioritizedMesh> prioritizedMeshes;
   prioritizedMeshes.reserve(model.meshes.size());
