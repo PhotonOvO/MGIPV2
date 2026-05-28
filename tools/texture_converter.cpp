@@ -100,6 +100,7 @@ struct ConverterOptions
   CompressionProfile profile{};
   OutputFormat outputFormat{OutputFormat::Bc7};
   AstcBlockFormat astcBlock{};
+  std::vector<std::string> inputExtensions{".png", ".jpg", ".jpeg"};
 };
 
 class NvttMipCollector final : public nvtt::OutputHandler
@@ -139,10 +140,22 @@ private:
   std::vector<EncodedMip> m_mips;
 };
 
-bool isSupportedTexture(const std::filesystem::path& path)
+std::string normalizeExtension(std::string ext)
 {
-  const std::string ext = path.extension().string();
-  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".PNG" || ext == ".JPG" || ext == ".JPEG";
+  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  if(!ext.empty() && ext.front() != '.')
+  {
+    ext.insert(ext.begin(), '.');
+  }
+  return ext;
+}
+
+bool isSupportedTexture(const std::filesystem::path& path, const ConverterOptions& options)
+{
+  const std::string ext = normalizeExtension(path.extension().string());
+  return std::find(options.inputExtensions.begin(), options.inputExtensions.end(), ext) != options.inputExtensions.end();
 }
 
 std::string toLower(std::string value)
@@ -162,7 +175,9 @@ bool isSrgbTexture(const std::filesystem::path& inputPath)
 {
   const std::string stem = toLower(inputPath.stem().string());
   return stemContains(stem, "albedo") || stemContains(stem, "basecolor") || stemContains(stem, "base_color")
-         || stemContains(stem, "diffuse") || stemContains(stem, "emissive");
+         || stemContains(stem, "diffuse") || stemContains(stem, "diff") || stemContains(stem, "emissive")
+         || stemContains(stem, "emmitance") || stemContains(stem, "_emi") || stemContains(stem, "_emt")
+         || stemContains(stem, "_em");
 }
 
 bool isNormalTexture(const std::filesystem::path& inputPath)
@@ -246,20 +261,50 @@ std::vector<uint8_t> rgbaToBgra(const std::vector<uint8_t>& rgbaPixels)
   return bgraPixels;
 }
 
-std::vector<nvtt::Surface> buildMipChain(const std::filesystem::path& inputPath,
-                                         int                         width,
-                                         int                         height,
-                                         const std::vector<uint8_t>& bgraPixels)
+nvtt::Surface loadSourceSurface(const std::filesystem::path& inputPath, int& outWidth, int& outHeight)
 {
-  nvtt::Surface baseSurface;
-  if(!baseSurface.setImage(nvtt::InputFormat_BGRA_8UB, width, height, 1, bgraPixels.data()))
+  nvtt::Surface surface;
+  const std::string ext = normalizeExtension(inputPath.extension().string());
+
+  if(ext == ".dds")
   {
-    throw std::runtime_error("NVTT failed to initialize source surface");
+    bool hasAlpha = false;
+    if(!surface.load(inputPath.string().c_str(), &hasAlpha))
+    {
+      throw std::runtime_error("NVTT failed to decode DDS");
+    }
+  }
+  else
+  {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgbaPixels;
+    if(!loadImageRgba8(inputPath, width, height, rgbaPixels))
+    {
+      throw std::runtime_error(std::string("Failed to decode image: ") + stbi_failure_reason());
+    }
+
+    const std::vector<uint8_t> bgraPixels = rgbaToBgra(rgbaPixels);
+    if(!surface.setImage(nvtt::InputFormat_BGRA_8UB, width, height, 1, bgraPixels.data()))
+    {
+      throw std::runtime_error("NVTT failed to initialize source surface");
+    }
   }
 
-  baseSurface.setAlphaMode(nvtt::AlphaMode_Transparency);
-  baseSurface.setNormalMap(isNormalTexture(inputPath));
+  outWidth = surface.width();
+  outHeight = surface.height();
+  if(outWidth <= 0 || outHeight <= 0)
+  {
+    throw std::runtime_error("Decoded image has invalid dimensions");
+  }
 
+  surface.setAlphaMode(nvtt::AlphaMode_Transparency);
+  surface.setNormalMap(isNormalTexture(inputPath));
+  return surface;
+}
+
+std::vector<nvtt::Surface> buildMipChain(const std::filesystem::path& inputPath, const nvtt::Surface& baseSurface)
+{
   std::vector<nvtt::Surface> mipChain;
   mipChain.push_back(baseSurface);
   while(mipChain.back().canMakeNextMipmap())
@@ -410,8 +455,8 @@ int main(int argc, char** argv)
   {
     std::cerr << "Usage: texture_converter <input_dir> <output_dir> [--format bc7|astc] "
                  "[--astc-block 4x4|5x4|5x5|6x5|6x6|8x5|8x6|8x8|10x5|10x6|10x8|10x10|12x10|12x12] "
-                 "[--quality fastest|normal|production|highest]\n";
-    std::cerr << "Offline-compresses PNG/JPG textures to BC7 or ASTC KTX2 sidecars with NVTT-generated mip chains.\n";
+                 "[--quality fastest|normal|production|highest] [--input-ext .png|.jpg|.jpeg|.dds] [--dds-only]\n";
+    std::cerr << "Offline-compresses PNG/JPG/DDS textures to BC7 or ASTC KTX2 sidecars with NVTT-generated mip chains.\n";
     return 1;
   }
 
@@ -483,6 +528,21 @@ int main(int argc, char** argv)
         return 1;
       }
     }
+    else if(arg == "--input-ext")
+    {
+      if(argIndex + 1 >= argc)
+      {
+        std::cerr << "--input-ext requires a value.\n";
+        return 1;
+      }
+
+      options.inputExtensions = {normalizeExtension(argv[++argIndex])};
+    }
+    else if(arg == "--dds-only")
+    {
+      options.inputExtensions = {".dds"};
+      options.outputFormat = OutputFormat::Bc7;
+    }
     else if(arg == "--astc-block")
     {
       if(argIndex + 1 >= argc)
@@ -525,12 +585,21 @@ int main(int argc, char** argv)
   {
     std::cout << " block=" << options.astcBlock.label;
   }
+  std::cout << " input-ext=";
+  for(size_t i = 0; i < options.inputExtensions.size(); ++i)
+  {
+    if(i > 0)
+    {
+      std::cout << ",";
+    }
+    std::cout << options.inputExtensions[i];
+  }
   std::cout << "\n";
 
   uint32_t convertedCount = 0;
   for(const auto& entry : std::filesystem::recursive_directory_iterator(inputDir))
   {
-    if(!entry.is_regular_file() || !isSupportedTexture(entry.path()))
+    if(!entry.is_regular_file() || !isSupportedTexture(entry.path(), options))
     {
       continue;
     }
@@ -544,15 +613,8 @@ int main(int argc, char** argv)
     {
       int width = 0;
       int height = 0;
-      std::vector<uint8_t> rgbaPixels;
-      if(!loadImageRgba8(entry.path(), width, height, rgbaPixels))
-      {
-        std::cerr << "Failed to decode image: " << entry.path() << " (" << stbi_failure_reason() << ")\n";
-        return 1;
-      }
-
-      const std::vector<uint8_t> bgraPixels = rgbaToBgra(rgbaPixels);
-      const std::vector<nvtt::Surface> mipChain = buildMipChain(entry.path(), width, height, bgraPixels);
+      const nvtt::Surface sourceSurface = loadSourceSurface(entry.path(), width, height);
+      const std::vector<nvtt::Surface> mipChain = buildMipChain(entry.path(), sourceSurface);
       const std::vector<EncodedMip> encodedMips =
           compressMipChain(entry.path(), mipChain, useCuda, options.profile.quality, options.outputFormat, options.astcBlock);
       const uint32_t vkFormat = selectVkFormat(entry.path(), options.outputFormat, options.astcBlock);

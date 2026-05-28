@@ -565,6 +565,7 @@ if not exist "%CONVERTER%" (
 string(CONFIGURE "${COMPRESS_TEXTURES_SCRIPT_TEMPLATE}" COMPRESS_TEXTURES_SCRIPT @ONLY)
 set(COMPRESS_RESOURCES_BC7_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/compress_resources_bc7_ktx2.cmd")
 set(COMPRESS_RESOURCES_ASTC_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/compress_resources_astc_ktx2.cmd")
+set(CONVERT_DDS_BC7_SCRIPT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/tools/convert_dds_to_bc7_ktx2.cmd")
 
 #====================================================================================
 # RESOURCE PREP - Copy resources and generate a manual texture conversion script
@@ -589,6 +590,9 @@ add_custom_target(copy_demo_resources
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${COMPRESS_RESOURCES_ASTC_SCRIPT_SOURCE}"
           "$<TARGET_FILE_DIR:Demo>/compress_resources_astc_ktx2.cmd"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CONVERT_DDS_BC7_SCRIPT_SOURCE}"
+          "$<TARGET_FILE_DIR:Demo>/convert_dds_to_bc7_ktx2.cmd"
   COMMENT "Copying resources to build directory..."
 )
 

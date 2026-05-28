@@ -255,6 +255,17 @@ glm::vec4 readVec4ExtensionFactor(const tinygltf::Value& extension, const char* 
     return result;
 }
 
+float readFloatExtensionFactor(const tinygltf::Value& extension, const char* name, float fallback)
+{
+    if(!extension.IsObject())
+    {
+        return fallback;
+    }
+
+    const tinygltf::Value& value = extension.Get(name);
+    return value.IsNumber() ? static_cast<float>(value.GetNumberAsDouble()) : fallback;
+}
+
 }  // namespace
 
 // Forward declarations for tangent generation
@@ -699,6 +710,15 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
                 data.baseColorTexture = diffuseTexture;
             }
             data.baseColorFactor = readVec4ExtensionFactor(specGloss, "diffuseFactor", data.baseColorFactor);
+
+            int specularGlossinessTexture = -1;
+            if(readExtensionTextureIndex(model, specGloss, "specularGlossinessTexture", specularGlossinessTexture))
+            {
+                data.metallicRoughnessTexture = specularGlossinessTexture;
+            }
+            data.materialWorkflow = 1;
+            data.metallicFactor = 0.0f;
+            data.roughnessFactor = readFloatExtensionFactor(specGloss, "glossinessFactor", 1.0f);
         }
 
         // Alpha mode (glTF spec)
@@ -718,23 +738,14 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
 
 void GltfLoader::processImages(const tinygltf::Model& model, const std::filesystem::path& sourcePath, GltfModel& outModel) {
     (void)sourcePath;
-    outModel.images.reserve(model.images.size());
+    outModel.images.clear();
+    outModel.images.resize(model.images.size());
 
-    for (const auto& image : model.images) {
+    for (size_t imageIndex = 0; imageIndex < model.images.size(); ++imageIndex) {
+        const auto& image = model.images[imageIndex];
         const bool isKtx2 = image.mimeType == "image/ktx2"
                          || hasExtension(std::filesystem::path(image.uri), ".ktx2")
                          || hasKtx2Identifier(image.image.data(), static_cast<int>(image.image.size()));
-        if(image.width < 0 || image.height < 0 || image.component < 0) {
-            continue;
-        }
-        if(static_cast<size_t>(image.width) > kMaxReasonableImageDimension
-           || static_cast<size_t>(image.height) > kMaxReasonableImageDimension
-           || (!isKtx2 && image.component > 4)) {
-            continue;
-        }
-        if(image.image.size() > kMaxReasonableImageBytes) {
-            continue;
-        }
 
         GltfImageData imageData;
         imageData.width = image.width;
@@ -743,6 +754,26 @@ void GltfLoader::processImages(const tinygltf::Model& model, const std::filesyst
         imageData.uri = image.uri;
         imageData.mimeType = image.mimeType;
         imageData.isKtx2 = isKtx2;
+
+        if(imageData.uri.empty() && !image.name.empty())
+        {
+            imageData.uri = image.name;
+        }
+
+        if(image.width < 0 || image.height < 0 || image.component < 0) {
+            outModel.images[imageIndex] = std::move(imageData);
+            continue;
+        }
+        if(static_cast<size_t>(image.width) > kMaxReasonableImageDimension
+           || static_cast<size_t>(image.height) > kMaxReasonableImageDimension
+           || (!isKtx2 && image.component > 4)) {
+            outModel.images[imageIndex] = std::move(imageData);
+            continue;
+        }
+        if(image.image.size() > kMaxReasonableImageBytes) {
+            outModel.images[imageIndex] = std::move(imageData);
+            continue;
+        }
 
         if(isKtx2)
         {
@@ -754,12 +785,7 @@ void GltfLoader::processImages(const tinygltf::Model& model, const std::filesyst
             imageData.pixels = expandToRgba8(image.image, image.width, image.height, image.component);
         }
 
-        if(imageData.uri.empty() && !image.name.empty())
-        {
-            imageData.uri = image.name;
-        }
-
-        outModel.images.push_back(std::move(imageData));
+        outModel.images[imageIndex] = std::move(imageData);
     }
 }
 

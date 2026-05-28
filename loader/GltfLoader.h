@@ -35,6 +35,7 @@ struct GltfMaterialData {
     int metallicRoughnessTexture = -1;
     float metallicFactor = 1.0f;
     float roughnessFactor = 1.0f;
+    int materialWorkflow = 0;          // 0 = metallic-roughness, 1 = specular-glossiness approximation
 
     // Normal map
     int normalTexture = -1;

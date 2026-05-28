@@ -580,6 +580,7 @@ private:
   static constexpr PresetModel m_presetModels[] = {
     {"Sponza", "resources/GLTF_Sponza/sponza.gltf"},
     {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
+    {"NVBistro", "resources/NV_Bistro/bistro_ktx.gltf"},
 	{"SponzaNew", "resources/Sponza/sponza.gltf"}
   };
   int m_selectedPreset = 0;

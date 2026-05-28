@@ -261,6 +261,7 @@ void writeMaterial(std::ostream& stream, const GltfMaterialData& material)
   writePod(stream, material.metallicRoughnessTexture);
   writePod(stream, material.metallicFactor);
   writePod(stream, material.roughnessFactor);
+  writePod(stream, material.materialWorkflow);
   writePod(stream, material.normalTexture);
   writePod(stream, material.normalScale);
   writePod(stream, material.occlusionTexture);
@@ -280,6 +281,7 @@ bool readMaterial(std::istream& stream, GltfMaterialData& material)
          && readPod(stream, material.metallicRoughnessTexture)
          && readPod(stream, material.metallicFactor)
          && readPod(stream, material.roughnessFactor)
+         && readPod(stream, material.materialWorkflow)
          && readPod(stream, material.normalTexture)
          && readPod(stream, material.normalScale)
          && readPod(stream, material.occlusionTexture)
