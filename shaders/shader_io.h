@@ -66,9 +66,12 @@ struct DrawUniforms
   float metallicFactor;
   float roughnessFactor;
   float normalScale;
+  float occlusionStrength;
+  vec4 emissiveFactor;
   int32_t alphaMode;      // 0=OPAQUE, 1=MASK, 2=BLEND
   float alphaCutoff;      // Default 0.5, used for MASK mode
-  float _padding[2];
+  int32_t emissiveTextureIndex;    // -1 = no texture
+  int32_t materialWorkflow;        // 0=metallic-roughness, 1=specular-glossiness approximation
 };
 
 struct SceneInfo

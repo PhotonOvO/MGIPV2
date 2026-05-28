@@ -15,9 +15,10 @@ GPUDrivenLightPass::GPUDrivenLightPass(GPUDrivenRenderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightPass::getDependencies() const
 {
-  static const std::array<PassResourceDependency, 8> dependencies = {
+  static const std::array<PassResourceDependency, 9> dependencies = {
       PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
+      PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::texture(kPassCSMShadowHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::buffer(kPassPointLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::fragment),

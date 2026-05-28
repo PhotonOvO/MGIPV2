@@ -67,6 +67,8 @@ VkFormat toVkFormat(TextureFormat format)
       return VK_FORMAT_R8G8B8A8_UNORM;
     case TextureFormat::bgra8Unorm:
       return VK_FORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::rgba16Sfloat:
+      return VK_FORMAT_R16G16B16A16_SFLOAT;
     case TextureFormat::d16Unorm:
       return VK_FORMAT_D16_UNORM;
     case TextureFormat::d32Sfloat:

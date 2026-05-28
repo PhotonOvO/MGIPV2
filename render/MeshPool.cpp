@@ -308,9 +308,13 @@ void MeshPool::setMeshMaterialData(MeshHandle handle,
                                    int32_t normalTextureIndex,
                                    int32_t metallicRoughnessTextureIndex,
                                    int32_t occlusionTextureIndex,
+                                   int32_t emissiveTextureIndex,
                                    float metallicFactor,
                                    float roughnessFactor,
-                                   float normalScale)
+                                   float normalScale,
+                                   float occlusionStrength,
+                                   const glm::vec4& emissiveFactor,
+                                   int32_t materialWorkflow)
 {
     MeshRecord* record = m_pool.tryGet(handle);
     if(record == nullptr)
@@ -323,9 +327,13 @@ void MeshPool::setMeshMaterialData(MeshHandle handle,
     record->normalTextureIndex = normalTextureIndex;
     record->metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
     record->occlusionTextureIndex = occlusionTextureIndex;
+    record->emissiveTextureIndex = emissiveTextureIndex;
     record->metallicFactor = metallicFactor;
     record->roughnessFactor = roughnessFactor;
     record->normalScale = normalScale;
+    record->occlusionStrength = occlusionStrength;
+    record->emissiveFactor = emissiveFactor;
+    record->materialWorkflow = materialWorkflow;
 }
 
 const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {

@@ -38,11 +38,13 @@ GPUDrivenGBufferPass::GPUDrivenGBufferPass(GPUDrivenRenderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenGBufferPass::getDependencies() const
 {
-  static const std::array<PassResourceDependency, 4> dependencies = {
+  static const std::array<PassResourceDependency, 5> dependencies = {
       PassResourceDependency::buffer(kPassVertexBufferHandle, ResourceAccess::read, rhi::ShaderStage::vertex),
       PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::write, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::ColorAttachment),
       PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::write, rhi::ShaderStage::fragment,
+                                      rhi::ResourceState::ColorAttachment),
+      PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::write, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::ColorAttachment),
       PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::DepthStencilAttachment),
@@ -318,6 +320,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
   const std::array<std::pair<TextureHandle, VkImage>, kPackedGBufferTargetCount> colorImages{{
       {kPassGBuffer0Handle, sceneView->gbufferImages[0]},
       {kPassGBuffer1Handle, sceneView->gbufferImages[1]},
+      {kPassGBuffer2Handle, sceneView->gbufferImages[2]},
   }};
   for(const auto& [handle, image] : colorImages)
   {

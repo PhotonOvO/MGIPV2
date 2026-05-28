@@ -48,7 +48,7 @@ GBufferPass::GBufferPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 4> dependencies = {
+    static const std::array<PassResourceDependency, 5> dependencies = {
         PassResourceDependency::buffer(
             kPassVertexBufferHandle,
             ResourceAccess::read,
@@ -62,6 +62,12 @@ PassNode::HandleSlice<PassResourceDependency> GBufferPass::getDependencies() con
         ),
         PassResourceDependency::texture(
             kPassGBuffer1Handle,
+            ResourceAccess::write,
+            rhi::ShaderStage::fragment,
+            rhi::ResourceState::ColorAttachment
+        ),
+        PassResourceDependency::texture(
+            kPassGBuffer2Handle,
             ResourceAccess::write,
             rhi::ShaderStage::fragment,
             rhi::ResourceState::ColorAttachment
@@ -235,9 +241,13 @@ void GBufferPass::execute(const PassContext& context) const
                 drawData.normalTextureIndex = mesh->normalTextureIndex;
                 drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
                 drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+                drawData.emissiveTextureIndex = mesh->emissiveTextureIndex;
                 drawData.metallicFactor = mesh->metallicFactor;
                 drawData.roughnessFactor = mesh->roughnessFactor;
                 drawData.normalScale = mesh->normalScale;
+                drawData.occlusionStrength = mesh->occlusionStrength;
+                drawData.emissiveFactor = mesh->emissiveFactor;
+                drawData.materialWorkflow = mesh->materialWorkflow;
 
                 pendingDraws.push_back({idx, mesh, drawData, opaquePipeline});
             }
@@ -263,9 +273,13 @@ void GBufferPass::execute(const PassContext& context) const
                 drawData.normalTextureIndex = mesh->normalTextureIndex;
                 drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
                 drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+                drawData.emissiveTextureIndex = mesh->emissiveTextureIndex;
                 drawData.metallicFactor = mesh->metallicFactor;
                 drawData.roughnessFactor = mesh->roughnessFactor;
                 drawData.normalScale = mesh->normalScale;
+                drawData.occlusionStrength = mesh->occlusionStrength;
+                drawData.emissiveFactor = mesh->emissiveFactor;
+                drawData.materialWorkflow = mesh->materialWorkflow;
 
                 pendingDraws.push_back({idx, mesh, drawData, alphaTestPipeline});
             }
@@ -413,6 +427,7 @@ void GBufferPass::execute(const PassContext& context) const
     const std::array<std::pair<TextureHandle, VkImage>, kPackedGBufferTargetCount> colorImages{{
         {kPassGBuffer0Handle, sceneResources.getColorImage(0)},
         {kPassGBuffer1Handle, sceneResources.getColorImage(1)},
+        {kPassGBuffer2Handle, sceneResources.getColorImage(2)},
     }};
     for(const auto& [handle, image] : colorImages)
     {

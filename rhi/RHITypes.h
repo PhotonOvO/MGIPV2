@@ -134,10 +134,11 @@ enum class TextureFormat : uint8_t
   undefined   = 0,
   rgba8Unorm  = 1,
   bgra8Unorm  = 2,
-  d16Unorm    = 3,
-  d32Sfloat   = 4,
-  d24UnormS8  = 5,
-  d32SfloatS8 = 6,
+  rgba16Sfloat = 3,
+  d16Unorm    = 4,
+  d32Sfloat   = 5,
+  d24UnormS8  = 6,
+  d32SfloatS8 = 7,
 };
 
 enum class DynamicState : uint8_t

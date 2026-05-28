@@ -25,7 +25,8 @@ ConstantBuffer<LightingUniforms> lighting;
 
 STATIC_CONST int kGBufferBaseColorIndex = 0;
 STATIC_CONST int kGBufferPackedNormalMaterialIndex = 1;
-STATIC_CONST int kGBufferDepthIndex                = 2;
+STATIC_CONST int kGBufferEmissiveIndex             = 2;
+STATIC_CONST int kGBufferDepthIndex                = 3;
 STATIC_CONST float PI                   = 3.14159265359;
 
 float2 signNotZero(float2 v)
@@ -298,9 +299,14 @@ vec3 evaluatePointLights(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColo
     return accumulated;
 }
 
-vec3 toneMap(vec3 color)
+vec3 toneMapACES(vec3 color)
 {
-    color = color / (color + vec3(1.0, 1.0, 1.0));
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     return pow(color, vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 }
 
@@ -329,6 +335,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
 {
     float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
     float4 packedSample    = inTexture[kGBufferPackedNormalMaterialIndex].Sample(input.uv);
+    float4 emissiveSample  = inTexture[kGBufferEmissiveIndex].Sample(input.uv);
     float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
 
     if(lightCoarseCulling.debugInfo.x > 0.5)
@@ -354,6 +361,6 @@ float4 fragmentMain(VSOutput input) : SV_Target
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 color = ambient + directional + pointLights;
-    return float4(toneMap(color), 1.0);
+    vec3 color = ambient + directional + pointLights + emissiveSample.rgb;
+    return float4(toneMapACES(color), 1.0);
 }

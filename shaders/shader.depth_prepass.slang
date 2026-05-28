@@ -68,7 +68,8 @@ void fragmentMain(VertexOutput input)
         return;
     }
 
-    float alpha = inTexture[draw.baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
+    uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
     if(alpha < draw.alphaCutoff)
     {
         discard;
@@ -84,7 +85,8 @@ void fragmentMdiMain(VertexOutputMdi input)
         return;
     }
 
-    float alpha = inTexture[draw.baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
+    uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
     if(alpha < draw.alphaCutoff)
     {
         discard;

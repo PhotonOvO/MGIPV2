@@ -101,7 +101,8 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        float4 texColor = inTexture[draw.baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
 
@@ -117,7 +118,8 @@ float4 fragmentMdiMain(VertexOutputMdi input) : SV_Target
     float4 color = mdiDraw.baseColorFactor;
     if(mdiDraw.baseColorTextureIndex >= 0)
     {
-        float4 texColor = inTexture[mdiDraw.baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(mdiDraw.baseColorTextureIndex));
+        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
         color = float4(texColor.rgb * mdiDraw.baseColorFactor.rgb, texColor.a * mdiDraw.baseColorFactor.a);
     }
 

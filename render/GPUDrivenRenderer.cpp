@@ -1642,9 +1642,13 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
     drawData.normalTextureIndex = mesh->normalTextureIndex;
     drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
     drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+    drawData.emissiveTextureIndex = mesh->emissiveTextureIndex;
     drawData.metallicFactor = mesh->metallicFactor;
     drawData.roughnessFactor = mesh->roughnessFactor;
     drawData.normalScale = mesh->normalScale;
+    drawData.occlusionStrength = mesh->occlusionStrength;
+    drawData.emissiveFactor = mesh->emissiveFactor;
+    drawData.materialWorkflow = mesh->materialWorkflow;
     drawData.alphaMode = mesh->alphaMode;
     drawData.alphaCutoff = mesh->alphaCutoff;
     m_persistentDrawData[drawIndex] = drawData;

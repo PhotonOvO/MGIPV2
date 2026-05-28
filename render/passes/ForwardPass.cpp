@@ -350,9 +350,13 @@ void ForwardPass::execute(const PassContext& context) const
                 drawData.normalTextureIndex = -1;
                 drawData.metallicRoughnessTextureIndex = -1;
                 drawData.occlusionTextureIndex = -1;
+                drawData.emissiveTextureIndex = -1;
                 drawData.metallicFactor = 1.0f;
                 drawData.roughnessFactor = 1.0f;
                 drawData.normalScale = 1.0f;
+                drawData.occlusionStrength = 1.0f;
+                drawData.emissiveFactor = glm::vec4(0.0f);
+                drawData.materialWorkflow = 0;
                 drawData.alphaMode = mesh->alphaMode;
                 drawData.alphaCutoff = mesh->alphaCutoff;
 
@@ -362,9 +366,13 @@ void ForwardPass::execute(const PassContext& context) const
                 drawData.normalTextureIndex = mesh->normalTextureIndex;
                 drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
                 drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+                drawData.emissiveTextureIndex = mesh->emissiveTextureIndex;
                 drawData.metallicFactor = mesh->metallicFactor;
                 drawData.roughnessFactor = mesh->roughnessFactor;
                 drawData.normalScale = mesh->normalScale;
+                drawData.occlusionStrength = mesh->occlusionStrength;
+                drawData.emissiveFactor = mesh->emissiveFactor;
+                drawData.materialWorkflow = mesh->materialWorkflow;
 
                 uniformsData.push_back(drawData);
             }

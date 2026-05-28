@@ -130,13 +130,15 @@ void fragmentMain(
     VertexOutput input,
     bool isFrontFace : SV_IsFrontFace,
     out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1
+    out float4 outGBuffer1 : SV_Target1,
+    out float4 outGBuffer2 : SV_Target2
 ) {
     // 1. BaseColor: sample texture if available, otherwise use factor
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        float4 texColor = inTexture[draw.baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
     // 2. Alpha test (specialization constant controlled)
@@ -154,11 +156,11 @@ void fragmentMain(
     if(draw.normalTextureIndex >= 0)
     {
         // Sample normal map (tangent space)
-        float3 tangentNormal = inTexture[draw.normalTextureIndex].Sample(input.uv).rgb;
+        uint normalTextureIndex = NonUniformResourceIndex(uint(draw.normalTextureIndex));
+        float3 tangentNormal = inTexture[normalTextureIndex].Sample(input.uv).rgb;
         // Convert from [0,1] to [-1,1]
         tangentNormal = tangentNormal * 2.0 - 1.0;
-        // Apply normal scale
-        // tangentNormal.xy *= draw.normalScale;
+        tangentNormal.xy *= draw.normalScale;
 
         tangentNormal = normalize(tangentNormal);
         // Build TBN matrix
@@ -179,27 +181,46 @@ void fragmentMain(
     }
 
     // 3. PBR values
-    float metallic = draw.metallicFactor;
-    float roughness = draw.roughnessFactor;
+    float metallic = draw.materialWorkflow == 1 ? 0.0 : draw.metallicFactor;
+    float roughness = draw.materialWorkflow == 1 ? (1.0 - draw.roughnessFactor) : draw.roughnessFactor;
     float ao = 1.0;
 
     // Sample metallic-roughness texture (glTF: G=metallic, B=roughness)
     if(draw.metallicRoughnessTextureIndex >= 0)
     {
-        float4 mrSample = inTexture[draw.metallicRoughnessTextureIndex].Sample(input.uv);
-        metallic = mrSample.g * draw.metallicFactor;
-        roughness = mrSample.b * draw.roughnessFactor;
+        uint metallicRoughnessTextureIndex = NonUniformResourceIndex(uint(draw.metallicRoughnessTextureIndex));
+        float4 mrSample = inTexture[metallicRoughnessTextureIndex].Sample(input.uv);
+        if(draw.materialWorkflow == 1)
+        {
+            metallic = 0.0;
+            roughness = 1.0 - mrSample.a * draw.roughnessFactor;
+        }
+        else
+        {
+            metallic = mrSample.g * draw.metallicFactor;
+            roughness = mrSample.b * draw.roughnessFactor;
+        }
     }
 
     // Sample occlusion texture
     if(draw.occlusionTextureIndex >= 0)
     {
-        ao = inTexture[draw.occlusionTextureIndex].Sample(input.uv).r;
+        uint occlusionTextureIndex = NonUniformResourceIndex(uint(draw.occlusionTextureIndex));
+        float sampledAo = inTexture[occlusionTextureIndex].Sample(input.uv).r;
+        ao = lerp(1.0, sampledAo, draw.occlusionStrength);
+    }
+
+    float3 emissive = draw.emissiveFactor.rgb;
+    if(draw.emissiveTextureIndex >= 0)
+    {
+        uint emissiveTextureIndex = NonUniformResourceIndex(uint(draw.emissiveTextureIndex));
+        emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
     }
 
     // Pack outputs
     outGBuffer0 = float4(color.rgb, roughness);
     outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
+    outGBuffer2 = float4(emissive, 0.0);
 }
 
 [shader("fragment")]
@@ -207,13 +228,15 @@ void fragmentMdiMain(
     VertexOutputMdi input,
     bool isFrontFace : SV_IsFrontFace,
     out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1
+    out float4 outGBuffer1 : SV_Target1,
+    out float4 outGBuffer2 : SV_Target2
 ) {
     const DrawUniforms draw = drawData[input.drawIndex];
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        float4 texColor = inTexture[draw.baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
 
@@ -228,8 +251,10 @@ void fragmentMdiMain(
     float3 worldNormal = normalize(input.worldNormal);
     if(draw.normalTextureIndex >= 0)
     {
-        float3 tangentNormal = inTexture[draw.normalTextureIndex].Sample(input.uv).rgb;
+        uint normalTextureIndex = NonUniformResourceIndex(uint(draw.normalTextureIndex));
+        float3 tangentNormal = inTexture[normalTextureIndex].Sample(input.uv).rgb;
         tangentNormal = tangentNormal * 2.0 - 1.0;
+        tangentNormal.xy *= draw.normalScale;
         tangentNormal = normalize(tangentNormal);
         float3 N = normalize(input.worldNormal);
         float3 T = normalize(input.worldTangent);
@@ -241,20 +266,39 @@ void fragmentMdiMain(
         worldNormal = -worldNormal;
     }
 
-    float metallic = draw.metallicFactor;
-    float roughness = draw.roughnessFactor;
+    float metallic = draw.materialWorkflow == 1 ? 0.0 : draw.metallicFactor;
+    float roughness = draw.materialWorkflow == 1 ? (1.0 - draw.roughnessFactor) : draw.roughnessFactor;
     float ao = 1.0;
     if(draw.metallicRoughnessTextureIndex >= 0)
     {
-        float4 mrSample = inTexture[draw.metallicRoughnessTextureIndex].Sample(input.uv);
-        metallic = mrSample.g * draw.metallicFactor;
-        roughness = mrSample.b * draw.roughnessFactor;
+        uint metallicRoughnessTextureIndex = NonUniformResourceIndex(uint(draw.metallicRoughnessTextureIndex));
+        float4 mrSample = inTexture[metallicRoughnessTextureIndex].Sample(input.uv);
+        if(draw.materialWorkflow == 1)
+        {
+            metallic = 0.0;
+            roughness = 1.0 - mrSample.a * draw.roughnessFactor;
+        }
+        else
+        {
+            metallic = mrSample.g * draw.metallicFactor;
+            roughness = mrSample.b * draw.roughnessFactor;
+        }
     }
     if(draw.occlusionTextureIndex >= 0)
     {
-        ao = inTexture[draw.occlusionTextureIndex].Sample(input.uv).r;
+        uint occlusionTextureIndex = NonUniformResourceIndex(uint(draw.occlusionTextureIndex));
+        float sampledAo = inTexture[occlusionTextureIndex].Sample(input.uv).r;
+        ao = lerp(1.0, sampledAo, draw.occlusionStrength);
+    }
+
+    float3 emissive = draw.emissiveFactor.rgb;
+    if(draw.emissiveTextureIndex >= 0)
+    {
+        uint emissiveTextureIndex = NonUniformResourceIndex(uint(draw.emissiveTextureIndex));
+        emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
     }
 
     outGBuffer0 = float4(color.rgb, roughness);
     outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
+    outGBuffer2 = float4(emissive, 0.0);
 }

@@ -37,12 +37,16 @@ struct MeshRecord {
     int32_t normalTextureIndex = -1;
     int32_t metallicRoughnessTextureIndex = -1;
     int32_t occlusionTextureIndex = -1;
+    int32_t emissiveTextureIndex = -1;
 
     // Pre-computed material factors
     glm::vec4 baseColorFactor = glm::vec4(1.0f);
     float metallicFactor = 1.0f;
     float roughnessFactor = 1.0f;
     float normalScale = 1.0f;
+    float occlusionStrength = 1.0f;
+    glm::vec4 emissiveFactor = glm::vec4(0.0f);
+    int32_t materialWorkflow = 0;
 
     glm::vec3 localBoundsMin = glm::vec3(0.0f);
     glm::vec3 localBoundsMax = glm::vec3(0.0f);
@@ -86,9 +90,13 @@ public:
                             int32_t normalTextureIndex,
                             int32_t metallicRoughnessTextureIndex,
                             int32_t occlusionTextureIndex,
+                            int32_t emissiveTextureIndex,
                             float metallicFactor,
                             float roughnessFactor,
-                            float normalScale);
+                            float normalScale,
+                            float occlusionStrength,
+                            const glm::vec4& emissiveFactor,
+                            int32_t materialWorkflow);
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
     void reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd);

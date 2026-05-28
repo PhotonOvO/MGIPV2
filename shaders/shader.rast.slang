@@ -126,7 +126,8 @@ PixelOutput fragmentMain(VertexOutput input)
     // Conditionally sample texture based on specialization constant
     if (useTexture)
     {
-        triangleColor *= inTexture[sceneInfo.texId].Sample(input.uv);
+        uint textureIndex = NonUniformResourceIndex(uint(sceneInfo.texId));
+        triangleColor *= inTexture[textureIndex].Sample(input.uv);
     }
 
     // Blend between point and triangle color based on distance field

@@ -17,7 +17,7 @@ LightPass::LightPass(Renderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> LightPass::getDependencies() const
 {
-    static const std::array<PassResourceDependency, 8> dependencies = {
+    static const std::array<PassResourceDependency, 9> dependencies = {
         PassResourceDependency::texture(
             kPassGBuffer0Handle,
             ResourceAccess::read,
@@ -25,6 +25,11 @@ PassNode::HandleSlice<PassResourceDependency> LightPass::getDependencies() const
         ),
         PassResourceDependency::texture(
             kPassGBuffer1Handle,
+            ResourceAccess::read,
+            rhi::ShaderStage::fragment
+        ),
+        PassResourceDependency::texture(
+            kPassGBuffer2Handle,
             ResourceAccess::read,
             rhi::ShaderStage::fragment
         ),

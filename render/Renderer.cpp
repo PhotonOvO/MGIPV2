@@ -376,9 +376,13 @@ struct PendingMipGeneration
   drawData.normalTextureIndex = mesh.normalTextureIndex;
   drawData.metallicRoughnessTextureIndex = mesh.metallicRoughnessTextureIndex;
   drawData.occlusionTextureIndex = mesh.occlusionTextureIndex;
+  drawData.emissiveTextureIndex = mesh.emissiveTextureIndex;
   drawData.metallicFactor = mesh.metallicFactor;
   drawData.roughnessFactor = mesh.roughnessFactor;
   drawData.normalScale = mesh.normalScale;
+  drawData.occlusionStrength = mesh.occlusionStrength;
+  drawData.emissiveFactor = mesh.emissiveFactor;
+  drawData.materialWorkflow = mesh.materialWorkflow;
   drawData.alphaMode = mesh.alphaMode;
   drawData.alphaCutoff = mesh.alphaCutoff;
   return drawData;
@@ -684,6 +688,8 @@ static rhi::TextureFormat toPortableTextureFormat(VkFormat format)
       return rhi::TextureFormat::rgba8Unorm;
     case VK_FORMAT_B8G8R8A8_UNORM:
       return rhi::TextureFormat::bgra8Unorm;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return rhi::TextureFormat::rgba16Sfloat;
     case VK_FORMAT_D16_UNORM:
       return rhi::TextureFormat::d16Unorm;
     case VK_FORMAT_D32_SFLOAT:
@@ -857,6 +863,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
         .color         = {
             VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer0: BaseColor.rgb + roughness
             VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer1: oct normal.xy + metallic + AO
+            VK_FORMAT_R16G16B16A16_SFLOAT,  // GBuffer2: emissive.rgb + material flags
         },
         .depth         = depthFormat,
         .linearSampler = linearSampler,
@@ -3766,6 +3773,13 @@ void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
+      .handle       = kPassGBuffer2Handle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
       .handle       = kPassSceneDepthHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
       .aspect       = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
@@ -6007,12 +6021,14 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     const std::array<rhi::BlendAttachmentState, kPackedGBufferTargetCount> gbufferBlendStates{{
         rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
         rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
     }};
 
-    // Packed GBuffer formats: 2 color attachments + depth
+    // Packed GBuffer formats: 3 color attachments + depth
     const std::array<rhi::TextureFormat, kPackedGBufferTargetCount> gbufferColorFormats{{
         rhi::TextureFormat::rgba8Unorm,  // GBuffer0: BaseColor.rgb + Roughness
         rhi::TextureFormat::rgba8Unorm,  // GBuffer1: OctNormal.xy + Metallic + AO
+        rhi::TextureFormat::rgba16Sfloat,  // GBuffer2: Emissive.rgb + flags
     }};
 
     // Specialization constant for alpha test (must be VkBool32 = uint32_t = 4 bytes)
@@ -7871,9 +7887,13 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
                                          ? static_cast<int32_t>(getGltfTextureBaseIndex() + matData.metallicRoughnessTexture)
                                          : -1,
                                      matData.occlusionTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + matData.occlusionTexture) : -1,
+                                     matData.emissiveTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + matData.emissiveTexture) : -1,
                                      matData.metallicFactor,
                                      matData.roughnessFactor,
-                                     matData.normalScale);
+                                     matData.normalScale,
+                                     matData.occlusionStrength,
+                                     glm::vec4(matData.emissiveFactor, 0.0f),
+                                     matData.materialWorkflow);
 
       if(matData.alphaMode == shaderio::LAlphaOpaque)
       {
