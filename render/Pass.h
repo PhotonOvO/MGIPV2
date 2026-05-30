@@ -13,7 +13,7 @@ namespace demo {
 // Forward declaration to allow PassContext to carry render params without a
 // hard dependency on the full RenderParams type from Renderer.
 struct RenderParams;
-struct GltfUploadResult;
+struct SceneUploadResult;
 
 struct PassContext
 {
@@ -26,7 +26,7 @@ struct PassContext
   const RenderParams*       params{nullptr};
   std::vector<StreamEntry>* drawStream{nullptr};
   // glTF model data for rendering meshes
-  const GltfUploadResult*   gltfModel{nullptr};
+  const SceneUploadResult*  gltfModel{nullptr};
   // Global bindless resource (bind once at pass start)
   BindGroupHandle           globalBindlessGroup{};
   // Shared camera uniform allocation (set once per frame by Renderer)

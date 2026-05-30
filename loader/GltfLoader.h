@@ -70,6 +70,13 @@ struct GltfImageData {
     bool isKtx2 = false;
 };
 
+struct GltfDependencyData {
+    std::string relativePath;
+    uint64_t fileSize = 0;
+    int64_t writeTimeTicks = 0;
+    uint64_t pathHash = 0;
+};
+
 struct GltfNodeData {
     std::string name;
     int parent = -1;
@@ -93,6 +100,7 @@ struct GltfModel {
     std::string name;
     std::string sourcePath;
     std::string sourceDirectory;
+    std::vector<GltfDependencyData> dependencies;
 };
 
 class GltfLoader {

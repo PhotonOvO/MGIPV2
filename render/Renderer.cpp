@@ -14,6 +14,7 @@
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include "../loader/Ktx2Loader.h"
 #include "../scene/SceneAssetView.h"
+#include "../scene/SceneUploadPlanner.h"
 
 #include <algorithm>
 #include <chrono>
@@ -7822,6 +7823,10 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
 
 SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd)
 {
+  const SceneUploadPlanValidationResult validation =
+      SceneUploadPlanner::validate(makeSceneAssetView(asset), plan);
+  ASSERT(validation.valid, "SceneUploadPlan validation failed before GPU commit");
+
   SceneUploadResult result{};
   result.meshes.resize(asset.meshes.size(), kNullMeshHandle);
   result.materials.resize(asset.materials.size(), kNullMaterialHandle);
@@ -8080,6 +8085,148 @@ SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const
     {
       result.opaqueMeshIndices.push_back(meshPlan.meshIndex);
       result.shadowCasterIndices.push_back(meshPlan.meshIndex);
+    }
+  }
+
+  result.instanceToDrawRecord.assign(plan.instances.instances.size(), UINT32_MAX);
+  result.drawCommandToDrawRecord.assign(plan.drawCommands.size(), UINT32_MAX);
+  result.drawRecords.reserve(plan.drawCommands.empty() ? plan.instances.instances.size() : plan.drawCommands.size());
+
+  auto appendDrawRecord = [&](uint32_t instanceIndex,
+                              uint32_t meshIndex,
+                              uint32_t materialIndex,
+                              const glm::mat4& worldTransform,
+                              SceneDrawBucket bucket,
+                              const glm::vec4& boundsSphere) -> uint32_t {
+    if(meshIndex >= result.meshes.size())
+    {
+      return UINT32_MAX;
+    }
+
+    const MeshHandle meshHandle = result.meshes[meshIndex];
+    if(meshHandle.isNull())
+    {
+      return UINT32_MAX;
+    }
+
+    MaterialHandle materialHandle = kNullMaterialHandle;
+    if(materialIndex < result.materials.size())
+    {
+      materialHandle = result.materials[materialIndex];
+    }
+
+    const uint32_t alphaMode = bucket == SceneDrawBucket::Transparent
+                                   ? shaderio::LAlphaBlend
+                                   : (bucket == SceneDrawBucket::AlphaMask ? shaderio::LAlphaMask : shaderio::LAlphaOpaque);
+    float alphaCutoff = 0.5f;
+    if(materialIndex < asset.materials.size())
+    {
+      alphaCutoff = asset.materials[materialIndex].alphaCutoff;
+    }
+
+    const uint32_t drawRecordIndex = static_cast<uint32_t>(result.drawRecords.size());
+    result.drawRecords.push_back(SceneUploadResult::SceneDrawRecord{
+      .instanceIndex = instanceIndex,
+      .meshIndex = meshIndex,
+      .materialIndex = materialIndex,
+      .meshHandle = meshHandle,
+      .materialHandle = materialHandle,
+      .worldTransform = worldTransform,
+      .boundsSphere = boundsSphere,
+      .alphaMode = alphaMode,
+      .alphaCutoff = alphaCutoff,
+    });
+    result.drawMeshHandles.push_back(meshHandle);
+    result.shadowCasterDrawIndices.push_back(drawRecordIndex);
+    if(bucket == SceneDrawBucket::Transparent)
+    {
+      result.transparentDrawIndices.push_back(drawRecordIndex);
+      result.transparentDrawDistances.push_back(0.0f);
+    }
+    else if(bucket == SceneDrawBucket::AlphaMask)
+    {
+      result.alphaTestDrawIndices.push_back(drawRecordIndex);
+    }
+    else
+    {
+      result.opaqueDrawIndices.push_back(drawRecordIndex);
+    }
+    return drawRecordIndex;
+  };
+
+  if(!plan.drawCommands.empty())
+  {
+    for(uint32_t commandIndex = 0; commandIndex < static_cast<uint32_t>(plan.drawCommands.size()); ++commandIndex)
+    {
+      const DrawCommandBuildPlan& command = plan.drawCommands[commandIndex];
+      if(command.instanceIndex >= plan.instances.instances.size())
+      {
+        continue;
+      }
+
+      const SceneDrawInstance& instance = plan.instances.instances[command.instanceIndex];
+      glm::vec4 boundsSphere(0.0f);
+      for(const InstanceCullRecord& cullRecord : plan.cullRecords)
+      {
+        if(cullRecord.instanceIndex == command.instanceIndex)
+        {
+          boundsSphere = cullRecord.boundingSphere;
+          break;
+        }
+      }
+
+      const uint32_t drawRecordIndex = appendDrawRecord(command.instanceIndex,
+                                                        command.meshIndex,
+                                                        command.materialIndex,
+                                                        instance.worldTransform,
+                                                        command.bucket,
+                                                        boundsSphere);
+      if(drawRecordIndex == UINT32_MAX)
+      {
+        continue;
+      }
+      result.drawCommandToDrawRecord[commandIndex] = drawRecordIndex;
+      if(command.instanceIndex < result.instanceToDrawRecord.size()
+         && result.instanceToDrawRecord[command.instanceIndex] == UINT32_MAX)
+      {
+        result.instanceToDrawRecord[command.instanceIndex] = drawRecordIndex;
+      }
+    }
+  }
+  else
+  {
+    for(uint32_t instanceIndex = 0; instanceIndex < static_cast<uint32_t>(plan.instances.instances.size()); ++instanceIndex)
+    {
+      const SceneDrawInstance& instance = plan.instances.instances[instanceIndex];
+      SceneDrawBucket bucket = SceneDrawBucket::Opaque;
+      if(instance.materialIndex < asset.materials.size())
+      {
+        const int32_t alphaMode = asset.materials[instance.materialIndex].alphaMode;
+        bucket = alphaMode == shaderio::LAlphaBlend
+                     ? SceneDrawBucket::Transparent
+                     : (alphaMode == shaderio::LAlphaMask ? SceneDrawBucket::AlphaMask : SceneDrawBucket::Opaque);
+      }
+
+      glm::vec4 boundsSphere(0.0f);
+      for(const InstanceCullRecord& cullRecord : plan.cullRecords)
+      {
+        if(cullRecord.instanceIndex == instanceIndex)
+        {
+          boundsSphere = cullRecord.boundingSphere;
+          break;
+        }
+      }
+
+      const uint32_t drawRecordIndex = appendDrawRecord(instanceIndex,
+                                                        instance.meshIndex,
+                                                        instance.materialIndex,
+                                                        instance.worldTransform,
+                                                        bucket,
+                                                        boundsSphere);
+      if(drawRecordIndex != UINT32_MAX)
+      {
+        result.instanceToDrawRecord[instanceIndex] = drawRecordIndex;
+      }
     }
   }
 

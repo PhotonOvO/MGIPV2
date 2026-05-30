@@ -2,6 +2,7 @@
 
 #include "../common/Common.h"
 
+#include <span>
 #include <vector>
 
 namespace demo {
@@ -18,7 +19,13 @@ public:
 
   void init(VkDevice device, VmaAllocator allocator, VkDeviceSize totalSize);
   [[nodiscard]] bool isInitialized() const { return m_stagingBuffer.buffer != VK_NULL_HANDLE; }
+  [[nodiscard]] VkDeviceSize usedBytes() const { return m_head; }
+  [[nodiscard]] VkDeviceSize capacityBytes() const { return m_capacity; }
   [[nodiscard]] Slice allocate(VkDeviceSize size, VkDeviceSize alignment);
+  [[nodiscard]] std::vector<Slice> allocateSlices(const std::vector<VkDeviceSize>& sizes, VkDeviceSize alignment);
+  [[nodiscard]] Slice mapReservedSlice(VkDeviceSize offset, VkDeviceSize size) const;
+  [[nodiscard]] std::vector<Slice> reserveSlices(const std::vector<VkDeviceSize>& sizes, VkDeviceSize alignment);
+  void copyToSlices(std::span<const Slice> slices, std::span<const std::span<const std::byte>> sources);
 
   void recordTextureUpload(const Slice& slice, VkImage dstImage, const VkBufferImageCopy& region);
   void recordBufferUpload(const Slice& slice, VkBuffer dstBuffer, const VkBufferCopy& region);

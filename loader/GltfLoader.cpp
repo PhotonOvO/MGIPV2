@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 
@@ -143,6 +144,54 @@ bool hasExtension(const std::filesystem::path& path, const char* extension)
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return ext == extension;
+}
+
+uint64_t hashPathForDependency(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+    const std::filesystem::path hashPath = ec ? path.lexically_normal() : canonical;
+    return static_cast<uint64_t>(std::hash<std::string>{}(hashPath.generic_string()));
+}
+
+void addExternalDependency(const std::filesystem::path& sourceDirectory,
+                           const std::filesystem::path& relativePath,
+                           GltfModel& outModel)
+{
+    if(relativePath.empty() || relativePath.is_absolute()) {
+        return;
+    }
+    const std::string relativeGeneric = relativePath.generic_string();
+    if(relativeGeneric.rfind("data:", 0) == 0) {
+        return;
+    }
+
+    const std::filesystem::path dependencyPath = sourceDirectory / relativePath;
+    std::error_code ec;
+    if(!std::filesystem::exists(dependencyPath, ec) || ec) {
+        return;
+    }
+    if(!std::filesystem::is_regular_file(dependencyPath, ec) || ec) {
+        return;
+    }
+
+    const uint64_t pathHash = hashPathForDependency(dependencyPath);
+    for(const GltfDependencyData& dependency : outModel.dependencies) {
+        if(dependency.pathHash == pathHash) {
+            return;
+        }
+    }
+
+    std::error_code sizeEc;
+    std::error_code timeEc;
+    const uint64_t fileSize = std::filesystem::file_size(dependencyPath, sizeEc);
+    const auto writeTime = std::filesystem::last_write_time(dependencyPath, timeEc);
+    outModel.dependencies.push_back(GltfDependencyData{
+        .relativePath = relativeGeneric,
+        .fileSize = sizeEc ? 0 : fileSize,
+        .writeTimeTicks = timeEc ? 0 : static_cast<int64_t>(writeTime.time_since_epoch().count()),
+        .pathHash = pathHash,
+    });
 }
 
 bool hasKtx2Identifier(const unsigned char* bytes, int size)
@@ -324,6 +373,19 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     if (!success) {
         m_lastError = "Failed to load glTF file: " + filepath;
         return false;
+    }
+
+    const std::filesystem::path sourceDirectory = std::filesystem::path(filepath).parent_path();
+    for(const tinygltf::Buffer& buffer : model.buffers) {
+        addExternalDependency(sourceDirectory, std::filesystem::path(buffer.uri), outModel);
+    }
+    for(const tinygltf::Image& image : model.images) {
+        addExternalDependency(sourceDirectory, std::filesystem::path(image.uri), outModel);
+        if(!image.uri.empty()) {
+            std::filesystem::path ktx2Path(image.uri);
+            ktx2Path.replace_extension(".ktx2");
+            addExternalDependency(sourceDirectory, ktx2Path, outModel);
+        }
     }
 
     if(!hasReasonableModelShape(model)) {

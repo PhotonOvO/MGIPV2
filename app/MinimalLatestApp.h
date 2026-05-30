@@ -17,6 +17,10 @@
 #include "../loader/SceneCacheSerializer.h"
 #include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
+#include "../scene/SceneAssetBuilder.h"
+#include "../scene/SceneAssetSerializer.h"
+#include "../scene/ParallelSceneLoader.h"
+#include "../scene/SceneUploadPlanner.h"
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 
 #include <memory>
@@ -57,7 +61,7 @@ public:
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 
     // Load default scene automatically
-    std::string path = "resources/Test/test.gltf";
+    std::string path = "resources/Sponza/Sponza.gltf";
     loadModelAsync(path);
   }
 
@@ -305,20 +309,102 @@ public:
         ImGui::Separator();
         ImGui::Text("Debug Overlay");
         ImGui::Checkbox("Enable Debug Pass", &m_debugOptions.enabled);
-        ImGui::Checkbox("Scene Bounds", &m_debugOptions.showSceneBounds);
-        ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
-        ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
-        ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
-        ImGui::Checkbox("Random Point Lights", &m_debugOptions.enablePointLights);
-        ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
-        ImGui::Checkbox("Viewport Axis", &m_debugOptions.showViewportAxis);
-        ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
-        ImGui::Checkbox("GPU Culling Overlay", &m_debugOptions.showGPUCullingOverlay);
-        ImGui::SliderFloat("Point Max Radius", &m_debugOptions.pointLightMaxRadius, 0.5f, 12.0f, "%.2f");
-        ImGui::SliderFloat("Point Intensity", &m_debugOptions.pointLightIntensityScale, 0.25f, 16.0f, "%.2f",
-                           ImGuiSliderFlags_Logarithmic);
-        ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
-        ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
+        if(ImGui::TreeNode("Scene Overlays"))
+        {
+          ImGui::Checkbox("Scene Bounds", &m_debugOptions.showSceneBounds);
+          ImGui::Checkbox("View Frustum", &m_debugOptions.showViewFrustum);
+          ImGui::Checkbox("Viewport Axis", &m_debugOptions.showViewportAxis);
+          ImGui::TreePop();
+        }
+        if(ImGui::TreeNode("Light Overlays"))
+        {
+          ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
+          ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
+          ImGui::Checkbox("Random Point Lights", &m_debugOptions.enablePointLights);
+          ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
+          if(m_debugOptions.enablePointLights || m_debugOptions.showPointLights)
+          {
+            ImGui::SliderFloat("Point Max Radius", &m_debugOptions.pointLightMaxRadius, 0.5f, 12.0f, "%.2f");
+            ImGui::SliderFloat("Point Intensity", &m_debugOptions.pointLightIntensityScale, 0.25f, 16.0f, "%.2f",
+                               ImGuiSliderFlags_Logarithmic);
+          }
+          ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
+          ImGui::TreePop();
+        }
+        if(ImGui::TreeNode("Culling Overlays"))
+        {
+          ImGui::Checkbox("GPU Culling Overlay", &m_debugOptions.showGPUCullingOverlay);
+          ImGui::Checkbox("Cull Distance", &m_debugOptions.showCullDistance);
+          if(m_debugOptions.showCullDistance)
+          {
+            ImGui::SliderFloat("Cull Radius", &m_debugOptions.cullDistance, 1.0f, 80.0f);
+          }
+          ImGui::TreePop();
+        }
+        ImGui::Separator();
+        ImGui::Text("Post Process");
+        ImGui::Checkbox("Post Effects", &m_debugOptions.enablePostProcessing);
+        if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Exposure"))
+        {
+          ImGui::Checkbox("Adaptive", &m_debugOptions.enableAdaptiveExposure);
+          ImGui::SliderFloat("Fixed", &m_debugOptions.postExposure, 0.1f, 4.0f, "%.2f");
+          if(m_debugOptions.enableAdaptiveExposure)
+          {
+            ImGui::SliderFloat("Target Luma", &m_debugOptions.exposureTargetLuminance, 0.03f, 0.8f, "%.2f");
+            ImGui::SliderFloat("Auto Min", &m_debugOptions.minAutoExposure, 0.05f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Auto Max", &m_debugOptions.maxAutoExposure, 1.0f, 8.0f, "%.2f");
+          }
+          ImGui::TreePop();
+        }
+        if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Temporal"))
+        {
+          ImGui::Checkbox("TAA", &m_debugOptions.enableTAA);
+          ImGui::Checkbox("Show Velocity", &m_debugOptions.showVelocity);
+          if(m_debugOptions.enableTAA)
+          {
+            ImGui::SliderFloat("Jitter Scale", &m_debugOptions.taaJitterScale, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Blend Weight", &m_debugOptions.taaBlendWeight, 0.0f, 0.98f, "%.2f");
+          }
+          ImGui::SliderFloat("Render Scale", &m_debugOptions.renderScale, 0.5f, 1.0f, "%.2f");
+          const char* upscaleModes[] = {"Off", "TAA", "Spatial"};
+          ImGui::Combo("Upscaling Mode", &m_debugOptions.upscalingMode, upscaleModes, IM_ARRAYSIZE(upscaleModes));
+          ImGui::TreePop();
+        }
+        if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Bloom"))
+        {
+          ImGui::Checkbox("Enable", &m_debugOptions.enableBloom);
+          if(m_debugOptions.enableBloom)
+          {
+            ImGui::SliderFloat("Intensity", &m_debugOptions.bloomIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Threshold", &m_debugOptions.bloomThreshold, 0.1f, 8.0f, "%.2f");
+          }
+          ImGui::TreePop();
+        }
+        if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Color Grading"))
+        {
+          ImGui::Checkbox("Enable", &m_debugOptions.enableColorGrading);
+          if(m_debugOptions.enableColorGrading)
+          {
+            ImGui::SliderFloat("Saturation", &m_debugOptions.colorSaturation, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Contrast", &m_debugOptions.colorContrast, 0.5f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Gamma", &m_debugOptions.colorGamma, 0.5f, 2.5f, "%.2f");
+            ImGui::SliderFloat("Vignette", &m_debugOptions.vignetteIntensity, 0.0f, 1.0f, "%.2f");
+          }
+          ImGui::TreePop();
+        }
+        if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Lens"))
+        {
+          ImGui::Checkbox("Enable", &m_debugOptions.enableLensEffects);
+          if(m_debugOptions.enableLensEffects)
+          {
+            ImGui::SliderFloat("Dirt", &m_debugOptions.lensDirtIntensity, 0.0f, 1.0f, "%.2f");
+          }
+          ImGui::TreePop();
+        }
+        if(m_debugOptions.maxAutoExposure < m_debugOptions.minAutoExposure)
+        {
+          m_debugOptions.maxAutoExposure = m_debugOptions.minAutoExposure;
+        }
 
         // CSM Shadow debug panel
         {
@@ -329,25 +415,35 @@ public:
 
         ImGui::Separator();
         ImGui::Text("GPU Culling");
-        ImGui::Checkbox("Frustum Culling", &m_debugOptions.enableGPUFrustumCulling);
-        ImGui::Checkbox("Hi-Z Occlusion Culling", &m_debugOptions.enableGPUOcclusionCulling);
-        ImGui::Checkbox("Meshlet Hi-Z Occlusion", &m_debugOptions.enableGPUMeshletOcclusionCulling);
-        ImGui::Checkbox("Meshlet Cone Culling", &m_debugOptions.enableGPUMeshletConeCulling);
         const shaderio::GPUCullStats& gpuCullStats = m_renderer.getLastGPUCullingStats();
         const uint32_t totalCullEvaluated = gpuCullStats.totalCount > 0 ? gpuCullStats.totalCount : 1u;
-        ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
-        ImGui::Text("Opaque Visible: %u / %u", gpuCullStats.opaqueVisibleCount, gpuCullStats.opaqueCount);
-        ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
-        ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
-        ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
-        ImGui::Text("Hi-Z Candidates: %u", gpuCullStats.hizCandidateCount);
-        ImGui::Text("Hi-Z Tested: %u", gpuCullStats.hizTestedCount);
-        ImGui::Text("Hi-Z Skipped Large: %u", gpuCullStats.hizRejectedLargeCount);
-        ImGui::Text("Hi-Z Skipped Near: %u", gpuCullStats.hizRejectedNearCount);
-        ImGui::Text("Hi-Z Skipped Offscreen: %u", gpuCullStats.hizRejectedOffscreenCount);
-        ImGui::Text("Meshlet Cone Culled: %u", gpuCullStats.meshletConeCulledCount);
-        ImGui::Text("Total: %u", gpuCullStats.totalCount);
-        ImGui::Text("Visible Ratio: %.1f%%", 100.0f * static_cast<float>(gpuCullStats.visibleCount) / static_cast<float>(totalCullEvaluated));
+        if(ImGui::TreeNode("Controls"))
+        {
+          ImGui::Checkbox("Frustum Culling", &m_debugOptions.enableGPUFrustumCulling);
+          ImGui::Checkbox("Hi-Z Occlusion Culling", &m_debugOptions.enableGPUOcclusionCulling);
+          ImGui::Checkbox("Meshlet Hi-Z Occlusion", &m_debugOptions.enableGPUMeshletOcclusionCulling);
+          ImGui::Checkbox("Meshlet Cone Culling", &m_debugOptions.enableGPUMeshletConeCulling);
+          ImGui::TreePop();
+        }
+        if(ImGui::TreeNode("Stats"))
+        {
+          ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
+          ImGui::Text("Opaque Visible: %u / %u", gpuCullStats.opaqueVisibleCount, gpuCullStats.opaqueCount);
+          ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
+          ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
+          ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
+          ImGui::Text("Hi-Z Candidates: %u", gpuCullStats.hizCandidateCount);
+          ImGui::Text("Hi-Z Tested: %u", gpuCullStats.hizTestedCount);
+          ImGui::Text("Hi-Z Skipped Large: %u", gpuCullStats.hizRejectedLargeCount);
+          ImGui::Text("Hi-Z Skipped Near: %u", gpuCullStats.hizRejectedNearCount);
+          ImGui::Text("Hi-Z Skipped Offscreen: %u", gpuCullStats.hizRejectedOffscreenCount);
+          ImGui::Text("Meshlet Cone Culled: %u", gpuCullStats.meshletConeCulledCount);
+          ImGui::Text("Total: %u", gpuCullStats.totalCount);
+          ImGui::Text("Visible Ratio: %.1f%%",
+                      100.0f * static_cast<float>(gpuCullStats.visibleCount)
+                          / static_cast<float>(totalCullEvaluated));
+          ImGui::TreePop();
+        }
 
         // Swapchain diagnostics
         ImGui::Separator();
@@ -407,6 +503,193 @@ public:
               break;
           }
           ImGui::Text("Visibility Ownership: %s", visibilityOwnershipLabel);
+          const auto ownershipLabel = [](demo::GPUDrivenOwnershipState ownership) -> const char* {
+            switch(ownership)
+            {
+              case demo::GPUDrivenOwnershipState::gpuOwned:
+                return "GPU-Owned";
+              case demo::GPUDrivenOwnershipState::bridged:
+                return "Bridged";
+              case demo::GPUDrivenOwnershipState::legacy:
+                return "Legacy";
+              case demo::GPUDrivenOwnershipState::disabled:
+              default:
+                return "Disabled";
+            }
+          };
+          ImGui::Text("Resource Ownership");
+          ImGui::Text("  Attachments: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.sceneAttachments));
+          ImGui::Text("  Depth Pyramid: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.depthPyramid));
+          ImGui::Text("  Visibility: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.visibility));
+          ImGui::Text("  Lighting: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.lightingResources));
+          ImGui::Text("  Shadows: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.shadowResources));
+          ImGui::Text("  Materials: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.materialDescriptors));
+          const auto vkFormatLabel = [](VkFormat format) -> const char* {
+            switch(format)
+            {
+              case VK_FORMAT_B8G8R8A8_UNORM:
+                return "B8G8R8A8_UNORM";
+              case VK_FORMAT_R8G8B8A8_UNORM:
+                return "R8G8B8A8_UNORM";
+              case VK_FORMAT_R8G8B8A8_SRGB:
+                return "R8G8B8A8_SRGB";
+              case VK_FORMAT_R16G16B16A16_SFLOAT:
+                return "R16G16B16A16_SFLOAT";
+              case VK_FORMAT_UNDEFINED:
+                return "Undefined";
+              default:
+                return "Other";
+            }
+          };
+          if(ImGui::TreeNode("GPU Pass Ownership"))
+          {
+            for(const demo::GPUDrivenPassDiagnostic& passDiagnostic : gpuDrivenStats.passDiagnostics)
+            {
+              ImGui::Text("%s: %s", passDiagnostic.name.c_str(), ownershipLabel(passDiagnostic.ownership));
+              if(!passDiagnostic.note.empty())
+              {
+                ImGui::TextWrapped("  %s", passDiagnostic.note.c_str());
+              }
+            }
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("Visibility Diagnostics"))
+          {
+            const demo::GPUDrivenVisibilityDiagnostics& visibilityDiagnostics = gpuDrivenStats.visibilityDiagnostics;
+            ImGui::Text("Safe Objects: %u", visibilityDiagnostics.safeObjectCount);
+            ImGui::Text("Current GPU Objects: %u", visibilityDiagnostics.currentGPUCullingObjectCount);
+            ImGui::Text("Previous GPU Objects: %u", visibilityDiagnostics.previousGPUCullingObjectCount);
+            ImGui::Text("Sort Inputs: %u / padded %u",
+                        visibilityDiagnostics.sortInputCount,
+                        visibilityDiagnostics.sortPaddedCount);
+            ImGui::Text("Capacities O/A/T: %u / %u / %u",
+                        visibilityDiagnostics.opaqueCapacity,
+                        visibilityDiagnostics.alphaCapacity,
+                        visibilityDiagnostics.transparentCapacity);
+            ImGui::Text("Same-Frame O/A/T: %u / %u / %u",
+                        visibilityDiagnostics.sameFrameOpaqueCapacity,
+                        visibilityDiagnostics.sameFrameAlphaCapacity,
+                        visibilityDiagnostics.sameFrameTransparentCapacity);
+            ImGui::Text("Depth Previous Indirect: %s",
+                        visibilityDiagnostics.depthUsesPreviousFrameIndirect ? "Yes" : "No");
+            ImGui::Text("Depth Sorted Bootstrap: %s",
+                        visibilityDiagnostics.depthUsesSortedBootstrap ? "Yes" : "No");
+            ImGui::Text("GBuffer Opaque/Alpha Patch: %s",
+                        visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched ? "Yes" : "No");
+            ImGui::Text("Transparent Patch: %s",
+                        visibilityDiagnostics.transparentPatchDispatched ? "Yes" : "No");
+            ImGui::Text("Transparent CPU Seed: %s",
+                        visibilityDiagnostics.transparentOrderingCpuSeeded ? "Yes" : "No");
+            ImGui::Text("Material Keys CPU Seed: %s",
+                        visibilityDiagnostics.materialSortKeysCpuSeeded ? "Yes" : "No");
+            ImGui::Text("Mobile Transparent Limit: %u%s",
+                        visibilityDiagnostics.maxMobileTransparentDraws,
+                        visibilityDiagnostics.transparentCapacityOverflow ? " (overflow)" : "");
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("Hi-Z Diagnostics"))
+          {
+            const demo::GPUDrivenHiZDiagnostics& hiZDiagnostics = gpuDrivenStats.hiZDiagnostics;
+            const double estimatedMiB =
+                static_cast<double>(hiZDiagnostics.estimatedMemoryBytes) / (1024.0 * 1024.0);
+            ImGui::Text("Valid: %s", hiZDiagnostics.valid ? "Yes" : "No");
+            ImGui::Text("Bound For GPU Culling: %s", hiZDiagnostics.boundForGpuCulling ? "Yes" : "No");
+            ImGui::Text("Source: %u x %u", hiZDiagnostics.sourceWidth, hiZDiagnostics.sourceHeight);
+            ImGui::Text("Pyramid: %u x %u", hiZDiagnostics.pyramidWidth, hiZDiagnostics.pyramidHeight);
+            ImGui::Text("Mips: %u / full %u", hiZDiagnostics.mipCount, hiZDiagnostics.fullMipCount);
+            ImGui::Text("Policy: /%u, max mips %u, min mip %u",
+                        hiZDiagnostics.policyDownsampleDivisor,
+                        hiZDiagnostics.policyMaxMipCount,
+                        hiZDiagnostics.policyMinMipSize);
+            ImGui::Text("Estimated Memory: %.2f MiB", estimatedMiB);
+            ImGui::Text("Generation: %llu", static_cast<unsigned long long>(hiZDiagnostics.generation));
+            ImGui::Text("Controls F/O/MO/MC: %s / %s / %s / %s",
+                        hiZDiagnostics.frustumCullingEnabled ? "On" : "Off",
+                        hiZDiagnostics.occlusionCullingEnabled ? "On" : "Off",
+                        hiZDiagnostics.meshletOcclusionEnabled ? "On" : "Off",
+                        hiZDiagnostics.meshletConeCullingEnabled ? "On" : "Off");
+            ImGui::Text("Depth Epsilon: %.4f", hiZDiagnostics.depthEpsilon);
+            ImGui::Text("Radius Scale/Bias: %.2f / %.2f",
+                        hiZDiagnostics.conservativeRadiusScale,
+                        hiZDiagnostics.conservativeRadiusBias);
+            ImGui::Text("Near Epsilon: %.5f", hiZDiagnostics.nearRejectEpsilon);
+            ImGui::Text("Large Footprint Skip: %.1f px", hiZDiagnostics.largeObjectFootprintThreshold);
+            ImGui::Text("Camera Delta: %.2f / %.2f",
+                        hiZDiagnostics.cameraDeltaDistance,
+                        hiZDiagnostics.fastCameraFallbackDistance);
+            ImGui::Text("Fast Camera Fallback: %s",
+                        hiZDiagnostics.fastCameraFallbackTriggered ? "Triggered" : "Idle");
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("Post Process Diagnostics"))
+          {
+            const demo::GPUDrivenPostProcessDiagnostics& postDiagnostics =
+                gpuDrivenStats.postProcessDiagnostics;
+            const double outputMiB =
+                static_cast<double>(postDiagnostics.outputMemoryBytes) / (1024.0 * 1024.0);
+            const double hdrMiB =
+                static_cast<double>(postDiagnostics.recommendedHdrMemoryBytes) / (1024.0 * 1024.0);
+            const double bloomMiB =
+                static_cast<double>(postDiagnostics.bloomHalfQuarterMemoryBytes) / (1024.0 * 1024.0);
+            ImGui::Text("Output: %u x %u",
+                        postDiagnostics.outputWidth,
+                        postDiagnostics.outputHeight);
+            ImGui::Text("Output Format: %s", vkFormatLabel(postDiagnostics.outputFormat));
+            ImGui::Text("Scene Color: %s", vkFormatLabel(postDiagnostics.sceneColorFormat));
+            ImGui::Text("Recommended HDR: %s", vkFormatLabel(postDiagnostics.recommendedHdrFormat));
+            ImGui::Text("HDR Scene Color Active: %s",
+                        postDiagnostics.hdrSceneColorActive ? "Yes" : "No");
+            ImGui::Text("Tone Map Location: %s",
+                        postDiagnostics.toneMapInLightPass ? "LightPass" : "FinalColor");
+            if(ImGui::TreeNode("Temporal"))
+            {
+              ImGui::Text("Display: %u x %u",
+                          postDiagnostics.displayWidth,
+                          postDiagnostics.displayHeight);
+              ImGui::Text("Internal: %u x %u scale %.2f",
+                          postDiagnostics.internalWidth,
+                          postDiagnostics.internalHeight,
+                          postDiagnostics.renderScale);
+              ImGui::Text("Velocity Buffer: %s",
+                          postDiagnostics.velocityBufferActive ? "On" : "Off");
+              ImGui::Text("TAA: %s history %s blend %.2f jitter %.2f",
+                          postDiagnostics.taaPassActive ? "On" : "Off",
+                          postDiagnostics.taaHistoryValid ? "Valid" : "Cold",
+                          postDiagnostics.taaBlendWeight,
+                          postDiagnostics.taaJitterScale);
+              ImGui::Text("Upscale Mode: %u%s",
+                          postDiagnostics.upscaleMode,
+                          postDiagnostics.internalRenderScaleBlocked ? " (blocked)" : "");
+              ImGui::TreePop();
+            }
+            ImGui::Text("Fixed Exposure: %.2f", postDiagnostics.fixedExposure);
+            ImGui::Text("Adaptive Exposure: %s target %.2f range %.2f-%.2f",
+                        postDiagnostics.adaptiveExposureActive ? "On" : "Off",
+                        postDiagnostics.adaptiveExposureTarget,
+                        postDiagnostics.minAutoExposure,
+                        postDiagnostics.maxAutoExposure);
+            ImGui::Text("Bloom: %.2f / threshold %.2f",
+                        postDiagnostics.bloomIntensity,
+                        postDiagnostics.bloomThreshold);
+            ImGui::Text("Grade S/C/G/V: %.2f / %.2f / %.2f / %.2f",
+                        postDiagnostics.colorSaturation,
+                        postDiagnostics.colorContrast,
+                        postDiagnostics.colorGamma,
+                        postDiagnostics.vignetteIntensity);
+            ImGui::Text("Lens Dirt: %.2f", postDiagnostics.lensDirtIntensity);
+            ImGui::Text("Passes E/AE/B/F/Grade/Lens: %s / %s / %s / %s / %s / %s",
+                        postDiagnostics.exposurePassActive ? "On" : "Off",
+                        postDiagnostics.adaptiveExposureActive ? "On" : "Off",
+                        postDiagnostics.bloomPassActive ? "On" : "Off",
+                        postDiagnostics.finalColorPassActive ? "On" : "Off",
+                        postDiagnostics.colorGradingLutActive ? "On" : "Off",
+                        postDiagnostics.lensEffectsActive ? "On" : "Off");
+            ImGui::Text("Memory LDR/HDR/Bloom: %.2f / %.2f / %.2f MiB",
+                        outputMiB,
+                        hdrMiB,
+                        bloomMiB);
+            ImGui::TreePop();
+          }
           ImGui::Text("GPU Sort Feedback: %s", gpuDrivenStats.batchStats.sortPassCount > 0 ? "Active" : "Idle");
           ImGui::Text("Meshlets: %u", gpuDrivenStats.meshletCount);
           ImGui::Text("Meshlet Triangles: %u", gpuDrivenStats.meshletTriangleCount);
@@ -541,7 +824,7 @@ private:
   // glTF model loading
   std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
   std::optional<demo::GltfModel>                  m_sceneModel;
-  std::optional<demo::GltfUploadResult>           m_currentModel;
+  std::optional<demo::SceneUploadResult>          m_currentModel;
   std::string                                     m_modelPath;
   bool                                            m_modelLoaded = false;
 
@@ -570,7 +853,7 @@ private:
   float m_cascadeOverlayAlpha{0.25f};
 
   // UI state
-  char m_modelPathBuffer[512] = "resources/GLTF_Sponza/sponza.gltf";
+  char m_modelPathBuffer[512] = "resources/NV_Bistro/bistro_ktx.gltf";
 
   // Preset models
   struct PresetModel {
@@ -581,7 +864,8 @@ private:
     {"Sponza", "resources/GLTF_Sponza/sponza.gltf"},
     {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
     {"NVBistro", "resources/NV_Bistro/bistro_ktx.gltf"},
-	{"SponzaNew", "resources/Sponza/sponza.gltf"}
+    {"SponzaNew", "resources/Sponza/sponza.gltf"},
+    {"test", "resources/test/test.gltf"}
   };
   int m_selectedPreset = 0;
 
@@ -589,7 +873,17 @@ private:
   struct AsyncLoadResult
   {
     std::optional<demo::GltfModel> model;
+    std::optional<demo::SceneAsset> sceneAsset;
+    std::optional<demo::SceneUploadPlan> sceneUploadPlan;
+    uint32_t sceneUploadJobCount = 0;
+    bool experimentalAssetLoadedFromSceneAssetCache = false;
     std::string error;
+  };
+
+  enum class SceneLoadPath
+  {
+    legacyGltf,
+    experimentalSceneUploadPlan,
   };
 
   std::future<AsyncLoadResult> m_loadFuture;
@@ -599,6 +893,14 @@ private:
   bool m_isLoading = false;
   float m_loadProgress = 0.0f;
   std::string m_loadStatus;
+  bool m_enableExperimentalSceneUploadPath{false};
+  std::optional<demo::SceneAsset> m_sceneAsset;
+  std::optional<demo::SceneAssetView> m_sceneAssetView;
+  std::optional<demo::SceneUploadPlan> m_sceneUploadPlan;
+  uint32_t m_sceneUploadJobCount{0};
+  bool m_sceneAssetLoadedFromCache{false};
+  SceneLoadPath m_activeSceneLoadPath{SceneLoadPath::legacyGltf};
+  bool m_experimentalSceneCommitPending{false};
   int m_selectedSceneNode = -1;
   ImGuiUtils::ProfilerGraph m_cpuProfilerGraph{240};
   ImGuiUtils::ProfilerGraph m_gpuProfilerGraph{240};
@@ -616,6 +918,8 @@ private:
   void applySceneGraphTransforms();
   void updateSceneNodeWorldTransform(int nodeIndex, const glm::mat4& parentTransform);
   void updateAsyncLoading();
+  void beginLegacySceneUpload();
+  void beginExperimentalSceneUpload();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
   void drawCSMDebugPanel();
@@ -666,47 +970,177 @@ inline void MinimalLatestApp::loadModelAsync(const std::string& path)
   m_pendingModelPath = path;
   m_lastLoadError.clear();
   m_asyncLoadingCoordinator.reset();
+  m_sceneAssetView.reset();
+  m_sceneAsset.reset();
+  m_sceneUploadPlan.reset();
+  m_sceneUploadJobCount = 0;
+  m_sceneAssetLoadedFromCache = false;
+  m_activeSceneLoadPath = SceneLoadPath::legacyGltf;
 
   // Start async loading (only file parsing, no member access)
-  m_loadFuture = std::async(std::launch::async, [path]() -> AsyncLoadResult {
+  const bool experimentalSceneUploadPath =
+      m_enableExperimentalSceneUploadPath && m_renderer.getBackend() == demo::RendererBackend::gpuDriven;
+  m_loadFuture = std::async(std::launch::async, [path, experimentalSceneUploadPath]() -> AsyncLoadResult {
     AsyncLoadResult result;
     demo::SceneCacheSerializer cacheSerializer;
     demo::GltfLoader loader;
+    demo::SceneAssetSerializer assetSerializer;
     demo::GltfModel model;
 
     const std::filesystem::path sourcePath(path);
     const std::filesystem::path cachePath = demo::SceneCacheSerializer::buildCachePath(sourcePath);
+    const std::filesystem::path assetPath = demo::SceneAssetSerializer::buildAssetPath(sourcePath);
 
     try
     {
+      if(experimentalSceneUploadPath && assetSerializer.isValid(assetPath, sourcePath))
+      {
+        demo::SceneAsset asset;
+        bool sceneAssetCacheLoaded = false;
+        if(assetSerializer.load(assetPath, asset))
+        {
+          sceneAssetCacheLoaded = true;
+          demo::ParallelSceneLoader parallelLoader;
+          demo::ParallelSceneLoader::BuildResult planBuildResult =
+              parallelLoader.build(demo::makeSceneAssetView(asset));
+          if(planBuildResult.cancelled)
+          {
+            result.error = "Parallel scene upload planning was cancelled";
+            return result;
+          }
+          const demo::SceneUploadPlanValidationResult validation =
+              demo::SceneUploadPlanner::validate(demo::makeSceneAssetView(asset), planBuildResult.plan);
+          if(!validation.valid)
+          {
+            LOGW("Ignoring scene asset cache %s: %s", assetPath.string().c_str(), validation.error.c_str());
+          }
+          else
+          {
+
+            result.experimentalAssetLoadedFromSceneAssetCache = true;
+            result.sceneUploadJobCount = static_cast<uint32_t>(planBuildResult.orderedJobs.size());
+            result.sceneUploadPlan = std::move(planBuildResult.plan);
+            result.sceneAsset = std::move(asset);
+            LOGI("Loaded scene asset cache: %s", assetPath.string().c_str());
+            return result;
+          }
+        }
+
+        if(!sceneAssetCacheLoaded)
+        {
+          LOGW("Ignoring invalid scene asset cache %s: %s",
+               assetPath.string().c_str(),
+               assetSerializer.getLastError().c_str());
+        }
+      }
+
       if(cacheSerializer.isCacheValid(cachePath, sourcePath))
       {
         if(cacheSerializer.loadCache(cachePath, model))
         {
           LOGI("Loaded scene cache: %s", cachePath.string().c_str());
           result.model = std::move(model);
-          return result;
+          if(!experimentalSceneUploadPath)
+          {
+            return result;
+          }
         }
-
-        LOGW("Ignoring invalid scene cache %s: %s",
-             cachePath.string().c_str(),
-             cacheSerializer.getLastError().c_str());
-        std::error_code removeError;
-        std::filesystem::remove(cachePath, removeError);
+        else
+        {
+          LOGW("Ignoring invalid scene cache %s: %s",
+               cachePath.string().c_str(),
+               cacheSerializer.getLastError().c_str());
+          std::error_code removeError;
+          std::filesystem::remove(cachePath, removeError);
+        }
       }
 
-      if(!loader.load(path, model))
+      if(!result.model.has_value() && !loader.load(path, model))
       {
         result.error = loader.getLastError();
         return result;
       }
 
-      if(!cacheSerializer.saveCache(cachePath, model, sourcePath))
+      if(!result.model.has_value() && !cacheSerializer.saveCache(cachePath, model, sourcePath))
       {
         LOGW("Failed to save scene cache %s: %s", cachePath.string().c_str(), cacheSerializer.getLastError().c_str());
       }
 
-      result.model = std::move(model);
+      if(!result.model.has_value())
+      {
+        result.model = std::move(model);
+      }
+
+      if(experimentalSceneUploadPath && result.model.has_value())
+      {
+        demo::SceneAsset asset;
+        bool loadedExperimentalAsset = false;
+
+        if(assetSerializer.isValid(assetPath, sourcePath))
+        {
+          if(assetSerializer.load(assetPath, asset))
+          {
+            result.experimentalAssetLoadedFromSceneAssetCache = true;
+            loadedExperimentalAsset = true;
+            LOGI("Loaded scene asset cache: %s", assetPath.string().c_str());
+          }
+          else
+          {
+            LOGW("Ignoring invalid scene asset cache %s: %s",
+                 assetPath.string().c_str(),
+                 assetSerializer.getLastError().c_str());
+          }
+        }
+
+        if(!loadedExperimentalAsset)
+        {
+          asset = demo::SceneAssetBuilder::build(*result.model);
+          if(!assetSerializer.save(assetPath, asset, sourcePath))
+          {
+            LOGW("Failed to save scene asset cache %s: %s",
+                 assetPath.string().c_str(),
+                 assetSerializer.getLastError().c_str());
+          }
+        }
+
+        if(experimentalSceneUploadPath)
+        {
+          demo::ParallelSceneLoader parallelLoader;
+          demo::ParallelSceneLoader::BuildResult planBuildResult =
+              parallelLoader.build(demo::makeSceneAssetView(asset));
+          if(planBuildResult.cancelled)
+          {
+            result.error = "Parallel scene upload planning was cancelled";
+            return result;
+          }
+          const demo::SceneUploadPlanValidationResult validation =
+              demo::SceneUploadPlanner::validate(demo::makeSceneAssetView(asset), planBuildResult.plan);
+          if(!validation.valid)
+          {
+            result.error = "SceneUploadPlan validation failed: " + validation.error;
+            return result;
+          }
+
+          result.sceneUploadJobCount = static_cast<uint32_t>(planBuildResult.orderedJobs.size());
+          result.sceneUploadPlan = std::move(planBuildResult.plan);
+        }
+        else
+        {
+          demo::SceneUploadPlanner planner;
+          demo::SceneUploadPlanBuildResult planBuildResult = planner.build(demo::makeSceneAssetView(asset));
+          const demo::SceneUploadPlanValidationResult validation =
+              demo::SceneUploadPlanner::validate(demo::makeSceneAssetView(asset), planBuildResult.plan);
+          if(!validation.valid)
+          {
+            result.error = "SceneUploadPlan validation failed: " + validation.error;
+            return result;
+          }
+          result.sceneUploadJobCount = static_cast<uint32_t>(planBuildResult.orderedJobs.size());
+          result.sceneUploadPlan = std::move(planBuildResult.plan);
+        }
+        result.sceneAsset = std::move(asset);
+      }
+
       return result;
     }
     catch(const std::bad_alloc&)
@@ -765,7 +1199,11 @@ inline void MinimalLatestApp::updateAsyncLoading()
       }
 
       m_lastLoadError = std::move(loadResult.error);
-      if(loadResult.model.has_value())
+      const bool hasExperimentalLoad =
+          m_enableExperimentalSceneUploadPath
+          && loadResult.sceneAsset.has_value()
+          && loadResult.sceneUploadPlan.has_value();
+      if(loadResult.model.has_value() || hasExperimentalLoad)
       {
         try
         {
@@ -775,26 +1213,92 @@ inline void MinimalLatestApp::updateAsyncLoading()
           m_renderer.waitForIdle();
           unloadModel();
 
-          m_sceneModel = std::move(*loadResult.model);
-          m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
-
-          m_currentModel.emplace();
-          m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
-          m_asyncLoadingCoordinator.emplace();
-          m_asyncLoadingCoordinator->begin(*m_sceneModel, m_camera.getPosition(), 24, 96);
-          m_renderer.setSceneRenderingSuspended(true);
+          if(loadResult.model.has_value())
+          {
+            m_sceneModel = std::move(*loadResult.model);
+          }
+          else
+          {
+            m_sceneModel.reset();
+          }
+          m_sceneAsset = std::move(loadResult.sceneAsset);
+          if(m_sceneAsset.has_value())
+          {
+            m_sceneAssetView = demo::makeSceneAssetView(*m_sceneAsset);
+          }
+          else
+          {
+            m_sceneAssetView.reset();
+          }
+          m_sceneUploadPlan = std::move(loadResult.sceneUploadPlan);
+          m_sceneUploadJobCount = loadResult.sceneUploadJobCount;
+          m_sceneAssetLoadedFromCache = loadResult.experimentalAssetLoadedFromSceneAssetCache;
+          if(m_enableExperimentalSceneUploadPath && m_renderer.getBackend() == demo::RendererBackend::gpuDriven
+             && m_sceneAsset.has_value() && !m_sceneAsset->rootNodes.empty())
+          {
+            m_selectedSceneNode = static_cast<int>(m_sceneAsset->rootNodes.front());
+          }
+          else if(m_sceneModel.has_value())
+          {
+            m_selectedSceneNode = m_sceneModel->rootNodes.empty() ? -1 : m_sceneModel->rootNodes.front();
+          }
+          else
+          {
+            m_selectedSceneNode = -1;
+          }
 
           m_modelPath = m_pendingModelPath;
           m_modelLoaded = false;
 
-          LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
-               m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+          if(m_sceneModel.has_value())
+          {
+            LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
+                 m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+          }
+          if(m_sceneAsset.has_value())
+          {
+            LOGI("Loaded SceneAsset: %s (%zu meshes, %zu materials, %zu textures)",
+                 m_pendingModelPath.c_str(),
+                 m_sceneAsset->meshes.size(),
+                 m_sceneAsset->materials.size(),
+                 m_sceneAsset->textures.size());
+          }
+          if(m_sceneUploadPlan.has_value())
+          {
+            LOGI("Prepared experimental SceneUploadPlan: meshes=%zu textures=%zu materials=%zu instances=%zu draws=%zu jobs=%u source=%s",
+                 m_sceneUploadPlan->meshes.size(),
+                 m_sceneUploadPlan->textures.size(),
+                 m_sceneUploadPlan->materials.size(),
+                 m_sceneUploadPlan->instances.instances.size(),
+                 m_sceneUploadPlan->drawCommands.size(),
+                 m_sceneUploadJobCount,
+                 m_sceneAssetLoadedFromCache ? "sceneasset" : "gltf-build");
+          }
+
+          m_renderer.setSceneRenderingSuspended(true);
+          if(m_enableExperimentalSceneUploadPath && m_renderer.getBackend() == demo::RendererBackend::gpuDriven
+             && m_sceneAsset.has_value() && m_sceneAssetView.has_value()
+             && m_sceneUploadPlan.has_value())
+          {
+            beginExperimentalSceneUpload();
+          }
+          else
+          {
+            ASSERT(m_sceneModel.has_value(), "Legacy scene upload requires a loaded glTF model");
+            beginLegacySceneUpload();
+          }
         }
         catch(const std::bad_alloc&)
         {
           m_sceneModel.reset();
+          m_sceneAssetView.reset();
+          m_sceneAsset.reset();
+          m_sceneUploadPlan.reset();
+          m_sceneUploadJobCount = 0;
+          m_sceneAssetLoadedFromCache = false;
           m_currentModel.reset();
           m_asyncLoadingCoordinator.reset();
+          m_experimentalSceneCommitPending = false;
           m_modelLoaded = false;
           m_loadStatus = "Model allocation failed";
           m_loadProgress = 0.0f;
@@ -816,7 +1320,10 @@ inline void MinimalLatestApp::updateAsyncLoading()
     }
   }
 
-  if(m_asyncLoadingCoordinator.has_value() && m_sceneModel.has_value() && m_currentModel.has_value())
+  if(m_activeSceneLoadPath == SceneLoadPath::legacyGltf
+     && m_asyncLoadingCoordinator.has_value()
+     && m_sceneModel.has_value()
+     && m_currentModel.has_value())
   {
     demo::AsyncLoadingCoordinator::LoadProgress progress = m_asyncLoadingCoordinator->getProgress();
     if(m_asyncLoadingCoordinator->hasPendingBatches())
@@ -856,11 +1363,95 @@ inline void MinimalLatestApp::updateAsyncLoading()
       m_isLoading = false;
     }
   }
+
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan
+     && m_asyncLoadingCoordinator.has_value()
+     && m_sceneAsset.has_value()
+     && m_sceneUploadPlan.has_value()
+     && m_currentModel.has_value())
+  {
+    demo::AsyncLoadingCoordinator::LoadProgress progress = m_asyncLoadingCoordinator->getProgress();
+    if(m_asyncLoadingCoordinator->hasPendingBatches())
+    {
+      demo::AsyncLoadingCoordinator::UploadBatch batch = m_asyncLoadingCoordinator->takeNextBatch();
+      if(!batch.meshIndices.empty()
+         || !batch.materialIndices.empty()
+         || !batch.textureIndices.empty()
+         || !batch.instanceIndices.empty()
+         || !batch.drawCommandIndices.empty())
+      {
+        LOGI("Scene plan batch: critical=%d final=%d textures=%zu materials=%zu meshes=%zu instances=%zu draws=%zu",
+             batch.criticalBatch ? 1 : 0,
+             batch.finalBatch ? 1 : 0,
+             batch.textureIndices.size(),
+             batch.materialIndices.size(),
+             batch.meshIndices.size(),
+             batch.instanceIndices.size(),
+             batch.drawCommandIndices.size());
+        m_loadStatus = batch.criticalBatch ? "Preparing critical SceneUploadPlan batches..."
+                                           : "Preparing SceneUploadPlan batches...";
+        m_asyncLoadingCoordinator->markBatchUploaded(batch);
+        progress = m_asyncLoadingCoordinator->getProgress();
+      }
+    }
+
+    m_loadProgress = 0.35f + progress.progressPercent * 0.35f;
+    if(progress.isComplete && m_experimentalSceneCommitPending)
+    {
+      m_loadStatus = "Committing SceneUploadPlan...";
+      m_loadProgress = 0.75f;
+      m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
+        *m_currentModel = m_renderer.commitSceneUploadPlan(*m_sceneAsset, *m_sceneUploadPlan, cmd);
+      });
+      m_renderer.waitForIdle();
+      m_experimentalSceneCommitPending = false;
+      m_loadProgress = 1.0f;
+      m_loadStatus = "Done!";
+      m_modelLoaded = true;
+      m_renderer.setSceneRenderingSuspended(false);
+      m_isLoading = false;
+    }
+  }
+}
+
+inline void MinimalLatestApp::beginLegacySceneUpload()
+{
+  ASSERT(m_sceneModel.has_value(), "Legacy scene upload requires a loaded glTF model");
+
+  m_activeSceneLoadPath = SceneLoadPath::legacyGltf;
+  m_currentModel.emplace();
+  m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
+  m_asyncLoadingCoordinator.emplace();
+  m_asyncLoadingCoordinator->begin(*m_sceneModel, m_camera.getPosition(), 24, 96);
+}
+
+inline void MinimalLatestApp::beginExperimentalSceneUpload()
+{
+  ASSERT(m_renderer.getBackend() == demo::RendererBackend::gpuDriven,
+         "Experimental scene upload is currently only supported by GPUDrivenRenderer");
+  ASSERT(m_sceneAsset.has_value(), "Experimental scene upload requires a SceneAsset");
+  ASSERT(m_sceneAssetView.has_value(), "Experimental scene upload requires a SceneAssetView");
+  ASSERT(m_sceneUploadPlan.has_value(), "Experimental scene upload requires a SceneUploadPlan");
+
+  m_activeSceneLoadPath = SceneLoadPath::experimentalSceneUploadPlan;
+  m_loadStatus = "Scheduling SceneUploadPlan...";
+  m_loadProgress = 0.4f;
+  m_currentModel.emplace();
+  m_asyncLoadingCoordinator.emplace();
+  m_asyncLoadingCoordinator->begin(*m_sceneAssetView, *m_sceneUploadPlan, m_camera.getPosition(), 24, 96);
+  m_experimentalSceneCommitPending = true;
 }
 
 inline void MinimalLatestApp::unloadModel()
 {
   m_asyncLoadingCoordinator.reset();
+  m_sceneAssetView.reset();
+  m_sceneAsset.reset();
+  m_sceneUploadPlan.reset();
+  m_sceneUploadJobCount = 0;
+  m_sceneAssetLoadedFromCache = false;
+  m_experimentalSceneCommitPending = false;
+  m_activeSceneLoadPath = SceneLoadPath::legacyGltf;
   m_renderer.setSceneRenderingSuspended(false);
   if(m_currentModel.has_value())
   {
@@ -884,6 +1475,10 @@ inline void MinimalLatestApp::drawModelLoaderUI()
 {
   if(ImGui::Begin("Model Loader"))
   {
+    ImGui::Checkbox("Experimental SceneUploadPlan", &m_enableExperimentalSceneUploadPath);
+    ImGui::TextDisabled("Legacy rendering/upload path stays available. This switch enables the SceneAsset + plan upload path.");
+    ImGui::Separator();
+
     // Preset model dropdown
     ImGui::Text("Select Model:");
     const char* currentName = m_presetModels[m_selectedPreset].name;
@@ -947,6 +1542,18 @@ inline void MinimalLatestApp::drawModelLoaderUI()
                     progress.materialsTotal,
                     progress.texturesLoaded,
                     progress.texturesTotal);
+        if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan)
+        {
+          ImGui::Text("Instances %u/%u  Draws %u/%u",
+                      progress.instancesLoaded,
+                      progress.instancesTotal,
+                      progress.drawCommandsLoaded,
+                      progress.drawCommandsTotal);
+        }
+      }
+      if(m_enableExperimentalSceneUploadPath && m_renderer.getBackend() == demo::RendererBackend::gpuDriven)
+      {
+        ImGui::TextDisabled("Experimental path keeps the legacy glTF upload route available as fallback.");
       }
     }
 
@@ -963,11 +1570,28 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     {
       ImGui::Separator();
       ImGui::Text("Current: %s", m_modelPath.c_str());
+      ImGui::Text("Path: %s",
+                  m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan
+                      ? "Experimental SceneUploadPlan"
+                      : "Legacy glTF Upload");
       if(m_currentModel.has_value())
       {
         ImGui::Text("  Meshes: %zu", m_currentModel->meshes.size());
         ImGui::Text("  Materials: %zu", m_currentModel->materials.size());
         ImGui::Text("  Textures: %zu", m_currentModel->textures.size());
+      }
+      if(m_enableExperimentalSceneUploadPath && m_renderer.getBackend() == demo::RendererBackend::gpuDriven
+         && m_sceneUploadPlan.has_value())
+      {
+        ImGui::Separator();
+        ImGui::Text("Experimental SceneAsset: %s",
+                    m_sceneAssetLoadedFromCache ? "Loaded from .sceneasset" : "Built from glTF");
+        ImGui::Text("  Jobs: %u", m_sceneUploadJobCount);
+        ImGui::Text("  Mesh plans: %zu", m_sceneUploadPlan->meshes.size());
+        ImGui::Text("  Texture plans: %zu", m_sceneUploadPlan->textures.size());
+        ImGui::Text("  Material plans: %zu", m_sceneUploadPlan->materials.size());
+        ImGui::Text("  Instances: %zu", m_sceneUploadPlan->instances.instances.size());
+        ImGui::Text("  Draw plans: %zu", m_sceneUploadPlan->drawCommands.size());
       }
     }
   }
@@ -978,22 +1602,36 @@ inline void MinimalLatestApp::drawSceneGraphUI()
 {
   if(ImGui::Begin("Scene Graph"))
   {
-    if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+    const bool useSceneAssetGraph = m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan
+                                 && m_sceneAsset.has_value();
+    const bool hasLegacyGraph = m_sceneModel.has_value();
+    if((!useSceneAssetGraph && !hasLegacyGraph) || !m_currentModel.has_value())
     {
       ImGui::TextDisabled("No scene loaded.");
     }
     else
     {
-      ImGui::Text("Model: %s", m_sceneModel->name.c_str());
+      const char* sceneName = useSceneAssetGraph ? m_sceneAsset->name.c_str() : m_sceneModel->name.c_str();
+      ImGui::Text("Model: %s", sceneName);
       ImGui::Separator();
 
       const float panelWidth = ImGui::GetContentRegionAvail().x;
       const float treeWidth = panelWidth * 0.5f;
 
       ImGui::BeginChild("##SceneTree", ImVec2(treeWidth, 0.0f), true);
-      for(const int rootNodeIndex : m_sceneModel->rootNodes)
+      if(useSceneAssetGraph)
       {
-        drawSceneNodeTree(rootNodeIndex);
+        for(const uint32_t rootNodeIndex : m_sceneAsset->rootNodes)
+        {
+          drawSceneNodeTree(static_cast<int>(rootNodeIndex));
+        }
+      }
+      else
+      {
+        for(const int rootNodeIndex : m_sceneModel->rootNodes)
+        {
+          drawSceneNodeTree(rootNodeIndex);
+        }
       }
       ImGui::EndChild();
 
@@ -1009,6 +1647,51 @@ inline void MinimalLatestApp::drawSceneGraphUI()
 
 inline void MinimalLatestApp::drawSceneNodeTree(int nodeIndex)
 {
+  const bool useSceneAssetGraph = m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan
+                               && m_sceneAsset.has_value();
+  if(useSceneAssetGraph)
+  {
+    if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_sceneAsset->nodes.size()))
+    {
+      return;
+    }
+
+    const demo::SceneNode& node = m_sceneAsset->nodes[nodeIndex];
+    const bool hasChildren = !node.children.empty();
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick
+                             | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if(!hasChildren)
+    {
+      flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+    if(m_selectedSceneNode == nodeIndex)
+    {
+      flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    std::string label = node.name;
+    if(!node.meshRefs.empty())
+    {
+      label += " (" + std::to_string(node.meshRefs.size()) + ")";
+    }
+
+    const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(nodeIndex)), flags, "%s", label.c_str());
+    if(ImGui::IsItemClicked())
+    {
+      m_selectedSceneNode = nodeIndex;
+    }
+
+    if(open)
+    {
+      for(const uint32_t childIndex : node.children)
+      {
+        drawSceneNodeTree(static_cast<int>(childIndex));
+      }
+      ImGui::TreePop();
+    }
+    return;
+  }
+
   if(!m_sceneModel.has_value() || nodeIndex < 0 || nodeIndex >= static_cast<int>(m_sceneModel->nodes.size()))
   {
     return;
@@ -1051,6 +1734,52 @@ inline void MinimalLatestApp::drawSceneNodeTree(int nodeIndex)
 
 inline void MinimalLatestApp::drawSelectedSceneNodeInspector()
 {
+  const bool useSceneAssetGraph = m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan
+                               && m_sceneAsset.has_value();
+  if(useSceneAssetGraph)
+  {
+    if(m_selectedSceneNode < 0 || m_selectedSceneNode >= static_cast<int>(m_sceneAsset->nodes.size()))
+    {
+      ImGui::TextDisabled("Select a node to edit its transform.");
+      return;
+    }
+
+    demo::SceneNode& node = m_sceneAsset->nodes[m_selectedSceneNode];
+    ImGui::Text("Node");
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", node.name.c_str());
+    ImGui::Text("Children: %d", static_cast<int>(node.children.size()));
+    ImGui::Text("Meshes: %d", static_cast<int>(node.meshRefs.size()));
+    ImGui::Text("Parent: %s",
+                node.parent >= 0 && node.parent < static_cast<int>(m_sceneAsset->nodes.size())
+                    ? m_sceneAsset->nodes[node.parent].name.c_str()
+                    : "<root>");
+
+    ImGui::Separator();
+    ImGui::Text("Local Transform");
+
+    glm::vec3 rotationEulerDegrees = glm::degrees(glm::eulerAngles(node.rotation));
+    bool transformChanged = false;
+    transformChanged |= ImGui::DragFloat3("Translation", &node.translation.x, 0.05f);
+    transformChanged |= ImGui::DragFloat3("Rotation", &rotationEulerDegrees.x, 0.5f);
+    transformChanged |= ImGui::DragFloat3("Scale", &node.scale.x, 0.01f, 0.001f, 1000.0f, "%.3f");
+
+    if(transformChanged)
+    {
+      node.scale = glm::max(node.scale, glm::vec3(0.001f));
+      node.rotation = glm::normalize(glm::quat(glm::radians(rotationEulerDegrees)));
+      applySceneGraphTransforms();
+    }
+
+    ImGui::Separator();
+    const glm::vec3 worldPosition = glm::vec3(node.worldTransform[3]);
+    ImGui::Text("World Position");
+    ImGui::Text("  X: %.3f", worldPosition.x);
+    ImGui::Text("  Y: %.3f", worldPosition.y);
+    ImGui::Text("  Z: %.3f", worldPosition.z);
+    return;
+  }
+
   if(!m_sceneModel.has_value() || m_selectedSceneNode < 0 || m_selectedSceneNode >= static_cast<int>(m_sceneModel->nodes.size()))
   {
     ImGui::TextDisabled("Select a node to edit its transform.");
@@ -1093,7 +1822,22 @@ inline void MinimalLatestApp::drawSelectedSceneNodeInspector()
 
 inline void MinimalLatestApp::applySceneGraphTransforms()
 {
-  if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+  if(!m_currentModel.has_value())
+  {
+    return;
+  }
+
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    for(const uint32_t rootNodeIndex : m_sceneAsset->rootNodes)
+    {
+      updateSceneNodeWorldTransform(static_cast<int>(rootNodeIndex), glm::mat4(1.0f));
+    }
+    m_sceneAssetView = demo::makeSceneAssetView(*m_sceneAsset);
+    return;
+  }
+
+  if(!m_sceneModel.has_value())
   {
     return;
   }
@@ -1106,7 +1850,43 @@ inline void MinimalLatestApp::applySceneGraphTransforms()
 
 inline void MinimalLatestApp::updateSceneNodeWorldTransform(int nodeIndex, const glm::mat4& parentTransform)
 {
-  if(!m_sceneModel.has_value() || !m_currentModel.has_value())
+  if(!m_currentModel.has_value())
+  {
+    return;
+  }
+
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    if(nodeIndex < 0 || nodeIndex >= static_cast<int>(m_sceneAsset->nodes.size()))
+    {
+      return;
+    }
+
+    demo::SceneNode& node = m_sceneAsset->nodes[nodeIndex];
+    node.localTransform = glm::translate(glm::mat4(1.0f), node.translation)
+                        * glm::mat4_cast(node.rotation)
+                        * glm::scale(glm::mat4(1.0f), node.scale);
+    node.worldTransform = parentTransform * node.localTransform;
+
+    if(m_sceneUploadPlan.has_value())
+    {
+      for(const demo::SceneDrawInstance& instance : m_sceneUploadPlan->instances.instances)
+      {
+        if(instance.nodeIndex == static_cast<uint32_t>(nodeIndex))
+        {
+          m_renderer.updateSceneInstanceTransform(instance.instanceIndex, node.worldTransform);
+        }
+      }
+    }
+
+    for(const uint32_t childIndex : node.children)
+    {
+      updateSceneNodeWorldTransform(static_cast<int>(childIndex), node.worldTransform);
+    }
+    return;
+  }
+
+  if(!m_sceneModel.has_value())
   {
     return;
   }

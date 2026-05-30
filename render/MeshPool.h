@@ -12,6 +12,7 @@ namespace demo {
 
 class BatchUploadContext;
 struct GltfMeshData;  // Forward declaration
+struct SceneMeshData;
 
 struct MeshRecord {
     uint64_t vertexBufferHandle = 0;  // Opaque buffer handle (encoded VkBuffer)
@@ -81,6 +82,7 @@ public:
     void deinit();
 
     MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
+    MeshHandle uploadMesh(const SceneMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
     void destroyMesh(MeshHandle handle);
     void updateTransform(MeshHandle handle, const glm::mat4& transform);
     void setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alphaCutoff);

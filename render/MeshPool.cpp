@@ -1,6 +1,7 @@
 #include "MeshPool.h"
 #include "BatchUploadContext.h"
 #include "../loader/GltfLoader.h"
+#include "../scene/SceneAsset.h"
 
 #include <array>
 #include <cstring>
@@ -86,6 +87,19 @@ void buildInterleavedVertexData(const GltfMeshData& meshData, MeshRecord& record
             dst[10] = 0.0f;
             dst[11] = 1.0f;
         }
+    }
+}
+
+void updateLocalBoundsFromInterleavedVertices(MeshRecord& record, std::span<const uint8_t> vertexData)
+{
+    ASSERT(vertexData.size() == static_cast<size_t>(record.vertexCount) * kInterleavedVertexStride,
+           "Interleaved vertex buffer size mismatch");
+
+    for (uint32_t i = 0; i < record.vertexCount; ++i) {
+        const float* src = reinterpret_cast<const float*>(vertexData.data() + static_cast<size_t>(i) * kInterleavedVertexStride);
+        const glm::vec3 position(src[0], src[1], src[2]);
+        record.localBoundsMin = glm::min(record.localBoundsMin, position);
+        record.localBoundsMax = glm::max(record.localBoundsMax, position);
     }
 }
 
@@ -233,6 +247,73 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         const std::span<const std::byte> vertexBytes(reinterpret_cast<const std::byte*>(vertexData.data()), vertexData.size());
         const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()),
                                                     indexDataSize);
+
+        utils::Buffer vertexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, vertexBytes);
+        utils::Buffer indexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, indexBytes);
+
+        const VkBufferCopy vertexCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize};
+        const VkBufferCopy indexCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize};
+        vkCmdCopyBuffer(cmd, vertexStagingBuffer.buffer, m_sharedVertexBuffer.buffer.buffer, 1, &vertexCopy);
+        vkCmdCopyBuffer(cmd, indexStagingBuffer.buffer, m_sharedIndexBuffer.buffer.buffer, 1, &indexCopy);
+
+        m_stagingBuffers.push_back(vertexStagingBuffer);
+        m_stagingBuffers.push_back(indexStagingBuffer);
+    }
+
+    m_sharedVertexBuffer.bytesUsed += vertexDataSize;
+    m_sharedIndexBuffer.bytesUsed += indexDataSize;
+
+    updateWorldBounds(record);
+
+    return m_pool.emplace(std::move(record));
+}
+
+MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload)
+{
+    if(meshData.interleavedVertexData.empty() || meshData.indices.empty() || meshData.vertexCount == 0) {
+        return kNullMeshHandle;
+    }
+
+    MeshRecord record;
+    record.vertexCount = meshData.vertexCount;
+    record.indexCount = static_cast<uint32_t>(meshData.indices.size());
+    record.firstIndex = static_cast<uint32_t>(m_sharedIndexBuffer.bytesUsed / sizeof(uint32_t));
+    record.vertexOffset = static_cast<int32_t>(m_sharedVertexBuffer.bytesUsed / kInterleavedVertexStride);
+    record.vertexStride = kInterleavedVertexStride;
+    record.transform = meshData.transform;
+    record.materialIndex = meshData.materialIndex;
+    record.localBoundsMin = glm::vec3(std::numeric_limits<float>::max());
+    record.localBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+
+    const size_t vertexDataSize = meshData.interleavedVertexData.size();
+    const size_t indexDataSize = meshData.indices.size_bytes();
+
+    reserve(vertexDataSize, indexDataSize, cmd);
+
+    record.vertexBufferOffset = m_sharedVertexBuffer.bytesUsed;
+    record.indexBufferOffset = m_sharedIndexBuffer.bytesUsed;
+    record.setNativeVertexBuffer(m_sharedVertexBuffer.buffer.buffer);
+    record.setNativeIndexBuffer(m_sharedIndexBuffer.buffer.buffer);
+    updateLocalBoundsFromInterleavedVertices(record, meshData.interleavedVertexData);
+
+    if(batchUpload != nullptr)
+    {
+        const BatchUploadContext::Slice vertexSlice = batchUpload->allocate(vertexDataSize, alignof(float));
+        std::memcpy(vertexSlice.cpuPtr, meshData.interleavedVertexData.data(), vertexDataSize);
+        batchUpload->recordBufferUpload(vertexSlice,
+                                        m_sharedVertexBuffer.buffer.buffer,
+                                        VkBufferCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize});
+
+        const BatchUploadContext::Slice indexSlice = batchUpload->allocate(indexDataSize, alignof(uint32_t));
+        std::memcpy(indexSlice.cpuPtr, meshData.indices.data(), indexDataSize);
+        batchUpload->recordBufferUpload(indexSlice,
+                                        m_sharedIndexBuffer.buffer.buffer,
+                                        VkBufferCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize});
+    }
+    else
+    {
+        const std::span<const std::byte> vertexBytes(reinterpret_cast<const std::byte*>(meshData.interleavedVertexData.data()), vertexDataSize);
+        const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()), indexDataSize);
 
         utils::Buffer vertexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, vertexBytes);
         utils::Buffer indexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, indexBytes);

@@ -2,6 +2,11 @@
 
 #include "UploadUtils.h"
 
+#include <algorithm>
+#include <cstring>
+#include <execution>
+#include <numeric>
+
 namespace demo {
 
 namespace {
@@ -44,6 +49,61 @@ BatchUploadContext::Slice BatchUploadContext::allocate(VkDeviceSize size, VkDevi
 
   m_head = offset + size;
   return slice;
+}
+
+std::vector<BatchUploadContext::Slice> BatchUploadContext::allocateSlices(const std::vector<VkDeviceSize>& sizes,
+                                                                          VkDeviceSize alignment)
+{
+  return reserveSlices(sizes, alignment);
+}
+
+BatchUploadContext::Slice BatchUploadContext::mapReservedSlice(VkDeviceSize offset, VkDeviceSize size) const
+{
+  ASSERT(offset + size <= m_capacity, "BatchUploadContext reserved slice exceeded capacity");
+
+  Slice slice{};
+  slice.cpuPtr = static_cast<std::byte*>(m_stagingBuffer.mapped) + offset;
+  slice.offset = offset;
+  slice.size = size;
+  return slice;
+}
+
+std::vector<BatchUploadContext::Slice> BatchUploadContext::reserveSlices(const std::vector<VkDeviceSize>& sizes,
+                                                                         VkDeviceSize alignment)
+{
+  std::vector<Slice> slices;
+  slices.reserve(sizes.size());
+
+  VkDeviceSize cursor = m_head;
+  for(const VkDeviceSize size : sizes)
+  {
+    const VkDeviceSize offset = alignUp(cursor, alignment);
+    ASSERT(offset + size <= m_capacity, "BatchUploadContext staging reservation exceeded capacity");
+    slices.push_back(mapReservedSlice(offset, size));
+    cursor = offset + size;
+  }
+
+  m_head = cursor;
+  return slices;
+}
+
+void BatchUploadContext::copyToSlices(std::span<const Slice> slices,
+                                      std::span<const std::span<const std::byte>> sources)
+{
+  ASSERT(slices.size() == sources.size(), "BatchUploadContext slice/source count mismatch");
+
+  std::vector<size_t> indices(slices.size());
+  std::iota(indices.begin(), indices.end(), size_t{0});
+  std::for_each(std::execution::par, indices.begin(), indices.end(), [&](size_t index) {
+    const Slice& slice = slices[index];
+    const std::span<const std::byte> source = sources[index];
+    ASSERT(source.size_bytes() <= slice.size, "BatchUploadContext source does not fit reserved slice");
+    if(source.empty())
+    {
+      return;
+    }
+    std::memcpy(slice.cpuPtr, source.data(), source.size_bytes());
+  });
 }
 
 void BatchUploadContext::recordTextureUpload(const Slice& slice, VkImage dstImage, const VkBufferImageCopy& region)

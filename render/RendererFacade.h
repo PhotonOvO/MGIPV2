@@ -31,6 +31,7 @@ public:
   [[nodiscard]] ImTextureID    getViewportTextureID(TextureHandle handle) const;
   [[nodiscard]] MaterialHandle getMaterialHandle(uint32_t slot) const;
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
+  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd);
   void             uploadGltfModelBatch(const GltfModel&          model,
                                         std::span<const uint32_t> textureIndices,
                                         std::span<const uint32_t> materialIndices,
@@ -40,6 +41,7 @@ public:
   void             initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const;
   void             destroyGltfResources(const GltfUploadResult& result);
   void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
+  void             updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
   void             executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn);
   void             waitForIdle();
 

@@ -218,6 +218,7 @@ public:
   }
   void             destroyGltfResources(const GltfUploadResult& result);
   void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
+  void             updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
   void             executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn) { m_renderer.executeUploadCommand(std::move(uploadFn)); }
   void             waitForIdle() { m_renderer.waitForIdle(); }
 
@@ -616,7 +617,11 @@ private:
                                                                uint64_t targetIndirectBufferHandle);
   [[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
   void            rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd);
-  void            rebuildGPUDrivenScene(const SceneAsset& asset, const SceneUploadResult& uploadResult, VkCommandBuffer cmd);
+  void            rebuildGPUDrivenScene(const SceneAsset& asset,
+                                        const SceneUploadPlan& plan,
+                                        const SceneUploadResult& uploadResult,
+                                        VkCommandBuffer cmd);
+  void            appendSceneObjectDraw(uint64_t meshKey, MeshHandle meshHandle, uint32_t drawIndex, SceneDrawBucket bucket);
   void            clearGPUDrivenScene();
   void            flushPendingSceneUploads();
   void            invalidateSortedBootstrapStates();
@@ -643,6 +648,7 @@ private:
   std::vector<uint32_t>              m_cachedStaticVisibilitySortKeys;
   uint64_t                           m_cachedStaticVisibilitySortTopologyVersion{0};
   std::vector<shaderio::DrawUniforms> m_persistentDrawData;
+  std::vector<SceneUploadResult::SceneDrawRecord> m_sceneDrawRecords;
   std::vector<uint32_t>              m_dirtyPersistentDrawIndices;
   std::unique_ptr<GPUDrivenDepthPrepass> m_depthPrepass;
   std::unique_ptr<GPUDrivenDepthPyramidPass> m_depthPyramidPass;
@@ -663,10 +669,15 @@ private:
   std::unique_ptr<GPUDrivenImguiPass>    m_imguiPass;
   GPUDrivenSceneView                 m_sceneView{};
   GPUDrivenRuntimeStats              m_runtimeStats{};
-  const GltfUploadResult*            m_activeUploadResult{nullptr};
+  SceneUploadResult                  m_activeUploadResultStorage{};
+  const SceneUploadResult*           m_activeUploadResult{nullptr};
   std::unordered_map<uint64_t, uint32_t> m_objectIdByMeshHandle;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> m_objectIdsByMeshHandle;
   std::unordered_map<uint64_t, uint32_t> m_drawIndexByMeshHandle;
   std::unordered_map<uint64_t, glm::mat4> m_previousTransformByMeshHandle;
+  std::unordered_map<uint32_t, glm::mat4> m_previousTransformByDrawIndex;
+  std::vector<uint32_t>              m_objectIdByDrawRecord;
+  std::vector<uint32_t>              m_drawIndexByDrawRecord;
   std::vector<MeshHandle>            m_meshHandleByDrawIndex;
   std::vector<uint32_t>              m_opaqueDrawIndices;
   std::vector<uint32_t>              m_alphaTestDrawIndices;

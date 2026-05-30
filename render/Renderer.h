@@ -54,7 +54,7 @@ namespace rhi {
 struct BindTableWrite;
 }
 
-struct GltfUploadResult;
+struct SceneUploadResult;
 
 struct DirectionalLightSettings
 {
@@ -158,6 +158,8 @@ struct GPUDrivenSceneView
   uint32_t                           indirectCommandStride{0};
   const MeshHandle*                  meshHandles{nullptr};
   uint32_t                           meshHandleCount{0};
+  const MeshHandle*                  drawMeshHandles{nullptr};
+  uint32_t                           drawMeshHandleCount{0};
   const size_t*                      shadowCasterMeshIndices{nullptr};
   uint32_t                           shadowCasterCount{0};
   VkBuffer                           shadowPackedVertexBuffer{VK_NULL_HANDLE};
@@ -207,7 +209,7 @@ struct RenderParams
   std::function<void(rhi::CommandList&)> recordUi;
   glm::vec4                              viewportImageRect{0.0f};  // x, y, width, height in ImGui screen space
   // glTF model data for rendering
-  const GltfUploadResult*                gltfModel{nullptr};
+  const SceneUploadResult*               gltfModel{nullptr};
   // Camera data (pointer to App-owned CameraUniforms)
   const shaderio::CameraUniforms*       cameraUniforms{nullptr};
   DirectionalLightSettings               lightSettings{};
@@ -216,11 +218,33 @@ struct RenderParams
   const GPUDrivenSceneView*              gpuDrivenSceneView{nullptr};
 };
 
-struct GltfUploadResult
+struct SceneUploadResult
 {
+  struct SceneDrawRecord
+  {
+    uint32_t        instanceIndex{UINT32_MAX};
+    uint32_t        meshIndex{UINT32_MAX};
+    uint32_t        materialIndex{UINT32_MAX};
+    MeshHandle      meshHandle{kNullMeshHandle};
+    MaterialHandle  materialHandle{kNullMaterialHandle};
+    glm::mat4       worldTransform{1.0f};
+    glm::vec4       boundsSphere{0.0f};
+    uint32_t        alphaMode{0u};
+    float           alphaCutoff{0.5f};
+  };
+
   std::vector<MeshHandle>     meshes;
   std::vector<MaterialHandle> materials;
   std::vector<TextureHandle>  textures;
+  std::vector<SceneDrawRecord> drawRecords;
+  std::vector<uint32_t>        instanceToDrawRecord;
+  std::vector<uint32_t>        drawCommandToDrawRecord;
+  std::vector<MeshHandle>      drawMeshHandles;
+  std::vector<size_t>          opaqueDrawIndices;
+  std::vector<size_t>          alphaTestDrawIndices;
+  std::vector<size_t>          transparentDrawIndices;
+  std::vector<size_t>          shadowCasterDrawIndices;
+  std::vector<float>           transparentDrawDistances;
 
   // Pre-built mesh lists for each pass type
   std::vector<size_t> opaqueMeshIndices;        // Indices into meshes for OPAQUE
@@ -238,7 +262,7 @@ struct GltfUploadResult
   std::vector<demo::ShadowPackedMesh> shadowPackedMeshes;
 };
 
-using SceneUploadResult = GltfUploadResult;
+using GltfUploadResult = SceneUploadResult;
 
 struct RuntimeProfileSnapshot
 {
@@ -371,7 +395,7 @@ public:
   [[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const;
   [[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex,
-                                                          const GltfUploadResult* gltfModel) const;
+                                                          const SceneUploadResult* gltfModel) const;
   [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
   {
     return static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand));
@@ -442,7 +466,7 @@ public:
 
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
-  int32_t getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
+  int32_t getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const SceneUploadResult* gltfModel) const;
 
   // Material texture indices struct for GBuffer rendering
   struct MaterialTextureIndices {
@@ -456,7 +480,7 @@ public:
     int32_t alphaMode = 0;    // 0=OPAQUE, 1=MASK, 2=BLEND
     float alphaCutoff = 0.5f;
   };
-  MaterialTextureIndices getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const;
+  MaterialTextureIndices getMaterialTextureIndices(MaterialHandle materialHandle, const SceneUploadResult* gltfModel) const;
 
   // RHI accessors (replacing native accessors)
   rhi::TextureViewHandle getCurrentSwapchainView() const;
@@ -692,7 +716,7 @@ private:
       uint64_t           externalGPUCullingObjectBufferAddress{0};
       bool               useExternalGPUCullingObjectBuffer{false};
       bool               useExternalGPUCullingMeshletData{false};
-      const GltfUploadResult* gpuCullingSourceModel{nullptr};
+      const SceneUploadResult* gpuCullingSourceModel{nullptr};
       uint32_t           gpuCullingObjectCount{0};
       uint32_t           gpuCullingMeshCapacity{0};
       std::vector<uint32_t> gpuCullingResults;
@@ -986,7 +1010,7 @@ private:
   uint64_t                 getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
-  [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const;
+  [[nodiscard]] Aabb computeSceneBounds(const SceneUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const;
   void                     rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd);
   void                     rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd);
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;

@@ -310,6 +310,16 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenGBufferPass.cpp
   render/passes/GPUDrivenLightPass.h
   render/passes/GPUDrivenLightPass.cpp
+  render/passes/GPUDrivenBloomPrefilterPass.h
+  render/passes/GPUDrivenBloomPrefilterPass.cpp
+  render/passes/GPUDrivenBloomDownsamplePass.h
+  render/passes/GPUDrivenBloomDownsamplePass.cpp
+  render/passes/GPUDrivenFinalColorPass.h
+  render/passes/GPUDrivenFinalColorPass.cpp
+  render/passes/GPUDrivenVelocityPass.h
+  render/passes/GPUDrivenVelocityPass.cpp
+  render/passes/GPUDrivenTAAResolvePass.h
+  render/passes/GPUDrivenTAAResolvePass.cpp
   render/passes/GPUDrivenLightCullingPass.h
   render/passes/GPUDrivenLightCullingPass.cpp
   render/passes/GPUDrivenCSMShadowPass.h
@@ -380,6 +390,23 @@ add_library(demo_core STATIC
   loader/Ktx2Loader.cpp
   loader/SceneCacheSerializer.h
   loader/SceneCacheSerializer.cpp
+  scene/SceneAsset.h
+  scene/SceneAssetView.h
+  scene/SceneAssetBuilder.h
+  scene/SceneAssetBuilder.cpp
+  scene/SceneAssetSerializer.h
+  scene/SceneAssetSerializer.cpp
+  scene/SceneLoadJob.h
+  scene/SceneLoadJobGraph.h
+  scene/SceneJobSystem.h
+  scene/SceneJobSystem.cpp
+  scene/ParallelSceneLoader.h
+  scene/ParallelSceneLoader.cpp
+  scene/SceneUploadPlan.h
+  scene/SceneUploadPlanner.h
+  scene/SceneUploadPlanner.cpp
+  scene/TransformSystem.h
+  scene/TransformSystem.cpp
   render/MeshPool.h
   render/MeshPool.cpp
   render/Camera.h

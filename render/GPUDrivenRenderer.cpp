@@ -102,6 +102,34 @@ glm::vec4 transformBoundsSphere(const glm::mat4& transform, const glm::vec4& loc
   return glm::vec4(worldCenter, std::max(localSphere.w * maxScale, 0.0f));
 }
 
+glm::vec4 computeTransformedBoundsSphere(const MeshRecord& meshRecord, const glm::mat4& transform)
+{
+  const glm::vec3 localMin = meshRecord.localBoundsMin;
+  const glm::vec3 localMax = meshRecord.localBoundsMax;
+  const glm::vec3 corners[8] = {
+      {localMin.x, localMin.y, localMin.z},
+      {localMax.x, localMin.y, localMin.z},
+      {localMin.x, localMax.y, localMin.z},
+      {localMax.x, localMax.y, localMin.z},
+      {localMin.x, localMin.y, localMax.z},
+      {localMax.x, localMin.y, localMax.z},
+      {localMin.x, localMax.y, localMax.z},
+      {localMax.x, localMax.y, localMax.z},
+  };
+
+  glm::vec3 worldMin = glm::vec3(transform * glm::vec4(corners[0], 1.0f));
+  glm::vec3 worldMax = worldMin;
+  for(uint32_t i = 1; i < 8; ++i) {
+    const glm::vec3 worldCorner = glm::vec3(transform * glm::vec4(corners[i], 1.0f));
+    worldMin = glm::min(worldMin, worldCorner);
+    worldMax = glm::max(worldMax, worldCorner);
+  }
+
+  const glm::vec3 center = (worldMin + worldMax) * 0.5f;
+  const float     radius = glm::length(worldMax - center);
+  return glm::vec4(center, radius);
+}
+
 utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
 {
   const VkBufferUsageFlags2CreateInfoKHR usageInfo{
@@ -1435,7 +1463,8 @@ void GPUDrivenRenderer::executeImguiPass(const PassContext& context)
 GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
 {
   GltfUploadResult result = m_renderer.uploadGltfModel(model, cmd);
-  rebuildGPUDrivenScene(model, result, cmd);
+  m_activeUploadResultStorage = result;
+  rebuildGPUDrivenScene(model, m_activeUploadResultStorage, cmd);
   return result;
 }
 
@@ -1444,7 +1473,8 @@ SceneUploadResult GPUDrivenRenderer::commitSceneUploadPlan(const SceneAsset& ass
                                                            VkCommandBuffer cmd)
 {
   SceneUploadResult result = m_renderer.commitSceneUploadPlan(asset, plan, cmd);
-  rebuildGPUDrivenScene(asset, result, cmd);
+  m_activeUploadResultStorage = result;
+  rebuildGPUDrivenScene(asset, plan, m_activeUploadResultStorage, cmd);
   return result;
 }
 
@@ -1456,16 +1486,15 @@ void GPUDrivenRenderer::uploadGltfModelBatch(const GltfModel&          model,
                                              VkCommandBuffer           cmd)
 {
   m_renderer.uploadGltfModelBatch(model, textureIndices, materialIndices, meshIndices, ioResult, cmd);
-  rebuildGPUDrivenScene(model, ioResult, cmd);
+  m_activeUploadResultStorage = ioResult;
+  rebuildGPUDrivenScene(model, m_activeUploadResultStorage, cmd);
 }
 
 void GPUDrivenRenderer::destroyGltfResources(const GltfUploadResult& result)
 {
   clearGPUDrivenScene();
-  if(m_activeUploadResult == &result)
-  {
-    m_activeUploadResult = nullptr;
-  }
+  m_activeUploadResultStorage = {};
+  m_activeUploadResult = nullptr;
   m_renderer.destroyGltfResources(result);
 }
 
@@ -1480,8 +1509,9 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
 
   uint32_t drawIndex = 0;
   const bool hasDrawIndex = tryGetMeshDrawIndex(handle, drawIndex);
-  const auto it = m_objectIdByMeshHandle.find(meshKey);
-  if(it == m_objectIdByMeshHandle.end())
+  const auto objectIdsIt = m_objectIdsByMeshHandle.find(meshKey);
+  const auto objectIdIt = m_objectIdByMeshHandle.find(meshKey);
+  if(objectIdsIt == m_objectIdsByMeshHandle.end() && objectIdIt == m_objectIdByMeshHandle.end())
   {
     return;
   }
@@ -1492,9 +1522,18 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
     return;
   }
 
-  m_sceneRegistry.updateTransform(it->second,
-                                  transform,
-                                  glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius));
+  const glm::vec4 boundsSphere(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
+  if(objectIdsIt != m_objectIdsByMeshHandle.end())
+  {
+    for(const uint32_t objectId : objectIdsIt->second)
+    {
+      m_sceneRegistry.updateTransform(objectId, transform, boundsSphere);
+    }
+  }
+  else
+  {
+    m_sceneRegistry.updateTransform(objectIdIt->second, transform, boundsSphere);
+  }
   if(m_enableExperimentalMeshletPath && !m_meshletCullObjectsCpu.empty())
   {
     for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
@@ -1510,14 +1549,75 @@ void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& 
     }
   }
   m_sceneUploadPending = true;
-  if(hasDrawIndex && !m_enableExperimentalMeshletPath)
+  if(!m_enableExperimentalMeshletPath)
   {
-    markPersistentDrawDirty(drawIndex);
+    bool markedDraws = false;
+    for(uint32_t candidateDrawIndex = 0; candidateDrawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size());
+        ++candidateDrawIndex)
+    {
+      if(packMeshHandleKey(m_meshHandleByDrawIndex[candidateDrawIndex]) == meshKey)
+      {
+        markPersistentDrawDirty(candidateDrawIndex);
+        markedDraws = true;
+      }
+    }
+    if(!markedDraws && hasDrawIndex)
+    {
+      markPersistentDrawDirty(drawIndex);
+    }
   }
   else
   {
     m_persistentDrawDataDirty = true;
   }
+  m_runtimeStats.pendingSceneUpdates = 1;
+  refreshSceneView();
+}
+
+void GPUDrivenRenderer::updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform)
+{
+  if(m_activeUploadResult == nullptr || instanceIndex >= m_activeUploadResult->instanceToDrawRecord.size())
+  {
+    return;
+  }
+
+  const uint32_t drawRecordIndex = m_activeUploadResult->instanceToDrawRecord[instanceIndex];
+  if(drawRecordIndex == UINT32_MAX || drawRecordIndex >= m_sceneDrawRecords.size())
+  {
+    return;
+  }
+
+  SceneUploadResult::SceneDrawRecord& drawRecord = m_sceneDrawRecords[drawRecordIndex];
+  const MeshHandle meshHandle = drawRecord.meshHandle;
+  if(meshHandle.isNull())
+  {
+    return;
+  }
+
+  const MeshRecord* meshRecord = m_renderer.getMeshPool().tryGet(meshHandle);
+  if(meshRecord == nullptr)
+  {
+    return;
+  }
+
+  const glm::mat4 previousTransform = drawRecord.worldTransform;
+  drawRecord.worldTransform = transform;
+  const glm::vec4 boundsSphere = computeTransformedBoundsSphere(*meshRecord, transform);
+
+  const uint32_t objectId =
+      drawRecordIndex < m_objectIdByDrawRecord.size() ? m_objectIdByDrawRecord[drawRecordIndex] : UINT32_MAX;
+  const uint32_t drawIndex =
+      drawRecordIndex < m_drawIndexByDrawRecord.size() ? m_drawIndexByDrawRecord[drawRecordIndex] : UINT32_MAX;
+  if(objectId != UINT32_MAX)
+  {
+    m_sceneRegistry.updateTransform(objectId, transform, boundsSphere);
+  }
+  if(drawIndex != UINT32_MAX)
+  {
+    m_previousTransformByDrawIndex[drawIndex] = previousTransform;
+    markPersistentDrawDirty(drawIndex);
+  }
+  m_sceneUploadPending = true;
   m_runtimeStats.pendingSceneUpdates = 1;
   refreshSceneView();
 }
@@ -1550,13 +1650,13 @@ uint64_t GPUDrivenRenderer::packMeshHandleKey(MeshHandle handle)
 
 void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd)
 {
-  m_activeUploadResult = &uploadResult;
   const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
   if(firstSceneBuild)
   {
     clearGPUDrivenScene();
     m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
   }
+  m_activeUploadResult = &uploadResult;
 
   bool appendedObjects = false;
   bool appendedMeshlets = false;
@@ -1696,17 +1796,150 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
   refreshSceneView();
 }
 
-void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset, const SceneUploadResult& uploadResult, VkCommandBuffer cmd)
+void GPUDrivenRenderer::appendSceneObjectDraw(uint64_t meshKey, MeshHandle meshHandle, uint32_t drawIndex, SceneDrawBucket bucket)
 {
-  m_activeUploadResult = &uploadResult;
+  m_drawIndexByMeshHandle[meshKey] = drawIndex;
+  if(drawIndex >= m_meshHandleByDrawIndex.size())
+  {
+    m_meshHandleByDrawIndex.resize(drawIndex + 1u, kNullMeshHandle);
+  }
+  m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+
+  switch(bucket)
+  {
+  case SceneDrawBucket::Transparent:
+    m_transparentDrawIndices.push_back(drawIndex);
+    break;
+  case SceneDrawBucket::AlphaMask:
+    m_alphaTestDrawIndices.push_back(drawIndex);
+    break;
+  case SceneDrawBucket::Opaque:
+  default:
+    m_opaqueDrawIndices.push_back(drawIndex);
+    break;
+  }
+}
+
+void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset,
+                                              const SceneUploadPlan& plan,
+                                              const SceneUploadResult& uploadResult,
+                                              VkCommandBuffer cmd)
+{
   const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
   if(firstSceneBuild)
   {
     clearGPUDrivenScene();
     m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
   }
+  m_activeUploadResult = &uploadResult;
 
   bool appendedObjects = false;
+  bool appendedMeshlets = false;
+
+  std::vector<SceneDrawBucket> primaryBucketByMeshIndex(asset.meshes.size(), SceneDrawBucket::Opaque);
+  std::vector<bool>            hasPrimaryBucketByMeshIndex(asset.meshes.size(), false);
+  std::vector<glm::vec4>       primaryBoundsSphereByMeshIndex(asset.meshes.size(), glm::vec4(0.0f));
+  std::vector<bool>            hasPrimaryBoundsSphereByMeshIndex(asset.meshes.size(), false);
+
+  for(const DrawCommandBuildPlan& draw : plan.drawCommands)
+  {
+    if(draw.meshIndex < primaryBucketByMeshIndex.size() && !hasPrimaryBucketByMeshIndex[draw.meshIndex])
+    {
+      primaryBucketByMeshIndex[draw.meshIndex] = draw.bucket;
+      hasPrimaryBucketByMeshIndex[draw.meshIndex] = true;
+    }
+  }
+  for(const InstanceCullRecord& cullRecord : plan.cullRecords)
+  {
+    if(cullRecord.meshIndex < primaryBoundsSphereByMeshIndex.size() && !hasPrimaryBoundsSphereByMeshIndex[cullRecord.meshIndex])
+    {
+      primaryBoundsSphereByMeshIndex[cullRecord.meshIndex] = cullRecord.boundingSphere;
+      hasPrimaryBoundsSphereByMeshIndex[cullRecord.meshIndex] = true;
+    }
+  }
+
+  if(!m_enableExperimentalMeshletPath && !uploadResult.drawRecords.empty())
+  {
+    m_sceneDrawRecords = uploadResult.drawRecords;
+    m_objectIdByDrawRecord.assign(m_sceneDrawRecords.size(), UINT32_MAX);
+    m_drawIndexByDrawRecord.assign(m_sceneDrawRecords.size(), UINT32_MAX);
+
+    for(uint32_t drawRecordIndex = 0; drawRecordIndex < static_cast<uint32_t>(uploadResult.drawRecords.size()); ++drawRecordIndex)
+    {
+      const SceneUploadResult::SceneDrawRecord& drawRecord = uploadResult.drawRecords[drawRecordIndex];
+      if(drawRecord.meshIndex >= uploadResult.meshes.size() || drawRecord.meshIndex >= asset.meshes.size())
+      {
+        continue;
+      }
+
+      const MeshHandle meshHandle = drawRecord.meshHandle;
+      const uint64_t meshKey = packMeshHandleKey(meshHandle);
+      const MeshRecord* meshRecord = m_renderer.getMeshPool().tryGet(meshHandle);
+      if(meshRecord == nullptr)
+      {
+        continue;
+      }
+
+      GPUSceneRegistrationDesc desc{};
+      desc.meshHandle = meshHandle;
+      desc.meshIndex = drawRecord.meshIndex;
+      desc.materialIndex = drawRecord.materialIndex;
+      desc.transform = drawRecord.worldTransform;
+      desc.boundsSphere = glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
+      desc.flags = buildGPUDrivenFlags(*meshRecord);
+      desc.indexCount = meshRecord->indexCount;
+      desc.firstIndex = meshRecord->firstIndex;
+      desc.vertexOffset = meshRecord->vertexOffset;
+      if(drawRecord.boundsSphere.w > 0.0f)
+      {
+        desc.boundsSphere = drawRecord.boundsSphere;
+      }
+
+      const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
+      const uint32_t objectId = m_sceneRegistry.registerObject(desc);
+      if(m_objectIdByMeshHandle.find(meshKey) == m_objectIdByMeshHandle.end())
+      {
+        m_objectIdByMeshHandle[meshKey] = objectId;
+      }
+      if(drawRecordIndex < m_objectIdByDrawRecord.size())
+      {
+        m_objectIdByDrawRecord[drawRecordIndex] = objectId;
+      }
+      if(drawRecordIndex < m_drawIndexByDrawRecord.size())
+      {
+        m_drawIndexByDrawRecord[drawRecordIndex] = objectDrawIndex;
+      }
+      m_objectIdsByMeshHandle[meshKey].push_back(objectId);
+
+      SceneDrawBucket bucket = SceneDrawBucket::Opaque;
+      if(drawRecord.alphaMode == shaderio::LAlphaBlend)
+      {
+        bucket = SceneDrawBucket::Transparent;
+      }
+      else if(drawRecord.alphaMode == shaderio::LAlphaMask)
+      {
+        bucket = SceneDrawBucket::AlphaMask;
+      }
+      appendSceneObjectDraw(meshKey, meshHandle, objectDrawIndex, bucket);
+      appendedObjects = true;
+    }
+
+    if(appendedObjects || firstSceneBuild)
+    {
+      ++m_sceneTopologyVersion;
+      invalidateSortedBootstrapStates();
+      m_sceneRegistry.syncToGpu(cmd);
+    }
+    m_sceneUploadPending = false;
+    m_persistentDrawDataDirty = true;
+    m_dirtyPersistentDrawIndices.clear();
+    m_runtimeStats.sceneUploadCount += 1;
+    m_runtimeStats.pendingSceneUpdates = 0;
+    m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
+    m_runtimeStats.meshletCount = 0u;
+    refreshSceneView();
+    return;
+  }
 
   for(size_t meshIndex = 0; meshIndex < uploadResult.meshes.size() && meshIndex < asset.meshes.size(); ++meshIndex)
   {
@@ -1735,28 +1968,93 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset, const Sce
     desc.vertexOffset = meshRecord->vertexOffset;
 
     const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
+    SceneDrawBucket bucket = SceneDrawBucket::Opaque;
+    if(meshIndex < primaryBucketByMeshIndex.size() && hasPrimaryBucketByMeshIndex[meshIndex])
+    {
+      bucket = primaryBucketByMeshIndex[meshIndex];
+    }
+
+    if(meshIndex < primaryBoundsSphereByMeshIndex.size() && hasPrimaryBoundsSphereByMeshIndex[meshIndex])
+    {
+      desc.boundsSphere = primaryBoundsSphereByMeshIndex[meshIndex];
+    }
+
     const uint32_t objectId = m_sceneRegistry.registerObject(desc);
     m_objectIdByMeshHandle[meshKey] = objectId;
     appendedObjects = true;
 
-    m_drawIndexByMeshHandle[meshKey] = objectDrawIndex;
-    if(objectDrawIndex >= m_meshHandleByDrawIndex.size())
+    if(m_enableExperimentalMeshletPath && meshIndex < asset.meshletPayloads.size())
     {
-      m_meshHandleByDrawIndex.resize(objectDrawIndex + 1u, kNullMeshHandle);
+      const SceneAsset::MeshletPayload& meshletPayload = asset.meshletPayloads[meshIndex];
+      const size_t meshletStride = sizeof(shaderio::Meshlet);
+      const uint32_t meshletCount =
+          meshletStride > 0 ? static_cast<uint32_t>(meshletPayload.meshletData.size() / meshletStride) : 0u;
+      if(meshletCount > 0)
+      {
+        const uint32_t baseMeshletIndex = static_cast<uint32_t>(m_meshletDataCpu.size());
+        const uint32_t baseIndexOffset = static_cast<uint32_t>(m_meshletIndicesCpu.size());
+        const uint32_t flags = buildMeshletGPUDrivenFlags(*meshRecord);
+        const shaderio::Meshlet* sourceMeshlets =
+            reinterpret_cast<const shaderio::Meshlet*>(meshletPayload.meshletData.data());
+        const uint32_t* sourcePackedIndices =
+            reinterpret_cast<const uint32_t*>(meshletPayload.indexData.data());
+        const uint32_t packedIndexCount = static_cast<uint32_t>(meshletPayload.indexData.size() / sizeof(uint32_t));
+
+        m_drawIndexByMeshHandle.emplace(meshKey, baseMeshletIndex);
+        if(m_meshHandleByDrawIndex.size() < baseMeshletIndex + meshletCount)
+        {
+          m_meshHandleByDrawIndex.resize(baseMeshletIndex + meshletCount, kNullMeshHandle);
+        }
+        appendedMeshlets = true;
+
+        for(uint32_t localMeshletIndex = 0; localMeshletIndex < meshletCount; ++localMeshletIndex)
+        {
+          shaderio::Meshlet meshlet = sourceMeshlets[localMeshletIndex];
+          meshlet.materialIndex = desc.materialIndex;
+          meshlet.objectIndex = objectId;
+          meshlet.flags = flags;
+          meshlet.localIndex = localMeshletIndex;
+          meshlet.indexOffset += baseIndexOffset;
+
+          const uint32_t drawIndex = baseMeshletIndex + localMeshletIndex;
+          m_meshletDataCpu.push_back(meshlet);
+          m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+
+          switch(bucket)
+          {
+          case SceneDrawBucket::Transparent:
+            m_transparentDrawIndices.push_back(drawIndex);
+            break;
+          case SceneDrawBucket::AlphaMask:
+            m_alphaTestDrawIndices.push_back(drawIndex);
+            break;
+          case SceneDrawBucket::Opaque:
+          default:
+            m_opaqueDrawIndices.push_back(drawIndex);
+            break;
+          }
+
+          m_meshletCullObjectsCpu.push_back(shaderio::GPUCullObject{
+              .sphereCenterRadius = transformBoundsSphere(meshRecord->transform, meshlet.boundsSphere),
+              .indexCount = meshlet.indexCount,
+              .firstIndex = meshlet.indexOffset,
+              .vertexOffset = meshRecord->vertexOffset,
+              .flags = flags,
+          });
+        }
+
+        if(sourcePackedIndices != nullptr && packedIndexCount > 0)
+        {
+          m_meshletIndicesCpu.insert(m_meshletIndicesCpu.end(),
+                                     sourcePackedIndices,
+                                     sourcePackedIndices + packedIndexCount);
+        }
+        m_runtimeStats.meshletTriangleCount += packedIndexCount / 3u;
+        continue;
+      }
     }
-    m_meshHandleByDrawIndex[objectDrawIndex] = meshHandle;
-    if(meshRecord->alphaMode == shaderio::LAlphaBlend)
-    {
-      m_transparentDrawIndices.push_back(objectDrawIndex);
-    }
-    else if(meshRecord->alphaMode == shaderio::LAlphaMask)
-    {
-      m_alphaTestDrawIndices.push_back(objectDrawIndex);
-    }
-    else
-    {
-      m_opaqueDrawIndices.push_back(objectDrawIndex);
-    }
+
+    appendSceneObjectDraw(meshKey, meshHandle, objectDrawIndex, bucket);
   }
 
   if(appendedObjects || firstSceneBuild)
@@ -1765,13 +2063,17 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset, const Sce
     invalidateSortedBootstrapStates();
     m_sceneRegistry.syncToGpu(cmd);
   }
+  if(m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
+  {
+    m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+  }
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = true;
   m_dirtyPersistentDrawIndices.clear();
   m_runtimeStats.sceneUploadCount += 1;
   m_runtimeStats.pendingSceneUpdates = 0;
   m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
-  m_runtimeStats.meshletCount = 0u;
+  m_runtimeStats.meshletCount = m_enableExperimentalMeshletPath ? m_meshletBuffer.getMeshletCount() : 0u;
   refreshSceneView();
 }
 
@@ -1787,6 +2089,7 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_meshletDataCpu.clear();
   m_meshletIndicesCpu.clear();
   m_meshletCullObjectsCpu.clear();
+  m_sceneDrawRecords.clear();
   m_persistentDrawData.clear();
   m_visibilitySortInputObjects.clear();
   m_visibilitySortInputKeys.clear();
@@ -1794,8 +2097,12 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_cachedStaticVisibilitySortKeys.clear();
   m_cachedStaticVisibilitySortTopologyVersion = 0;
   m_objectIdByMeshHandle.clear();
+  m_objectIdsByMeshHandle.clear();
   m_drawIndexByMeshHandle.clear();
   m_previousTransformByMeshHandle.clear();
+  m_previousTransformByDrawIndex.clear();
+  m_objectIdByDrawRecord.clear();
+  m_drawIndexByDrawRecord.clear();
   m_meshHandleByDrawIndex.clear();
   m_opaqueDrawIndices.clear();
   m_alphaTestDrawIndices.clear();
@@ -1956,6 +2263,7 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
   if(resetPreviousTransforms)
   {
     m_previousTransformByMeshHandle.clear();
+    m_previousTransformByDrawIndex.clear();
   }
 
   const auto updateDrawPayload = [this](uint32_t drawIndex) {
@@ -1978,20 +2286,39 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
       return;
     }
 
+    const SceneUploadResult::SceneDrawRecord* drawRecord =
+        drawIndex < m_sceneDrawRecords.size() ? &m_sceneDrawRecords[drawIndex] : nullptr;
+    const MaterialHandle drawMaterialHandle =
+        drawRecord != nullptr ? drawRecord->materialHandle : kNullMaterialHandle;
+    const Renderer::MaterialTextureIndices drawMaterialTextures =
+        drawMaterialHandle.isNull() ? Renderer::MaterialTextureIndices{}
+                                    : m_renderer.getMaterialTextureIndices(drawMaterialHandle, m_activeUploadResult);
     shaderio::DrawUniforms drawData{};
-    drawData.modelMatrix = mesh->transform;
-    drawData.prevModelMatrix = mesh->transform;
+    drawData.modelMatrix = drawRecord != nullptr ? drawRecord->worldTransform : mesh->transform;
+    drawData.prevModelMatrix = drawData.modelMatrix;
     const uint64_t meshKey = packMeshHandleKey(meshHandle);
+    const auto previousDrawTransformIt = m_previousTransformByDrawIndex.find(drawIndex);
     const auto previousTransformIt = m_previousTransformByMeshHandle.find(meshKey);
-    if(previousTransformIt != m_previousTransformByMeshHandle.end())
+    if(previousDrawTransformIt != m_previousTransformByDrawIndex.end())
+    {
+      drawData.prevModelMatrix = previousDrawTransformIt->second;
+    }
+    else if(previousTransformIt != m_previousTransformByMeshHandle.end())
     {
       drawData.prevModelMatrix = previousTransformIt->second;
     }
-    drawData.baseColorFactor = mesh->baseColorFactor;
-    drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
-    drawData.normalTextureIndex = mesh->normalTextureIndex;
-    drawData.metallicRoughnessTextureIndex = mesh->metallicRoughnessTextureIndex;
-    drawData.occlusionTextureIndex = mesh->occlusionTextureIndex;
+    const MeshRecord* materialSource = mesh;
+    drawData.baseColorFactor = drawMaterialHandle.isNull() ? mesh->baseColorFactor
+                                                           : m_renderer.getMaterialBaseColorFactor(drawMaterialHandle);
+    drawData.baseColorTextureIndex = drawMaterialHandle.isNull() ? mesh->baseColorTextureIndex
+                                                                 : drawMaterialTextures.baseColor;
+    drawData.normalTextureIndex = drawMaterialHandle.isNull() ? mesh->normalTextureIndex
+                                                              : drawMaterialTextures.normal;
+    drawData.metallicRoughnessTextureIndex = drawMaterialHandle.isNull()
+                                                 ? mesh->metallicRoughnessTextureIndex
+                                                 : drawMaterialTextures.metallicRoughness;
+    drawData.occlusionTextureIndex = drawMaterialHandle.isNull() ? mesh->occlusionTextureIndex
+                                                                 : drawMaterialTextures.occlusion;
     drawData.emissiveTextureIndex = mesh->emissiveTextureIndex;
     drawData.metallicFactor = mesh->metallicFactor;
     drawData.roughnessFactor = mesh->roughnessFactor;
@@ -1999,8 +2326,8 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
     drawData.occlusionStrength = mesh->occlusionStrength;
     drawData.emissiveFactor = mesh->emissiveFactor;
     drawData.materialWorkflow = mesh->materialWorkflow;
-    drawData.alphaMode = mesh->alphaMode;
-    drawData.alphaCutoff = mesh->alphaCutoff;
+    drawData.alphaMode = drawMaterialHandle.isNull() ? materialSource->alphaMode : drawMaterialTextures.alphaMode;
+    drawData.alphaCutoff = drawMaterialHandle.isNull() ? materialSource->alphaCutoff : drawMaterialTextures.alphaCutoff;
     m_persistentDrawData[drawIndex] = drawData;
   };
 
@@ -2043,7 +2370,7 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
       m_renderer.uploadDepthMDIDrawDataRange(frameIndex, range.first, drawRange);
     }
   }
-  bool hasMotionPreviousTransforms = false;
+  bool hasMotionPreviousTransforms = !m_previousTransformByDrawIndex.empty();
   for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
   {
     const MeshHandle meshHandle = m_meshHandleByDrawIndex[drawIndex];
@@ -2108,6 +2435,11 @@ void GPUDrivenRenderer::refreshSceneView()
                                 : nullptr;
   m_sceneView.meshHandleCount =
       m_activeUploadResult != nullptr ? static_cast<uint32_t>(m_activeUploadResult->meshes.size()) : 0;
+  m_sceneView.drawMeshHandles = m_activeUploadResult != nullptr && !m_activeUploadResult->drawMeshHandles.empty()
+                                    ? m_activeUploadResult->drawMeshHandles.data()
+                                    : nullptr;
+  m_sceneView.drawMeshHandleCount =
+      m_activeUploadResult != nullptr ? static_cast<uint32_t>(m_activeUploadResult->drawMeshHandles.size()) : 0;
   m_sceneView.shadowCasterMeshIndices =
       m_activeUploadResult != nullptr && !m_activeUploadResult->shadowCasterIndices.empty()
           ? m_activeUploadResult->shadowCasterIndices.data()
@@ -2224,7 +2556,11 @@ uint32_t GPUDrivenRenderer::getSafePersistentObjectCount() const
   const bool meshletCullStreamActive =
       m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
       && m_sceneView.gpuCullObjectBuffer == m_meshletBuffer.getMeshletCullObjectBuffer();
-  if(!meshletCullStreamActive && m_sceneView.meshHandleCount > 0u)
+  if(!meshletCullStreamActive && m_sceneView.drawMeshHandleCount > 0u)
+  {
+    safeCount = std::min(safeCount, m_sceneView.drawMeshHandleCount);
+  }
+  else if(!meshletCullStreamActive && m_sceneView.meshHandleCount > 0u)
   {
     safeCount = std::min(safeCount, m_sceneView.meshHandleCount);
   }

@@ -3,13 +3,14 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <type_traits>
 
 namespace demo {
 
 namespace {
 
-constexpr char     kCacheMagic[8] = {'V', 'K', 'C', 'A', 'C', 'H', 'E', 0};
+constexpr char     kCacheMagic[8] = {'G', 'L', 'T', 'F', 'C', 'A', 0, 0};
 constexpr uint32_t kCacheVersion  = SceneCacheSerializer::kCurrentVersion;
 constexpr uint64_t kMaxReasonableStringBytes = 1ull << 20;
 constexpr uint64_t kMaxReasonableVectorElements = 1ull << 22;
@@ -18,6 +19,7 @@ constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageCount = 1u << 14;
 constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
 constexpr uint32_t kMaxReasonableRootNodeCount = 1u << 14;
+constexpr uint32_t kMaxReasonableDependencyCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageDimension = 1u << 14;
 constexpr uint64_t kMaxReasonableImagePixels = 1ull << 28;
 
@@ -34,6 +36,8 @@ struct CacheHeader
   uint32_t imageCount{0};
   uint32_t nodeCount{0};
   uint32_t rootNodeCount{0};
+  uint32_t dependencyCount{0};
+  uint32_t reserved1{0};
 };
 
 [[nodiscard]] bool hasReasonableCounts(const CacheHeader& header)
@@ -42,7 +46,8 @@ struct CacheHeader
          && header.materialCount <= kMaxReasonableMaterialCount
          && header.imageCount <= kMaxReasonableImageCount
          && header.nodeCount <= kMaxReasonableNodeCount
-         && header.rootNodeCount <= kMaxReasonableRootNodeCount;
+         && header.rootNodeCount <= kMaxReasonableRootNodeCount
+         && header.dependencyCount <= kMaxReasonableDependencyCount;
 }
 
 [[nodiscard]] bool hasReasonableModelShape(const GltfModel& model)
@@ -51,7 +56,8 @@ struct CacheHeader
          && model.materials.size() <= kMaxReasonableMaterialCount
          && model.images.size() <= kMaxReasonableImageCount
          && model.nodes.size() <= kMaxReasonableNodeCount
-         && model.rootNodes.size() <= kMaxReasonableRootNodeCount;
+         && model.rootNodes.size() <= kMaxReasonableRootNodeCount
+         && model.dependencies.size() <= kMaxReasonableDependencyCount;
 }
 
 [[nodiscard]] bool hasReasonableMeshPayload(const GltfMeshData& mesh)
@@ -149,6 +155,25 @@ struct CacheHeader
 [[nodiscard]] int64_t fileWriteTicks(const std::filesystem::path& path)
 {
   return static_cast<int64_t>(std::filesystem::last_write_time(path).time_since_epoch().count());
+}
+
+[[nodiscard]] bool dependencyMatchesSource(const GltfDependencyData& dependency,
+                                           const std::filesystem::path& sourceDirectory)
+{
+  if(dependency.relativePath.empty())
+  {
+    return true;
+  }
+
+  const std::filesystem::path dependencyPath = sourceDirectory / std::filesystem::path(dependency.relativePath);
+  if(!std::filesystem::exists(dependencyPath) || !std::filesystem::is_regular_file(dependencyPath))
+  {
+    return false;
+  }
+
+  return std::filesystem::file_size(dependencyPath) == dependency.fileSize
+         && fileWriteTicks(dependencyPath) == dependency.writeTimeTicks
+         && hashPath(dependencyPath) == dependency.pathHash;
 }
 
 template <typename T>
@@ -320,6 +345,22 @@ bool readImage(std::istream& stream, GltfImageData& image)
          && readPod(stream, image.isKtx2);
 }
 
+void writeDependency(std::ostream& stream, const GltfDependencyData& dependency)
+{
+  writeString(stream, dependency.relativePath);
+  writePod(stream, dependency.fileSize);
+  writePod(stream, dependency.writeTimeTicks);
+  writePod(stream, dependency.pathHash);
+}
+
+bool readDependency(std::istream& stream, GltfDependencyData& dependency)
+{
+  return readString(stream, dependency.relativePath)
+         && readPod(stream, dependency.fileSize)
+         && readPod(stream, dependency.writeTimeTicks)
+         && readPod(stream, dependency.pathHash);
+}
+
 void writeNode(std::ostream& stream, const GltfNodeData& node)
 {
   writeString(stream, node.name);
@@ -354,7 +395,7 @@ bool readNode(std::istream& stream, GltfNodeData& node)
 
 std::filesystem::path SceneCacheSerializer::buildCachePath(const std::filesystem::path& sourcePath)
 {
-  return sourcePath.parent_path() / (sourcePath.filename().string() + ".vkcache");
+  return sourcePath.parent_path() / "Cache" / (sourcePath.filename().string() + ".gltfcache");
 }
 
 bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
@@ -391,6 +432,7 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   header.imageCount           = static_cast<uint32_t>(model.images.size());
   header.nodeCount            = static_cast<uint32_t>(model.nodes.size());
   header.rootNodeCount        = static_cast<uint32_t>(model.rootNodes.size());
+  header.dependencyCount      = static_cast<uint32_t>(model.dependencies.size());
   writePod(stream, header);
 
   writeString(stream, model.name);
@@ -414,6 +456,10 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
     writeNode(stream, node);
   }
   writeVector(stream, model.rootNodes);
+  for(const GltfDependencyData& dependency : model.dependencies)
+  {
+    writeDependency(stream, dependency);
+  }
 
   if(!stream)
   {
@@ -461,6 +507,7 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
     loadedModel.materials.resize(header.materialCount);
     loadedModel.images.resize(header.imageCount);
     loadedModel.nodes.resize(header.nodeCount);
+    loadedModel.dependencies.resize(header.dependencyCount);
 
     if(!readString(stream, loadedModel.name))
     {
@@ -509,6 +556,14 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
     {
       m_lastError = "Failed to read root node payload";
       return false;
+    }
+    for(GltfDependencyData& dependency : loadedModel.dependencies)
+    {
+      if(!readDependency(stream, dependency))
+      {
+        m_lastError = "Failed to read dependency payload";
+        return false;
+      }
     }
 
     if(!hasReasonableModelShape(loadedModel))
@@ -564,6 +619,66 @@ bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, 
   if(!hasReasonableCounts(header))
   {
     return false;
+  }
+
+  const std::filesystem::path sourceDirectory = sourcePath.parent_path();
+  stream.seekg(0, std::ios::beg);
+  CacheHeader ignoredHeader{};
+  if(!readPod(stream, ignoredHeader))
+  {
+    return false;
+  }
+  std::string ignoredName;
+  std::string ignoredSourcePath;
+  std::string ignoredSourceDirectory;
+  if(!readString(stream, ignoredName) || !readString(stream, ignoredSourcePath) || !readString(stream, ignoredSourceDirectory))
+  {
+    return false;
+  }
+  for(uint32_t meshIndex = 0; meshIndex < header.meshCount; ++meshIndex)
+  {
+    GltfMeshData ignoredMesh;
+    if(!readMesh(stream, ignoredMesh))
+    {
+      return false;
+    }
+  }
+  for(uint32_t materialIndex = 0; materialIndex < header.materialCount; ++materialIndex)
+  {
+    GltfMaterialData ignoredMaterial;
+    if(!readMaterial(stream, ignoredMaterial))
+    {
+      return false;
+    }
+  }
+  for(uint32_t imageIndex = 0; imageIndex < header.imageCount; ++imageIndex)
+  {
+    GltfImageData ignoredImage;
+    if(!readImage(stream, ignoredImage))
+    {
+      return false;
+    }
+  }
+  for(uint32_t nodeIndex = 0; nodeIndex < header.nodeCount; ++nodeIndex)
+  {
+    GltfNodeData ignoredNode;
+    if(!readNode(stream, ignoredNode))
+    {
+      return false;
+    }
+  }
+  std::vector<int> ignoredRootNodes;
+  if(!readVector(stream, ignoredRootNodes))
+  {
+    return false;
+  }
+  for(uint32_t dependencyIndex = 0; dependencyIndex < header.dependencyCount; ++dependencyIndex)
+  {
+    GltfDependencyData dependency;
+    if(!readDependency(stream, dependency) || !dependencyMatchesSource(dependency, sourceDirectory))
+    {
+      return false;
+    }
   }
 
   const uint64_t sourceFileSize = std::filesystem::file_size(sourcePath);

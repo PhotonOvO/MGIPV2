@@ -138,6 +138,15 @@ GltfUploadResult RendererFacade::uploadGltfModel(const GltfModel& model, VkComma
   return m_backend == RendererBackend::gpuDriven ? gpuDriven().uploadGltfModel(model, cmd) : legacy().uploadGltfModel(model, cmd);
 }
 
+SceneUploadResult RendererFacade::commitSceneUploadPlan(const SceneAsset& asset,
+                                                        const SceneUploadPlan& plan,
+                                                        VkCommandBuffer cmd)
+{
+  return m_backend == RendererBackend::gpuDriven
+             ? gpuDriven().commitSceneUploadPlan(asset, plan, cmd)
+             : legacy().commitSceneUploadPlan(asset, plan, cmd);
+}
+
 void RendererFacade::uploadGltfModelBatch(const GltfModel&          model,
                                           std::span<const uint32_t> textureIndices,
                                           std::span<const uint32_t> materialIndices,
@@ -181,6 +190,14 @@ void RendererFacade::updateMeshTransform(MeshHandle handle, const glm::mat4& tra
     return;
   }
   legacy().updateMeshTransform(handle, transform);
+}
+
+void RendererFacade::updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform)
+{
+  if(m_backend == RendererBackend::gpuDriven)
+  {
+    gpuDriven().updateSceneInstanceTransform(instanceIndex, transform);
+  }
 }
 
 void RendererFacade::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
