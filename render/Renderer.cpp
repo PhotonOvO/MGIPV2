@@ -13,6 +13,7 @@
 #include "../common/ProfilerMarkers.h"
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include "../loader/Ktx2Loader.h"
+#include "../scene/SceneAssetView.h"
 
 #include <algorithm>
 #include <chrono>
@@ -30,7 +31,14 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
-constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 1u;
+constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 7u;
+constexpr uint32_t kLightPassDepthTextureIndex    = kPackedGBufferTargetCount;
+constexpr uint32_t kLightPassSceneColorHdrIndex   = kPackedGBufferTargetCount + 1u;
+constexpr uint32_t kLightPassBloomHalfIndex       = kPackedGBufferTargetCount + 2u;
+constexpr uint32_t kLightPassBloomQuarterIndex    = kPackedGBufferTargetCount + 3u;
+constexpr uint32_t kLightPassVelocityIndex        = kPackedGBufferTargetCount + 4u;
+constexpr uint32_t kLightPassHistoryReadIndex     = kPackedGBufferTargetCount + 5u;
+constexpr uint32_t kLightPassHistoryWriteIndex    = kPackedGBufferTargetCount + 6u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
 
@@ -371,6 +379,7 @@ struct PendingMipGeneration
 {
   shaderio::DrawUniforms drawData{};
   drawData.modelMatrix = mesh.transform;
+  drawData.prevModelMatrix = mesh.transform;
   drawData.baseColorFactor = mesh.baseColorFactor;
   drawData.baseColorTextureIndex = mesh.baseColorTextureIndex;
   drawData.normalTextureIndex = mesh.normalTextureIndex;
@@ -1114,6 +1123,11 @@ void Renderer::shutdown(rhi::Surface& surface)
     vkDestroyPipelineLayout(device, m_device.lightPipelineLayout, nullptr);
     m_device.lightPipelineLayout = VK_NULL_HANDLE;
   }
+  if(m_device.postProcessPipelineLayout != VK_NULL_HANDLE)
+  {
+    vkDestroyPipelineLayout(device, m_device.postProcessPipelineLayout, nullptr);
+    m_device.postProcessPipelineLayout = VK_NULL_HANDLE;
+  }
   if(m_device.depthPyramidPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.depthPyramidPipelineLayout, nullptr);
@@ -1391,6 +1405,36 @@ PipelineHandle Renderer::getGraphicsPipelineHandle(GraphicsPipelineVariant varia
 PipelineHandle Renderer::getLightPipelineHandle() const
 {
   return m_lightPipeline;
+}
+
+PipelineHandle Renderer::getGPUDrivenLightHdrPipelineHandle() const
+{
+  return m_gpuDrivenLightHdrPipeline.isNull() ? m_lightPipeline : m_gpuDrivenLightHdrPipeline;
+}
+
+PipelineHandle Renderer::getBloomPrefilterPipelineHandle() const
+{
+  return m_bloomPrefilterPipeline;
+}
+
+PipelineHandle Renderer::getBloomDownsamplePipelineHandle() const
+{
+  return m_bloomDownsamplePipeline;
+}
+
+PipelineHandle Renderer::getFinalColorPipelineHandle() const
+{
+  return m_finalColorPipeline;
+}
+
+PipelineHandle Renderer::getVelocityPipelineHandle() const
+{
+  return m_velocityPipeline;
+}
+
+PipelineHandle Renderer::getTAAResolvePipelineHandle() const
+{
+  return m_taaResolvePipeline;
 }
 
 PipelineHandle Renderer::getDepthPrepassOpaquePipelineHandle() const
@@ -2012,6 +2056,16 @@ void Renderer::updateGBufferTextureDescriptorSet()
     LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
     return;
   }
+  if(sceneResources.getSceneColorHdrView() == VK_NULL_HANDLE
+      || sceneResources.getBloomHalfView() == VK_NULL_HANDLE
+      || sceneResources.getBloomQuarterView() == VK_NULL_HANDLE
+      || sceneResources.getVelocityView() == VK_NULL_HANDLE
+      || sceneResources.getSceneColorHistoryView(0) == VK_NULL_HANDLE
+      || sceneResources.getSceneColorHistoryView(1) == VK_NULL_HANDLE)
+  {
+    LOGW("GPU-driven post-process image view is null, skipping GBuffer descriptor update");
+    return;
+  }
   if(m_csmShadowResources.getCascadeView() == VK_NULL_HANDLE)
   {
     LOGW("CSM cascade shadow view is null, skipping GBuffer descriptor update");
@@ -2039,9 +2093,29 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
-  imageInfos[kPackedGBufferTargetCount] = VkDescriptorImageInfo{
+  imageInfos[kLightPassDepthTextureIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
       .imageView   = sceneResources.getDepthImageView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getSceneColorHdrView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomHalfIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomHalfView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomQuarterIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomQuarterView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassVelocityIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getVelocityView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   const VkDescriptorImageInfo shadowMapInfo{
@@ -2054,6 +2128,17 @@ void Renderer::updateGBufferTextureDescriptorSet()
   ASSERT(m_device.gbufferTextureSets.size() == frameCount, "LightPass descriptor set count must match frame count");
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
+    imageInfos[kLightPassHistoryReadIndex] = VkDescriptorImageInfo{
+        .sampler     = linearSampler,
+        .imageView   = sceneResources.getSceneColorHistoryView((frameIndex + 1u) & 1u),
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    imageInfos[kLightPassHistoryWriteIndex] = VkDescriptorImageInfo{
+        .sampler     = linearSampler,
+        .imageView   = sceneResources.getSceneColorHistoryView(frameIndex & 1u),
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+
     const VkDescriptorBufferInfo pointLightBufferInfo{
         .buffer = m_lightResources.getPointLightBuffer(frameIndex),
         .offset = 0,
@@ -3815,6 +3900,48 @@ void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
   passExecutor.bindTexture({
       .handle       = kPassOutputHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassSceneColorHdrHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHdrImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomHalfHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomHalfImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomQuarterHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomQuarterImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassVelocityHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getVelocityImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassSceneColorHistoryReadHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHistoryImage(1)),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassSceneColorHistoryWriteHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHistoryImage(0)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
@@ -5854,6 +5981,102 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                        reinterpret_cast<uint64_t>(lightPipeline),
                                        2);  // specialization variant
 
+    if(m_device.postProcessPipelineLayout == VK_NULL_HANDLE)
+    {
+      const std::array<VkDescriptorSetLayout, 1> postSetLayouts{m_device.gbufferTextureSetLayout};
+      const VkPushConstantRange postPushRange{
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .offset     = 0,
+          .size       = sizeof(shaderio::PostProcessPushConstants),
+      };
+      const VkPipelineLayoutCreateInfo postLayoutInfo{
+          .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount         = static_cast<uint32_t>(postSetLayouts.size()),
+          .pSetLayouts            = postSetLayouts.data(),
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges    = &postPushRange,
+      };
+      VK_CHECK(vkCreatePipelineLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                      &postLayoutInfo,
+                                      nullptr,
+                                      &m_device.postProcessPipelineLayout));
+      DBG_VK_NAME(m_device.postProcessPipelineLayout);
+    }
+
+    const auto createFullscreenPipeline = [&](const char* fragmentEntry,
+                                              VkPipelineLayout pipelineLayout,
+                                              VkFormat colorAttachmentFormat,
+                                              uint32_t variant) -> PipelineHandle {
+      const std::array<VkPipelineShaderStageCreateInfo, 2> fullscreenStages{{
+          {
+              .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+              .module = lightShaderModule,
+              .pName  = "vertexMain",
+          },
+          {
+              .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
+              .module = lightShaderModule,
+              .pName  = fragmentEntry,
+          },
+      }};
+      const VkPipelineRenderingCreateInfo fullscreenRenderingInfo{
+          .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+          .colorAttachmentCount    = 1,
+          .pColorAttachmentFormats = &colorAttachmentFormat,
+      };
+      const VkGraphicsPipelineCreateInfo fullscreenPipelineInfo{
+          .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+          .pNext               = &fullscreenRenderingInfo,
+          .stageCount          = static_cast<uint32_t>(fullscreenStages.size()),
+          .pStages             = fullscreenStages.data(),
+          .pVertexInputState   = &vertexInput,
+          .pInputAssemblyState = &inputAssembly,
+          .pViewportState      = &viewportState,
+          .pRasterizationState = &rasterizer,
+          .pMultisampleState   = &multisampling,
+          .pDepthStencilState  = &depthStencil,
+          .pColorBlendState    = &colorBlending,
+          .pDynamicState       = &dynamicState,
+          .layout              = pipelineLayout,
+          .renderPass          = VK_NULL_HANDLE,
+          .subpass             = 0,
+      };
+      VkPipeline pipeline = VK_NULL_HANDLE;
+      VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                          VK_NULL_HANDLE, 1, &fullscreenPipelineInfo, nullptr, &pipeline));
+      DBG_VK_NAME(pipeline);
+      return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                              reinterpret_cast<uint64_t>(pipeline),
+                              variant);
+    };
+
+    m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain",
+                                                           m_device.lightPipelineLayout,
+                                                           SceneResources::kSceneColorHdrFormat,
+                                                           30);
+    m_bloomPrefilterPipeline = createFullscreenPipeline("fragmentBloomPrefilterMain",
+                                                        m_device.postProcessPipelineLayout,
+                                                        SceneResources::kBloomFormat,
+                                                        31);
+    m_bloomDownsamplePipeline = createFullscreenPipeline("fragmentBloomDownsampleMain",
+                                                         m_device.postProcessPipelineLayout,
+                                                         SceneResources::kBloomFormat,
+                                                         32);
+    m_finalColorPipeline = createFullscreenPipeline("fragmentFinalColorMain",
+                                                    m_device.postProcessPipelineLayout,
+                                                    m_swapchainDependent.sceneResources.getOutputTextureFormat(),
+                                                    33);
+    m_velocityPipeline = createFullscreenPipeline("fragmentVelocityMain",
+                                                  m_device.lightPipelineLayout,
+                                                  SceneResources::kVelocityFormat,
+                                                  34);
+    m_taaResolvePipeline = createFullscreenPipeline("fragmentTAAResolveMain",
+                                                    m_device.postProcessPipelineLayout,
+                                                    SceneResources::kSceneColorHdrFormat,
+                                                    35);
+
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightShaderModule, nullptr);
   }
 #endif
@@ -6312,6 +6535,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
     // Render to swapchain format
     const rhi::TextureFormat swapchainFormat = toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat);
+    const rhi::TextureFormat hdrSceneColorFormat = toPortableTextureFormat(SceneResources::kSceneColorHdrFormat);
     const rhi::TextureFormat depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat());
 
     rhi::GraphicsPipelineDesc forwardGraphicsDesc{
@@ -6357,6 +6581,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
       rhi::GraphicsPipelineDesc forwardMdiGraphicsDesc = forwardGraphicsDesc;
       forwardMdiGraphicsDesc.layout = m_device.mdiPipelineLayout.get();
       forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages.data();
+      forwardMdiGraphicsDesc.renderingInfo.colorFormats = &hdrSceneColorFormat;
 
       rhi::vulkan::GraphicsPipelineCreateInfo forwardMdiCreateInfo{
           .key =
@@ -7595,6 +7820,292 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
   return result;
 }
 
+SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd)
+{
+  SceneUploadResult result{};
+  result.meshes.resize(asset.meshes.size(), kNullMeshHandle);
+  result.materials.resize(asset.materials.size(), kNullMaterialHandle);
+  result.textures.resize(asset.textures.size(), kNullTextureHandle);
+
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+
+  VkDeviceSize estimatedTextureUploadBytes = 0;
+  VkDeviceSize estimatedVertexUploadBytes = 0;
+  VkDeviceSize estimatedIndexUploadBytes = 0;
+  for(const TextureUploadPlan& texturePlan : plan.textures)
+  {
+    estimatedTextureUploadBytes += texturePlan.payloadByteSize;
+  }
+  for(const MeshUploadPlan& meshPlan : plan.meshes)
+  {
+    estimatedVertexUploadBytes += meshPlan.vertexByteSize;
+    estimatedIndexUploadBytes += meshPlan.indexByteSize;
+  }
+
+  BatchUploadContext batchUpload;
+  batchUpload.init(device, m_device.allocator, estimatedTextureUploadBytes + estimatedVertexUploadBytes + estimatedIndexUploadBytes);
+  m_meshPool.reserve(estimatedVertexUploadBytes, estimatedIndexUploadBytes, cmd);
+
+  for(const TextureUploadPlan& texturePlan : plan.textures)
+  {
+    if(texturePlan.textureIndex >= asset.textures.size() || !result.textures[texturePlan.textureIndex].isNull())
+    {
+      continue;
+    }
+
+    const SceneTexture& texture = asset.textures[texturePlan.textureIndex];
+    if(texture.payloadSize == 0 || texture.payloadOffset + texture.payloadSize > asset.texturePayload.size())
+    {
+      continue;
+    }
+
+    const uint8_t* payloadData = asset.texturePayload.data() + texture.payloadOffset;
+    const size_t payloadSize = static_cast<size_t>(texture.payloadSize);
+    VkFormat format = texturePlan.format;
+    uint32_t width = texturePlan.width;
+    uint32_t height = texturePlan.height;
+    uint32_t mipLevels = std::max(texturePlan.mipLevels, 1u);
+    Ktx2Loader::Ktx2Texture ktxTexture;
+    const bool isKtxPayload = texturePlan.payloadKind == TexturePayloadKind::Ktx2Container;
+    if(isKtxPayload)
+    {
+      Ktx2Loader loader;
+      if(!loader.loadFromMemory(payloadData, payloadSize, ktxTexture))
+      {
+        LOGW("Skipping SceneAsset KTX2 texture %u: %s", texturePlan.textureIndex, loader.getLastError().c_str());
+        continue;
+      }
+      if(!supportsSampledImageFormat(physicalDevice, ktxTexture.format))
+      {
+        LOGW("Skipping unsupported SceneAsset KTX2 texture format %s for texture %u",
+             string_VkFormat(ktxTexture.format),
+             texturePlan.textureIndex);
+        continue;
+      }
+      format = ktxTexture.format;
+      width = ktxTexture.width;
+      height = ktxTexture.height;
+      mipLevels = std::max(ktxTexture.mipLevels, 1u);
+    }
+
+    const VkImageCreateInfo imageInfo = {
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = format,
+        .extent      = {width, height, 1},
+        .mipLevels   = mipLevels,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+    };
+
+    utils::Image image = createImage(m_device.allocator, imageInfo);
+    utils::cmdInitImageLayout(cmd, image.image);
+
+    if(isKtxPayload)
+    {
+      const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
+      std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
+
+      for(uint32_t mip = 0; mip < mipLevels; ++mip)
+      {
+        const VkBufferImageCopy region{
+            .bufferOffset = ktxTexture.mipOffsets[mip],
+            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .layerCount = 1},
+            .imageExtent = {std::max(width >> mip, 1u), std::max(height >> mip, 1u), 1},
+        };
+        batchUpload.recordTextureUpload(slice, image.image, region);
+      }
+    }
+    else
+    {
+      const BatchUploadContext::Slice slice = batchUpload.allocate(payloadSize, 4);
+      std::memcpy(slice.cpuPtr, payloadData, payloadSize);
+      batchUpload.recordTextureUpload(
+          slice,
+          image.image,
+          VkBufferImageCopy{
+              .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+              .imageExtent = {width, height, 1},
+          });
+    }
+
+    const VkImageViewCreateInfo viewInfo = {
+        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image            = image.image,
+        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+        .format           = format,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
+    };
+
+    VkImageView imageView = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
+
+    utils::ImageResource imageResource{};
+    imageResource.image = image.image;
+    imageResource.allocation = image.allocation;
+    imageResource.view = imageView;
+    imageResource.layout = VK_IMAGE_LAYOUT_GENERAL;
+    imageResource.extent = {width, height};
+
+    result.textures[texturePlan.textureIndex] = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
+        .hot = {
+            .runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
+            .sampledImageView = imageView,
+            .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        },
+        .cold = {
+            .ownedImage = imageResource,
+            .sourceExtent = {width, height},
+            .mipLevels = mipLevels,
+        },
+    });
+  }
+
+  for(const MaterialCreatePlan& materialPlan : plan.materials)
+  {
+    if(materialPlan.materialIndex >= asset.materials.size() || !result.materials[materialPlan.materialIndex].isNull())
+    {
+      continue;
+    }
+
+    MaterialResources::MaterialRecord record;
+    if(materialPlan.baseColorTexture >= 0 && static_cast<size_t>(materialPlan.baseColorTexture) < result.textures.size())
+    {
+      record.baseColorTexture = result.textures[materialPlan.baseColorTexture];
+      record.sampledTexture = record.baseColorTexture;
+    }
+    if(materialPlan.metallicRoughnessTexture >= 0 && static_cast<size_t>(materialPlan.metallicRoughnessTexture) < result.textures.size())
+    {
+      record.metallicRoughnessTexture = result.textures[materialPlan.metallicRoughnessTexture];
+    }
+    if(materialPlan.normalTexture >= 0 && static_cast<size_t>(materialPlan.normalTexture) < result.textures.size())
+    {
+      record.normalTexture = result.textures[materialPlan.normalTexture];
+    }
+    if(materialPlan.occlusionTexture >= 0 && static_cast<size_t>(materialPlan.occlusionTexture) < result.textures.size())
+    {
+      record.occlusionTexture = result.textures[materialPlan.occlusionTexture];
+    }
+    if(materialPlan.emissiveTexture >= 0 && static_cast<size_t>(materialPlan.emissiveTexture) < result.textures.size())
+    {
+      record.emissiveTexture = result.textures[materialPlan.emissiveTexture];
+    }
+
+    record.baseColorFactor = materialPlan.baseColorFactor;
+    record.metallicFactor = materialPlan.metallicFactor;
+    record.roughnessFactor = materialPlan.roughnessFactor;
+    record.normalScale = materialPlan.normalScale;
+    record.occlusionStrength = materialPlan.occlusionStrength;
+    record.emissiveFactor = materialPlan.emissiveFactor;
+    record.alphaMode = materialPlan.alphaMode;
+    record.alphaCutoff = materialPlan.alphaCutoff;
+    record.descriptorIndex = static_cast<rhi::ResourceIndex>(materialPlan.materialIndex);
+    record.debugName = asset.materials[materialPlan.materialIndex].name.empty()
+                           ? "scene-material"
+                           : asset.materials[materialPlan.materialIndex].name.c_str();
+
+    result.materials[materialPlan.materialIndex] = m_materials.materialPool.emplace(std::move(record));
+  }
+
+  for(const MeshUploadPlan& meshPlan : plan.meshes)
+  {
+    if(meshPlan.meshIndex >= asset.meshes.size() || !result.meshes[meshPlan.meshIndex].isNull())
+    {
+      continue;
+    }
+
+    const SceneMesh& mesh = asset.meshes[meshPlan.meshIndex];
+    if(meshPlan.vertexSrcOffset + meshPlan.vertexByteSize > asset.vertexPayload.size()
+       || meshPlan.indexSrcOffset + meshPlan.indexByteSize > asset.indexPayload.size())
+    {
+      continue;
+    }
+
+    const uint8_t* vertexBegin = asset.vertexPayload.data() + meshPlan.vertexSrcOffset;
+    const uint32_t* indexBegin = reinterpret_cast<const uint32_t*>(asset.indexPayload.data() + meshPlan.indexSrcOffset);
+    SceneMeshData sceneMeshData{
+        .interleavedVertexData = std::span<const uint8_t>(vertexBegin, static_cast<size_t>(meshPlan.vertexByteSize)),
+        .vertexCount = meshPlan.vertexCount,
+        .indices = std::span<const uint32_t>(indexBegin, meshPlan.indexCount),
+        .transform = mesh.exportTransform,
+        .materialIndex = static_cast<int32_t>(mesh.materialIndex),
+    };
+
+    MeshHandle meshHandle = m_meshPool.uploadMesh(sceneMeshData, cmd, &batchUpload);
+    if(meshHandle.isNull())
+    {
+      continue;
+    }
+
+    result.meshes[meshPlan.meshIndex] = meshHandle;
+
+    const SceneMaterial* material = mesh.materialIndex < asset.materials.size() ? &asset.materials[mesh.materialIndex] : nullptr;
+    if(material != nullptr)
+    {
+      m_meshPool.setMeshAlphaMode(meshHandle, material->alphaMode, material->alphaCutoff);
+      m_meshPool.setMeshMaterialData(meshHandle,
+                                     material->baseColorFactor,
+                                     material->baseColorTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + material->baseColorTexture) : -1,
+                                     material->normalTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + material->normalTexture) : -1,
+                                     material->metallicRoughnessTexture >= 0
+                                         ? static_cast<int32_t>(getGltfTextureBaseIndex() + material->metallicRoughnessTexture)
+                                         : -1,
+                                     material->occlusionTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + material->occlusionTexture) : -1,
+                                     material->emissiveTexture >= 0 ? static_cast<int32_t>(getGltfTextureBaseIndex() + material->emissiveTexture) : -1,
+                                     material->metallicFactor,
+                                     material->roughnessFactor,
+                                     material->normalScale,
+                                     material->occlusionStrength,
+                                     glm::vec4(material->emissiveFactor, 0.0f),
+                                     material->materialWorkflow);
+
+      if(material->alphaMode == shaderio::LAlphaOpaque)
+      {
+        result.opaqueMeshIndices.push_back(meshPlan.meshIndex);
+        result.shadowCasterIndices.push_back(meshPlan.meshIndex);
+      }
+      else if(material->alphaMode == shaderio::LAlphaMask)
+      {
+        result.alphaTestMeshIndices.push_back(meshPlan.meshIndex);
+        result.shadowCasterIndices.push_back(meshPlan.meshIndex);
+      }
+      else
+      {
+        result.transparentMeshIndices.push_back(meshPlan.meshIndex);
+      }
+    }
+    else
+    {
+      result.opaqueMeshIndices.push_back(meshPlan.meshIndex);
+      result.shadowCasterIndices.push_back(meshPlan.meshIndex);
+    }
+  }
+
+  batchUpload.executeUploads(cmd);
+
+  utils::Buffer batchStagingBuffer = batchUpload.releaseStagingBuffer();
+  if(batchStagingBuffer.buffer != VK_NULL_HANDLE)
+  {
+    m_device.stagingBuffers.push_back(batchStagingBuffer);
+  }
+
+  const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+  for(uint32_t textureIndex = 0; textureIndex < result.textures.size(); ++textureIndex)
+  {
+    if(!result.textures[textureIndex].isNull())
+    {
+      updateBindlessTexture(gltfTextureBaseIndex + textureIndex, result.textures[textureIndex]);
+    }
+  }
+
+  result.transparentDistances.resize(result.transparentMeshIndices.size(), 0.0f);
+  result.transparentSortDirty = true;
+  rebuildShadowPackedBuffers(asset, result, cmd);
+  return result;
+}
+
 void Renderer::initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const
 {
   outResult = {};
@@ -8070,6 +8581,91 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
       &m_device.stagingBuffers);
 }
 
+void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd)
+{
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
+  {
+    waitForAllFrameSlots();
+  }
+  destroyBuffer(m_device.allocator, result.shadowPackedVertexBuffer);
+  destroyBuffer(m_device.allocator, result.shadowPackedIndexBuffer);
+  result.shadowPackedMeshes.clear();
+
+  if(result.shadowCasterIndices.empty())
+  {
+    return;
+  }
+
+  std::vector<uint8_t> packedVertexData;
+  std::vector<uint32_t> packedIndexData;
+
+  for(const size_t meshIndex : result.shadowCasterIndices)
+  {
+    if(meshIndex >= asset.meshes.size())
+    {
+      continue;
+    }
+
+    const SceneMesh& mesh = asset.meshes[meshIndex];
+    const size_t vertexByteOffset = mesh.vertexOffset;
+    const size_t vertexByteSize = static_cast<size_t>(mesh.vertexCount) * 48u;
+    const size_t indexByteOffset = mesh.indexOffset;
+    const size_t indexByteSize = static_cast<size_t>(mesh.indexCount) * sizeof(uint32_t);
+    if(vertexByteOffset + vertexByteSize > asset.vertexPayload.size()
+       || indexByteOffset + indexByteSize > asset.indexPayload.size())
+    {
+      continue;
+    }
+
+    const uint32_t vertexBase = static_cast<uint32_t>(packedVertexData.size() / 48u);
+    const uint32_t firstIndex = static_cast<uint32_t>(packedIndexData.size());
+    packedVertexData.insert(packedVertexData.end(),
+                            asset.vertexPayload.begin() + static_cast<ptrdiff_t>(vertexByteOffset),
+                            asset.vertexPayload.begin() + static_cast<ptrdiff_t>(vertexByteOffset + vertexByteSize));
+
+    const uint32_t* sourceIndices = reinterpret_cast<const uint32_t*>(asset.indexPayload.data() + indexByteOffset);
+    for(uint32_t index = 0; index < mesh.indexCount; ++index)
+    {
+      packedIndexData.push_back(vertexBase + sourceIndices[index]);
+    }
+
+    result.shadowPackedMeshes.push_back(ShadowPackedMesh{
+        .meshIndex = meshIndex,
+        .indexCount = mesh.indexCount,
+        .firstIndex = firstIndex,
+        .vertexOffset = 0,
+    });
+  }
+
+  if(result.shadowPackedMeshes.empty())
+  {
+    return;
+  }
+
+  const std::span<const std::byte> packedVertexBytes(reinterpret_cast<const std::byte*>(packedVertexData.data()),
+                                                     packedVertexData.size());
+  const std::span<const std::byte> packedIndexBytes(reinterpret_cast<const std::byte*>(packedIndexData.data()),
+                                                    packedIndexData.size() * sizeof(uint32_t));
+
+  result.shadowPackedVertexBuffer = upload::createStaticBufferWithUpload(
+      device,
+      m_device.allocator,
+      cmd,
+      packedVertexBytes,
+      VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
+      m_device.staticBufferUploadPolicy,
+      &m_device.stagingBuffers);
+  result.shadowPackedIndexBuffer = upload::createStaticBufferWithUpload(
+      device,
+      m_device.allocator,
+      cmd,
+      packedIndexBytes,
+      VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
+      m_device.staticBufferUploadPolicy,
+      &m_device.stagingBuffers);
+}
+
 void Renderer::destroyGltfResources(const GltfUploadResult& result)
 {
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
@@ -8115,6 +8711,11 @@ void Renderer::updateMeshTransform(MeshHandle handle, const glm::mat4& transform
 uint64_t Renderer::getLightPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
+}
+
+uint64_t Renderer::getPostProcessPipelineLayout() const
+{
+  return reinterpret_cast<uint64_t>(m_device.postProcessPipelineLayout);
 }
 
 uint64_t Renderer::getLightCullingPipelineLayout() const

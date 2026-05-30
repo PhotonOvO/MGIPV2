@@ -20,6 +20,49 @@ constexpr uint32_t kVisibilitySortKeyMask = 0x3fffffffu;
 constexpr uint32_t kVisibilitySortCategoryOpaque = 0x00000000u;
 constexpr uint32_t kVisibilitySortCategoryAlpha = 0x40000000u;
 constexpr uint32_t kVisibilitySortCategoryTransparent = 0x80000000u;
+constexpr uint32_t kMobileMaxTransparentDraws = 2048u;
+constexpr float kGPUDrivenHiZDepthEpsilon = 2.0e-3f;
+constexpr float kGPUDrivenHiZConservativeRadiusScale = 1.1f;
+constexpr float kGPUDrivenHiZConservativeRadiusBias = 0.1f;
+constexpr float kGPUDrivenHiZNearRejectEpsilon = 1.0e-4f;
+constexpr float kGPUDrivenHiZLargeObjectFootprintThreshold = 192.0f;
+constexpr float kGPUDrivenHiZFastCameraFallbackDistance = 8.0f;
+
+uint32_t bytesPerPixelForFormat(VkFormat format)
+{
+  switch(format)
+  {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+      return 4u;
+    case VK_FORMAT_R16G16_SFLOAT:
+      return 4u;
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return 8u;
+    default:
+      return 0u;
+  }
+}
+
+uint64_t estimateTextureBytes(VkExtent2D extent, VkFormat format)
+{
+  return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
+         * static_cast<uint64_t>(bytesPerPixelForFormat(format));
+}
+
+float halton(uint64_t index, uint32_t base)
+{
+  float result = 0.0f;
+  float fraction = 1.0f / static_cast<float>(base);
+  while(index > 0)
+  {
+    result += static_cast<float>(index % base) * fraction;
+    index /= base;
+    fraction /= static_cast<float>(base);
+  }
+  return result;
+}
 
 uint32_t buildGPUDrivenFlags(const MeshRecord& mesh)
 {
@@ -192,6 +235,11 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_gbufferPass = std::make_unique<GPUDrivenGBufferPass>(this);
   m_lightPass = std::make_unique<GPUDrivenLightPass>(this);
   m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
+  m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
+  m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
+  m_bloomPrefilterPass = std::make_unique<GPUDrivenBloomPrefilterPass>(this);
+  m_bloomDownsamplePass = std::make_unique<GPUDrivenBloomDownsamplePass>(this);
+  m_finalColorPass = std::make_unique<GPUDrivenFinalColorPass>(this);
   m_debugPass = std::make_unique<GPUDrivenDebugPass>(this);
   m_presentPass = std::make_unique<GPUDrivenPresentPass>(this);
   m_imguiPass = std::make_unique<GPUDrivenImguiPass>(this);
@@ -209,6 +257,11 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_gbufferPass);
   m_passExecutor.addPass(*m_lightPass);
   m_passExecutor.addPass(*m_forwardPass);
+  m_passExecutor.addPass(*m_velocityPass);
+  m_passExecutor.addPass(*m_taaResolvePass);
+  m_passExecutor.addPass(*m_bloomPrefilterPass);
+  m_passExecutor.addPass(*m_bloomDownsamplePass);
+  m_passExecutor.addPass(*m_finalColorPass);
   m_passExecutor.addPass(*m_debugPass);
   m_passExecutor.addPass(*m_presentPass);
   m_passExecutor.addPass(*m_imguiPass);
@@ -240,6 +293,8 @@ void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
   m_imguiPass.reset();
   m_presentPass.reset();
   m_debugPass.reset();
+  m_taaResolvePass.reset();
+  m_velocityPass.reset();
   m_forwardPass.reset();
   m_lightPass.reset();
   m_gbufferPass.reset();
@@ -308,6 +363,18 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   m_runtimeStats.batchStats.sortPassCount = 0u;
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
+  m_runtimeStats.visibilityDiagnostics = GPUDrivenVisibilityDiagnostics{
+      .safeObjectCount = safeObjectCount,
+      .currentGPUCullingObjectCount = getGPUCullingObjectCount(frameIndex),
+      .previousGPUCullingObjectCount = getPreviousGPUCullingObjectCount(frameIndex),
+      .opaqueCapacity = static_cast<uint32_t>(m_opaqueDrawIndices.size()),
+      .alphaCapacity = static_cast<uint32_t>(m_alphaTestDrawIndices.size()),
+      .transparentCapacity = static_cast<uint32_t>(m_transparentDrawIndices.size()),
+      .maxMobileTransparentDraws = kMobileMaxTransparentDraws,
+      .transparentOrderingCpuSeeded = !m_transparentDrawIndices.empty(),
+      .materialSortKeysCpuSeeded = true,
+      .transparentCapacityOverflow = m_transparentDrawIndices.size() > kMobileMaxTransparentDraws,
+  };
   if(kEnableShippingVisibilitySort && !sceneRenderingSuspended)
   {
     {
@@ -386,6 +453,12 @@ void GPUDrivenRenderer::render(const RenderParams& params)
       appendTransparentDraws(m_transparentDrawIndices);
       m_runtimeStats.batchStats.sortPassCount =
           computeBitonicSortPassCount(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
+      m_runtimeStats.visibilityDiagnostics.sortInputCount =
+          static_cast<uint32_t>(m_visibilitySortInputObjects.size());
+      m_runtimeStats.visibilityDiagnostics.sortPaddedCount =
+          m_visibilitySortInputObjects.empty()
+              ? 0u
+              : nextPowerOfTwo(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
     }
     {
       TRACY_ZONE_SCOPED("GPUDriven::PrepareVisibilitySortInputs");
@@ -419,11 +492,53 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
 
   RenderParams gpuParams = params;
+  if(params.cameraUniforms != nullptr)
+  {
+    m_temporalCameraUniforms = *params.cameraUniforms;
+    if(!m_previousCameraValid)
+    {
+      m_previousCameraUniforms = m_temporalCameraUniforms;
+    }
+    m_temporalCameraUniforms.prevView = m_previousCameraUniforms.view;
+    m_temporalCameraUniforms.prevProjection = m_previousCameraUniforms.projection;
+    m_temporalCameraUniforms.prevViewProjection = m_previousCameraUniforms.viewProjection;
+    const VkExtent2D temporalExtent = getSceneExtent();
+    if(gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
+       && temporalExtent.width > 0u && temporalExtent.height > 0u)
+    {
+      const uint64_t jitterIndex = m_temporalFrameCounter + 1u;
+      const glm::vec2 jitter = (glm::vec2(halton(jitterIndex, 2u), halton(jitterIndex, 3u)) - glm::vec2(0.5f))
+                               * (2.0f * gpuParams.debugOptions.taaJitterScale);
+      m_temporalCameraUniforms.projection[2][0] += jitter.x / static_cast<float>(temporalExtent.width);
+      m_temporalCameraUniforms.projection[2][1] += jitter.y / static_cast<float>(temporalExtent.height);
+      m_temporalCameraUniforms.viewProjection = m_temporalCameraUniforms.projection * m_temporalCameraUniforms.view;
+      m_temporalCameraUniforms.inverseViewProjection = glm::inverse(m_temporalCameraUniforms.viewProjection);
+    }
+    gpuParams.cameraUniforms = &m_temporalCameraUniforms;
+  }
   {
     TRACY_ZONE_SCOPED("GPUDriven::BuildRenderParams");
     if(isMeshletRenderingActive())
     {
       gpuParams.debugOptions.enableGPUOcclusionCulling = params.debugOptions.enableGPUMeshletOcclusionCulling;
+    }
+    m_lastHiZCameraDeltaDistance = 0.0f;
+    m_lastHiZFastCameraFallbackTriggered = false;
+    if(params.cameraUniforms != nullptr)
+    {
+      const glm::vec3 cameraPosition = params.cameraUniforms->cameraPosition;
+      if(m_hiZCameraHistoryValid)
+      {
+        m_lastHiZCameraDeltaDistance = glm::length(cameraPosition - m_lastHiZCameraPosition);
+        m_lastHiZFastCameraFallbackTriggered =
+            m_lastHiZCameraDeltaDistance > kGPUDrivenHiZFastCameraFallbackDistance;
+        if(m_lastHiZFastCameraFallbackTriggered)
+        {
+          gpuParams.debugOptions.enableGPUOcclusionCulling = false;
+        }
+      }
+      m_lastHiZCameraPosition = cameraPosition;
+      m_hiZCameraHistoryValid = true;
     }
     gpuParams.gpuDrivenSceneView =
         (!sceneRenderingSuspended && m_sceneView.usePersistentCullingObjects) ? &m_sceneView : nullptr;
@@ -431,6 +546,33 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     {
       gpuParams.gltfModel = nullptr;
     }
+    const uint32_t historyReadIndex = (frameIndex + 1u) & 1u;
+    const uint32_t historyWriteIndex = frameIndex & 1u;
+    m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
+    m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
+    m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
+    m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
+    m_passExecutor.bindTexture({
+        .handle       = kPassVelocityHandle,
+        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.velocityImage),
+        .aspect       = rhi::TextureAspect::color,
+        .initialState = rhi::ResourceState::General,
+        .isSwapchain  = false,
+    });
+    m_passExecutor.bindTexture({
+        .handle       = kPassSceneColorHistoryReadHandle,
+        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHistoryReadImage),
+        .aspect       = rhi::TextureAspect::color,
+        .initialState = rhi::ResourceState::General,
+        .isSwapchain  = false,
+    });
+    m_passExecutor.bindTexture({
+        .handle       = kPassSceneColorHistoryWriteHandle,
+        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHistoryWriteImage),
+        .aspect       = rhi::TextureAspect::color,
+        .initialState = rhi::ResourceState::General,
+        .isSwapchain  = false,
+    });
   }
   {
     TRACY_ZONE_SCOPED("GPUDriven::submitPassGraph");
@@ -456,12 +598,110 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         && m_hiZDepthPyramid.getSourceDepth().generation == kPassSceneDepthHandle.generation
         && m_hiZDepthPyramid.getLastBoundSet() == gpuCullingDescriptorSet
         && m_hiZDepthPyramid.getLastBoundBinding() == 5;
+    const HiZDepthPyramid::MobilePolicy& hiZPolicy = m_hiZDepthPyramid.getMobilePolicy();
+    const VkExtent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
+    const VkExtent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
+    m_runtimeStats.hiZDiagnostics = GPUDrivenHiZDiagnostics{
+        .sourceWidth = hiZSourceExtent.width,
+        .sourceHeight = hiZSourceExtent.height,
+        .pyramidWidth = hiZPyramidExtent.width,
+        .pyramidHeight = hiZPyramidExtent.height,
+        .mipCount = m_hiZDepthPyramid.getMipCount(),
+        .fullMipCount = m_hiZDepthPyramid.getFullMipCount(),
+        .policyDownsampleDivisor = hiZPolicy.downsampleDivisor,
+        .policyMaxMipCount = hiZPolicy.maxMipCount,
+        .policyMinMipSize = hiZPolicy.minMipSize,
+        .estimatedMemoryBytes = m_hiZDepthPyramid.getEstimatedMemoryBytes(),
+        .generation = m_hiZDepthPyramid.getGenerationCount(),
+        .valid = m_hiZDepthPyramid.isValid(),
+        .boundForGpuCulling = m_runtimeStats.ownsHiZVisibilityChain,
+        .frustumCullingEnabled = gpuParams.debugOptions.enableGPUFrustumCulling,
+        .occlusionCullingEnabled = gpuParams.debugOptions.enableGPUOcclusionCulling,
+        .meshletOcclusionEnabled = gpuParams.debugOptions.enableGPUMeshletOcclusionCulling,
+        .meshletConeCullingEnabled = gpuParams.debugOptions.enableGPUMeshletConeCulling,
+        .depthEpsilon = kGPUDrivenHiZDepthEpsilon,
+        .conservativeRadiusScale = kGPUDrivenHiZConservativeRadiusScale,
+        .conservativeRadiusBias = kGPUDrivenHiZConservativeRadiusBias,
+        .nearRejectEpsilon = kGPUDrivenHiZNearRejectEpsilon,
+        .largeObjectFootprintThreshold = kGPUDrivenHiZLargeObjectFootprintThreshold,
+        .fastCameraFallbackDistance = kGPUDrivenHiZFastCameraFallbackDistance,
+        .cameraDeltaDistance = m_lastHiZCameraDeltaDistance,
+        .fastCameraFallbackTriggered = m_lastHiZFastCameraFallbackTriggered,
+    };
+    const VkExtent2D postExtent = getSceneExtent();
+    const VkFormat outputFormat = getOutputTextureFormat();
+    const VkFormat sceneColorFormat = getSceneColorHdrFormat();
+    constexpr VkFormat kRecommendedMobileHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    m_runtimeStats.postProcessDiagnostics = GPUDrivenPostProcessDiagnostics{
+        .displayWidth = getSwapchainExtent().width,
+        .displayHeight = getSwapchainExtent().height,
+        .internalWidth = postExtent.width,
+        .internalHeight = postExtent.height,
+        .outputWidth = postExtent.width,
+        .outputHeight = postExtent.height,
+        .outputFormat = outputFormat,
+        .sceneColorFormat = sceneColorFormat,
+        .recommendedHdrFormat = kRecommendedMobileHdrFormat,
+        .outputMemoryBytes = getOutputTextureEstimatedBytes(),
+        .sceneColorMemoryBytes = getSceneColorHdrEstimatedBytes(),
+        .recommendedHdrMemoryBytes = estimateTextureBytes(postExtent, kRecommendedMobileHdrFormat),
+        .bloomHalfQuarterMemoryBytes = getBloomEstimatedBytes(),
+        .fixedExposure = gpuParams.debugOptions.postExposure,
+        .adaptiveExposureTarget = gpuParams.debugOptions.exposureTargetLuminance,
+        .minAutoExposure = gpuParams.debugOptions.minAutoExposure,
+        .maxAutoExposure = gpuParams.debugOptions.maxAutoExposure,
+        .bloomIntensity = gpuParams.debugOptions.bloomIntensity,
+        .bloomThreshold = gpuParams.debugOptions.bloomThreshold,
+        .colorSaturation = gpuParams.debugOptions.colorSaturation,
+        .colorContrast = gpuParams.debugOptions.colorContrast,
+        .colorGamma = gpuParams.debugOptions.colorGamma,
+        .vignetteIntensity = gpuParams.debugOptions.vignetteIntensity,
+        .lensDirtIntensity = gpuParams.debugOptions.lensDirtIntensity,
+        .taaBlendWeight = gpuParams.debugOptions.taaBlendWeight,
+        .taaJitterScale = gpuParams.debugOptions.taaJitterScale,
+        .renderScale = gpuParams.debugOptions.renderScale,
+        .upscaleMode = static_cast<uint32_t>(std::max(0, gpuParams.debugOptions.upscalingMode)),
+        .hdrSceneColorActive = sceneColorFormat == kRecommendedMobileHdrFormat
+                               && m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE
+                               && !getGPUDrivenLightHdrPipelineHandle().isNull(),
+        .mobileHdrRecommended = true,
+        .toneMapInLightPass = false,
+        .finalColorPassActive = !getFinalColorPipelineHandle().isNull(),
+        .velocityBufferActive = m_sceneView.velocityImage != VK_NULL_HANDLE
+                                && !getVelocityPipelineHandle().isNull(),
+        .taaPassActive = gpuParams.debugOptions.enablePostProcessing
+                         && gpuParams.debugOptions.enableTAA
+                         && !getTAAResolvePipelineHandle().isNull(),
+        .taaHistoryValid = m_taaHistoryValid,
+        .temporalUpscalingActive = false,
+        .internalRenderScaleBlocked = gpuParams.debugOptions.renderScale < 0.999f,
+        .exposurePassActive = gpuParams.debugOptions.enablePostProcessing,
+        .adaptiveExposureActive = gpuParams.debugOptions.enablePostProcessing
+                                  && gpuParams.debugOptions.enableAdaptiveExposure,
+        .bloomPassActive = gpuParams.debugOptions.enableBloom
+                           && gpuParams.debugOptions.enablePostProcessing
+                           && !getBloomPrefilterPipelineHandle().isNull()
+                           && !getBloomDownsamplePipelineHandle().isNull(),
+        .colorGradingLutActive = gpuParams.debugOptions.enablePostProcessing
+                                 && gpuParams.debugOptions.enableColorGrading,
+        .lensEffectsActive = gpuParams.debugOptions.enablePostProcessing
+                             && gpuParams.debugOptions.enableLensEffects,
+    };
     if(m_sceneView.usePersistentCullingObjects
        && getGPUCullingObjectCount(frameIndex) == safeObjectCount && safeObjectCount > 0u)
     {
       m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
     }
+    updateOwnershipDiagnostics(frameIndex, sceneRenderingSuspended, safeObjectCount);
   }
+  if(gpuParams.cameraUniforms != nullptr)
+  {
+    m_previousCameraUniforms = *gpuParams.cameraUniforms;
+    m_previousCameraValid = true;
+  }
+  m_taaHistoryValid = gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
+                      && !getTAAResolvePipelineHandle().isNull();
+  ++m_temporalFrameCounter;
 }
 
 void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams&)
@@ -1199,6 +1439,15 @@ GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCo
   return result;
 }
 
+SceneUploadResult GPUDrivenRenderer::commitSceneUploadPlan(const SceneAsset& asset,
+                                                           const SceneUploadPlan& plan,
+                                                           VkCommandBuffer cmd)
+{
+  SceneUploadResult result = m_renderer.commitSceneUploadPlan(asset, plan, cmd);
+  rebuildGPUDrivenScene(asset, result, cmd);
+  return result;
+}
+
 void GPUDrivenRenderer::uploadGltfModelBatch(const GltfModel&          model,
                                              std::span<const uint32_t> textureIndices,
                                              std::span<const uint32_t> materialIndices,
@@ -1222,11 +1471,16 @@ void GPUDrivenRenderer::destroyGltfResources(const GltfUploadResult& result)
 
 void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& transform)
 {
+  const uint64_t meshKey = packMeshHandleKey(handle);
+  if(const MeshRecord* previousMeshRecord = m_renderer.getMeshPool().tryGet(handle))
+  {
+    m_previousTransformByMeshHandle[meshKey] = previousMeshRecord->transform;
+  }
   m_renderer.updateMeshTransform(handle, transform);
 
   uint32_t drawIndex = 0;
   const bool hasDrawIndex = tryGetMeshDrawIndex(handle, drawIndex);
-  const auto it = m_objectIdByMeshHandle.find(packMeshHandleKey(handle));
+  const auto it = m_objectIdByMeshHandle.find(meshKey);
   if(it == m_objectIdByMeshHandle.end())
   {
     return;
@@ -1442,6 +1696,85 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
   refreshSceneView();
 }
 
+void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset, const SceneUploadResult& uploadResult, VkCommandBuffer cmd)
+{
+  m_activeUploadResult = &uploadResult;
+  const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
+  if(firstSceneBuild)
+  {
+    clearGPUDrivenScene();
+    m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
+  }
+
+  bool appendedObjects = false;
+
+  for(size_t meshIndex = 0; meshIndex < uploadResult.meshes.size() && meshIndex < asset.meshes.size(); ++meshIndex)
+  {
+    const MeshHandle meshHandle = uploadResult.meshes[meshIndex];
+    const uint64_t meshKey = packMeshHandleKey(meshHandle);
+    if(m_objectIdByMeshHandle.find(meshKey) != m_objectIdByMeshHandle.end())
+    {
+      continue;
+    }
+
+    const MeshRecord* meshRecord = m_renderer.getMeshPool().tryGet(meshHandle);
+    if(meshRecord == nullptr)
+    {
+      continue;
+    }
+
+    GPUSceneRegistrationDesc desc{};
+    desc.meshHandle = meshHandle;
+    desc.meshIndex = static_cast<uint32_t>(meshIndex);
+    desc.materialIndex = meshRecord->materialIndex >= 0 ? static_cast<uint32_t>(meshRecord->materialIndex) : UINT32_MAX;
+    desc.transform = meshRecord->transform;
+    desc.boundsSphere = glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
+    desc.flags = buildGPUDrivenFlags(*meshRecord);
+    desc.indexCount = meshRecord->indexCount;
+    desc.firstIndex = meshRecord->firstIndex;
+    desc.vertexOffset = meshRecord->vertexOffset;
+
+    const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
+    const uint32_t objectId = m_sceneRegistry.registerObject(desc);
+    m_objectIdByMeshHandle[meshKey] = objectId;
+    appendedObjects = true;
+
+    m_drawIndexByMeshHandle[meshKey] = objectDrawIndex;
+    if(objectDrawIndex >= m_meshHandleByDrawIndex.size())
+    {
+      m_meshHandleByDrawIndex.resize(objectDrawIndex + 1u, kNullMeshHandle);
+    }
+    m_meshHandleByDrawIndex[objectDrawIndex] = meshHandle;
+    if(meshRecord->alphaMode == shaderio::LAlphaBlend)
+    {
+      m_transparentDrawIndices.push_back(objectDrawIndex);
+    }
+    else if(meshRecord->alphaMode == shaderio::LAlphaMask)
+    {
+      m_alphaTestDrawIndices.push_back(objectDrawIndex);
+    }
+    else
+    {
+      m_opaqueDrawIndices.push_back(objectDrawIndex);
+    }
+  }
+
+  if(appendedObjects || firstSceneBuild)
+  {
+    ++m_sceneTopologyVersion;
+    invalidateSortedBootstrapStates();
+    m_sceneRegistry.syncToGpu(cmd);
+  }
+  m_sceneUploadPending = false;
+  m_persistentDrawDataDirty = true;
+  m_dirtyPersistentDrawIndices.clear();
+  m_runtimeStats.sceneUploadCount += 1;
+  m_runtimeStats.pendingSceneUpdates = 0;
+  m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
+  m_runtimeStats.meshletCount = 0u;
+  refreshSceneView();
+}
+
 void GPUDrivenRenderer::clearGPUDrivenScene()
 {
   ++m_sceneTopologyVersion;
@@ -1462,6 +1795,7 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_cachedStaticVisibilitySortTopologyVersion = 0;
   m_objectIdByMeshHandle.clear();
   m_drawIndexByMeshHandle.clear();
+  m_previousTransformByMeshHandle.clear();
   m_meshHandleByDrawIndex.clear();
   m_opaqueDrawIndices.clear();
   m_alphaTestDrawIndices.clear();
@@ -1471,7 +1805,11 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_activeUploadResult = nullptr;
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = false;
+  m_previousTransformResetPending = false;
   m_dirtyPersistentDrawIndices.clear();
+  m_previousCameraValid = false;
+  m_taaHistoryValid = false;
+  m_temporalFrameCounter = 0;
 }
 
 void GPUDrivenRenderer::flushPendingSceneUploads()
@@ -1603,16 +1941,21 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
     return;
   }
 
-  if(!m_persistentDrawDataDirty && !m_persistentDrawData.empty())
+  if(!m_persistentDrawDataDirty && !m_previousTransformResetPending && !m_persistentDrawData.empty())
   {
     return;
   }
 
+  const bool resetPreviousTransforms = m_previousTransformResetPending && !m_persistentDrawDataDirty;
   const bool needsFullUpload = m_persistentDrawData.size() != m_sceneView.objectCount || m_persistentDrawData.empty()
-                               || m_dirtyPersistentDrawIndices.empty();
+                               || m_dirtyPersistentDrawIndices.empty() || resetPreviousTransforms;
   if(needsFullUpload)
   {
     m_persistentDrawData.assign(m_sceneView.objectCount, shaderio::DrawUniforms{});
+  }
+  if(resetPreviousTransforms)
+  {
+    m_previousTransformByMeshHandle.clear();
   }
 
   const auto updateDrawPayload = [this](uint32_t drawIndex) {
@@ -1637,6 +1980,13 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
 
     shaderio::DrawUniforms drawData{};
     drawData.modelMatrix = mesh->transform;
+    drawData.prevModelMatrix = mesh->transform;
+    const uint64_t meshKey = packMeshHandleKey(meshHandle);
+    const auto previousTransformIt = m_previousTransformByMeshHandle.find(meshKey);
+    if(previousTransformIt != m_previousTransformByMeshHandle.end())
+    {
+      drawData.prevModelMatrix = previousTransformIt->second;
+    }
     drawData.baseColorFactor = mesh->baseColorFactor;
     drawData.baseColorTextureIndex = mesh->baseColorTextureIndex;
     drawData.normalTextureIndex = mesh->normalTextureIndex;
@@ -1693,6 +2043,25 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
       m_renderer.uploadDepthMDIDrawDataRange(frameIndex, range.first, drawRange);
     }
   }
+  bool hasMotionPreviousTransforms = false;
+  for(uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
+  {
+    const MeshHandle meshHandle = m_meshHandleByDrawIndex[drawIndex];
+    if(meshHandle.isNull())
+    {
+      continue;
+    }
+    const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+    if(mesh == nullptr)
+    {
+      continue;
+    }
+    const uint64_t meshKey = packMeshHandleKey(meshHandle);
+    hasMotionPreviousTransforms = hasMotionPreviousTransforms
+                                  || (m_previousTransformByMeshHandle.find(meshKey) != m_previousTransformByMeshHandle.end());
+    m_previousTransformByMeshHandle[meshKey] = mesh->transform;
+  }
+  m_previousTransformResetPending = hasMotionPreviousTransforms && !resetPreviousTransforms;
   m_persistentDrawDataDirty = false;
   m_dirtyPersistentDrawIndices.clear();
 }
@@ -1769,6 +2138,20 @@ void GPUDrivenRenderer::refreshSceneView()
   }
   m_sceneView.outputImage = getOutputTextureImage();
   m_sceneView.outputView = getOutputTextureView();
+  m_sceneView.sceneColorHdrImage = getSceneColorHdrImage();
+  m_sceneView.sceneColorHdrView = getSceneColorHdrView();
+  m_sceneView.bloomHalfImage = getBloomHalfImage();
+  m_sceneView.bloomHalfView = getBloomHalfView();
+  m_sceneView.bloomHalfExtent = getBloomHalfExtent();
+  m_sceneView.bloomQuarterImage = getBloomQuarterImage();
+  m_sceneView.bloomQuarterView = getBloomQuarterView();
+  m_sceneView.bloomQuarterExtent = getBloomQuarterExtent();
+  m_sceneView.velocityImage = getVelocityImage();
+  m_sceneView.velocityView = getVelocityView();
+  m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(1);
+  m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(1);
+  m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(0);
+  m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(0);
   m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
   m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
   m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
@@ -1807,6 +2190,32 @@ void GPUDrivenRenderer::refreshSceneView()
   m_runtimeStats.ownsFullRenderChain = true;
   m_runtimeStats.ownsHiZVisibilityChain = false;
   m_runtimeStats.hiZGeneration = 0;
+  const HiZDepthPyramid::MobilePolicy& hiZPolicy = m_hiZDepthPyramid.getMobilePolicy();
+  const VkExtent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
+  const VkExtent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
+  m_runtimeStats.hiZDiagnostics = GPUDrivenHiZDiagnostics{
+      .sourceWidth = hiZSourceExtent.width,
+      .sourceHeight = hiZSourceExtent.height,
+      .pyramidWidth = hiZPyramidExtent.width,
+      .pyramidHeight = hiZPyramidExtent.height,
+      .mipCount = m_hiZDepthPyramid.getMipCount(),
+      .fullMipCount = m_hiZDepthPyramid.getFullMipCount(),
+      .policyDownsampleDivisor = hiZPolicy.downsampleDivisor,
+      .policyMaxMipCount = hiZPolicy.maxMipCount,
+      .policyMinMipSize = hiZPolicy.minMipSize,
+      .estimatedMemoryBytes = m_hiZDepthPyramid.getEstimatedMemoryBytes(),
+      .generation = m_hiZDepthPyramid.getGenerationCount(),
+      .valid = m_hiZDepthPyramid.isValid(),
+      .boundForGpuCulling = false,
+      .depthEpsilon = kGPUDrivenHiZDepthEpsilon,
+      .conservativeRadiusScale = kGPUDrivenHiZConservativeRadiusScale,
+      .conservativeRadiusBias = kGPUDrivenHiZConservativeRadiusBias,
+      .nearRejectEpsilon = kGPUDrivenHiZNearRejectEpsilon,
+      .largeObjectFootprintThreshold = kGPUDrivenHiZLargeObjectFootprintThreshold,
+      .fastCameraFallbackDistance = kGPUDrivenHiZFastCameraFallbackDistance,
+      .cameraDeltaDistance = m_lastHiZCameraDeltaDistance,
+      .fastCameraFallbackTriggered = m_lastHiZFastCameraFallbackTriggered,
+  };
 }
 
 uint32_t GPUDrivenRenderer::getSafePersistentObjectCount() const
@@ -1825,6 +2234,192 @@ uint32_t GPUDrivenRenderer::getSafePersistentObjectCount() const
   }
   safeCount = std::min(safeCount, kMaxReasonableGPUDrivenObjectCount);
   return safeCount;
+}
+
+void GPUDrivenRenderer::recordDepthPrepassVisibilitySource(bool     usedPreviousFrameIndirect,
+                                                           bool     usedSortedBootstrap,
+                                                           uint32_t previousObjectCount,
+                                                           uint32_t opaqueMaxDrawCount,
+                                                           uint32_t alphaMaxDrawCount)
+{
+  m_runtimeStats.visibilityDiagnostics.depthUsesPreviousFrameIndirect = usedPreviousFrameIndirect;
+  m_runtimeStats.visibilityDiagnostics.depthUsesSortedBootstrap = usedSortedBootstrap;
+  m_runtimeStats.visibilityDiagnostics.previousGPUCullingObjectCount = previousObjectCount;
+  m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity =
+      std::max(m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity, opaqueMaxDrawCount);
+  m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity =
+      std::max(m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity, alphaMaxDrawCount);
+}
+
+void GPUDrivenRenderer::recordGBufferVisibilityPatch(bool patched, uint32_t opaqueCapacity, uint32_t alphaCapacity)
+{
+  m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched = patched;
+  if(patched)
+  {
+    m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity = opaqueCapacity;
+    m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity = alphaCapacity;
+  }
+}
+
+void GPUDrivenRenderer::recordForwardVisibilityPatch(bool patched,
+                                                     uint32_t transparentCapacity,
+                                                     uint32_t)
+{
+  m_runtimeStats.visibilityDiagnostics.transparentPatchDispatched = patched;
+  m_runtimeStats.visibilityDiagnostics.sameFrameTransparentCapacity = patched ? transparentCapacity : 0u;
+  m_runtimeStats.visibilityDiagnostics.transparentCapacityOverflow =
+      transparentCapacity > m_runtimeStats.visibilityDiagnostics.maxMobileTransparentDraws;
+}
+
+void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
+                                                   bool     sceneRenderingSuspended,
+                                                   uint32_t safeObjectCount)
+{
+  const bool hasSceneAttachments = m_sceneView.sceneDepthImage != VK_NULL_HANDLE
+                                   && m_sceneView.sceneDepthView != VK_NULL_HANDLE
+                                   && m_sceneView.outputImage != VK_NULL_HANDLE
+                                   && m_sceneView.outputView != VK_NULL_HANDLE
+                                   && m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE
+                                   && m_sceneView.sceneColorHdrView != VK_NULL_HANDLE
+                                   && m_sceneView.gbufferImages[0] != VK_NULL_HANDLE
+                                   && m_sceneView.gbufferViews[0] != VK_NULL_HANDLE;
+  const bool hasLightingResources = !getGPUDrivenLightHdrPipelineHandle().isNull()
+                                    && getLightPipelineLayout() != 0
+                                    && getLightingInputDescriptorSet() != 0;
+  const bool hasShadowResources = !getCSMShadowPipelineHandle().isNull()
+                                  && getCSMShadowPipelineLayout() != 0
+                                  && getCSMShadowResources().getCascadeImage() != VK_NULL_HANDLE;
+  const bool hasMaterialDescriptors = getGraphicsMaterialDescriptorSet() != 0;
+  const bool hasCurrentVisibility = m_sceneView.usePersistentCullingObjects
+                                    && getGPUCullingObjectCount(frameIndex) == safeObjectCount
+                                    && safeObjectCount > 0u;
+  m_runtimeStats.visibilityDiagnostics.currentGPUCullingObjectCount = getGPUCullingObjectCount(frameIndex);
+  m_runtimeStats.visibilityDiagnostics.safeObjectCount = safeObjectCount;
+
+  m_runtimeStats.resourceOwnership.sceneAttachments =
+      hasSceneAttachments ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
+  m_runtimeStats.resourceOwnership.depthPyramid =
+      m_runtimeStats.ownsHiZVisibilityChain
+          ? GPUDrivenOwnershipState::gpuOwned
+          : (m_hiZDepthPyramid.isValid() ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled);
+  m_runtimeStats.resourceOwnership.visibility =
+      hasCurrentVisibility ? GPUDrivenOwnershipState::gpuOwned
+                           : (m_sceneView.usePersistentCullingObjects ? GPUDrivenOwnershipState::bridged
+                                                                      : GPUDrivenOwnershipState::disabled);
+  m_runtimeStats.resourceOwnership.lightingResources =
+      hasLightingResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
+  m_runtimeStats.resourceOwnership.shadowResources =
+      hasShadowResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
+  m_runtimeStats.resourceOwnership.materialDescriptors =
+      hasMaterialDescriptors ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
+  const bool transparentVisibilityAuthoritative =
+      m_runtimeStats.visibilityDiagnostics.transparentCapacity == 0u
+      || m_runtimeStats.visibilityDiagnostics.transparentPatchDispatched;
+  if(hasCurrentVisibility && m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched
+     && transparentVisibilityAuthoritative)
+  {
+    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
+  }
+  else if(m_visibilitySortPass != nullptr && m_runtimeStats.visibilityDiagnostics.sortInputCount > 0u)
+  {
+    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuSortCpuFeedback;
+  }
+  else
+  {
+    m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::cpuBootstrap;
+  }
+
+  m_runtimeStats.passDiagnostics.clear();
+  m_runtimeStats.passDiagnostics.reserve(m_passExecutor.getPassCount());
+  const auto addPassDiagnostic = [this](const char* name, GPUDrivenOwnershipState ownership, const char* note) {
+    m_runtimeStats.passDiagnostics.push_back(GPUDrivenPassDiagnostic{
+        .name = name != nullptr ? name : "",
+        .ownership = ownership,
+        .note = note != nullptr ? note : "",
+    });
+  };
+
+  addPassDiagnostic("GPUDrivenDepthPrepass",
+                    m_depthPrepass != nullptr ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
+                    hasSceneAttachments ? "MDI submission; scene attachments still bridged"
+                                        : "Disabled until scene attachments are valid");
+  addPassDiagnostic("GPUDrivenDepthPyramid",
+                    m_runtimeStats.resourceOwnership.depthPyramid,
+                    m_runtimeStats.ownsHiZVisibilityChain ? "GPU-driven Hi-Z is bound to GPU culling"
+                                                          : "Hi-Z resource exists but ownership is not complete");
+  addPassDiagnostic("GPUDrivenCulling",
+                    hasCurrentVisibility ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::bridged,
+                    hasCurrentVisibility ? "Current GPU culling object stream is authoritative"
+                                         : "Bootstrap or suspended scene path is active");
+  addPassDiagnostic("GPUDrivenVisibilitySortPass",
+                    m_visibilitySortPass != nullptr ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
+                    m_visibilitySortPass != nullptr ? "GPU sort executes; transparent distance keys are still CPU-seeded"
+                                                    : "Visibility sort pass is not registered");
+  addPassDiagnostic("GPUDrivenLightCulling",
+                    GPUDrivenOwnershipState::bridged,
+                    "Uses shared light resources; clustered mobile path is pending");
+  addPassDiagnostic("GPUDrivenCSMShadow",
+                    hasShadowResources ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
+                    hasShadowResources ? "GPU-driven submission; CSM atlas/resources are still shared"
+                                       : "CSM resources are unavailable");
+  addPassDiagnostic("GPUDrivenGBuffer",
+                    hasSceneAttachments && hasMaterialDescriptors ? GPUDrivenOwnershipState::gpuOwned
+                                                                  : GPUDrivenOwnershipState::disabled,
+                    hasSceneAttachments && hasMaterialDescriptors
+                        ? "MDI submission; attachments/material descriptors are still bridged"
+                        : "Missing scene attachments or material descriptors");
+  addPassDiagnostic("GPUDrivenLightPass",
+                    hasLightingResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled,
+                    hasLightingResources ? "Deferred lighting writes FP16 HDR scene color; lighting descriptors are still shared"
+                                         : "Lighting resources are unavailable");
+  addPassDiagnostic("GPUDrivenForwardPass",
+                    hasSceneAttachments ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
+                    hasSceneAttachments ? "Transparent visibility is GPU-patched into HDR scene color; ordering seed is still CPU-generated"
+                                        : "Disabled until scene attachments are valid");
+  addPassDiagnostic("GPUDrivenVelocity",
+                    m_velocityPass != nullptr && m_runtimeStats.postProcessDiagnostics.velocityBufferActive
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.postProcessDiagnostics.velocityBufferActive
+                        ? "Fullscreen camera velocity writes R16G16 motion vectors for temporal passes"
+                        : "Velocity buffer or pipeline is unavailable");
+  addPassDiagnostic("GPUDrivenTAAResolve",
+                    m_taaResolvePass != nullptr && m_runtimeStats.postProcessDiagnostics.taaPassActive
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.postProcessDiagnostics.taaPassActive
+                        ? "Mobile temporal resolve writes the current HDR history target"
+                        : "TAA is disabled or pipeline is unavailable");
+  addPassDiagnostic("GPUDrivenBloomPrefilter",
+                    m_bloomPrefilterPass != nullptr && m_runtimeStats.postProcessDiagnostics.bloomPassActive
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.postProcessDiagnostics.bloomPassActive
+                        ? "Half-resolution mobile bloom prefilter is active"
+                        : "Bloom is disabled or pipeline is unavailable");
+  addPassDiagnostic("GPUDrivenBloomDownsample",
+                    m_bloomDownsamplePass != nullptr && m_runtimeStats.postProcessDiagnostics.bloomPassActive
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.postProcessDiagnostics.bloomPassActive
+                        ? "Quarter-resolution mobile bloom downsample is active"
+                        : "Bloom is disabled or pipeline is unavailable");
+  addPassDiagnostic("GPUDrivenFinalColor",
+                    m_finalColorPass != nullptr && m_runtimeStats.postProcessDiagnostics.finalColorPassActive
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.postProcessDiagnostics.finalColorPassActive
+                        ? "Final color pass owns exposure, bloom composite, tone mapping, and SDR output"
+                        : "Final color pipeline is unavailable");
+  addPassDiagnostic("GPUDrivenDebug",
+                    GPUDrivenOwnershipState::disabled,
+                    "Pass is registered but debug execution is currently disabled");
+  addPassDiagnostic("GPUDrivenPresent",
+                    GPUDrivenOwnershipState::gpuOwned,
+                    "GPU-driven present path owns the copy/blit step");
+  addPassDiagnostic("GPUDrivenImgui",
+                    sceneRenderingSuspended ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::bridged,
+                    "ImGui rendering is intentionally shared with the app UI backend");
 }
 
 void GPUDrivenRenderer::initVisibilitySortResources()

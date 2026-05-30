@@ -154,6 +154,9 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         }
       }
     }
+    m_renderer->recordGBufferVisibilityPatch(sortedIndirectBufferHandle != 0,
+                                             sortedOpaqueCapacity,
+                                             sortedAlphaCapacity);
   }
 
   const rhi::RenderPassDesc passDesc{

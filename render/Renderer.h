@@ -25,6 +25,8 @@
 #include "MeshPool.h"
 #include "LightResources.h"
 #include "../loader/GltfLoader.h"
+#include "../scene/SceneAsset.h"
+#include "../scene/SceneUploadPlan.h"
 #include "SceneResources.h"
 #include "CSMShadowResources.h"
 #include "TransientAllocator.h"
@@ -87,6 +89,28 @@ struct DebugPassOptions
   float cullDistance{25.0f};
   float pointLightMaxRadius{4.0f};
   float pointLightIntensityScale{4.0f};
+  bool  enablePostProcessing{true};
+  bool  enableBloom{true};
+  bool  enableAdaptiveExposure{false};
+  bool  enableColorGrading{true};
+  bool  enableLensEffects{false};
+  bool  enableTAA{true};
+  bool  showVelocity{false};
+  int   upscalingMode{1};  // 0=Off, 1=TAA, 2=Spatial fallback
+  float postExposure{1.0f};
+  float bloomIntensity{0.35f};
+  float bloomThreshold{1.0f};
+  float taaJitterScale{1.0f};
+  float taaBlendWeight{0.90f};
+  float renderScale{1.0f};
+  float exposureTargetLuminance{0.18f};
+  float minAutoExposure{0.25f};
+  float maxAutoExposure{4.0f};
+  float colorSaturation{1.0f};
+  float colorContrast{1.0f};
+  float colorGamma{1.0f};
+  float vignetteIntensity{0.15f};
+  float lensDirtIntensity{0.0f};
 
   // CSM Shadow cascade debug visualization
   bool  showShadowCascades{true};      // Show cascade frustum splits
@@ -151,6 +175,20 @@ struct GPUDrivenSceneView
   std::array<VkImageView, kPackedGBufferTargetCount> gbufferViews{};
   VkImage                            outputImage{VK_NULL_HANDLE};
   VkImageView                        outputView{VK_NULL_HANDLE};
+  VkImage                            sceneColorHdrImage{VK_NULL_HANDLE};
+  VkImageView                        sceneColorHdrView{VK_NULL_HANDLE};
+  VkImage                            bloomHalfImage{VK_NULL_HANDLE};
+  VkImageView                        bloomHalfView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomHalfExtent{};
+  VkImage                            bloomQuarterImage{VK_NULL_HANDLE};
+  VkImageView                        bloomQuarterView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomQuarterExtent{};
+  VkImage                            velocityImage{VK_NULL_HANDLE};
+  VkImageView                        velocityView{VK_NULL_HANDLE};
+  VkImage                            sceneColorHistoryReadImage{VK_NULL_HANDLE};
+  VkImageView                        sceneColorHistoryReadView{VK_NULL_HANDLE};
+  VkImage                            sceneColorHistoryWriteImage{VK_NULL_HANDLE};
+  VkImageView                        sceneColorHistoryWriteView{VK_NULL_HANDLE};
   VkImage                            depthPyramidImage{VK_NULL_HANDLE};
   const VkImageView*                 depthPyramidMipViews{nullptr};
   uint32_t                           depthPyramidMipCount{0};
@@ -199,6 +237,8 @@ struct GltfUploadResult
   utils::Buffer                 shadowPackedIndexBuffer{};
   std::vector<demo::ShadowPackedMesh> shadowPackedMeshes;
 };
+
+using SceneUploadResult = GltfUploadResult;
 
 struct RuntimeProfileSnapshot
 {
@@ -265,6 +305,7 @@ public:
 
   // glTF model support
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
+  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd);
   void             uploadGltfModelBatch(const GltfModel&          model,
                                         std::span<const uint32_t> textureIndices,
                                         std::span<const uint32_t> materialIndices,
@@ -289,6 +330,12 @@ public:
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
+  PipelineHandle getGPUDrivenLightHdrPipelineHandle() const;
+  PipelineHandle getBloomPrefilterPipelineHandle() const;
+  PipelineHandle getBloomDownsamplePipelineHandle() const;
+  PipelineHandle getFinalColorPipelineHandle() const;
+  PipelineHandle getVelocityPipelineHandle() const;
+  PipelineHandle getTAAResolvePipelineHandle() const;
   PipelineHandle getDepthPrepassOpaquePipelineHandle() const;
   PipelineHandle getDepthPrepassAlphaTestPipelineHandle() const;
   PipelineHandle getDepthPrepassOpaqueMDIPipelineHandle() const;
@@ -346,6 +393,7 @@ public:
   [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
+  uint64_t       getPostProcessPipelineLayout() const;
   uint64_t       getLightCullingPipelineLayout() const;
   uint64_t       getDebugPipelineLayout() const;
   uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
@@ -432,6 +480,41 @@ public:
   VkImageView getSceneGBufferImageView(uint32_t index) const { return m_swapchainDependent.sceneResources.getGBufferImageView(index); }
   VkImage getOutputTextureImage() const { return m_swapchainDependent.sceneResources.getOutputTextureImage(); }
   VkImageView getOutputTextureView() const;
+  VkFormat getOutputTextureFormat() const { return m_swapchainDependent.sceneResources.getOutputTextureFormat(); }
+  uint64_t getOutputTextureEstimatedBytes() const
+  {
+    return m_swapchainDependent.sceneResources.getOutputTextureEstimatedBytes();
+  }
+  VkImage getSceneColorHdrImage() const { return m_swapchainDependent.sceneResources.getSceneColorHdrImage(); }
+  VkImageView getSceneColorHdrView() const { return m_swapchainDependent.sceneResources.getSceneColorHdrView(); }
+  VkFormat getSceneColorHdrFormat() const { return m_swapchainDependent.sceneResources.getSceneColorHdrFormat(); }
+  uint64_t getSceneColorHdrEstimatedBytes() const
+  {
+    return m_swapchainDependent.sceneResources.getSceneColorHdrEstimatedBytes();
+  }
+  VkImage getBloomHalfImage() const { return m_swapchainDependent.sceneResources.getBloomHalfImage(); }
+  VkImageView getBloomHalfView() const { return m_swapchainDependent.sceneResources.getBloomHalfView(); }
+  VkExtent2D getBloomHalfExtent() const { return m_swapchainDependent.sceneResources.getBloomHalfExtent(); }
+  VkImage getBloomQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomQuarterImage(); }
+  VkImageView getBloomQuarterView() const { return m_swapchainDependent.sceneResources.getBloomQuarterView(); }
+  VkExtent2D getBloomQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomQuarterExtent(); }
+  uint64_t getBloomEstimatedBytes() const { return m_swapchainDependent.sceneResources.getBloomEstimatedBytes(); }
+  VkImage getVelocityImage() const { return m_swapchainDependent.sceneResources.getVelocityImage(); }
+  VkImageView getVelocityView() const { return m_swapchainDependent.sceneResources.getVelocityView(); }
+  VkFormat getVelocityFormat() const { return m_swapchainDependent.sceneResources.getVelocityFormat(); }
+  uint64_t getVelocityEstimatedBytes() const { return m_swapchainDependent.sceneResources.getVelocityEstimatedBytes(); }
+  VkImage getSceneColorHistoryImage(uint32_t index) const
+  {
+    return m_swapchainDependent.sceneResources.getSceneColorHistoryImage(index);
+  }
+  VkImageView getSceneColorHistoryView(uint32_t index) const
+  {
+    return m_swapchainDependent.sceneResources.getSceneColorHistoryView(index);
+  }
+  uint64_t getSceneColorHistoryEstimatedBytes() const
+  {
+    return m_swapchainDependent.sceneResources.getSceneColorHistoryEstimatedBytes();
+  }
   VkImageView getShadowMapView() const;
   VkImage getShadowMapImage() const;
   shaderio::ShadowUniforms* getShadowUniformsData();
@@ -533,6 +616,7 @@ private:
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gbufferTextureSets;
     VkPipelineLayout                           lightPipelineLayout{nullptr};
+    VkPipelineLayout                           postProcessPipelineLayout{nullptr};
     VkDescriptorSetLayout                      depthPyramidSetLayout{nullptr};
     VkDescriptorSet                            depthPyramidDescriptorSet{nullptr};
     VkPipelineLayout                           depthPyramidPipelineLayout{nullptr};
@@ -665,6 +749,12 @@ private:
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
+  PipelineHandle m_gpuDrivenLightHdrPipeline{};
+  PipelineHandle m_bloomPrefilterPipeline{};
+  PipelineHandle m_bloomDownsamplePipeline{};
+  PipelineHandle m_finalColorPipeline{};
+  PipelineHandle m_velocityPipeline{};
+  PipelineHandle m_taaResolvePipeline{};
   PipelineHandle m_depthPrepassOpaquePipeline{};
   PipelineHandle m_depthPrepassAlphaTestPipeline{};
   PipelineHandle m_depthPrepassOpaqueMDIPipeline{};
@@ -898,6 +988,7 @@ private:
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
   [[nodiscard]] Aabb computeSceneBounds(const GltfUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const;
   void                     rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd);
+  void                     rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd);
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
   void              ensureTestPointLights(const RenderParams& params);
   [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;

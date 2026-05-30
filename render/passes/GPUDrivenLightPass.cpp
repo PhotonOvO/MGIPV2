@@ -24,7 +24,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightPass::getDependencie
       PassResourceDependency::buffer(kPassPointLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::buffer(kPassPointLightCoarseBoundsHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::buffer(kPassLightCoarseCullingUniformHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
+      PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::ColorAttachment),
   };
   return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
@@ -40,13 +40,13 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenLightPass");
 
   const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
-  if(sceneView == nullptr || sceneView->outputView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->sceneColorHdrView == VK_NULL_HANDLE)
   {
     context.cmd->endEvent();
     return;
   }
 
-  rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(sceneView->outputView);
+  rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(sceneView->sceneColorHdrView);
   const VkExtent2D outputExtent = sceneView->sceneDepthExtent;
   const rhi::Extent2D extent = {outputExtent.width, outputExtent.height};
   if(outputViewHandle.isNull())
@@ -65,8 +65,8 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   };
 
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
       .aspect = rhi::TextureAspect::color,
       .srcStage = rhi::PipelineStage::FragmentShader,
       .dstStage = rhi::PipelineStage::FragmentShader,
@@ -87,13 +87,13 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
 
-  const PipelineHandle lightPipeline = m_renderer->getLightPipelineHandle();
+  const PipelineHandle lightPipeline = m_renderer->getGPUDrivenLightHdrPipelineHandle();
   if(lightPipeline.isNull())
   {
     context.cmd->endRenderPass();
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -128,8 +128,8 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   {
     context.cmd->endRenderPass();
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -163,8 +163,8 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   context.cmd->draw(3, 1, 0, 0);
   context.cmd->endRenderPass();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
       .aspect = rhi::TextureAspect::color,
       .srcStage = rhi::PipelineStage::FragmentShader,
       .dstStage = rhi::PipelineStage::FragmentShader,

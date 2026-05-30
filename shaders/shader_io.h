@@ -49,6 +49,9 @@ struct CameraUniforms
   mat4 projection;
   mat4 viewProjection;
   mat4 inverseViewProjection;
+  mat4 prevView;
+  mat4 prevProjection;
+  mat4 prevViewProjection;
   vec3 cameraPosition;
   float shadowConstantBias;
   vec4 shadowDirectionAndSlopeBias;
@@ -58,6 +61,7 @@ struct CameraUniforms
 struct DrawUniforms
 {
   mat4 modelMatrix;
+  mat4 prevModelMatrix;
   vec4 baseColorFactor;
   int32_t baseColorTextureIndex;   // Bindless texture index, -1 = no texture
   int32_t normalTextureIndex;      // -1 = no texture
@@ -86,6 +90,16 @@ struct SceneInfo
 struct PushConstant
 {
   vec3 color;
+};
+
+struct PostProcessPushConstants
+{
+  vec4 params0;  // exposure, bloom intensity, bloom threshold, bloom enabled
+  vec4 params1;  // source texel size x/y, output texel size x/y
+  vec4 params2;  // adaptive enabled, target luminance, min exposure, max exposure
+  vec4 params3;  // saturation, contrast, gamma, vignette intensity
+  vec4 params4;  // lens effects enabled, lens dirt intensity, reserved, reserved
+  vec4 params5;  // TAA enabled, history valid, blend weight, show velocity
 };
 
 struct PushConstantCompute

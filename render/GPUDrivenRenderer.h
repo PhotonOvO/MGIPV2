@@ -16,12 +16,19 @@
 #include "passes/GPUDrivenImguiPass.h"
 #include "passes/GPUDrivenLightCullingPass.h"
 #include "passes/GPUDrivenLightPass.h"
+#include "passes/GPUDrivenBloomPrefilterPass.h"
+#include "passes/GPUDrivenBloomDownsamplePass.h"
+#include "passes/GPUDrivenFinalColorPass.h"
+#include "passes/GPUDrivenVelocityPass.h"
+#include "passes/GPUDrivenTAAResolvePass.h"
 #include "passes/GPUDrivenPresentPass.h"
 #include "passes/GPUDrivenVisibilitySortPass.h"
 #include "Renderer.h"
 
 #include <array>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace demo {
 
@@ -30,6 +37,129 @@ enum class GPUDrivenVisibilityOwnership : uint32_t
   cpuBootstrap = 0,
   gpuSortCpuFeedback = 1,
   gpuOwned = 2,
+};
+
+enum class GPUDrivenOwnershipState : uint32_t
+{
+  gpuOwned = 0,
+  bridged = 1,
+  legacy = 2,
+  disabled = 3,
+};
+
+struct GPUDrivenPassDiagnostic
+{
+  std::string              name;
+  GPUDrivenOwnershipState ownership{GPUDrivenOwnershipState::disabled};
+  std::string              note;
+};
+
+struct GPUDrivenResourceOwnershipSummary
+{
+  GPUDrivenOwnershipState sceneAttachments{GPUDrivenOwnershipState::disabled};
+  GPUDrivenOwnershipState depthPyramid{GPUDrivenOwnershipState::disabled};
+  GPUDrivenOwnershipState visibility{GPUDrivenOwnershipState::disabled};
+  GPUDrivenOwnershipState lightingResources{GPUDrivenOwnershipState::disabled};
+  GPUDrivenOwnershipState shadowResources{GPUDrivenOwnershipState::disabled};
+  GPUDrivenOwnershipState materialDescriptors{GPUDrivenOwnershipState::disabled};
+};
+
+struct GPUDrivenVisibilityDiagnostics
+{
+  uint32_t safeObjectCount{0};
+  uint32_t currentGPUCullingObjectCount{0};
+  uint32_t previousGPUCullingObjectCount{0};
+  uint32_t sortInputCount{0};
+  uint32_t sortPaddedCount{0};
+  uint32_t opaqueCapacity{0};
+  uint32_t alphaCapacity{0};
+  uint32_t transparentCapacity{0};
+  uint32_t sameFrameOpaqueCapacity{0};
+  uint32_t sameFrameAlphaCapacity{0};
+  uint32_t sameFrameTransparentCapacity{0};
+  uint32_t maxMobileTransparentDraws{0};
+  bool     depthUsesPreviousFrameIndirect{false};
+  bool     depthUsesSortedBootstrap{false};
+  bool     gbufferOpaqueAlphaPatchDispatched{false};
+  bool     transparentPatchDispatched{false};
+  bool     transparentOrderingCpuSeeded{false};
+  bool     materialSortKeysCpuSeeded{false};
+  bool     transparentCapacityOverflow{false};
+};
+
+struct GPUDrivenHiZDiagnostics
+{
+  uint32_t sourceWidth{0};
+  uint32_t sourceHeight{0};
+  uint32_t pyramidWidth{0};
+  uint32_t pyramidHeight{0};
+  uint32_t mipCount{0};
+  uint32_t fullMipCount{0};
+  uint32_t policyDownsampleDivisor{0};
+  uint32_t policyMaxMipCount{0};
+  uint32_t policyMinMipSize{0};
+  uint64_t estimatedMemoryBytes{0};
+  uint64_t generation{0};
+  bool     valid{false};
+  bool     boundForGpuCulling{false};
+  bool     frustumCullingEnabled{false};
+  bool     occlusionCullingEnabled{false};
+  bool     meshletOcclusionEnabled{false};
+  bool     meshletConeCullingEnabled{false};
+  float    depthEpsilon{0.0f};
+  float    conservativeRadiusScale{0.0f};
+  float    conservativeRadiusBias{0.0f};
+  float    nearRejectEpsilon{0.0f};
+  float    largeObjectFootprintThreshold{0.0f};
+  float    fastCameraFallbackDistance{0.0f};
+  float    cameraDeltaDistance{0.0f};
+  bool     fastCameraFallbackTriggered{false};
+};
+
+struct GPUDrivenPostProcessDiagnostics
+{
+  uint32_t displayWidth{0};
+  uint32_t displayHeight{0};
+  uint32_t internalWidth{0};
+  uint32_t internalHeight{0};
+  uint32_t outputWidth{0};
+  uint32_t outputHeight{0};
+  VkFormat outputFormat{VK_FORMAT_UNDEFINED};
+  VkFormat sceneColorFormat{VK_FORMAT_UNDEFINED};
+  VkFormat recommendedHdrFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
+  uint64_t outputMemoryBytes{0};
+  uint64_t sceneColorMemoryBytes{0};
+  uint64_t recommendedHdrMemoryBytes{0};
+  uint64_t bloomHalfQuarterMemoryBytes{0};
+  float    fixedExposure{1.0f};
+  float    adaptiveExposureTarget{0.18f};
+  float    minAutoExposure{0.25f};
+  float    maxAutoExposure{4.0f};
+  float    bloomIntensity{0.35f};
+  float    bloomThreshold{1.0f};
+  float    colorSaturation{1.0f};
+  float    colorContrast{1.0f};
+  float    colorGamma{1.0f};
+  float    vignetteIntensity{0.0f};
+  float    lensDirtIntensity{0.0f};
+  float    taaBlendWeight{0.90f};
+  float    taaJitterScale{1.0f};
+  float    renderScale{1.0f};
+  uint32_t upscaleMode{0};
+  bool     hdrSceneColorActive{false};
+  bool     mobileHdrRecommended{true};
+  bool     toneMapInLightPass{true};
+  bool     finalColorPassActive{false};
+  bool     velocityBufferActive{false};
+  bool     taaPassActive{false};
+  bool     taaHistoryValid{false};
+  bool     temporalUpscalingActive{false};
+  bool     internalRenderScaleBlocked{false};
+  bool     exposurePassActive{false};
+  bool     adaptiveExposureActive{false};
+  bool     bloomPassActive{false};
+  bool     colorGradingLutActive{false};
+  bool     lensEffectsActive{false};
 };
 
 struct GPUDrivenRuntimeStats
@@ -49,6 +179,11 @@ struct GPUDrivenRuntimeStats
   uint64_t hiZGeneration{0};
   GPUDrivenVisibilityOwnership visibilityOwnership{GPUDrivenVisibilityOwnership::cpuBootstrap};
   shaderio::GPUBatchBuildStats batchStats{};
+  GPUDrivenResourceOwnershipSummary resourceOwnership{};
+  GPUDrivenVisibilityDiagnostics visibilityDiagnostics{};
+  GPUDrivenHiZDiagnostics hiZDiagnostics{};
+  GPUDrivenPostProcessDiagnostics postProcessDiagnostics{};
+  std::vector<GPUDrivenPassDiagnostic> passDiagnostics;
 };
 
 class GPUDrivenRenderer
@@ -70,6 +205,7 @@ public:
   ImTextureID    getViewportTextureID(TextureHandle handle) const { return m_renderer.getViewportTextureID(handle); }
   MaterialHandle getMaterialHandle(uint32_t slot) const { return m_renderer.getMaterialHandle(slot); }
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
+  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd);
   void             uploadGltfModelBatch(const GltfModel&          model,
                                         std::span<const uint32_t> textureIndices,
                                         std::span<const uint32_t> materialIndices,
@@ -95,6 +231,7 @@ public:
     return m_renderer.getLastGPUCullingOverlayObjects();
   }
   [[nodiscard]] const GPUDrivenRuntimeStats& getRuntimeStats() const { return m_runtimeStats; }
+  [[nodiscard]] bool isTAAHistoryValid() const { return m_taaHistoryValid; }
   [[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const
   {
     return m_renderer.getRuntimeProfileSnapshot();
@@ -160,6 +297,30 @@ public:
     return m_renderer.getGBufferAlphaTestMDIPipelineHandle();
   }
   [[nodiscard]] PipelineHandle getLightPipelineHandle() const { return m_renderer.getLightPipelineHandle(); }
+  [[nodiscard]] PipelineHandle getGPUDrivenLightHdrPipelineHandle() const
+  {
+    return m_renderer.getGPUDrivenLightHdrPipelineHandle();
+  }
+  [[nodiscard]] PipelineHandle getBloomPrefilterPipelineHandle() const
+  {
+    return m_renderer.getBloomPrefilterPipelineHandle();
+  }
+  [[nodiscard]] PipelineHandle getBloomDownsamplePipelineHandle() const
+  {
+    return m_renderer.getBloomDownsamplePipelineHandle();
+  }
+  [[nodiscard]] PipelineHandle getFinalColorPipelineHandle() const
+  {
+    return m_renderer.getFinalColorPipelineHandle();
+  }
+  [[nodiscard]] PipelineHandle getVelocityPipelineHandle() const
+  {
+    return m_renderer.getVelocityPipelineHandle();
+  }
+  [[nodiscard]] PipelineHandle getTAAResolvePipelineHandle() const
+  {
+    return m_renderer.getTAAResolvePipelineHandle();
+  }
   [[nodiscard]] PipelineHandle getForwardMDIPipelineHandle() const { return m_renderer.getForwardMDIPipelineHandle(); }
   [[nodiscard]] PipelineHandle getCSMShadowPipelineHandle() const { return m_renderer.getCSMShadowPipelineHandle(); }
   [[nodiscard]] PipelineHandle getShadowCullingPipelineHandle() const
@@ -187,6 +348,7 @@ public:
   [[nodiscard]] uint64_t getGraphicsMDIPipelineLayout() const { return m_renderer.getGraphicsMDIPipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
   [[nodiscard]] uint64_t getLightPipelineLayout() const { return m_renderer.getLightPipelineLayout(); }
+  [[nodiscard]] uint64_t getPostProcessPipelineLayout() const { return m_renderer.getPostProcessPipelineLayout(); }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const { return m_renderer.getLightingInputDescriptorSet(); }
   [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
   [[nodiscard]] uint64_t getDebugPipelineLayout() const { return m_renderer.getDebugPipelineLayout(); }
@@ -285,6 +447,13 @@ public:
   {
     recordSortedBootstrapState(frameIndex, opaqueCapacity, alphaCapacity);
   }
+  void recordDepthPrepassVisibilitySource(bool usedPreviousFrameIndirect,
+                                          bool usedSortedBootstrap,
+                                          uint32_t previousObjectCount,
+                                          uint32_t opaqueMaxDrawCount,
+                                          uint32_t alphaMaxDrawCount);
+  void recordGBufferVisibilityPatch(bool patched, uint32_t opaqueCapacity, uint32_t alphaCapacity);
+  void recordForwardVisibilityPatch(bool patched, uint32_t transparentCapacity, uint32_t totalPersistentCapacity);
   [[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const
   {
     return m_renderer.getForwardMDIIndirectBuffer(frameIndex);
@@ -310,6 +479,41 @@ public:
   }
   [[nodiscard]] VkImage getOutputTextureImage() const { return m_renderer.getOutputTextureImage(); }
   [[nodiscard]] VkImageView getOutputTextureView() const { return m_renderer.getOutputTextureView(); }
+  [[nodiscard]] VkFormat getOutputTextureFormat() const { return m_renderer.getOutputTextureFormat(); }
+  [[nodiscard]] uint64_t getOutputTextureEstimatedBytes() const
+  {
+    return m_renderer.getOutputTextureEstimatedBytes();
+  }
+  [[nodiscard]] VkImage getSceneColorHdrImage() const { return m_renderer.getSceneColorHdrImage(); }
+  [[nodiscard]] VkImageView getSceneColorHdrView() const { return m_renderer.getSceneColorHdrView(); }
+  [[nodiscard]] VkFormat getSceneColorHdrFormat() const { return m_renderer.getSceneColorHdrFormat(); }
+  [[nodiscard]] uint64_t getSceneColorHdrEstimatedBytes() const
+  {
+    return m_renderer.getSceneColorHdrEstimatedBytes();
+  }
+  [[nodiscard]] VkImage getBloomHalfImage() const { return m_renderer.getBloomHalfImage(); }
+  [[nodiscard]] VkImageView getBloomHalfView() const { return m_renderer.getBloomHalfView(); }
+  [[nodiscard]] VkExtent2D getBloomHalfExtent() const { return m_renderer.getBloomHalfExtent(); }
+  [[nodiscard]] VkImage getBloomQuarterImage() const { return m_renderer.getBloomQuarterImage(); }
+  [[nodiscard]] VkImageView getBloomQuarterView() const { return m_renderer.getBloomQuarterView(); }
+  [[nodiscard]] VkExtent2D getBloomQuarterExtent() const { return m_renderer.getBloomQuarterExtent(); }
+  [[nodiscard]] uint64_t getBloomEstimatedBytes() const { return m_renderer.getBloomEstimatedBytes(); }
+  [[nodiscard]] VkImage getVelocityImage() const { return m_renderer.getVelocityImage(); }
+  [[nodiscard]] VkImageView getVelocityView() const { return m_renderer.getVelocityView(); }
+  [[nodiscard]] VkFormat getVelocityFormat() const { return m_renderer.getVelocityFormat(); }
+  [[nodiscard]] uint64_t getVelocityEstimatedBytes() const { return m_renderer.getVelocityEstimatedBytes(); }
+  [[nodiscard]] VkImage getSceneColorHistoryImage(uint32_t index) const
+  {
+    return m_renderer.getSceneColorHistoryImage(index);
+  }
+  [[nodiscard]] VkImageView getSceneColorHistoryView(uint32_t index) const
+  {
+    return m_renderer.getSceneColorHistoryView(index);
+  }
+  [[nodiscard]] uint64_t getSceneColorHistoryEstimatedBytes() const
+  {
+    return m_renderer.getSceneColorHistoryEstimatedBytes();
+  }
   [[nodiscard]] VkExtent2D getSwapchainExtent() const { return m_renderer.getSwapchainExtent(); }
   [[nodiscard]] VkImage getCurrentSwapchainImage() const { return m_renderer.getCurrentSwapchainImage(); }
   [[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
@@ -412,6 +616,7 @@ private:
                                                                uint64_t targetIndirectBufferHandle);
   [[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
   void            rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd);
+  void            rebuildGPUDrivenScene(const SceneAsset& asset, const SceneUploadResult& uploadResult, VkCommandBuffer cmd);
   void            clearGPUDrivenScene();
   void            flushPendingSceneUploads();
   void            invalidateSortedBootstrapStates();
@@ -421,6 +626,7 @@ private:
   [[nodiscard]] std::vector<DirtyRange> buildPersistentDrawDirtyRanges() const;
   void            uploadPersistentDrawData();
   void            refreshSceneView();
+  void            updateOwnershipDiagnostics(uint32_t frameIndex, bool sceneRenderingSuspended, uint32_t safeObjectCount);
   [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
 
   Renderer                           m_renderer;
@@ -446,6 +652,11 @@ private:
   std::unique_ptr<GPUDrivenCSMShadowPass>    m_csmShadowPass;
   std::unique_ptr<GPUDrivenGBufferPass>  m_gbufferPass;
   std::unique_ptr<GPUDrivenLightPass>    m_lightPass;
+  std::unique_ptr<GPUDrivenVelocityPass>  m_velocityPass;
+  std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
+  std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;
+  std::unique_ptr<GPUDrivenBloomDownsamplePass> m_bloomDownsamplePass;
+  std::unique_ptr<GPUDrivenFinalColorPass> m_finalColorPass;
   std::unique_ptr<GPUDrivenForwardPass>  m_forwardPass;
   std::unique_ptr<GPUDrivenDebugPass>    m_debugPass;
   std::unique_ptr<GPUDrivenPresentPass>  m_presentPass;
@@ -455,6 +666,7 @@ private:
   const GltfUploadResult*            m_activeUploadResult{nullptr};
   std::unordered_map<uint64_t, uint32_t> m_objectIdByMeshHandle;
   std::unordered_map<uint64_t, uint32_t> m_drawIndexByMeshHandle;
+  std::unordered_map<uint64_t, glm::mat4> m_previousTransformByMeshHandle;
   std::vector<MeshHandle>            m_meshHandleByDrawIndex;
   std::vector<uint32_t>              m_opaqueDrawIndices;
   std::vector<uint32_t>              m_alphaTestDrawIndices;
@@ -475,6 +687,16 @@ private:
   bool                               m_suspendSceneRendering{false};
   bool                               m_sceneUploadPending{false};
   bool                               m_persistentDrawDataDirty{false};
+  bool                               m_previousTransformResetPending{false};
+  bool                               m_hiZCameraHistoryValid{false};
+  glm::vec3                          m_lastHiZCameraPosition{0.0f};
+  float                              m_lastHiZCameraDeltaDistance{0.0f};
+  bool                               m_lastHiZFastCameraFallbackTriggered{false};
+  shaderio::CameraUniforms           m_temporalCameraUniforms{};
+  shaderio::CameraUniforms           m_previousCameraUniforms{};
+  bool                               m_previousCameraValid{false};
+  bool                               m_taaHistoryValid{false};
+  uint64_t                           m_temporalFrameCounter{0};
 };
 
 }  // namespace demo

@@ -4,6 +4,8 @@
 #include "../rhi/RHIDevice.h"
 #include "Pass.h"
 
+#include <array>
+
 namespace demo {
 
 class SceneResources
@@ -47,6 +49,31 @@ public:
   [[nodiscard]] VkImageView getOutputTextureView() const;
   [[nodiscard]] ImTextureID getOutputTextureImID() const;
   [[nodiscard]] VkImage getOutputTextureImage() const;
+  [[nodiscard]] VkFormat getOutputTextureFormat() const { return kOutputTextureFormat; }
+  [[nodiscard]] uint64_t getOutputTextureEstimatedBytes() const;
+  [[nodiscard]] VkImage getSceneColorHdrImage() const;
+  [[nodiscard]] VkImageView getSceneColorHdrView() const;
+  [[nodiscard]] VkFormat getSceneColorHdrFormat() const { return kSceneColorHdrFormat; }
+  [[nodiscard]] uint64_t getSceneColorHdrEstimatedBytes() const;
+  [[nodiscard]] VkImage getBloomHalfImage() const;
+  [[nodiscard]] VkImageView getBloomHalfView() const;
+  [[nodiscard]] VkExtent2D getBloomHalfExtent() const;
+  [[nodiscard]] VkImage getBloomQuarterImage() const;
+  [[nodiscard]] VkImageView getBloomQuarterView() const;
+  [[nodiscard]] VkExtent2D getBloomQuarterExtent() const;
+  [[nodiscard]] uint64_t getBloomEstimatedBytes() const;
+  [[nodiscard]] VkImage getVelocityImage() const;
+  [[nodiscard]] VkImageView getVelocityView() const;
+  [[nodiscard]] VkFormat getVelocityFormat() const { return kVelocityFormat; }
+  [[nodiscard]] uint64_t getVelocityEstimatedBytes() const;
+  [[nodiscard]] VkImage getSceneColorHistoryImage(uint32_t index) const;
+  [[nodiscard]] VkImageView getSceneColorHistoryView(uint32_t index) const;
+  [[nodiscard]] uint64_t getSceneColorHistoryEstimatedBytes() const;
+
+  static constexpr VkFormat kOutputTextureFormat = VK_FORMAT_B8G8R8A8_UNORM;
+  static constexpr VkFormat kSceneColorHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  static constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  static constexpr VkFormat kVelocityFormat = VK_FORMAT_R16G16_SFLOAT;
 
   static constexpr uint32_t kShadowMapSize = 2048;
 
@@ -69,6 +96,18 @@ private:
     utils::Image                       outputTextureImage{};  // Fixed-res output for PBR result
     VkImageView                        outputTextureView{};
     ImTextureID                        outputTextureImID{};
+    utils::Image                       sceneColorHdrImage{};
+    VkImageView                        sceneColorHdrView{};
+    utils::Image                       bloomHalfImage{};
+    VkImageView                        bloomHalfView{};
+    VkExtent2D                         bloomHalfExtent{};
+    utils::Image                       bloomQuarterImage{};
+    VkImageView                        bloomQuarterView{};
+    VkExtent2D                         bloomQuarterExtent{};
+    utils::Image                       velocityImage{};
+    VkImageView                        velocityView{};
+    std::array<utils::Image, 2>        sceneColorHistoryImages{};
+    std::array<VkImageView, 2>         sceneColorHistoryViews{};
     utils::Image                       shadowMapImage{};
     VkImageView                        shadowMapView{};
     utils::Image                       depthPyramidImage{};

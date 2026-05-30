@@ -41,7 +41,7 @@ GPUDrivenForwardPass::GPUDrivenForwardPass(GPUDrivenRenderer* renderer)
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenForwardPass::getDependencies() const
 {
   static const std::array<PassResourceDependency, 2> dependencies = {
-      PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment),
+      PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment),
       PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::DepthStencilAttachment),
   };
@@ -58,7 +58,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenForwardPass");
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->sceneDepthView == VK_NULL_HANDLE || sceneView->outputView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->sceneDepthView == VK_NULL_HANDLE || sceneView->sceneColorHdrView == VK_NULL_HANDLE)
   {
     context.cmd->endEvent();
     return;
@@ -78,7 +78,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     });
   };
 
-  const VkImageView outputImageView = sceneView->outputView;
+  const VkImageView outputImageView = sceneView->sceneColorHdrView;
   const VkExtent2D vkExtent = sceneView->sceneDepthExtent;
   const rhi::Extent2D renderExtent = {vkExtent.width, vkExtent.height};
   if(outputImageView == VK_NULL_HANDLE || renderExtent.width == 0 || renderExtent.height == 0)
@@ -100,8 +100,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   }
 
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
       .aspect = rhi::TextureAspect::color,
       .srcStage = rhi::PipelineStage::FragmentShader,
       .dstStage = rhi::PipelineStage::FragmentShader,
@@ -145,8 +145,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   if(forwardPipeline.isNull())
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -181,8 +181,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   if(!context.cameraAllocValid)
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -218,8 +218,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   if(drawBindGroupHandle.isNull())
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -238,8 +238,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   if(transparentCapacity == 0u)
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -259,16 +259,19 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const uint32_t totalPersistentCapacity = opaqueCapacity + alphaCapacity + transparentCapacity;
   m_renderer->ensureGPUDrivenPersistentIndirectStream(context.frameIndex, totalPersistentCapacity);
   const uint64_t forwardIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(context.frameIndex);
-  if(forwardIndirectBufferHandle == 0
-     || !m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
-                                                        context.frameIndex,
-                                                        forwardIndirectBufferHandle,
-                                                        0x80000000u,
-                                                        opaqueCapacity + alphaCapacity))
+  const bool transparentPatched =
+      forwardIndirectBufferHandle != 0
+      && m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                                       context.frameIndex,
+                                                       forwardIndirectBufferHandle,
+                                                       0x80000000u,
+                                                       opaqueCapacity + alphaCapacity);
+  m_renderer->recordForwardVisibilityPatch(transparentPatched, transparentCapacity, totalPersistentCapacity);
+  if(!transparentPatched)
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
         .aspect = rhi::TextureAspect::color,
         .srcStage = rhi::PipelineStage::FragmentShader,
         .dstStage = rhi::PipelineStage::FragmentShader,
@@ -329,8 +332,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     {
       context.cmd->endRenderPass();
       context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-          .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-          .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+          .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+          .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
           .aspect = rhi::TextureAspect::color,
           .srcStage = rhi::PipelineStage::FragmentShader,
           .dstStage = rhi::PipelineStage::FragmentShader,
@@ -360,8 +363,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
 
   context.cmd->endRenderPass();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
+      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
       .aspect = rhi::TextureAspect::color,
       .srcStage = rhi::PipelineStage::FragmentShader,
       .dstStage = rhi::PipelineStage::FragmentShader,

@@ -345,6 +345,7 @@ void ForwardPass::execute(const PassContext& context) const
 
                 shaderio::DrawUniforms drawData{};
                 drawData.modelMatrix = mesh->transform;
+                drawData.prevModelMatrix = mesh->transform;
                 drawData.baseColorFactor = glm::vec4(1.0f);
                 drawData.baseColorTextureIndex = -1;
                 drawData.normalTextureIndex = -1;

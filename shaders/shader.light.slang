@@ -27,6 +27,12 @@ STATIC_CONST int kGBufferBaseColorIndex = 0;
 STATIC_CONST int kGBufferPackedNormalMaterialIndex = 1;
 STATIC_CONST int kGBufferEmissiveIndex             = 2;
 STATIC_CONST int kGBufferDepthIndex                = 3;
+STATIC_CONST int kSceneColorHdrIndex               = 4;
+STATIC_CONST int kBloomHalfIndex                   = 5;
+STATIC_CONST int kBloomQuarterIndex                = 6;
+STATIC_CONST int kVelocityIndex                    = 7;
+STATIC_CONST int kSceneColorHistoryReadIndex       = 8;
+STATIC_CONST int kSceneColorHistoryWriteIndex      = 9;
 STATIC_CONST float PI                   = 3.14159265359;
 
 float2 signNotZero(float2 v)
@@ -363,4 +369,210 @@ float4 fragmentMain(VSOutput input) : SV_Target
 
     vec3 color = ambient + directional + pointLights + emissiveSample.rgb;
     return float4(toneMapACES(color), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentHdrMain(VSOutput input) : SV_Target
+{
+    float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
+    float4 packedSample    = inTexture[kGBufferPackedNormalMaterialIndex].Sample(input.uv);
+    float4 emissiveSample  = inTexture[kGBufferEmissiveIndex].Sample(input.uv);
+    float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+
+    if(lightCoarseCulling.debugInfo.x > 0.5)
+    {
+        return float4(computeCoarseCullHeatmap(input.uv, baseColorSample.rgb, depthSample > 0.0001), 1.0);
+    }
+
+    if(depthSample <= 0.0001)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
+    vec3 N = decodeNormalOct(packedSample.rg);
+    vec3 V = normalize(camera.cameraPosition - worldPos);
+    vec3 baseColor = saturate(baseColorSample.rgb);
+    float metallic = saturate(packedSample.b);
+    float roughness = saturateRoughness(baseColorSample.a);
+    float ao = saturate(packedSample.a);
+    float viewDepth = computeViewDepth(worldPos);
+
+    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
+    vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
+
+    return float4(max(ambient + directional + pointLights + emissiveSample.rgb, 0.0), 1.0);
+}
+
+[[vk::push_constant]]
+ConstantBuffer<PostProcessPushConstants> postProcess;
+
+int selectTemporalSceneColorIndex()
+{
+    return postProcess.params5.x > 0.5 ? kSceneColorHistoryWriteIndex : kSceneColorHdrIndex;
+}
+
+float3 sampleBloomSource(int textureIndex, float2 uv, float2 texelSize)
+{
+    float3 color = inTexture[textureIndex].Sample(uv).rgb * 0.40;
+    color += inTexture[textureIndex].Sample(uv + float2(texelSize.x, 0.0)).rgb * 0.15;
+    color += inTexture[textureIndex].Sample(uv - float2(texelSize.x, 0.0)).rgb * 0.15;
+    color += inTexture[textureIndex].Sample(uv + float2(0.0, texelSize.y)).rgb * 0.15;
+    color += inTexture[textureIndex].Sample(uv - float2(0.0, texelSize.y)).rgb * 0.15;
+    return color;
+}
+
+float luminance(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float computeAdaptiveExposure()
+{
+    float total = 0.0;
+    [unroll]
+    for(int y = 0; y < 4; ++y)
+    {
+        [unroll]
+        for(int x = 0; x < 4; ++x)
+        {
+            float2 uv = float2((float(x) + 0.5) * 0.25, (float(y) + 0.5) * 0.25);
+            total += luminance(inTexture[selectTemporalSceneColorIndex()].Sample(uv).rgb);
+        }
+    }
+    float averageLum = max(total * (1.0 / 16.0), 1.0e-4);
+    return clamp(postProcess.params2.y / averageLum, postProcess.params2.z, postProcess.params2.w);
+}
+
+float3 applyColorGrade(float3 color, float2 uv)
+{
+    float gray = luminance(color);
+    color = lerp(float3(gray, gray, gray), color, postProcess.params3.x);
+    color = (color - 0.5) * postProcess.params3.y + 0.5;
+    color = pow(max(color, 0.0), float3(1.0 / max(postProcess.params3.z, 0.01)));
+
+    float2 centeredUv = uv * 2.0 - 1.0;
+    float vignette = saturate(1.0 - dot(centeredUv, centeredUv) * postProcess.params3.w);
+    return color * vignette;
+}
+
+float proceduralLensDirt(float2 uv)
+{
+    float grain = frac(sin(dot(floor(uv * 32.0), float2(12.9898, 78.233))) * 43758.5453);
+    float smudge = 0.5 + 0.5 * sin((uv.x + uv.y) * 32.0) * sin((uv.x - uv.y) * 17.0);
+    float radial = saturate(1.0 - length(uv - 0.5) * 1.45);
+    return saturate((grain * 0.35 + smudge * 0.65) * radial);
+}
+
+[shader("fragment")]
+float4 fragmentBloomPrefilterMain(VSOutput input) : SV_Target
+{
+    float3 hdrColor = sampleBloomSource(selectTemporalSceneColorIndex(), input.uv, postProcess.params1.xy);
+    float brightness = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
+    float contribution = saturate((brightness - postProcess.params0.z) / max(brightness, 1e-4));
+    return float4(hdrColor * contribution, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentBloomDownsampleMain(VSOutput input) : SV_Target
+{
+    return float4(sampleBloomSource(kBloomHalfIndex, input.uv, postProcess.params1.xy), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentFinalColorMain(VSOutput input) : SV_Target
+{
+    if(postProcess.params5.w > 0.5)
+    {
+        float2 velocity = inTexture[kVelocityIndex].Sample(input.uv).rg;
+        float magnitude = saturate(length(velocity) * 64.0);
+        return float4(magnitude, magnitude, magnitude, 1.0);
+    }
+
+    float3 hdrColor = inTexture[selectTemporalSceneColorIndex()].Sample(input.uv).rgb;
+    float3 bloom = inTexture[kBloomHalfIndex].Sample(input.uv).rgb * 0.65
+                 + inTexture[kBloomQuarterIndex].Sample(input.uv).rgb * 0.35;
+    float bloomEnabled = postProcess.params0.w;
+    float exposure = lerp(postProcess.params0.x, computeAdaptiveExposure(), postProcess.params2.x);
+    float lensEnabled = postProcess.params4.x;
+    float lensDirt = proceduralLensDirt(input.uv) * postProcess.params4.y * lensEnabled;
+    float3 lensBloom = bloom * lensDirt;
+    float3 color = (hdrColor + (bloom + lensBloom) * postProcess.params0.y * bloomEnabled) * exposure;
+    color = toneMapACES(max(color, 0.0));
+    color = applyColorGrade(color, input.uv);
+    return float4(saturate(color), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentVelocityMain(VSOutput input) : SV_Target
+{
+    float depthSample = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    if(depthSample <= 0.0001)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    float2 currentNdc = input.uv * 2.0 - 1.0;
+    float4 currentClip = float4(currentNdc, depthSample, 1.0);
+    float4 worldPos = mul(camera.inverseViewProjection, currentClip);
+    worldPos.xyz /= max(worldPos.w, 1.0e-5);
+    worldPos.w = 1.0;
+
+    float4 previousClip = mul(camera.prevViewProjection, worldPos);
+    float2 previousUv = previousClip.xy / max(previousClip.w, 1.0e-5) * 0.5 + 0.5;
+    float2 velocity = input.uv - previousUv;
+    return float4(velocity, 0.0, 1.0);
+}
+
+float3 rgbToYCoCg(float3 c)
+{
+    return float3(
+        dot(c, float3(0.25, 0.5, 0.25)),
+        dot(c, float3(0.5, 0.0, -0.5)),
+        dot(c, float3(-0.25, 0.5, -0.25)));
+}
+
+float3 yCoCgToRgb(float3 c)
+{
+    return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+[shader("fragment")]
+float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
+{
+    float3 currentColor = inTexture[kSceneColorHdrIndex].Sample(input.uv).rgb;
+    if(postProcess.params5.x <= 0.5 || postProcess.params5.y <= 0.5)
+    {
+        return float4(max(currentColor, 0.0), 1.0);
+    }
+
+    float2 velocity = inTexture[kVelocityIndex].Sample(input.uv).rg;
+    float2 historyUv = input.uv - velocity;
+    float3 historyColor = inTexture[kSceneColorHistoryReadIndex].Sample(historyUv).rgb;
+
+    float3 minColor = rgbToYCoCg(currentColor);
+    float3 maxColor = minColor;
+    const float2 texel = postProcess.params1.zw;
+    float2 offsets[4] = {
+        float2(texel.x, 0.0),
+        float2(-texel.x, 0.0),
+        float2(0.0, texel.y),
+        float2(0.0, -texel.y)
+    };
+    [unroll]
+    for(int i = 0; i < 4; ++i)
+    {
+        float3 sampleColor = rgbToYCoCg(inTexture[kSceneColorHdrIndex].Sample(input.uv + offsets[i]).rgb);
+        minColor = min(minColor, sampleColor);
+        maxColor = max(maxColor, sampleColor);
+    }
+
+    float3 historyYCoCg = clamp(rgbToYCoCg(historyColor), minColor, maxColor);
+    float3 clampedHistory = yCoCgToRgb(historyYCoCg);
+    const bool historyOutOfBounds =
+        historyUv.x < 0.0 || historyUv.y < 0.0 || historyUv.x > 1.0 || historyUv.y > 1.0;
+    float blendWeight = historyOutOfBounds ? 0.0 : saturate(postProcess.params5.z);
+    float3 resolved = lerp(currentColor, clampedHistory, blendWeight);
+    return float4(max(resolved, 0.0), 1.0);
 }

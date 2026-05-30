@@ -226,6 +226,11 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
           previousBootstrapIndirectBufferHandle != 0 ? previousOpaqueCapacity : previousIndirectObjectCount;
       const uint32_t alphaMaxDrawCount =
           previousBootstrapIndirectBufferHandle != 0 ? previousAlphaCapacity : previousIndirectObjectCount;
+      m_renderer->recordDepthPrepassVisibilitySource(true,
+                                                     previousBootstrapIndirectBufferHandle != 0,
+                                                     previousIndirectObjectCount,
+                                                     opaqueMaxDrawCount,
+                                                     alphaMaxDrawCount);
 
       const VkPipeline opaquePipeline = reinterpret_cast<VkPipeline>(
           m_renderer->getNativeGraphicsPipeline(m_renderer->getDepthPrepassOpaqueMDIPipelineHandle()));

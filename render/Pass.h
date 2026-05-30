@@ -101,6 +101,12 @@ inline constexpr TextureHandle kPassShadowHandle{0xF105u, 1u};
 inline constexpr TextureHandle kPassOutputHandle{0xF106u, 1u};      // OutputTexture (PBR result)
 inline constexpr TextureHandle kPassCSMShadowHandle{0xF107u, 1u};    // CSM cascade array
 inline constexpr TextureHandle kPassDepthPyramidHandle{0xF108u, 1u};
+inline constexpr TextureHandle kPassSceneColorHdrHandle{0xF109u, 1u};
+inline constexpr TextureHandle kPassBloomHalfHandle{0xF10Au, 1u};
+inline constexpr TextureHandle kPassBloomQuarterHandle{0xF10Bu, 1u};
+inline constexpr TextureHandle kPassVelocityHandle{0xF10Cu, 1u};
+inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
+inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

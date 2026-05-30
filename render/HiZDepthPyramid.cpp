@@ -10,24 +10,40 @@ namespace demo {
 
 namespace {
 
-VkExtent2D computePyramidExtent(VkExtent2D sourceSize)
+VkExtent2D computePyramidExtent(VkExtent2D sourceSize, uint32_t downsampleDivisor)
 {
+  downsampleDivisor = std::max(downsampleDivisor, 1u);
   return {
-      std::max(1u, (sourceSize.width + 1u) / 2u),
-      std::max(1u, (sourceSize.height + 1u) / 2u),
+      std::max(1u, (sourceSize.width + downsampleDivisor - 1u) / downsampleDivisor),
+      std::max(1u, (sourceSize.height + downsampleDivisor - 1u) / downsampleDivisor),
   };
 }
 
-uint32_t computeMipCount(VkExtent2D extent)
+uint32_t computeMipCount(VkExtent2D extent, uint32_t minMipSize)
 {
   uint32_t maxDimension = std::max(extent.width, extent.height);
   uint32_t mipCount = 0;
-  while(maxDimension > 0)
+  minMipSize = std::max(minMipSize, 1u);
+  while(maxDimension >= minMipSize && maxDimension > 0)
   {
     ++mipCount;
     maxDimension >>= 1u;
   }
-  return mipCount;
+  return std::max(mipCount, 1u);
+}
+
+uint64_t estimateR32PyramidBytes(VkExtent2D extent, uint32_t mipCount)
+{
+  uint64_t totalBytes = 0;
+  uint32_t width = std::max(extent.width, 1u);
+  uint32_t height = std::max(extent.height, 1u);
+  for(uint32_t mipLevel = 0; mipLevel < mipCount; ++mipLevel)
+  {
+    totalBytes += static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * sizeof(float);
+    width = std::max(1u, width >> 1u);
+    height = std::max(1u, height >> 1u);
+  }
+  return totalBytes;
 }
 
 utils::Buffer createUniformBuffer(VmaAllocator allocator)
@@ -66,8 +82,16 @@ void HiZDepthPyramid::init(VkDevice device, VmaAllocator allocator, uint32_t fra
   m_device = device;
   m_allocator = allocator;
   m_frameCount = std::max(frameCount, 1u);
-  m_size = computePyramidExtent(sourceSize);
-  m_mipCount = computeMipCount(m_size);
+  m_mobilePolicy = MobilePolicy{
+      .downsampleDivisor = 2u,
+      .maxMipCount = shaderio::LDepthPyramidMaxMips,
+      .minMipSize = 1u,
+  };
+  m_sourceSize = sourceSize;
+  m_size = computePyramidExtent(sourceSize, m_mobilePolicy.downsampleDivisor);
+  m_fullMipCount = computeMipCount(m_size, 1u);
+  m_mipCount = std::min(computeMipCount(m_size, m_mobilePolicy.minMipSize), m_mobilePolicy.maxMipCount);
+  m_estimatedMemoryBytes = estimateR32PyramidBytes(m_size, m_mipCount);
 
   if(m_device == VK_NULL_HANDLE || m_allocator == VK_NULL_HANDLE || m_mipCount == 0)
   {
@@ -187,13 +211,42 @@ void HiZDepthPyramid::shutdown()
   m_lastBoundSet = VK_NULL_HANDLE;
   m_lastBoundBinding = 0;
   m_generationCount = 0;
+  m_estimatedMemoryBytes = 0;
   m_valid = false;
   m_layoutInitialized = false;
   m_frameCount = 0;
   m_mipCount = 0;
+  m_fullMipCount = 0;
   m_size = {};
+  m_sourceSize = {};
   m_device = VK_NULL_HANDLE;
   m_allocator = VK_NULL_HANDLE;
+}
+
+void HiZDepthPyramid::configureMobilePolicy(MobilePolicy policy)
+{
+  policy.downsampleDivisor = std::max(policy.downsampleDivisor, 1u);
+  policy.maxMipCount = std::max(policy.maxMipCount, 1u);
+  policy.minMipSize = std::max(policy.minMipSize, 1u);
+  if(policy.downsampleDivisor == m_mobilePolicy.downsampleDivisor
+     && policy.maxMipCount == m_mobilePolicy.maxMipCount
+     && policy.minMipSize == m_mobilePolicy.minMipSize)
+  {
+    return;
+  }
+
+  m_mobilePolicy = policy;
+  const VkExtent2D newSize = computePyramidExtent(m_sourceSize, m_mobilePolicy.downsampleDivisor);
+  const uint32_t newFullMipCount = computeMipCount(newSize, 1u);
+  const uint32_t newMipCount = std::min(computeMipCount(newSize, m_mobilePolicy.minMipSize), m_mobilePolicy.maxMipCount);
+  if(newSize.width != m_size.width || newSize.height != m_size.height || newMipCount != m_mipCount)
+  {
+    m_size = newSize;
+    m_fullMipCount = newFullMipCount;
+    m_mipCount = newMipCount;
+    m_estimatedMemoryBytes = estimateR32PyramidBytes(m_size, m_mipCount);
+    recreateResources();
+  }
 }
 
 void HiZDepthPyramid::resize(VkExtent2D sourceSize)
@@ -203,15 +256,20 @@ void HiZDepthPyramid::resize(VkExtent2D sourceSize)
     return;
   }
 
-  const VkExtent2D newSize = computePyramidExtent(sourceSize);
-  const uint32_t newMipCount = computeMipCount(newSize);
-  if(newSize.width == m_size.width && newSize.height == m_size.height && newMipCount == m_mipCount)
+  const VkExtent2D newSize = computePyramidExtent(sourceSize, m_mobilePolicy.downsampleDivisor);
+  const uint32_t newFullMipCount = computeMipCount(newSize, 1u);
+  const uint32_t newMipCount = std::min(computeMipCount(newSize, m_mobilePolicy.minMipSize), m_mobilePolicy.maxMipCount);
+  if(sourceSize.width == m_sourceSize.width && sourceSize.height == m_sourceSize.height
+     && newSize.width == m_size.width && newSize.height == m_size.height && newMipCount == m_mipCount)
   {
     return;
   }
 
+  m_sourceSize = sourceSize;
   m_size = newSize;
+  m_fullMipCount = newFullMipCount;
   m_mipCount = newMipCount;
+  m_estimatedMemoryBytes = estimateR32PyramidBytes(m_size, m_mipCount);
   recreateResources();
 }
 
@@ -451,6 +509,7 @@ void HiZDepthPyramid::recreateResources()
   destroyImageResources();
   m_sourceDepth = {};
   m_valid = false;
+  m_estimatedMemoryBytes = estimateR32PyramidBytes(m_size, m_mipCount);
 
   if(m_device == VK_NULL_HANDLE || m_allocator == VK_NULL_HANDLE || m_mipCount == 0
      || m_size.width == 0 || m_size.height == 0)

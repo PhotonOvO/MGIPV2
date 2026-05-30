@@ -34,6 +34,7 @@ struct PendingMdiDraw
 {
     shaderio::DrawUniforms drawData{};
     drawData.modelMatrix = mesh.transform;
+    drawData.prevModelMatrix = mesh.transform;
     drawData.baseColorFactor = mesh.baseColorFactor;
     drawData.baseColorTextureIndex = mesh.baseColorTextureIndex;
     drawData.normalTextureIndex = mesh.normalTextureIndex;

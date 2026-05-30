@@ -234,6 +234,7 @@ void GBufferPass::execute(const PassContext& context) const
                 // Compute DrawUniforms using cached material data from mesh
                 shaderio::DrawUniforms drawData{};
                 drawData.modelMatrix = mesh->transform;
+                drawData.prevModelMatrix = mesh->transform;
                 drawData.alphaMode = shaderio::LAlphaOpaque;
                 drawData.alphaCutoff = mesh->alphaCutoff;
                 drawData.baseColorFactor = mesh->baseColorFactor;
@@ -266,6 +267,7 @@ void GBufferPass::execute(const PassContext& context) const
                 // Compute DrawUniforms using cached material data from mesh
                 shaderio::DrawUniforms drawData{};
                 drawData.modelMatrix = mesh->transform;
+                drawData.prevModelMatrix = mesh->transform;
                 drawData.alphaMode = shaderio::LAlphaMask;
                 drawData.alphaCutoff = mesh->alphaCutoff;
                 drawData.baseColorFactor = mesh->baseColorFactor;
