@@ -210,6 +210,7 @@ endif()
 file(GLOB SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/*.slang")
 file(GLOB SHADER_GLSL_FILES  "${CMAKE_CURRENT_LIST_DIR}/shaders/*.glsl")
 file(GLOB SHADER_H_FILES     "${CMAKE_CURRENT_LIST_DIR}/shaders/*.h")
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "shader\\.ibl_common\\.slang$")
 
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/_autogen")
 
