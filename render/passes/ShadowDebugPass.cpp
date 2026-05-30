@@ -131,6 +131,10 @@ void ShadowDebugPass::execute(const PassContext& context) const
             projectionConvention);
         cameraData.viewProjection = cameraData.projection * cameraData.view;
         cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
+        cameraData.unjitteredViewProjection = cameraData.viewProjection;
+        cameraData.unjitteredInverseViewProjection = cameraData.inverseViewProjection;
+        cameraData.prevUnjitteredViewProjection = cameraData.viewProjection;
+        cameraData.prevJitteredViewProjection = cameraData.viewProjection;
         cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
     }
 
@@ -190,16 +194,16 @@ void ShadowDebugPass::execute(const PassContext& context) const
         // Bind pipeline layout
         VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getGBufferPipelineLayout());
 
-        // Bind camera descriptor set (set LSetScene) with dynamic offset
+        // Bind camera descriptor set (set LSetScene) with camera + post-process dynamic offsets.
         const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
         if(!cameraBindGroupHandle.isNull())
         {
             uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
             VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
-            const uint32_t cameraDynamicOffset = cameraAlloc.offset;  // Use actual allocation offset
+            const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
             vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                    shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                                    shaderio::LSetScene, 1, &cameraDescriptorSet, 2, dynamicOffsets);
         }
 
         // Bind vertex buffer

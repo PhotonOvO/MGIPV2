@@ -136,7 +136,7 @@ void DebugPass::execute(const PassContext& context) const
     cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
   }
-  const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+  const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
 
   if(hasLineDebug)
@@ -148,7 +148,7 @@ void DebugPass::execute(const PassContext& context) const
     if(cameraDescriptorSet != VK_NULL_HANDLE)
     {
       vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, shaderio::LSetScene, 1,
-                              &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                              &cameraDescriptorSet, 2, dynamicOffsets);
     }
 
     const uint32_t vertexDataSize = static_cast<uint32_t>(debugVertices.size() * sizeof(shaderio::DebugLineVertex));
@@ -172,7 +172,7 @@ void DebugPass::execute(const PassContext& context) const
     if(cameraDescriptorSet != VK_NULL_HANDLE)
     {
       vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, shaderio::LSetScene, 1,
-                              &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                              &cameraDescriptorSet, 2, dynamicOffsets);
     }
 
     const shaderio::PushConstantGPUCullDebug pushValues{

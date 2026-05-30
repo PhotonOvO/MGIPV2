@@ -41,6 +41,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 
 namespace demo {
@@ -79,6 +80,9 @@ struct DebugPassOptions
   bool  enablePointLights{true};
   bool  showViewportAxis{true};
   bool  showLightCoarseCullingHeatmap{false};
+  bool  enableClusteredLighting{true};
+  bool  showClusteredLightingHeatmap{false};
+  bool  showClusteredLightingOverflow{false};
   bool  showGPUCullingOverlay{false};
   bool  showPassGpuProfile{true};
   bool  enableGPUFrustumCulling{true};
@@ -95,6 +99,7 @@ struct DebugPassOptions
   bool  enableColorGrading{true};
   bool  enableLensEffects{false};
   bool  enableTAA{true};
+  bool  enableIBL{true};
   bool  showVelocity{false};
   int   upscalingMode{1};  // 0=Off, 1=TAA, 2=Spatial fallback
   float postExposure{1.0f};
@@ -111,6 +116,15 @@ struct DebugPassOptions
   float colorGamma{1.0f};
   float vignetteIntensity{0.15f};
   float lensDirtIntensity{0.0f};
+  float iblIntensity{1.0f};
+  int   iblDebugMode{0};  // 0=Off, 1=Diffuse, 2=Specular, 3=Fallback ambient, 4=Environment
+  bool  enableAO{true};
+  float aoRadius{12.0f};
+  float aoIntensity{1.0f};
+  bool  enableSSR{false};
+  int   ssrMaxSteps{32};
+  float ssrThickness{0.03f};
+  bool  enableShadowAtlas{false};
 
   // CSM Shadow cascade debug visualization
   bool  showShadowCascades{true};      // Show cascade frustum splits
@@ -355,6 +369,7 @@ public:
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
   PipelineHandle getGPUDrivenLightHdrPipelineHandle() const;
+  PipelineHandle getGPUDrivenSkyboxPipelineHandle() const;
   PipelineHandle getBloomPrefilterPipelineHandle() const;
   PipelineHandle getBloomDownsamplePipelineHandle() const;
   PipelineHandle getFinalColorPipelineHandle() const;
@@ -430,6 +445,14 @@ public:
   uint64_t       getGraphicsMaterialDescriptorSet() const;
   uint64_t       getLightingInputDescriptorSet() const;
   uint64_t       getLightCullingDescriptorSet() const;
+  [[nodiscard]] bool getIBLEnvironmentLoaded() const;
+  [[nodiscard]] bool getIBLUsingFallback() const;
+  [[nodiscard]] VkFormat getIBLEnvironmentFormat() const;
+  [[nodiscard]] VkExtent2D getIBLEnvironmentExtent() const;
+  [[nodiscard]] uint32_t getIBLEnvironmentMipCount() const;
+  [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const;
+  [[nodiscard]] const std::string& getIBLEnvironmentPath() const;
+  [[nodiscard]] const std::string& getIBLEnvironmentStatus() const;
   void updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms);
   [[nodiscard]] uint32_t getActivePointLightCount() const;
   [[nodiscard]] uint32_t getActiveSpotLightCount() const;
@@ -639,6 +662,15 @@ private:
     VkDescriptorPool                           uiDescriptorPool{};
     VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gbufferTextureSets;
+    utils::ImageResource                       iblEnvironment{};
+    VkFormat                                   iblEnvironmentFormat{VK_FORMAT_UNDEFINED};
+    VkExtent2D                                 iblEnvironmentExtent{};
+    uint32_t                                   iblEnvironmentMipCount{0};
+    uint64_t                                   iblEnvironmentEstimatedBytes{0};
+    bool                                       iblEnvironmentLoaded{false};
+    bool                                       iblUsingFallback{true};
+    std::string                                iblEnvironmentPath;
+    std::string                                iblEnvironmentStatus{"Not initialized"};
     VkPipelineLayout                           lightPipelineLayout{nullptr};
     VkPipelineLayout                           postProcessPipelineLayout{nullptr};
     VkDescriptorSetLayout                      depthPyramidSetLayout{nullptr};
@@ -774,6 +806,7 @@ private:
   // Light pipeline
   PipelineHandle m_lightPipeline{};
   PipelineHandle m_gpuDrivenLightHdrPipeline{};
+  PipelineHandle m_gpuDrivenSkyboxPipeline{};
   PipelineHandle m_bloomPrefilterPipeline{};
   PipelineHandle m_bloomDownsamplePipeline{};
   PipelineHandle m_finalColorPipeline{};
@@ -990,6 +1023,8 @@ private:
   void                 syncMaterialBindGroup(uint32_t frameIndex);
   BindGroupHandle      getCurrentMaterialBindGroupHandle() const;
   void                 flushPendingUploadCommands(bool waitForCompletion);
+  void                 createIBLResources(VkCommandBuffer cmd);
+  void                 destroyIBLResources();
   void                 updateGBufferTextureDescriptorSet();
   void                 bindStaticPassResources();  // Bind static resources once per swapchain rebuild
   void                 destroyBindGroups();

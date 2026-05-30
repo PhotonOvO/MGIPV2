@@ -92,6 +92,10 @@ inline constexpr BufferHandle  kPassGPUCullUniformBufferHandle{0xF00Au, 1u};
 inline constexpr BufferHandle  kPassGPUCullResultBufferHandle{0xF00Bu, 1u};
 inline constexpr BufferHandle  kPassGPUDrivenSortKeyBufferHandle{0xF00Cu, 1u};
 inline constexpr BufferHandle  kPassGPUDrivenSortValueBufferHandle{0xF00Du, 1u};
+inline constexpr BufferHandle  kPassClusterLightCountsHandle{0xF00Eu, 1u};
+inline constexpr BufferHandle  kPassClusterLightIndicesHandle{0xF00Fu, 1u};
+inline constexpr BufferHandle  kPassClusterLightStatsHandle{0xF010u, 1u};
+inline constexpr BufferHandle  kPassClusteredLightUniformHandle{0xF011u, 1u};
 inline constexpr uint32_t      kPackedGBufferTargetCount = 3u;
 inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
 inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
@@ -107,6 +111,7 @@ inline constexpr TextureHandle kPassBloomQuarterHandle{0xF10Bu, 1u};
 inline constexpr TextureHandle kPassVelocityHandle{0xF10Cu, 1u};
 inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
 inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
+inline constexpr TextureHandle kPassGPUDrivenShadowAtlasHandle{0xF10Fu, 1u};
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

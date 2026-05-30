@@ -108,6 +108,7 @@ void BatchUploadContext::copyToSlices(std::span<const Slice> slices,
 
 void BatchUploadContext::recordTextureUpload(const Slice& slice, VkImage dstImage, const VkBufferImageCopy& region)
 {
+  ASSERT(region.bufferOffset <= slice.size, "Texture upload region offset exceeds reserved slice size");
   UploadOperation op{};
   op.type      = UploadType::image;
   op.dstImage  = dstImage;

@@ -203,15 +203,15 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   {
     VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout,
                             shaderio::LSetScene,
                             1,
                             &cameraDescriptorSet,
-                            1,
-                            &cameraDynamicOffset);
+                            2,
+                            dynamicOffsets);
   }
 
   const BindGroupHandle drawBindGroupHandle = m_renderer->getMDIDrawBindGroup(context.frameIndex);

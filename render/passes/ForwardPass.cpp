@@ -313,11 +313,11 @@ void ForwardPass::execute(const PassContext& context) const
         uint64_t cameraSetOpaque = m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific);
         VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(cameraSetOpaque);
 
-        // Bind camera descriptor set (set 1) with dynamic offset
-        const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+        // Bind camera descriptor set (set 1) with camera + post-process dynamic offsets.
+        const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
         vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                                 VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                                shaderio::LSetScene, 1, &cameraDescriptorSet, 2, dynamicOffsets);
     }
 
     // Get draw descriptor set (per-frame)

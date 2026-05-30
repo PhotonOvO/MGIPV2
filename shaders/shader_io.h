@@ -31,6 +31,7 @@ STATIC_CONST int LBindSceneInfo = 0;      // SceneInfo for compute
 STATIC_CONST int LBindCamera    = 1;      // Camera uniform buffer
 STATIC_CONST int LBindLighting  = 2;      // Scene lighting/shadow data
 STATIC_CONST int LBindLightCulling = 3;   // Scene light-culling data
+STATIC_CONST int LBindPostProcess = 4;    // Per-pass post-process uniforms
 
 // Set 2: Draw-level dynamic uniforms
 STATIC_CONST int LSetDraw       = 2;
@@ -52,6 +53,10 @@ struct CameraUniforms
   mat4 prevView;
   mat4 prevProjection;
   mat4 prevViewProjection;
+  mat4 unjitteredViewProjection;
+  mat4 unjitteredInverseViewProjection;
+  mat4 prevUnjitteredViewProjection;
+  mat4 prevJitteredViewProjection;
   vec3 cameraPosition;
   float shadowConstantBias;
   vec4 shadowDirectionAndSlopeBias;
@@ -92,7 +97,7 @@ struct PushConstant
   vec3 color;
 };
 
-struct PostProcessPushConstants
+struct PostProcessUniforms
 {
   vec4 params0;  // exposure, bloom intensity, bloom threshold, bloom enabled
   vec4 params1;  // source texel size x/y, output texel size x/y
@@ -100,6 +105,18 @@ struct PostProcessPushConstants
   vec4 params3;  // saturation, contrast, gamma, vignette intensity
   vec4 params4;  // lens effects enabled, lens dirt intensity, reserved, reserved
   vec4 params5;  // TAA enabled, history valid, blend weight, show velocity
+};
+
+struct GPUDrivenAOPushConstants
+{
+  vec4 params0;  // outputWidth, outputHeight, radius, intensity
+  vec4 params1;  // invInputWidth, invInputHeight, depthScale, normalWeight
+};
+
+struct GPUDrivenSSRPushConstants
+{
+  vec4 params0;  // outputWidth, outputHeight, maxSteps, thickness
+  vec4 params1;  // stride, maxDistance, confidenceScale, reserved
 };
 
 struct PushConstantCompute
@@ -156,6 +173,18 @@ STATIC_CONST int LTileSizeX        = 16;
 STATIC_CONST int LTileSizeY        = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
 STATIC_CONST int LDepthPyramidMaxMips = 32;
+
+// Mobile clustered lighting constants
+STATIC_CONST uint32_t LClusterGridSizeX = 16u;
+STATIC_CONST uint32_t LClusterGridSizeY = 9u;
+STATIC_CONST uint32_t LClusterGridSizeZ = 24u;
+STATIC_CONST uint32_t LClusterCount = LClusterGridSizeX * LClusterGridSizeY * LClusterGridSizeZ;
+STATIC_CONST uint32_t LMaxLightsPerCluster = 32u;
+STATIC_CONST uint32_t LClusterOverflowBit = 0x80000000u;
+STATIC_CONST uint32_t LClusterCountMask = 0x7fffffffu;
+STATIC_CONST uint32_t LClusterLightTypePointBit = 0x00000000u;
+STATIC_CONST uint32_t LClusterLightTypeSpotBit = 0x40000000u;
+STATIC_CONST uint32_t LClusterLightIndexMask = 0x3fffffffu;
 
 // CSM (Cascaded Shadow Maps) constants
 STATIC_CONST int LCascadeCount = 4;  // Number of shadow cascades
@@ -218,6 +247,18 @@ struct LightCullingUniforms
   mat4 viewMatrix;
   mat4 projectionMatrix;
   mat4 invProjectionMatrix;
+};
+
+struct ClusteredLightUniforms
+{
+  vec4 screenSizeAndClusterInfo;  // xy = render extent, z = clusterCountX, w = clusterCountY
+  vec4 clusterZAndLightInfo;      // x = clusterCountZ, y = max lights/cluster, z = point count, w = spot count
+  vec4 clipInfo;                  // x = near, y = far, z = z slicing scale, w = z slicing bias
+  vec4 debugInfo;                 // x = enabled, y = heatmap, z = overflow highlight, w = fallback
+  mat4 viewMatrix;
+  mat4 projectionMatrix;
+  mat4 invProjectionMatrix;
+  mat4 invViewMatrix;
 };
 
 STATIC_CONST uint32_t LGPUCullingThreadCount       = 64;
@@ -380,6 +421,9 @@ struct LightParams
   vec4 lightColorAndNormalBias;           // rgb = light intensity, w = normal bias
   vec4 ambientColorAndTexelSize;          // rgb = ambient term, w = 1 / shadow map size
   vec4 shadowMetrics;                     // x = texelSize, y = baseBias, z = slopeBias, w = cascadeCount
+  vec4 iblParams;                         // x = enabled, y = intensity, z = max env mip, w = valid env texture
+  vec4 iblDebugInfo;                      // x = debug mode, yzw = reserved
+  vec4 phase7Info;                        // x = AO enabled, y = SSR enabled, zw = reserved until atlas sampling lands
 };
 
 struct LightingUniforms

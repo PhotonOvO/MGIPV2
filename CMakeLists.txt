@@ -280,6 +280,8 @@ add_library(demo_core STATIC
   render/AsyncLoadingCoordinator.cpp
   render/GPUDrivenRenderer.h
   render/GPUDrivenRenderer.cpp
+  render/GPUDrivenLightResources.h
+  render/GPUDrivenLightResources.cpp
   render/GPUSceneRegistry.h
   render/GPUSceneRegistry.cpp
   render/HiZDepthPyramid.h
@@ -310,6 +312,16 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenGBufferPass.cpp
   render/passes/GPUDrivenLightPass.h
   render/passes/GPUDrivenLightPass.cpp
+  render/passes/GPUDrivenClusteredLightCullingPass.h
+  render/passes/GPUDrivenClusteredLightCullingPass.cpp
+  render/passes/GPUDrivenAOPass.h
+  render/passes/GPUDrivenAOPass.cpp
+  render/passes/GPUDrivenSSRPass.h
+  render/passes/GPUDrivenSSRPass.cpp
+  render/passes/GPUDrivenShadowAtlasPass.h
+  render/passes/GPUDrivenShadowAtlasPass.cpp
+  render/passes/GPUDrivenSkyboxPass.h
+  render/passes/GPUDrivenSkyboxPass.cpp
   render/passes/GPUDrivenBloomPrefilterPass.h
   render/passes/GPUDrivenBloomPrefilterPass.cpp
   render/passes/GPUDrivenBloomDownsamplePass.h

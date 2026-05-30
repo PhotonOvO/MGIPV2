@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__linux__) || defined(__ANDROID__)
+#include <csignal>
+#endif
 
 namespace demo::rhi::vulkan {
 namespace {
@@ -697,12 +702,29 @@ void VulkanDevice::appendFeatureNode(VkBaseOutStructure*& chainHead, void* featu
   chainHead                = node;
 }
 
-VkBool32 VulkanDevice::debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT,
-                                     VkDebugUtilsMessageTypeFlagsEXT,
+VkBool32 VulkanDevice::debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                     VkDebugUtilsMessageTypeFlagsEXT type,
                                      const VkDebugUtilsMessengerCallbackDataEXT* callbackData,
                                      void*)
 {
-  (void)callbackData;
+  const char* severityName = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0
+                                 ? "ERROR"
+                                 : ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0 ? "WARNING" : "INFO");
+  const char* typeName = (type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) != 0
+                             ? "VALIDATION"
+                             : ((type & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) != 0 ? "PERFORMANCE" : "GENERAL");
+  LOGE("Vulkan validation %s/%s: %s",
+       severityName,
+       typeName,
+       callbackData != nullptr && callbackData->pMessage != nullptr ? callbackData->pMessage : "<null>");
+  if((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
+  {
+#if defined(_MSC_VER)
+    __debugbreak();
+#elif defined(__linux__) || defined(__ANDROID__)
+    raise(SIGTRAP);
+#endif
+  }
   return VK_FALSE;
 }
 

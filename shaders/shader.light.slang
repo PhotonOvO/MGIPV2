@@ -10,6 +10,8 @@ Sampler2DArray shadowMap;
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<LightData> pointLightBuffer;
+[[vk::binding(8, 0)]]
+StructuredBuffer<LightData> spotLightBuffer;
 
 [[vk::binding(3, 0)]]
 StructuredBuffer<uint16_t4> pointLightXYCoarseCullIndicesBuffer;
@@ -17,11 +19,22 @@ StructuredBuffer<uint16_t4> pointLightXYCoarseCullIndicesBuffer;
 [[vk::binding(4, 0)]]
 ConstantBuffer<LightCoarseCullingUniforms> lightCoarseCulling;
 
+[[vk::binding(5, 0)]]
+StructuredBuffer<uint> clusterLightCounts;
+
+[[vk::binding(6, 0)]]
+StructuredBuffer<uint> clusterLightIndices;
+
+[[vk::binding(7, 0)]]
+ConstantBuffer<ClusteredLightUniforms> clusteredLight;
+
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
 
 [[vk::binding(LBindLighting, LSetScene)]]
 ConstantBuffer<LightingUniforms> lighting;
+[[vk::binding(LBindPostProcess, LSetScene)]]
+ConstantBuffer<PostProcessUniforms> postProcess;
 
 STATIC_CONST int kGBufferBaseColorIndex = 0;
 STATIC_CONST int kGBufferPackedNormalMaterialIndex = 1;
@@ -33,7 +46,12 @@ STATIC_CONST int kBloomQuarterIndex                = 6;
 STATIC_CONST int kVelocityIndex                    = 7;
 STATIC_CONST int kSceneColorHistoryReadIndex       = 8;
 STATIC_CONST int kSceneColorHistoryWriteIndex      = 9;
+STATIC_CONST int kIBLEnvironmentIndex              = 10;
+STATIC_CONST int kAOTextureIndex                   = 11;
+STATIC_CONST int kSSRTextureIndex                  = 12;
 STATIC_CONST float PI                   = 3.14159265359;
+STATIC_CONST float TWO_PI               = 6.28318530718;
+STATIC_CONST float kEquirectSpecularFallbackWeight = 0.0;
 
 float2 signNotZero(float2 v)
 {
@@ -82,6 +100,34 @@ vec3 Fresnel_Schlick(float cosTheta, vec3 F0)
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+vec3 Fresnel_Schlick_Roughness(float cosTheta, vec3 F0, float roughness)
+{
+    vec3 grazing = max(vec3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0);
+    return F0 + (grazing - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec2 approximateEnvironmentBRDF(float NdotV, float roughness)
+{
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+float2 directionToEquirectUv(vec3 direction)
+{
+    vec3 d = normalize(direction);
+    float u = atan2(d.z, d.x) / TWO_PI + 0.5;
+    float v = asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5;
+    return float2(u, 1.0 - v);
+}
+
+vec3 sampleEquirectEnvironment(vec3 direction, float mipLevel)
+{
+    return max(inTexture[kIBLEnvironmentIndex].SampleLevel(directionToEquirectUv(direction), mipLevel).rgb, 0.0);
+}
+
 vec3 reconstructWorldPosition(float2 uv, float depth)
 {
     float ndcX = uv.x * 2.0 - 1.0;
@@ -89,6 +135,24 @@ vec3 reconstructWorldPosition(float2 uv, float depth)
     float4 clipPos = float4(ndcX, ndcY, depth, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     return worldPos.xyz / worldPos.w;
+}
+
+vec3 reconstructWorldRay(float2 uv)
+{
+    float2 ndc = uv * 2.0 - 1.0;
+    float4 clipPos = float4(ndc, 1.0, 1.0);
+    float4 worldPos = mul(camera.inverseViewProjection, clipPos);
+    return normalize(worldPos.xyz / max(worldPos.w, 1.0e-5) - camera.cameraPosition);
+}
+
+vec3 evaluateEnvironmentBackground(float2 uv)
+{
+    const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
+    if(!useIBL)
+    {
+        return vec3(0.0, 0.0, 0.0);
+    }
+    return sampleEquirectEnvironment(reconstructWorldRay(uv), 0.0) * lighting.light.iblParams.y;
 }
 
 bool tileContainsLight(uint16_t4 bounds, uint2 tileCoord)
@@ -273,7 +337,43 @@ vec3 evaluateDirectionalLight(vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, flo
     return direct * directVisibility;
 }
 
-vec3 evaluatePointLights(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+vec3 evaluateLocalLight(LightData light, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    const vec3 toLight = light.positionOrDirection - worldPos;
+    const float distanceToLight = length(toLight);
+    if(distanceToLight <= 0.0001 || distanceToLight >= light.range)
+    {
+        return vec3(0.0);
+    }
+
+    const vec3 L = toLight / distanceToLight;
+    const float invDistanceSq = 1.0 / max(distanceToLight * distanceToLight, 0.01);
+    const float rangeAttenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
+    float spotAttenuation = 1.0;
+    if(light.lightType == LLightTypeSpot)
+    {
+        const vec3 spotDirection = normalize(light.spotDirection);
+        const float innerCos = cos(light.spotInnerAngle);
+        const float outerCos = cos(light.spotOuterAngle);
+        const float spotCos = dot(spotDirection, -L);
+        spotAttenuation = smoothstep(outerCos, innerCos, spotCos);
+    }
+
+    const vec3 radiance = light.color * light.intensity * invDistanceSq * light.range * light.range * rangeAttenuation * spotAttenuation;
+    return evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
+}
+
+vec3 evaluatePointLight(uint lightIndex, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    return evaluateLocalLight(pointLightBuffer[lightIndex], N, V, worldPos, baseColor, metallic, roughness);
+}
+
+vec3 evaluateSpotLight(uint lightIndex, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    return evaluateLocalLight(spotLightBuffer[lightIndex], N, V, worldPos, baseColor, metallic, roughness);
+}
+
+vec3 evaluatePointLightsCoarse(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
 {
     const uint2 tileCoord = computeLightTileCoord(uv);
     vec3 accumulated = vec3(0.0);
@@ -287,22 +387,129 @@ vec3 evaluatePointLights(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColo
             continue;
         }
 
-        const LightData light = pointLightBuffer[lightIndex];
-        const vec3 toLight = light.positionOrDirection - worldPos;
-        const float distanceToLight = length(toLight);
-        if(distanceToLight <= 0.0001 || distanceToLight >= light.range)
-        {
-            continue;
-        }
-
-        const vec3 L = toLight / distanceToLight;
-        const float invDistanceSq = 1.0 / max(distanceToLight * distanceToLight, 0.01);
-        const float rangeAttenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
-        const vec3 radiance = light.color * light.intensity * invDistanceSq * light.range * light.range * rangeAttenuation;
-        accumulated += evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
+        accumulated += evaluatePointLight(lightIndex, N, V, worldPos, baseColor, metallic, roughness);
     }
 
     return accumulated;
+}
+
+uint computeClusterId(float2 uv, float viewDepth)
+{
+    const uint clusterCountX = max(uint(clusteredLight.screenSizeAndClusterInfo.z), 1u);
+    const uint clusterCountY = max(uint(clusteredLight.screenSizeAndClusterInfo.w), 1u);
+    const uint clusterCountZ = max(uint(clusteredLight.clusterZAndLightInfo.x), 1u);
+    const uint clusterX = min(uint(uv.x * float(clusterCountX)), clusterCountX - 1u);
+    const uint clusterY = min(uint(uv.y * float(clusterCountY)), clusterCountY - 1u);
+    const float nearZ = max(clusteredLight.clipInfo.x, 1.0e-4);
+    const float farZ = max(clusteredLight.clipInfo.y, nearZ + 1.0e-3);
+    const float normalizedDepth = saturate((viewDepth - nearZ) / max(farZ - nearZ, 1.0e-3));
+    const uint clusterZ = min(uint(normalizedDepth * float(clusterCountZ)), clusterCountZ - 1u);
+    return clusterX + clusterY * clusterCountX + clusterZ * clusterCountX * clusterCountY;
+}
+
+vec3 evaluatePointLightsClustered(float2 uv, float viewDepth, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    const uint clusterId = computeClusterId(uv, viewDepth);
+    const uint packedCount = clusterLightCounts[clusterId];
+    if((packedCount & LClusterOverflowBit) != 0u)
+    {
+        return evaluatePointLightsCoarse(uv, N, V, worldPos, baseColor, metallic, roughness);
+    }
+
+    const uint lightCount = min(packedCount & LClusterCountMask, LMaxLightsPerCluster);
+    const uint baseIndex = clusterId * LMaxLightsPerCluster;
+    vec3 accumulated = vec3(0.0);
+
+    for(uint i = 0; i < lightCount; ++i)
+    {
+        const uint packedLightIndex = clusterLightIndices[baseIndex + i];
+        const uint lightIndex = packedLightIndex & LClusterLightIndexMask;
+        accumulated += (packedLightIndex & LClusterLightTypeSpotBit) != 0u
+            ? evaluateSpotLight(lightIndex, N, V, worldPos, baseColor, metallic, roughness)
+            : evaluatePointLight(lightIndex, N, V, worldPos, baseColor, metallic, roughness);
+    }
+
+    return accumulated;
+}
+
+vec3 evaluatePointLights(float2 uv, float viewDepth, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    if(lightCoarseCulling.debugInfo.w > 0.5)
+    {
+        return evaluatePointLightsClustered(uv, viewDepth, N, V, worldPos, baseColor, metallic, roughness);
+    }
+
+    return evaluatePointLightsCoarse(uv, N, V, worldPos, baseColor, metallic, roughness);
+}
+
+vec3 evaluatePointLights(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    return evaluatePointLights(uv, computeViewDepth(worldPos), N, V, worldPos, baseColor, metallic, roughness);
+}
+
+float3 computeClusterHeatmap(float2 uv, float viewDepth, float3 baseColor)
+{
+    const uint clusterId = computeClusterId(uv, viewDepth);
+    const uint packedCount = clusterLightCounts[clusterId];
+    const uint count = packedCount & LClusterCountMask;
+    const bool overflow = (packedCount & LClusterOverflowBit) != 0u;
+    const float t = saturate(float(count) / float(LMaxLightsPerCluster));
+    const float3 heat = overflow && lightCoarseCulling.debugInfo.z > 0.5
+        ? float3(1.0, 0.0, 0.8)
+        : float3(t, 0.25, 1.0 - t);
+    return lerp(baseColor * 0.25, heat, 0.75);
+}
+
+vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao)
+{
+    const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
+    if(!useIBL)
+    {
+        return lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    }
+
+    const float intensity = lighting.light.iblParams.y;
+    const float maxMip = max(lighting.light.iblParams.z, 0.0);
+    const vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
+    const float NdotV = max(dot(N, V), 0.001);
+    const vec3 F = Fresnel_Schlick_Roughness(NdotV, F0, roughness);
+    const vec2 envBRDF = approximateEnvironmentBRDF(NdotV, roughness);
+    const vec3 kD = (1.0 - F) * (1.0 - metallic);
+    const vec3 irradiance = sampleEquirectEnvironment(N, maxMip);
+    const vec3 R = reflect(-V, N);
+    const vec3 prefiltered = sampleEquirectEnvironment(R, roughness * maxMip);
+    const vec3 diffuse = kD * irradiance * baseColor / PI;
+    const vec3 specular = prefiltered * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
+
+    const uint debugMode = uint(lighting.light.iblDebugInfo.x);
+    if(debugMode == 1u)
+    {
+        return diffuse * ao * intensity;
+    }
+    if(debugMode == 2u)
+    {
+        return specular * intensity;
+    }
+    if(debugMode == 3u)
+    {
+        return lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    }
+    if(debugMode == 4u)
+    {
+        return sampleEquirectEnvironment(N, 0.0) * intensity;
+    }
+
+    return (diffuse * ao + specular) * intensity;
+}
+
+vec3 evaluateSSR(float2 uv, float roughness)
+{
+    if(lighting.light.phase7Info.y <= 0.5 || roughness > 0.72)
+    {
+        return vec3(0.0);
+    }
+    const vec4 ssr = inTexture[kSSRTextureIndex].SampleLevel(uv, 0.0);
+    return ssr.rgb * saturate(ssr.a);
 }
 
 vec3 toneMapACES(vec3 color)
@@ -351,7 +558,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
 
     if(depthSample <= 0.0001)
     {
-        return float4(0.0, 0.0, 0.0, 1.0);
+        return float4(toneMapACES(evaluateEnvironmentBackground(input.uv)), 1.0);
     }
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
@@ -361,13 +568,23 @@ float4 fragmentMain(VSOutput input) : SV_Target
     float metallic = saturate(packedSample.b);
     float roughness = saturateRoughness(baseColorSample.a);
     float ao = saturate(packedSample.a);
+    if(lighting.light.phase7Info.x > 0.5)
+    {
+        ao *= saturate(inTexture[kAOTextureIndex].SampleLevel(input.uv, 0.0).r);
+    }
     float viewDepth = computeViewDepth(worldPos);
 
-    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    if(lightCoarseCulling.debugInfo.y > 0.5)
+    {
+        return float4(computeClusterHeatmap(input.uv, viewDepth, baseColor), 1.0);
+    }
+
+    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 color = ambient + directional + pointLights + emissiveSample.rgb;
+    vec3 ssr = evaluateSSR(input.uv, roughness);
+    vec3 color = ambient + directional + pointLights + ssr + emissiveSample.rgb;
     return float4(toneMapACES(color), 1.0);
 }
 
@@ -386,7 +603,7 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
 
     if(depthSample <= 0.0001)
     {
-        return float4(0.0, 0.0, 0.0, 1.0);
+        return float4(evaluateEnvironmentBackground(input.uv), 1.0);
     }
 
     vec3 worldPos = reconstructWorldPosition(input.uv, depthSample);
@@ -396,17 +613,25 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     float metallic = saturate(packedSample.b);
     float roughness = saturateRoughness(baseColorSample.a);
     float ao = saturate(packedSample.a);
+    if(lighting.light.phase7Info.x > 0.5)
+    {
+        ao *= saturate(inTexture[kAOTextureIndex].SampleLevel(input.uv, 0.0).r);
+    }
     float viewDepth = computeViewDepth(worldPos);
 
-    vec3 ambient = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    return float4(max(ambient + directional + pointLights + emissiveSample.rgb, 0.0), 1.0);
+    vec3 ssr = evaluateSSR(input.uv, roughness);
+    return float4(max(ambient + directional + pointLights + ssr + emissiveSample.rgb, 0.0), 1.0);
 }
 
-[[vk::push_constant]]
-ConstantBuffer<PostProcessPushConstants> postProcess;
+[shader("fragment")]
+float4 fragmentSkyboxMain(VSOutput input) : SV_Target
+{
+    return float4(evaluateEnvironmentBackground(input.uv), 1.0);
+}
 
 int selectTemporalSceneColorIndex()
 {
@@ -519,9 +744,11 @@ float4 fragmentVelocityMain(VSOutput input) : SV_Target
     worldPos.xyz /= max(worldPos.w, 1.0e-5);
     worldPos.w = 1.0;
 
-    float4 previousClip = mul(camera.prevViewProjection, worldPos);
+    float4 currentUnjitteredClip = mul(camera.unjitteredViewProjection, worldPos);
+    float2 currentUnjitteredUv = currentUnjitteredClip.xy / max(currentUnjitteredClip.w, 1.0e-5) * 0.5 + 0.5;
+    float4 previousClip = mul(camera.prevUnjitteredViewProjection, worldPos);
     float2 previousUv = previousClip.xy / max(previousClip.w, 1.0e-5) * 0.5 + 0.5;
-    float2 velocity = input.uv - previousUv;
+    float2 velocity = currentUnjitteredUv - previousUv;
     return float4(velocity, 0.0, 1.0);
 }
 
@@ -547,8 +774,18 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
         return float4(max(currentColor, 0.0), 1.0);
     }
 
-    float2 velocity = inTexture[kVelocityIndex].Sample(input.uv).rg;
-    float2 historyUv = input.uv - velocity;
+    float depthSample = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    float2 historyUv = input.uv;
+    if(depthSample > 0.0001)
+    {
+        float4 currentClip = float4(input.uv * 2.0 - 1.0, depthSample, 1.0);
+        float4 worldPos = mul(camera.inverseViewProjection, currentClip);
+        worldPos.xyz /= max(worldPos.w, 1.0e-5);
+        worldPos.w = 1.0;
+
+        float4 previousClip = mul(camera.prevJitteredViewProjection, worldPos);
+        historyUv = previousClip.xy / max(previousClip.w, 1.0e-5) * 0.5 + 0.5;
+    }
     float3 historyColor = inTexture[kSceneColorHistoryReadIndex].Sample(historyUv).rgb;
 
     float3 minColor = rgbToYCoCg(currentColor);

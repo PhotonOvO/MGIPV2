@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <numeric>
 #include <random>
 #include <type_traits>
@@ -32,7 +33,7 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
-constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 7u;
+constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 10u;
 constexpr uint32_t kLightPassDepthTextureIndex    = kPackedGBufferTargetCount;
 constexpr uint32_t kLightPassSceneColorHdrIndex   = kPackedGBufferTargetCount + 1u;
 constexpr uint32_t kLightPassBloomHalfIndex       = kPackedGBufferTargetCount + 2u;
@@ -40,8 +41,12 @@ constexpr uint32_t kLightPassBloomQuarterIndex    = kPackedGBufferTargetCount + 
 constexpr uint32_t kLightPassVelocityIndex        = kPackedGBufferTargetCount + 4u;
 constexpr uint32_t kLightPassHistoryReadIndex     = kPackedGBufferTargetCount + 5u;
 constexpr uint32_t kLightPassHistoryWriteIndex    = kPackedGBufferTargetCount + 6u;
+constexpr uint32_t kLightPassIBLEnvironmentIndex  = kPackedGBufferTargetCount + 7u;
+constexpr uint32_t kLightPassAOIndex              = kPackedGBufferTargetCount + 8u;
+constexpr uint32_t kLightPassSSRIndex             = kPackedGBufferTargetCount + 9u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
+constexpr const char* kDefaultIBLEnvironmentPath  = "resources/environment/lilienstein_4k.ktx2";
 
 struct DebugUnitLineSegment
 {
@@ -778,7 +783,11 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
 
   rhi::DeviceCreateInfo deviceCreateInfo;
+#ifdef _DEBUG
+  deviceCreateInfo.enableValidationLayers = true;
+#else
   deviceCreateInfo.enableValidationLayers = false;
+#endif
 #ifdef __ANDROID__
   deviceCreateInfo.enableValidationLayers = false;
   deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
@@ -879,6 +888,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
         .linearSampler = linearSampler,
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
+    createIBLResources(cmd);
     createDepthPyramidResources();
     createGPUCullingResources();
     createShadowCullingResources();
@@ -919,13 +929,29 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
       const VkDescriptorSetLayoutBinding lightCoarseCullingUniformBinding{
           4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
       };
+      const VkDescriptorSetLayoutBinding clusterCountsBinding{
+          5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutBinding clusterIndicesBinding{
+          6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutBinding clusteredLightUniformBinding{
+          7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
+      const VkDescriptorSetLayoutBinding spotLightBinding{
+          8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+      };
 
-      const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+      const std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
           textureBinding,
           shadowMapBinding,
           pointLightBinding,
           pointCoarseBoundsBinding,
           lightCoarseCullingUniformBinding,
+          clusterCountsBinding,
+          clusterIndicesBinding,
+          clusteredLightUniformBinding,
+          spotLightBinding,
       };
 
       const VkDescriptorSetLayoutCreateInfo layoutInfo{
@@ -1176,6 +1202,7 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
   destroyPassGpuProfileResources();
   m_lightResources.deinit();
+  destroyIBLResources();
   // Note: gbufferTextureSets are freed automatically when descriptorPool is destroyed
   m_device.gbufferTextureSets.clear();
   if(m_device.gbufferTextureSetLayout != VK_NULL_HANDLE)
@@ -1411,6 +1438,11 @@ PipelineHandle Renderer::getLightPipelineHandle() const
 PipelineHandle Renderer::getGPUDrivenLightHdrPipelineHandle() const
 {
   return m_gpuDrivenLightHdrPipeline.isNull() ? m_lightPipeline : m_gpuDrivenLightHdrPipeline;
+}
+
+PipelineHandle Renderer::getGPUDrivenSkyboxPipelineHandle() const
+{
+  return m_gpuDrivenSkyboxPipeline;
 }
 
 PipelineHandle Renderer::getBloomPrefilterPipelineHandle() const
@@ -2032,6 +2064,133 @@ void Renderer::updateSwapchainTextureBinding(rhi::ResourceState initialState)
   });
 }
 
+void Renderer::createIBLResources(VkCommandBuffer cmd)
+{
+  destroyIBLResources();
+
+  m_device.iblEnvironmentPath = kDefaultIBLEnvironmentPath;
+  m_device.iblUsingFallback = true;
+  m_device.iblEnvironmentStatus = "Using flat ambient fallback";
+
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const std::filesystem::path environmentPath(kDefaultIBLEnvironmentPath);
+
+  Ktx2Loader loader;
+  Ktx2Loader::Ktx2Texture ktxTexture;
+  if(!std::filesystem::exists(environmentPath))
+  {
+    m_device.iblEnvironmentStatus = "KTX2 environment not found: " + environmentPath.string();
+    LOGW("%s", m_device.iblEnvironmentStatus.c_str());
+    return;
+  }
+  if(!loader.load(environmentPath, ktxTexture))
+  {
+    m_device.iblEnvironmentStatus = "Failed to load KTX2 environment: " + loader.getLastError();
+    LOGW("%s", m_device.iblEnvironmentStatus.c_str());
+    return;
+  }
+  if(!supportsSampledImageFormat(physicalDevice, ktxTexture.format))
+  {
+    m_device.iblEnvironmentStatus = "Unsupported IBL KTX2 format: " + std::string(string_VkFormat(ktxTexture.format));
+    LOGW("%s", m_device.iblEnvironmentStatus.c_str());
+    return;
+  }
+  if(ktxTexture.width == 0 || ktxTexture.height == 0 || ktxTexture.data.empty())
+  {
+    m_device.iblEnvironmentStatus = "Invalid IBL KTX2 payload";
+    LOGW("%s", m_device.iblEnvironmentStatus.c_str());
+    return;
+  }
+
+  const uint32_t mipLevels = std::max(ktxTexture.mipLevels, 1u);
+  const VkImageCreateInfo imageInfo{
+      .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType   = VK_IMAGE_TYPE_2D,
+      .format      = ktxTexture.format,
+      .extent      = {ktxTexture.width, ktxTexture.height, 1},
+      .mipLevels   = mipLevels,
+      .arrayLayers = 1,
+      .samples     = VK_SAMPLE_COUNT_1_BIT,
+      .usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+  };
+
+  utils::Image environmentImage = createImage(m_device.allocator, imageInfo);
+  utils::cmdInitImageLayout(cmd, environmentImage.image);
+
+  BatchUploadContext batchUpload;
+  batchUpload.init(nativeDevice, m_device.allocator, static_cast<VkDeviceSize>(ktxTexture.data.size()) + 16u);
+  const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
+  std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
+
+  for(uint32_t mip = 0; mip < mipLevels; ++mip)
+  {
+    const VkBufferImageCopy region{
+        .bufferOffset = ktxTexture.mipOffsets[mip],
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .layerCount = 1},
+        .imageExtent = {std::max(ktxTexture.width >> mip, 1u), std::max(ktxTexture.height >> mip, 1u), 1},
+    };
+    batchUpload.recordTextureUpload(slice, environmentImage.image, region);
+  }
+  batchUpload.executeUploads(cmd);
+
+  utils::Buffer batchStagingBuffer = batchUpload.releaseStagingBuffer();
+  if(batchStagingBuffer.buffer != VK_NULL_HANDLE)
+  {
+    m_device.stagingBuffers.push_back(batchStagingBuffer);
+  }
+
+  const VkImageViewCreateInfo viewInfo{
+      .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image            = environmentImage.image,
+      .viewType         = VK_IMAGE_VIEW_TYPE_2D,
+      .format           = ktxTexture.format,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
+  };
+  VkImageView environmentView = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &environmentView));
+
+  utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
+  dutil.setObjectName(environmentImage.image, "IBL_EquirectEnvironment");
+  dutil.setObjectName(environmentView, "IBL_EquirectEnvironmentView");
+
+  m_device.iblEnvironment.image = environmentImage.image;
+  m_device.iblEnvironment.allocation = environmentImage.allocation;
+  m_device.iblEnvironment.view = environmentView;
+  m_device.iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
+  m_device.iblEnvironmentFormat = ktxTexture.format;
+  m_device.iblEnvironmentExtent = {ktxTexture.width, ktxTexture.height};
+  m_device.iblEnvironmentMipCount = mipLevels;
+  m_device.iblEnvironmentEstimatedBytes = static_cast<uint64_t>(ktxTexture.data.size());
+  m_device.iblEnvironmentLoaded = true;
+  m_device.iblUsingFallback = false;
+  m_device.iblEnvironmentStatus = "Loaded equirect HDR KTX2";
+  LOGI("Loaded IBL environment %s (%ux%u, %u mips, %s, %.2f MiB)",
+       environmentPath.string().c_str(),
+       ktxTexture.width,
+       ktxTexture.height,
+       mipLevels,
+       string_VkFormat(ktxTexture.format),
+       static_cast<double>(ktxTexture.data.size()) / (1024.0 * 1024.0));
+}
+
+void Renderer::destroyIBLResources()
+{
+  const VkDevice nativeDevice = m_device.device
+                                    ? fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())
+                                    : VK_NULL_HANDLE;
+  if(m_device.iblEnvironment.view != VK_NULL_HANDLE || m_device.iblEnvironment.image != VK_NULL_HANDLE)
+  {
+    destroyImageResource(nativeDevice, m_device.allocator, m_device.iblEnvironment);
+  }
+  m_device.iblEnvironmentFormat = VK_FORMAT_UNDEFINED;
+  m_device.iblEnvironmentExtent = {};
+  m_device.iblEnvironmentMipCount = 0;
+  m_device.iblEnvironmentEstimatedBytes = 0;
+  m_device.iblEnvironmentLoaded = false;
+  m_device.iblUsingFallback = true;
+}
+
 void Renderer::updateGBufferTextureDescriptorSet()
 {
   if(m_device.gbufferTextureSets.empty() || m_perFrame.frameUserData.empty())
@@ -2119,6 +2278,23 @@ void Renderer::updateGBufferTextureDescriptorSet()
       .imageView   = sceneResources.getVelocityView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
+  imageInfos[kLightPassIBLEnvironmentIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = m_device.iblEnvironment.view != VK_NULL_HANDLE
+                         ? m_device.iblEnvironment.view
+                         : sceneResources.getDescriptorImageInfo(0).imageView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassAOIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getDepthImageView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassSSRIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getDescriptorImageInfo(0).imageView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
   const VkDescriptorImageInfo shadowMapInfo{
       .sampler     = linearSampler,
       .imageView   = m_csmShadowResources.getCascadeView(),
@@ -2150,13 +2326,28 @@ void Renderer::updateGBufferTextureDescriptorSet()
         .offset = 0,
         .range  = VK_WHOLE_SIZE,
     };
+    const VkDescriptorBufferInfo spotCoarseBoundsBufferInfo{
+        .buffer = m_lightResources.getSpotCoarseBoundsBuffer(frameIndex),
+        .offset = 0,
+        .range  = VK_WHOLE_SIZE,
+    };
     const VkDescriptorBufferInfo coarseCullingUniformBufferInfo{
         .buffer = m_lightResources.getCoarseCullingUniformBuffer(frameIndex),
         .offset = 0,
         .range  = sizeof(shaderio::LightCoarseCullingUniforms),
     };
+    const VkDescriptorBufferInfo clusteredLightUniformBufferInfo{
+        .buffer = m_perFrame.frameUserData[frameIndex].lightingBuffer.buffer,
+        .offset = 0,
+        .range  = sizeof(shaderio::ClusteredLightUniforms),
+    };
+    const VkDescriptorBufferInfo spotLightBufferInfo{
+        .buffer = m_lightResources.getSpotLightBuffer(frameIndex),
+        .offset = 0,
+        .range  = VK_WHOLE_SIZE,
+    };
 
-    const std::array<VkWriteDescriptorSet, 5> writes{{
+    const std::array<VkWriteDescriptorSet, 9> writes{{
         VkWriteDescriptorSet{
             .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet          = m_device.gbufferTextureSets[frameIndex],
@@ -2201,6 +2392,42 @@ void Renderer::updateGBufferTextureDescriptorSet()
             .descriptorCount = 1,
             .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo     = &coarseCullingUniformBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 5,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &pointCoarseBoundsBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 6,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &spotCoarseBoundsBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 7,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &clusteredLightUniformBufferInfo,
+        },
+        VkWriteDescriptorSet{
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet          = m_device.gbufferTextureSets[frameIndex],
+            .dstBinding      = 8,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &spotLightBufferInfo,
         },
     }};
 
@@ -4072,6 +4299,13 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
     cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
     cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
   }
+  if(params.cameraUniforms == nullptr)
+  {
+    cameraData.unjitteredViewProjection = cameraData.viewProjection;
+    cameraData.unjitteredInverseViewProjection = cameraData.inverseViewProjection;
+    cameraData.prevUnjitteredViewProjection = cameraData.viewProjection;
+    cameraData.prevJitteredViewProjection = cameraData.viewProjection;
+  }
   std::memcpy(cameraAlloc.cpuPtr, &cameraData, sizeof(cameraData));
   frameUserData.transientAllocator.flushAllocation(cameraAlloc, sizeof(cameraData));
 
@@ -4750,6 +4984,10 @@ shaderio::LightCullingUniforms Renderer::buildLightCullingUniforms(const RenderP
         clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
     camera.viewProjection = camera.projection * camera.view;
     camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.unjitteredViewProjection = camera.viewProjection;
+    camera.unjitteredInverseViewProjection = camera.inverseViewProjection;
+    camera.prevUnjitteredViewProjection = camera.viewProjection;
+    camera.prevJitteredViewProjection = camera.viewProjection;
     camera.cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f);
   }
 
@@ -4790,6 +5028,10 @@ shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParam
         clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
     camera.viewProjection = camera.projection * camera.view;
     camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.unjitteredViewProjection = camera.viewProjection;
+    camera.unjitteredInverseViewProjection = camera.inverseViewProjection;
+    camera.prevUnjitteredViewProjection = camera.viewProjection;
+    camera.prevJitteredViewProjection = camera.viewProjection;
     camera.cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f);
   }
 
@@ -4856,6 +5098,13 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
       }(),
       .viewProjection = glm::mat4(1.0f),
       .inverseViewProjection = glm::mat4(1.0f),
+      .prevView = glm::mat4(1.0f),
+      .prevProjection = glm::mat4(1.0f),
+      .prevViewProjection = glm::mat4(1.0f),
+      .unjitteredViewProjection = glm::mat4(1.0f),
+      .unjitteredInverseViewProjection = glm::mat4(1.0f),
+      .prevUnjitteredViewProjection = glm::mat4(1.0f),
+      .prevJitteredViewProjection = glm::mat4(1.0f),
       .cameraPosition = glm::vec3(8.0f, 2.0f, 0.0f),
       .shadowConstantBias = 0.0f,
       .shadowDirectionAndSlopeBias = glm::vec4(0.0f),
@@ -4866,6 +5115,10 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   {
     camera.viewProjection = camera.projection * camera.view;
     camera.inverseViewProjection = glm::inverse(camera.viewProjection);
+    camera.unjitteredViewProjection = camera.viewProjection;
+    camera.unjitteredInverseViewProjection = camera.inverseViewProjection;
+    camera.prevUnjitteredViewProjection = camera.viewProjection;
+    camera.prevJitteredViewProjection = camera.viewProjection;
     camera.shadowConstantBias = 0.0f;
     camera.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
   }
@@ -4944,6 +5197,10 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   state.shadowCamera.projection = lightProjection;
   state.shadowCamera.viewProjection = lightProjection * lightView;
   state.shadowCamera.inverseViewProjection = glm::inverse(state.shadowCamera.viewProjection);
+  state.shadowCamera.unjitteredViewProjection = state.shadowCamera.viewProjection;
+  state.shadowCamera.unjitteredInverseViewProjection = state.shadowCamera.inverseViewProjection;
+  state.shadowCamera.prevUnjitteredViewProjection = state.shadowCamera.viewProjection;
+  state.shadowCamera.prevJitteredViewProjection = state.shadowCamera.viewProjection;
   state.shadowCamera.cameraPosition = lightPosition;
   state.shadowCamera.shadowConstantBias = params.lightSettings.depthBias;
   state.shadowCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, params.lightSettings.normalBias);
@@ -4966,6 +5223,13 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
       params.lightSettings.depthBias,
       params.lightSettings.normalBias,
       static_cast<float>(shaderio::LCascadeCount));
+  state.lightParams.iblParams = glm::vec4(
+      params.debugOptions.enableIBL ? 1.0f : 0.0f,
+      params.debugOptions.iblIntensity,
+      static_cast<float>(m_device.iblEnvironmentMipCount > 0 ? m_device.iblEnvironmentMipCount - 1u : 0u),
+      m_device.iblEnvironmentLoaded ? 1.0f : 0.0f);
+  state.lightParams.iblDebugInfo = glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode), 0.0f, 0.0f, 0.0f);
+  state.lightParams.phase7Info = glm::vec4(0.0f);
   return state;
 }
 
@@ -5433,6 +5697,12 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
             .descriptorCount = 1,
             .visibility      = rhi::ResourceVisibility::compute,
         },
+        rhi::BindTableLayoutEntry{
+            .logicalIndex    = shaderio::LBindPostProcess,
+            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
+            .descriptorCount = 1,
+            .visibility      = rhi::ResourceVisibility::fragment,
+        },
     };
 
     // Create per-frame camera bind groups (each with its own layout)
@@ -5475,7 +5745,12 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
           .offset = 0,
           .range  = sizeof(shaderio::LightCullingUniforms),
       };
-      const std::array<VkWriteDescriptorSet, 3> cameraWrites{{
+      VkDescriptorBufferInfo postProcessBufferInfo{
+          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
+          .offset = 0,
+          .range  = sizeof(shaderio::PostProcessUniforms),
+      };
+      const std::array<VkWriteDescriptorSet, 4> cameraWrites{{
           VkWriteDescriptorSet{
               .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
               .dstSet          = cameraTable->getVkDescriptorSet(),
@@ -5502,6 +5777,15 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
               .descriptorCount = 1,
               .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
               .pBufferInfo     = &lightCullingBufferInfo,
+          },
+          VkWriteDescriptorSet{
+              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet          = cameraTable->getVkDescriptorSet(),
+              .dstBinding      = shaderio::LBindPostProcess,
+              .dstArrayElement = 0,
+              .descriptorCount = 1,
+              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+              .pBufferInfo     = &postProcessBufferInfo,
           },
       }};
       vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
@@ -5984,18 +6268,14 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
 
     if(m_device.postProcessPipelineLayout == VK_NULL_HANDLE)
     {
-      const std::array<VkDescriptorSetLayout, 1> postSetLayouts{m_device.gbufferTextureSetLayout};
-      const VkPushConstantRange postPushRange{
-          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-          .offset     = 0,
-          .size       = sizeof(shaderio::PostProcessPushConstants),
-      };
+      ASSERT(!m_perFrame.frameUserData.empty(), "Post-process pipelines require per-frame scene bind groups");
+      const VkDescriptorSetLayout sceneSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
+          getBindGroupLayoutOpaque(m_perFrame.frameUserData.front().cameraBindGroup, BindGroupSetSlot::shaderSpecific));
+      const std::array<VkDescriptorSetLayout, 2> postSetLayouts{m_device.gbufferTextureSetLayout, sceneSetLayout};
       const VkPipelineLayoutCreateInfo postLayoutInfo{
-          .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-          .setLayoutCount         = static_cast<uint32_t>(postSetLayouts.size()),
-          .pSetLayouts            = postSetLayouts.data(),
-          .pushConstantRangeCount = 1,
-          .pPushConstantRanges    = &postPushRange,
+          .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = static_cast<uint32_t>(postSetLayouts.size()),
+          .pSetLayouts    = postSetLayouts.data(),
       };
       VK_CHECK(vkCreatePipelineLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
                                       &postLayoutInfo,
@@ -6057,6 +6337,68 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                                            m_device.lightPipelineLayout,
                                                            SceneResources::kSceneColorHdrFormat,
                                                            30);
+    {
+      const VkPipelineDepthStencilStateCreateInfo skyboxDepthStencil{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+          .depthTestEnable = VK_TRUE,
+          .depthWriteEnable = VK_FALSE,
+          .depthCompareOp = VK_COMPARE_OP_EQUAL,
+          .depthBoundsTestEnable = VK_FALSE,
+          .stencilTestEnable = VK_FALSE,
+      };
+      const std::array<VkPipelineShaderStageCreateInfo, 2> skyboxStages{{
+          {
+              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_VERTEX_BIT,
+              .module = lightShaderModule,
+              .pName = "vertexMain",
+          },
+          {
+              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+              .module = lightShaderModule,
+              .pName = "fragmentSkyboxMain",
+          },
+      }};
+      const VkFormat skyboxColorFormat = SceneResources::kSceneColorHdrFormat;
+      const VkFormat skyboxDepthFormat = m_swapchainDependent.sceneResources.getDepthFormat();
+      const VkFormat skyboxStencilFormat = hasStencilComponent(skyboxDepthFormat) ? skyboxDepthFormat : VK_FORMAT_UNDEFINED;
+      const VkPipelineRenderingCreateInfo skyboxRenderingInfo{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+          .colorAttachmentCount = 1,
+          .pColorAttachmentFormats = &skyboxColorFormat,
+          .depthAttachmentFormat = skyboxDepthFormat,
+          .stencilAttachmentFormat = skyboxStencilFormat,
+      };
+      const VkGraphicsPipelineCreateInfo skyboxPipelineInfo{
+          .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+          .pNext = &skyboxRenderingInfo,
+          .stageCount = static_cast<uint32_t>(skyboxStages.size()),
+          .pStages = skyboxStages.data(),
+          .pVertexInputState = &vertexInput,
+          .pInputAssemblyState = &inputAssembly,
+          .pViewportState = &viewportState,
+          .pRasterizationState = &rasterizer,
+          .pMultisampleState = &multisampling,
+          .pDepthStencilState = &skyboxDepthStencil,
+          .pColorBlendState = &colorBlending,
+          .pDynamicState = &dynamicState,
+          .layout = m_device.lightPipelineLayout,
+          .renderPass = VK_NULL_HANDLE,
+          .subpass = 0,
+      };
+      VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+      VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+                                          VK_NULL_HANDLE,
+                                          1,
+                                          &skyboxPipelineInfo,
+                                          nullptr,
+                                          &skyboxPipeline));
+      DBG_VK_NAME(skyboxPipeline);
+      m_gpuDrivenSkyboxPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                   reinterpret_cast<uint64_t>(skyboxPipeline),
+                                                   36);
+    }
     m_bloomPrefilterPipeline = createFullscreenPipeline("fragmentBloomPrefilterMain",
                                                         m_device.postProcessPipelineLayout,
                                                         SceneResources::kBloomFormat,
@@ -6074,7 +6416,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
                                                   SceneResources::kVelocityFormat,
                                                   34);
     m_taaResolvePipeline = createFullscreenPipeline("fragmentTAAResolveMain",
-                                                    m_device.postProcessPipelineLayout,
+                                                    m_device.lightPipelineLayout,
                                                     SceneResources::kSceneColorHdrFormat,
                                                     35);
 
@@ -6785,8 +7127,8 @@ void Renderer::createDescriptorPool()
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4U + frameCount * shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6U + frameCount * 3U},  // LightPass camera + pre-scene UBOs + GPU culling UBOs
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 16U},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8U + frameCount * 5U},  // Scene, light, culling, and LightPass fallback UBOs
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 24U},
     }};
     const VkDescriptorPoolCreateInfo          poolInfo = {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -7627,6 +7969,13 @@ void Renderer::destroyPipelines()
   m_shadowPipeline = kNullPipelineHandle;
   m_forwardPipeline = kNullPipelineHandle;
   m_forwardMDIPipeline = kNullPipelineHandle;
+  m_gpuDrivenLightHdrPipeline = kNullPipelineHandle;
+  m_gpuDrivenSkyboxPipeline = kNullPipelineHandle;
+  m_bloomPrefilterPipeline = kNullPipelineHandle;
+  m_bloomDownsamplePipeline = kNullPipelineHandle;
+  m_finalColorPipeline = kNullPipelineHandle;
+  m_velocityPipeline = kNullPipelineHandle;
+  m_taaResolvePipeline = kNullPipelineHandle;
   m_debugPipeline = kNullPipelineHandle;
   m_gpuCullingDebugPipeline = kNullPipelineHandle;
   m_pointLightCoarseCullingPipeline = kNullPipelineHandle;
@@ -8942,6 +9291,46 @@ uint64_t Renderer::getLightCullingDescriptorSet() const
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_device.lightCoarseCullingDescriptorSets[frameIndex]);
+}
+
+bool Renderer::getIBLEnvironmentLoaded() const
+{
+  return m_device.iblEnvironmentLoaded;
+}
+
+bool Renderer::getIBLUsingFallback() const
+{
+  return m_device.iblUsingFallback;
+}
+
+VkFormat Renderer::getIBLEnvironmentFormat() const
+{
+  return m_device.iblEnvironmentFormat;
+}
+
+VkExtent2D Renderer::getIBLEnvironmentExtent() const
+{
+  return m_device.iblEnvironmentExtent;
+}
+
+uint32_t Renderer::getIBLEnvironmentMipCount() const
+{
+  return m_device.iblEnvironmentMipCount;
+}
+
+uint64_t Renderer::getIBLEnvironmentEstimatedBytes() const
+{
+  return m_device.iblEnvironmentEstimatedBytes;
+}
+
+const std::string& Renderer::getIBLEnvironmentPath() const
+{
+  return m_device.iblEnvironmentPath;
+}
+
+const std::string& Renderer::getIBLEnvironmentStatus() const
+{
+  return m_device.iblEnvironmentStatus;
 }
 
 void Renderer::updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)

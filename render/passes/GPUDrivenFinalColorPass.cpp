@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace demo {
 
@@ -99,7 +100,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
   }
   const VkPipeline pipeline = reinterpret_cast<VkPipeline>(
       m_renderer->getNativeGraphicsPipeline(pipelineHandle));
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getPostProcessPipelineLayout());
+  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
   const VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
   if(pipeline != VK_NULL_HANDLE && layout != VK_NULL_HANDLE && descriptorSet != VK_NULL_HANDLE)
   {
@@ -110,7 +111,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
     const float exposure = context.params->debugOptions.enablePostProcessing
                                ? std::max(context.params->debugOptions.postExposure, 0.01f)
                                : 1.0f;
-    const shaderio::PostProcessPushConstants pushConstants{
+    const shaderio::PostProcessUniforms postProcessUniforms{
         .params0 = glm::vec4(exposure,
                              context.params->debugOptions.bloomIntensity,
                              context.params->debugOptions.bloomThreshold,
@@ -153,16 +154,28 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
                              context.params->debugOptions.taaBlendWeight,
                              context.params->debugOptions.showVelocity ? 1.0f : 0.0f),
     };
-    const VkPushConstantsInfo pushInfo{
-        .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
-        .layout = layout,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .offset = 0,
-        .size = sizeof(pushConstants),
-        .pValues = &pushConstants,
-    };
-    rhi::vulkan::cmdPushConstants(*context.cmd, pushInfo);
-    context.cmd->draw(3, 1, 0, 0);
+    const TransientAllocator::Allocation postProcessAlloc =
+        context.transientAllocator->allocate(sizeof(postProcessUniforms), 256);
+    std::memcpy(postProcessAlloc.cpuPtr, &postProcessUniforms, sizeof(postProcessUniforms));
+    context.transientAllocator->flushAllocation(postProcessAlloc, sizeof(postProcessUniforms));
+    m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
+                                                 reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                                 context.cameraAlloc.offset);
+    const VkDescriptorSet sceneDescriptorSet =
+        reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
+    if(sceneDescriptorSet != VK_NULL_HANDLE)
+    {
+      const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, postProcessAlloc.offset};
+      vkCmdBindDescriptorSets(vkCmd,
+                              VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              layout,
+                              shaderio::LSetScene,
+                              1,
+                              &sceneDescriptorSet,
+                              static_cast<uint32_t>(dynamicOffsets.size()),
+                              dynamicOffsets.data());
+      context.cmd->draw(3, 1, 0, 0);
+    }
   }
 
   context.cmd->endRenderPass();

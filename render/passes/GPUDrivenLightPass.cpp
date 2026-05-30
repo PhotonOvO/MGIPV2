@@ -144,20 +144,22 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   }
 
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
-  const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-  if(!cameraBindGroupHandle.isNull())
+  m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
+                                               reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                               cameraAlloc.offset);
+  VkDescriptorSet sceneDescriptorSet =
+      reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
+  if(sceneDescriptorSet != VK_NULL_HANDLE)
   {
-    VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-        m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+    const std::array<uint32_t, 2> dynamicOffsets{cameraAlloc.offset, 0u};
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout,
                             shaderio::LSetScene,
                             1,
-                            &cameraDescriptorSet,
-                            1,
-                            &cameraDynamicOffset);
+                            &sceneDescriptorSet,
+                            static_cast<uint32_t>(dynamicOffsets.size()),
+                            dynamicOffsets.data());
   }
 
   context.cmd->draw(3, 1, 0, 0);

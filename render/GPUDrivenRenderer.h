@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GPUSceneRegistry.h"
+#include "GPUDrivenLightResources.h"
 #include "GPUMeshletBuffer.h"
 #include "HiZDepthPyramid.h"
 #include "MeshletConverter.h"
@@ -15,7 +16,12 @@
 #include "passes/GPUDrivenGBufferPass.h"
 #include "passes/GPUDrivenImguiPass.h"
 #include "passes/GPUDrivenLightCullingPass.h"
+#include "passes/GPUDrivenClusteredLightCullingPass.h"
+#include "passes/GPUDrivenAOPass.h"
+#include "passes/GPUDrivenSSRPass.h"
+#include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
+#include "passes/GPUDrivenSkyboxPass.h"
 #include "passes/GPUDrivenBloomPrefilterPass.h"
 #include "passes/GPUDrivenBloomDownsamplePass.h"
 #include "passes/GPUDrivenFinalColorPass.h"
@@ -162,6 +168,76 @@ struct GPUDrivenPostProcessDiagnostics
   bool     lensEffectsActive{false};
 };
 
+struct GPUDrivenIBLDiagnostics
+{
+  uint32_t width{0};
+  uint32_t height{0};
+  uint32_t mipCount{0};
+  VkFormat format{VK_FORMAT_UNDEFINED};
+  uint64_t estimatedMemoryBytes{0};
+  float    intensity{0.0f};
+  bool     enabled{false};
+  bool     loaded{false};
+  bool     fallback{true};
+  bool     irradianceReady{false};
+  bool     prefilteredReady{false};
+  bool     brdfLutReady{false};
+  bool     splitSumReady{false};
+  int      debugMode{0};
+  std::string path;
+  std::string sourceMode;
+  std::string status;
+};
+
+struct GPUDrivenClusteredLightingDiagnostics
+{
+  uint32_t gridX{0};
+  uint32_t gridY{0};
+  uint32_t gridZ{0};
+  uint32_t clusterCount{0};
+  uint32_t maxLightsPerCluster{0};
+  uint32_t activePointLights{0};
+  uint32_t activeSpotLights{0};
+  uint32_t maxPointLights{0};
+  uint32_t maxSpotLights{0};
+  uint32_t maxOccupancy{0};
+  uint32_t overflowClusterCount{0};
+  uint32_t appendedLightReferences{0};
+  uint64_t clusterMemoryBytes{0};
+  uint64_t lightMemoryBytes{0};
+  bool     enabled{false};
+  bool     resourcesOwned{false};
+  bool     descriptorsReady{false};
+  bool     fallbackActive{true};
+};
+
+struct GPUDrivenAOReflectionDiagnostics
+{
+  uint32_t aoWidth{0};
+  uint32_t aoHeight{0};
+  uint32_t ssrWidth{0};
+  uint32_t ssrHeight{0};
+  uint64_t estimatedMemoryBytes{0};
+  bool     aoEnabled{false};
+  bool     aoReady{false};
+  bool     ssrEnabled{false};
+  bool     ssrReady{false};
+};
+
+struct GPUDrivenShadowAtlasDiagnostics
+{
+  uint32_t atlasWidth{0};
+  uint32_t atlasHeight{0};
+  uint32_t tileSize{0};
+  uint32_t tileCapacity{0};
+  uint32_t allocatedTiles{0};
+  uint64_t estimatedMemoryBytes{0};
+  bool     enabled{false};
+  bool     ready{false};
+  bool     fallbackToCSM{true};
+  std::string status;
+};
+
 struct GPUDrivenRuntimeStats
 {
   uint32_t objectCount{0};
@@ -183,6 +259,10 @@ struct GPUDrivenRuntimeStats
   GPUDrivenVisibilityDiagnostics visibilityDiagnostics{};
   GPUDrivenHiZDiagnostics hiZDiagnostics{};
   GPUDrivenPostProcessDiagnostics postProcessDiagnostics{};
+  GPUDrivenIBLDiagnostics iblDiagnostics{};
+  GPUDrivenClusteredLightingDiagnostics clusteredLightingDiagnostics{};
+  GPUDrivenAOReflectionDiagnostics aoReflectionDiagnostics{};
+  GPUDrivenShadowAtlasDiagnostics shadowAtlasDiagnostics{};
   std::vector<GPUDrivenPassDiagnostic> passDiagnostics;
 };
 
@@ -297,30 +377,34 @@ public:
   {
     return m_renderer.getGBufferAlphaTestMDIPipelineHandle();
   }
-  [[nodiscard]] PipelineHandle getLightPipelineHandle() const { return m_renderer.getLightPipelineHandle(); }
+  [[nodiscard]] PipelineHandle getLightPipelineHandle() const { return m_gpuDrivenLightHdrPipeline; }
   [[nodiscard]] PipelineHandle getGPUDrivenLightHdrPipelineHandle() const
   {
-    return m_renderer.getGPUDrivenLightHdrPipelineHandle();
+    return m_gpuDrivenLightHdrPipeline;
+  }
+  [[nodiscard]] PipelineHandle getGPUDrivenSkyboxPipelineHandle() const
+  {
+    return m_gpuDrivenSkyboxPipeline;
   }
   [[nodiscard]] PipelineHandle getBloomPrefilterPipelineHandle() const
   {
-    return m_renderer.getBloomPrefilterPipelineHandle();
+    return m_gpuDrivenBloomPrefilterPipeline;
   }
   [[nodiscard]] PipelineHandle getBloomDownsamplePipelineHandle() const
   {
-    return m_renderer.getBloomDownsamplePipelineHandle();
+    return m_gpuDrivenBloomDownsamplePipeline;
   }
   [[nodiscard]] PipelineHandle getFinalColorPipelineHandle() const
   {
-    return m_renderer.getFinalColorPipelineHandle();
+    return m_gpuDrivenFinalColorPipeline;
   }
   [[nodiscard]] PipelineHandle getVelocityPipelineHandle() const
   {
-    return m_renderer.getVelocityPipelineHandle();
+    return m_gpuDrivenVelocityPipeline;
   }
   [[nodiscard]] PipelineHandle getTAAResolvePipelineHandle() const
   {
-    return m_renderer.getTAAResolvePipelineHandle();
+    return m_gpuDrivenTAAResolvePipeline;
   }
   [[nodiscard]] PipelineHandle getForwardMDIPipelineHandle() const { return m_renderer.getForwardMDIPipelineHandle(); }
   [[nodiscard]] PipelineHandle getCSMShadowPipelineHandle() const { return m_renderer.getCSMShadowPipelineHandle(); }
@@ -337,25 +421,29 @@ public:
   {
     return m_renderer.getGPUCullingPipelineHandle();
   }
-  [[nodiscard]] PipelineHandle getLightCullingPipelineHandle() const
-  {
-    return m_renderer.getLightCullingPipelineHandle();
-  }
-  [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const
-  {
-    return m_renderer.getSpotLightCoarseCullingPipelineHandle();
-  }
+  [[nodiscard]] PipelineHandle getLightCullingPipelineHandle() const { return m_pointLightCoarseCullingPipeline; }
+  [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
   [[nodiscard]] uint64_t getGraphicsScenePipelineLayout() const { return m_renderer.getGraphicsScenePipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMDIPipelineLayout() const { return m_renderer.getGraphicsMDIPipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
-  [[nodiscard]] uint64_t getLightPipelineLayout() const { return m_renderer.getLightPipelineLayout(); }
+  [[nodiscard]] uint64_t getLightPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightPipelineLayout); }
   [[nodiscard]] uint64_t getPostProcessPipelineLayout() const { return m_renderer.getPostProcessPipelineLayout(); }
-  [[nodiscard]] uint64_t getLightingInputDescriptorSet() const { return m_renderer.getLightingInputDescriptorSet(); }
+  [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
+  [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
+  void updateLightingSceneDescriptorSet(uint32_t frameIndex, VkBuffer transientBuffer, uint32_t cameraOffset);
+  [[nodiscard]] bool getIBLEnvironmentLoaded() const { return m_iblEnvironmentLoaded; }
+  [[nodiscard]] bool getIBLUsingFallback() const { return m_iblUsingFallback; }
+  [[nodiscard]] VkFormat getIBLEnvironmentFormat() const { return m_iblEnvironmentFormat; }
+  [[nodiscard]] VkExtent2D getIBLEnvironmentExtent() const { return m_iblEnvironmentExtent; }
+  [[nodiscard]] uint32_t getIBLEnvironmentMipCount() const { return m_iblEnvironmentMipCount; }
+  [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const { return m_iblEnvironmentEstimatedBytes; }
+  [[nodiscard]] const std::string& getIBLEnvironmentPath() const { return m_iblEnvironmentPath; }
+  [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
   [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
   [[nodiscard]] uint64_t getDebugPipelineLayout() const { return m_renderer.getDebugPipelineLayout(); }
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
   [[nodiscard]] uint64_t getGPUCullingPipelineLayout() const { return m_renderer.getGPUCullingPipelineLayout(); }
-  [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return m_renderer.getLightCullingPipelineLayout(); }
+  [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightCoarseCullingPipelineLayout); }
   [[nodiscard]] uint64_t getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getShadowCullingDescriptorSetOpaque(frameIndex);
@@ -459,16 +547,9 @@ public:
   {
     return m_renderer.getForwardMDIIndirectBuffer(frameIndex);
   }
-  [[nodiscard]] uint64_t getCurrentLightCullingDescriptorSet() const
-  {
-    return m_renderer.getLightCullingDescriptorSet();
-  }
-  void updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)
-  {
-    m_renderer.updateLightCoarseCullingResources(frameIndex, uniforms);
-  }
-  [[nodiscard]] uint32_t getActivePointLightCount() const { return m_renderer.getActivePointLightCount(); }
-  [[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_renderer.getActiveSpotLightCount(); }
+  [[nodiscard]] uint64_t getCurrentLightCullingDescriptorSet() const;
+  [[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
+  [[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_lightResources.getActiveSpotLightCount(); }
   [[nodiscard]] VkExtent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }
   [[nodiscard]] VkFormat getSceneDepthFormat() const { return m_renderer.getSceneDepthFormat(); }
   [[nodiscard]] VkImage getSceneDepthImage() const { return m_renderer.getSceneDepthImage(); }
@@ -503,6 +584,8 @@ public:
   [[nodiscard]] VkImageView getVelocityView() const { return m_renderer.getVelocityView(); }
   [[nodiscard]] VkFormat getVelocityFormat() const { return m_renderer.getVelocityFormat(); }
   [[nodiscard]] uint64_t getVelocityEstimatedBytes() const { return m_renderer.getVelocityEstimatedBytes(); }
+  [[nodiscard]] glm::vec2 getCurrentTAAJitterUv() const { return m_currentTAAJitterUv; }
+  [[nodiscard]] glm::vec2 getPreviousTAAJitterUv() const { return m_previousTAAJitterUv; }
   [[nodiscard]] VkImage getSceneColorHistoryImage(uint32_t index) const
   {
     return m_renderer.getSceneColorHistoryImage(index);
@@ -526,6 +609,39 @@ public:
   }
   [[nodiscard]] uint64_t getNativeGraphicsPipeline(PipelineHandle pipelineHandle) const
   {
+    if(pipelineHandle.index == m_gpuDrivenLightHdrPipeline.index && pipelineHandle.generation == m_gpuDrivenLightHdrPipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenLightHdrVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenSkyboxPipeline.index && pipelineHandle.generation == m_gpuDrivenSkyboxPipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenSkyboxVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenTAAResolvePipeline.index
+       && pipelineHandle.generation == m_gpuDrivenTAAResolvePipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenTAAResolveVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenBloomPrefilterPipeline.index
+       && pipelineHandle.generation == m_gpuDrivenBloomPrefilterPipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomPrefilterVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenBloomDownsamplePipeline.index
+       && pipelineHandle.generation == m_gpuDrivenBloomDownsamplePipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomDownsampleVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenFinalColorPipeline.index
+       && pipelineHandle.generation == m_gpuDrivenFinalColorPipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenFinalColorVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenVelocityPipeline.index
+       && pipelineHandle.generation == m_gpuDrivenVelocityPipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenVelocityVkPipeline);
+    }
     return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS));
   }
   void uploadSharedMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
@@ -547,7 +663,11 @@ public:
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeClusteredLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeAOPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeSSRPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeCSMShadowPass(const PassContext& context);
+  void executeShadowAtlasPass(const PassContext& context);
   void executeDebugPass(const PassContext& context);
   void executePresentPass(const PassContext& context);
   void executeImguiPass(const PassContext& context);
@@ -633,11 +753,27 @@ private:
   void            refreshSceneView();
   void            updateOwnershipDiagnostics(uint32_t frameIndex, bool sceneRenderingSuspended, uint32_t safeObjectCount);
   [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
+  void            initLightingResources();
+  void            shutdownLightingResources();
+  void            initIBLResources();
+  void            shutdownIBLResources();
+  void            updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex);
+  void            updateLightingDescriptorSet(uint32_t frameIndex);
+  void            initLightingPipelines();
+  void            shutdownLightingPipelines();
+  void            initPhase7Resources();
+  void            shutdownPhase7Resources();
+  void            resizePhase7Resources();
+  void            bindPhase7PassResources();
+  void            initPhase7Pipelines();
+  void            shutdownPhase7Pipelines();
+  void            updatePhase7Descriptors(uint32_t frameIndex);
 
   Renderer                           m_renderer;
   PassExecutor                       m_passExecutor;
   GPUSceneRegistry                   m_sceneRegistry;
   HiZDepthPyramid                    m_hiZDepthPyramid;
+  GPUDrivenLightResources            m_lightResources;
   GPUMeshletBuffer                   m_meshletBuffer;
   std::vector<shaderio::Meshlet>     m_meshletDataCpu;
   std::vector<uint32_t>              m_meshletIndicesCpu;
@@ -655,9 +791,14 @@ private:
   std::unique_ptr<GPUDrivenCullingPass>      m_gpuCullingPass;
   std::unique_ptr<GPUDrivenVisibilitySortPass> m_visibilitySortPass;
   std::unique_ptr<GPUDrivenLightCullingPass> m_lightCullingPass;
+  std::unique_ptr<GPUDrivenClusteredLightCullingPass> m_clusteredLightCullingPass;
   std::unique_ptr<GPUDrivenCSMShadowPass>    m_csmShadowPass;
+  std::unique_ptr<GPUDrivenShadowAtlasPass>  m_shadowAtlasPass;
   std::unique_ptr<GPUDrivenGBufferPass>  m_gbufferPass;
   std::unique_ptr<GPUDrivenLightPass>    m_lightPass;
+  std::unique_ptr<GPUDrivenSkyboxPass>    m_skyboxPass;
+  std::unique_ptr<GPUDrivenAOPass>        m_aoPass;
+  std::unique_ptr<GPUDrivenSSRPass>       m_ssrPass;
   std::unique_ptr<GPUDrivenVelocityPass>  m_velocityPass;
   std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
   std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;
@@ -692,6 +833,68 @@ private:
   VkPipelineLayout                   m_transparentVisibilityPatchPipelineLayout{VK_NULL_HANDLE};
   VkPipeline                         m_transparentVisibilityPatchPipeline{VK_NULL_HANDLE};
   std::vector<TransparentVisibilityFrameResources> m_transparentVisibilityPatchFrames;
+  VkDescriptorPool                   m_lightingDescriptorPool{VK_NULL_HANDLE};
+  VkDescriptorSetLayout              m_lightingSetLayout{VK_NULL_HANDLE};
+  std::vector<VkDescriptorSet>       m_lightingDescriptorSets;
+  VkDescriptorSetLayout              m_lightCoarseCullingSetLayout{VK_NULL_HANDLE};
+  std::vector<VkDescriptorSet>       m_lightCoarseCullingDescriptorSets;
+  VkDescriptorSetLayout              m_lightingSceneSetLayout{VK_NULL_HANDLE};
+  std::vector<VkDescriptorSet>       m_lightingSceneDescriptorSets;
+  std::vector<VkBuffer>              m_lightingSceneDescriptorTransientBuffers;
+  VkSampler                          m_linearClampSampler{VK_NULL_HANDLE};
+  VkPipelineLayout                   m_lightCoarseCullingPipelineLayout{VK_NULL_HANDLE};
+  VkPipelineLayout                   m_lightPipelineLayout{VK_NULL_HANDLE};
+  PipelineHandle                     m_pointLightCoarseCullingPipeline{};
+  PipelineHandle                     m_spotLightCoarseCullingPipeline{};
+  PipelineHandle                     m_gpuDrivenLightHdrPipeline{};
+  PipelineHandle                     m_gpuDrivenSkyboxPipeline{};
+  VkPipeline                         m_gpuDrivenLightHdrVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_gpuDrivenSkyboxVkPipeline{VK_NULL_HANDLE};
+  PipelineHandle                     m_gpuDrivenTAAResolvePipeline{};
+  VkPipeline                         m_gpuDrivenTAAResolveVkPipeline{VK_NULL_HANDLE};
+  PipelineHandle                     m_gpuDrivenBloomPrefilterPipeline{};
+  PipelineHandle                     m_gpuDrivenBloomDownsamplePipeline{};
+  PipelineHandle                     m_gpuDrivenFinalColorPipeline{};
+  PipelineHandle                     m_gpuDrivenVelocityPipeline{};
+  VkPipeline                         m_gpuDrivenBloomPrefilterVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_gpuDrivenBloomDownsampleVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_gpuDrivenFinalColorVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_gpuDrivenVelocityVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_pointLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_spotLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_clusteredLightCullingVkPipeline{VK_NULL_HANDLE};
+  PipelineHandle                     m_clusteredLightCullingPipeline{};
+  VkDescriptorPool                   m_phase7DescriptorPool{VK_NULL_HANDLE};
+  VkDescriptorSetLayout              m_aoSetLayout{VK_NULL_HANDLE};
+  VkDescriptorSetLayout              m_ssrSetLayout{VK_NULL_HANDLE};
+  VkPipelineLayout                   m_aoPipelineLayout{VK_NULL_HANDLE};
+  VkPipelineLayout                   m_ssrPipelineLayout{VK_NULL_HANDLE};
+  VkPipeline                         m_gtaoPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_aoDenoisePipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_ssrTracePipeline{VK_NULL_HANDLE};
+  std::vector<VkDescriptorSet>       m_aoDescriptorSets;
+  std::vector<VkDescriptorSet>       m_aoDenoiseDescriptorSets;
+  std::vector<VkDescriptorSet>       m_ssrDescriptorSets;
+  utils::ImageResource               m_aoRaw{};
+  utils::ImageResource               m_aoDenoised{};
+  utils::ImageResource               m_ssrRaw{};
+  utils::ImageResource               m_shadowAtlas{};
+  VkExtent2D                         m_phase7HalfExtent{};
+  VkExtent2D                         m_shadowAtlasExtent{2048u, 2048u};
+  uint32_t                           m_shadowAtlasTileSize{512u};
+  uint32_t                           m_shadowAtlasAllocatedTiles{0};
+  std::vector<shaderio::LightData>   m_gpuDrivenPointLights;
+  std::vector<shaderio::LightData>   m_gpuDrivenSpotLights;
+  utils::ImageResource               m_iblEnvironment{};
+  std::vector<utils::Buffer>         m_gpuDrivenStagingBuffers;
+  VkFormat                           m_iblEnvironmentFormat{VK_FORMAT_UNDEFINED};
+  VkExtent2D                         m_iblEnvironmentExtent{};
+  uint32_t                           m_iblEnvironmentMipCount{0};
+  uint64_t                           m_iblEnvironmentEstimatedBytes{0};
+  bool                               m_iblEnvironmentLoaded{false};
+  bool                               m_iblUsingFallback{true};
+  std::string                        m_iblEnvironmentPath;
+  std::string                        m_iblEnvironmentStatus{"Not initialized"};
   std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
   uint64_t                           m_sceneTopologyVersion{1};
   bool                               m_enableExperimentalMeshletPath{false};
@@ -705,6 +908,9 @@ private:
   bool                               m_lastHiZFastCameraFallbackTriggered{false};
   shaderio::CameraUniforms           m_temporalCameraUniforms{};
   shaderio::CameraUniforms           m_previousCameraUniforms{};
+  glm::mat4                          m_previousJitteredViewProjection{1.0f};
+  glm::vec2                          m_currentTAAJitterUv{0.0f};
+  glm::vec2                          m_previousTAAJitterUv{0.0f};
   bool                               m_previousCameraValid{false};
   bool                               m_taaHistoryValid{false};
   uint64_t                           m_temporalFrameCounter{0};

@@ -77,6 +77,10 @@
 #include "_autogen/shader.shadow.slang.h"
 #include "_autogen/shader.debug.slang.h"
 #include "_autogen/shader.light_culling.slang.h"
+#include "_autogen/clustered_light_cull.slang.h"
+#include "_autogen/gtao.slang.h"
+#include "_autogen/ao_denoise.slang.h"
+#include "_autogen/ssr_trace.slang.h"
 #include "_autogen/shader.gpu_culling.slang.h"
 #include "_autogen/shader.transparent_visibility_patch.slang.h"
 #include "_autogen/shader.shadow_culling.slang.h"
@@ -501,7 +505,7 @@ struct ValidationSettings
   VkBool32 unique_handles{VK_TRUE};
   VkBool32 object_lifetime{VK_TRUE};
   VkBool32 stateless_param{VK_TRUE};
-  std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG"};  // Keep tool-injected validation messages non-fatal.
+  std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG", "VK_DBG_LAYER_ACTION_BREAK"};
   std::vector<const char*> report_flags{"error", "warn"};  // Enable both errors and warnings
   std::vector<const char*> message_id_filter{
       "WARNING-legacy-gpdp2",

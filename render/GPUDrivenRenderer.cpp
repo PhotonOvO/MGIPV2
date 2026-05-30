@@ -1,11 +1,16 @@
 #include "GPUDrivenRenderer.h"
+#include "BatchUploadContext.h"
 #include "UploadUtils.h"
 #include "../common/TracyProfiling.h"
+#include "../loader/Ktx2Loader.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <limits>
+#include <random>
+#include <span>
 
 namespace demo {
 
@@ -27,6 +32,29 @@ constexpr float kGPUDrivenHiZConservativeRadiusBias = 0.1f;
 constexpr float kGPUDrivenHiZNearRejectEpsilon = 1.0e-4f;
 constexpr float kGPUDrivenHiZLargeObjectFootprintThreshold = 192.0f;
 constexpr float kGPUDrivenHiZFastCameraFallbackDistance = 8.0f;
+constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 10u;
+constexpr uint32_t kGPUDrivenLightPassDepthTextureIndex = kPackedGBufferTargetCount;
+constexpr uint32_t kGPUDrivenLightPassSceneColorHdrIndex = kPackedGBufferTargetCount + 1u;
+constexpr uint32_t kGPUDrivenLightPassBloomHalfIndex = kPackedGBufferTargetCount + 2u;
+constexpr uint32_t kGPUDrivenLightPassBloomQuarterIndex = kPackedGBufferTargetCount + 3u;
+constexpr uint32_t kGPUDrivenLightPassVelocityIndex = kPackedGBufferTargetCount + 4u;
+constexpr uint32_t kGPUDrivenLightPassHistoryReadIndex = kPackedGBufferTargetCount + 5u;
+constexpr uint32_t kGPUDrivenLightPassHistoryWriteIndex = kPackedGBufferTargetCount + 6u;
+constexpr uint32_t kGPUDrivenLightPassIBLEnvironmentIndex = kPackedGBufferTargetCount + 7u;
+constexpr uint32_t kGPUDrivenLightPassAOIndex = kPackedGBufferTargetCount + 8u;
+constexpr uint32_t kGPUDrivenLightPassSSRIndex = kPackedGBufferTargetCount + 9u;
+constexpr uint32_t kGPUDrivenTestPointLightCount = 128u;
+constexpr uint32_t kGPUDrivenTestSpotLightCount = 16u;
+constexpr float kGPUDrivenTwoPi = 6.28318530718f;
+constexpr VkFormat kGPUDrivenAOFormat = VK_FORMAT_R16_SFLOAT;
+constexpr VkFormat kGPUDrivenSSRFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat kGPUDrivenShadowAtlasFormat = VK_FORMAT_D32_SFLOAT;
+
+uint64_t estimateImageBytes(VkExtent2D extent, uint32_t bytesPerPixel)
+{
+  return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height) * bytesPerPixel;
+}
+constexpr const char* kGPUDrivenDefaultIBLEnvironmentPath = "resources/environment/lilienstein_4k.ktx2";
 
 uint32_t bytesPerPixelForFormat(VkFormat format)
 {
@@ -244,6 +272,8 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_renderer.init(window, surface, vSync);
   m_sceneRegistry.init(getNativeDeviceHandle(), getAllocatorHandle());
+  initLightingResources();
+  initIBLResources();
   m_enableExperimentalMeshletPath = kEnableExperimentalMeshletPath;
   if(m_enableExperimentalMeshletPath)
   {
@@ -259,9 +289,14 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
     m_visibilitySortPass = std::make_unique<GPUDrivenVisibilitySortPass>(this);
   }
   m_lightCullingPass = std::make_unique<GPUDrivenLightCullingPass>(this);
+  m_clusteredLightCullingPass = std::make_unique<GPUDrivenClusteredLightCullingPass>(this);
   m_csmShadowPass = std::make_unique<GPUDrivenCSMShadowPass>(this);
+  m_shadowAtlasPass = std::make_unique<GPUDrivenShadowAtlasPass>(this);
   m_gbufferPass = std::make_unique<GPUDrivenGBufferPass>(this);
   m_lightPass = std::make_unique<GPUDrivenLightPass>(this);
+  m_skyboxPass = std::make_unique<GPUDrivenSkyboxPass>(this);
+  m_aoPass = std::make_unique<GPUDrivenAOPass>(this);
+  m_ssrPass = std::make_unique<GPUDrivenSSRPass>(this);
   m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
   m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
   m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -281,9 +316,14 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
     m_passExecutor.addPass(*m_visibilitySortPass);
   }
   m_passExecutor.addPass(*m_lightCullingPass);
+  m_passExecutor.addPass(*m_clusteredLightCullingPass);
   m_passExecutor.addPass(*m_csmShadowPass);
+  m_passExecutor.addPass(*m_shadowAtlasPass);
   m_passExecutor.addPass(*m_gbufferPass);
+  m_passExecutor.addPass(*m_aoPass);
   m_passExecutor.addPass(*m_lightPass);
+  m_passExecutor.addPass(*m_skyboxPass);
+  m_passExecutor.addPass(*m_ssrPass);
   m_passExecutor.addPass(*m_forwardPass);
   m_passExecutor.addPass(*m_velocityPass);
   m_passExecutor.addPass(*m_taaResolvePass);
@@ -302,20 +342,27 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
       .isSwapchain  = false,
   });
   initTransparentVisibilityPatchResources();
+  initPhase7Resources();
+  bindPhase7PassResources();
   m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
   if(kEnableShippingVisibilitySort)
   {
     initVisibilitySortResources();
   }
+  initLightingPipelines();
+  initPhase7Pipelines();
 }
 
 void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
 {
+  shutdownLightingPipelines();
+  shutdownPhase7Pipelines();
   if(kEnableShippingVisibilitySort)
   {
     shutdownVisibilitySortResources();
   }
   shutdownTransparentVisibilityPatchResources();
+  shutdownPhase7Resources();
   m_sortedBootstrapFrames.clear();
   m_passExecutor.clear();
   m_imguiPass.reset();
@@ -324,10 +371,15 @@ void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
   m_taaResolvePass.reset();
   m_velocityPass.reset();
   m_forwardPass.reset();
+  m_ssrPass.reset();
+  m_aoPass.reset();
+  m_skyboxPass.reset();
   m_lightPass.reset();
   m_gbufferPass.reset();
+  m_shadowAtlasPass.reset();
   m_csmShadowPass.reset();
   m_lightCullingPass.reset();
+  m_clusteredLightCullingPass.reset();
   if(m_visibilitySortPass != nullptr)
   {
     m_visibilitySortPass.reset();
@@ -340,6 +392,8 @@ void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
     m_meshletBuffer.deinit();
   }
   m_hiZDepthPyramid.shutdown();
+  shutdownIBLResources();
+  shutdownLightingResources();
   m_sceneRegistry.deinit();
   m_renderer.shutdown(surface);
 }
@@ -348,6 +402,7 @@ void GPUDrivenRenderer::resize(rhi::Extent2D size)
 {
   m_renderer.resize(size);
   m_hiZDepthPyramid.resize(getSceneExtent());
+  resizePhase7Resources();
   m_passExecutor.clearResourceBindings();
   bindStaticPassResources();
   m_passExecutor.bindTexture({
@@ -357,6 +412,7 @@ void GPUDrivenRenderer::resize(rhi::Extent2D size)
       .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
   });
+  bindPhase7PassResources();
 }
 
 void GPUDrivenRenderer::render(const RenderParams& params)
@@ -390,6 +446,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
                             + (cachedDrawCounts.transparentCount > 0u ? 1u : 0u));
   m_runtimeStats.batchStats.sortPassCount = 0u;
   const uint32_t frameIndex = getCurrentFrameIndexHint();
+  updateGPUDrivenLights(params, frameIndex);
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
   m_runtimeStats.visibilityDiagnostics = GPUDrivenVisibilityDiagnostics{
       .safeObjectCount = safeObjectCount,
@@ -520,16 +577,25 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   }
 
   RenderParams gpuParams = params;
+  m_previousTAAJitterUv = m_currentTAAJitterUv;
+  m_currentTAAJitterUv = glm::vec2(0.0f);
   if(params.cameraUniforms != nullptr)
   {
-    m_temporalCameraUniforms = *params.cameraUniforms;
+    const shaderio::CameraUniforms unjitteredCamera = *params.cameraUniforms;
     if(!m_previousCameraValid)
     {
-      m_previousCameraUniforms = m_temporalCameraUniforms;
+      m_previousCameraUniforms = unjitteredCamera;
+      m_previousJitteredViewProjection = unjitteredCamera.viewProjection;
     }
+
+    m_temporalCameraUniforms = unjitteredCamera;
     m_temporalCameraUniforms.prevView = m_previousCameraUniforms.view;
     m_temporalCameraUniforms.prevProjection = m_previousCameraUniforms.projection;
     m_temporalCameraUniforms.prevViewProjection = m_previousCameraUniforms.viewProjection;
+    m_temporalCameraUniforms.unjitteredViewProjection = unjitteredCamera.viewProjection;
+    m_temporalCameraUniforms.unjitteredInverseViewProjection = unjitteredCamera.inverseViewProjection;
+    m_temporalCameraUniforms.prevUnjitteredViewProjection = m_previousCameraUniforms.viewProjection;
+    m_temporalCameraUniforms.prevJitteredViewProjection = m_previousJitteredViewProjection;
     const VkExtent2D temporalExtent = getSceneExtent();
     if(gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
        && temporalExtent.width > 0u && temporalExtent.height > 0u)
@@ -537,8 +603,11 @@ void GPUDrivenRenderer::render(const RenderParams& params)
       const uint64_t jitterIndex = m_temporalFrameCounter + 1u;
       const glm::vec2 jitter = (glm::vec2(halton(jitterIndex, 2u), halton(jitterIndex, 3u)) - glm::vec2(0.5f))
                                * (2.0f * gpuParams.debugOptions.taaJitterScale);
-      m_temporalCameraUniforms.projection[2][0] += jitter.x / static_cast<float>(temporalExtent.width);
-      m_temporalCameraUniforms.projection[2][1] += jitter.y / static_cast<float>(temporalExtent.height);
+      const glm::vec2 jitterNdc = glm::vec2(jitter.x / static_cast<float>(temporalExtent.width),
+                                            jitter.y / static_cast<float>(temporalExtent.height));
+      m_currentTAAJitterUv = jitterNdc * 0.5f;
+      m_temporalCameraUniforms.projection[2][0] += jitterNdc.x;
+      m_temporalCameraUniforms.projection[2][1] += jitterNdc.y;
       m_temporalCameraUniforms.viewProjection = m_temporalCameraUniforms.projection * m_temporalCameraUniforms.view;
       m_temporalCameraUniforms.inverseViewProjection = glm::inverse(m_temporalCameraUniforms.viewProjection);
     }
@@ -580,6 +649,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
     m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
     m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
+    updatePhase7Descriptors(frameIndex);
     m_passExecutor.bindTexture({
         .handle       = kPassVelocityHandle,
         .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.velocityImage),
@@ -715,6 +785,97 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .lensEffectsActive = gpuParams.debugOptions.enablePostProcessing
                              && gpuParams.debugOptions.enableLensEffects,
     };
+    const VkExtent2D iblExtent = getIBLEnvironmentExtent();
+    m_runtimeStats.iblDiagnostics = GPUDrivenIBLDiagnostics{
+        .width = iblExtent.width,
+        .height = iblExtent.height,
+        .mipCount = getIBLEnvironmentMipCount(),
+        .format = getIBLEnvironmentFormat(),
+        .estimatedMemoryBytes = getIBLEnvironmentEstimatedBytes(),
+        .intensity = gpuParams.debugOptions.iblIntensity,
+        .enabled = gpuParams.debugOptions.enableIBL,
+        .loaded = getIBLEnvironmentLoaded(),
+        .fallback = getIBLUsingFallback(),
+        .irradianceReady = false,
+        .prefilteredReady = false,
+        .brdfLutReady = false,
+        .splitSumReady = false,
+        .debugMode = gpuParams.debugOptions.iblDebugMode,
+        .path = getIBLEnvironmentPath(),
+        .sourceMode = getIBLEnvironmentLoaded() ? "equirect_fallback" : "flat_ambient",
+        .status = getIBLEnvironmentStatus(),
+    };
+    m_lightResources.cacheClusterStats(frameIndex);
+    const GPUDrivenLightResources::Diagnostics lightDiagnostics = m_lightResources.getDiagnostics();
+    m_runtimeStats.clusteredLightingDiagnostics = GPUDrivenClusteredLightingDiagnostics{
+        .gridX = lightDiagnostics.clusterGridX,
+        .gridY = lightDiagnostics.clusterGridY,
+        .gridZ = lightDiagnostics.clusterGridZ,
+        .clusterCount = lightDiagnostics.clusterCount,
+        .maxLightsPerCluster = lightDiagnostics.maxLightsPerCluster,
+        .activePointLights = lightDiagnostics.activePointLights,
+        .activeSpotLights = lightDiagnostics.activeSpotLights,
+        .maxPointLights = lightDiagnostics.maxPointLights,
+        .maxSpotLights = lightDiagnostics.maxSpotLights,
+        .maxOccupancy = lightDiagnostics.maxOccupancy,
+        .overflowClusterCount = lightDiagnostics.overflowClusterCount,
+        .appendedLightReferences = lightDiagnostics.appendedLightReferences,
+        .clusterMemoryBytes = lightDiagnostics.clusterMemoryBytes,
+        .lightMemoryBytes = lightDiagnostics.lightMemoryBytes,
+        .enabled = gpuParams.debugOptions.enableClusteredLighting,
+        .resourcesOwned = lightDiagnostics.initialized,
+        .descriptorsReady = lightDiagnostics.lightingDescriptorsReady && lightDiagnostics.clusteredDescriptorsReady,
+        .fallbackActive = !gpuParams.debugOptions.enableClusteredLighting || !lightDiagnostics.clusteredDescriptorsReady,
+    };
+    const uint64_t aoBytes = estimateImageBytes(m_phase7HalfExtent, 2u) * 2u;
+    const uint64_t ssrBytes = estimateImageBytes(m_phase7HalfExtent, 8u);
+    m_runtimeStats.aoReflectionDiagnostics = GPUDrivenAOReflectionDiagnostics{
+        .aoWidth = m_phase7HalfExtent.width,
+        .aoHeight = m_phase7HalfExtent.height,
+        .ssrWidth = m_phase7HalfExtent.width,
+        .ssrHeight = m_phase7HalfExtent.height,
+        .estimatedMemoryBytes = aoBytes + ssrBytes,
+        .aoEnabled = gpuParams.debugOptions.enableAO,
+        .aoReady = m_aoDenoised.view != VK_NULL_HANDLE && m_gtaoPipeline != VK_NULL_HANDLE && m_aoDenoisePipeline != VK_NULL_HANDLE,
+        .ssrEnabled = gpuParams.debugOptions.enableSSR,
+        .ssrReady = m_ssrRaw.view != VK_NULL_HANDLE && m_ssrTracePipeline != VK_NULL_HANDLE,
+    };
+    const uint32_t shadowAtlasTileSize = std::max(1u, m_shadowAtlasTileSize);
+    const uint32_t shadowAtlasCapacity =
+        (m_shadowAtlasExtent.width / shadowAtlasTileSize) * (m_shadowAtlasExtent.height / shadowAtlasTileSize);
+    CSMShadowResources& shadowAtlasCsm = getCSMShadowResources();
+    const bool shadowAtlasReady = m_shadowAtlas.view != VK_NULL_HANDLE && m_shadowAtlas.image != VK_NULL_HANDLE
+                                  && !getCSMShadowPipelineHandle().isNull();
+    const bool shadowAtlasHasScene = m_sceneView.usePersistentCullingObjects
+                                     && m_sceneView.shadowPackedMeshes != nullptr
+                                     && m_sceneView.shadowPackedMeshCount > 0
+                                     && m_sceneView.shadowPackedVertexBuffer != VK_NULL_HANDLE
+                                     && m_sceneView.shadowPackedIndexBuffer != VK_NULL_HANDLE;
+    const uint32_t shadowAtlasExpectedTiles =
+        gpuParams.debugOptions.enableShadowAtlas && shadowAtlasReady && shadowAtlasHasScene
+            ? std::min(shadowAtlasCsm.getCascadeCount(), shadowAtlasCapacity)
+            : 0u;
+    const std::string shadowAtlasStatus =
+        !gpuParams.debugOptions.enableShadowAtlas
+            ? "Disabled; using CSM fallback"
+            : (!shadowAtlasReady
+                   ? "Enabled, but atlas image or CSM shadow pipeline is missing; using CSM fallback"
+                   : (!shadowAtlasHasScene
+                          ? "Enabled and allocated; no packed shadow casters this frame; using CSM fallback"
+                          : "Rendering cascade tiles into GPUDriven shadow atlas; lighting still samples CSM fallback"));
+    m_shadowAtlasAllocatedTiles = shadowAtlasExpectedTiles;
+    m_runtimeStats.shadowAtlasDiagnostics = GPUDrivenShadowAtlasDiagnostics{
+        .atlasWidth = m_shadowAtlasExtent.width,
+        .atlasHeight = m_shadowAtlasExtent.height,
+        .tileSize = shadowAtlasTileSize,
+        .tileCapacity = shadowAtlasCapacity,
+        .allocatedTiles = shadowAtlasExpectedTiles,
+        .estimatedMemoryBytes = estimateImageBytes(m_shadowAtlasExtent, 4u),
+        .enabled = gpuParams.debugOptions.enableShadowAtlas,
+        .ready = shadowAtlasReady,
+        .fallbackToCSM = true,
+        .status = shadowAtlasStatus,
+    };
     if(m_sceneView.usePersistentCullingObjects
        && getGPUCullingObjectCount(frameIndex) == safeObjectCount && safeObjectCount > 0u)
     {
@@ -722,9 +883,10 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     }
     updateOwnershipDiagnostics(frameIndex, sceneRenderingSuspended, safeObjectCount);
   }
-  if(gpuParams.cameraUniforms != nullptr)
+  if(params.cameraUniforms != nullptr)
   {
-    m_previousCameraUniforms = *gpuParams.cameraUniforms;
+    m_previousCameraUniforms = *params.cameraUniforms;
+    m_previousJitteredViewProjection = m_temporalCameraUniforms.viewProjection;
     m_previousCameraValid = true;
   }
   m_taaHistoryValid = gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
@@ -848,22 +1010,8 @@ void GPUDrivenRenderer::executeLightCullingPass(rhi::CommandList& cmd, const Ren
     return;
   }
 
-  const shaderio::CameraUniforms& camera = *params.cameraUniforms;
-  const glm::mat4 inverseView = glm::inverse(camera.view);
-  const VkExtent2D extent = getSceneExtent();
-  const uint32_t tileCountX = (extent.width + shaderio::LTileSizeX - 1u) / shaderio::LTileSizeX;
-  const uint32_t tileCountY = (extent.height + shaderio::LTileSizeY - 1u) / shaderio::LTileSizeY;
   const uint32_t pointLightCount = getActivePointLightCount();
   const uint32_t spotLightCount = getActiveSpotLightCount();
-  const shaderio::LightCoarseCullingUniforms coarseCullingUniforms{
-      .viewProjection = camera.viewProjection,
-      .cameraRight = glm::vec4(glm::normalize(glm::vec3(inverseView[0])), 0.0f),
-      .cameraUp = glm::vec4(glm::normalize(glm::vec3(inverseView[1])), 0.0f),
-      .screenTileInfo = glm::vec4(extent.width, extent.height, tileCountX, tileCountY),
-      .lightCountInfo = glm::vec4(pointLightCount, spotLightCount, 0.0f, 0.0f),
-      .debugInfo = glm::vec4(params.debugOptions.showLightCoarseCullingHeatmap ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f),
-  };
-  updateLightCoarseCullingResources(currentFrameIndex, coarseCullingUniforms);
 
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
   vkCmdBindDescriptorSets(vkCmd,
@@ -883,7 +1031,9 @@ void GPUDrivenRenderer::executeLightCullingPass(rhi::CommandList& cmd, const Ren
 
     vkCmdBindPipeline(vkCmd,
                       VK_PIPELINE_BIND_POINT_COMPUTE,
-                      reinterpret_cast<VkPipeline>(getNativeComputePipeline(pipelineHandle)));
+                      pipelineHandle.index == m_pointLightCoarseCullingPipeline.index
+                          ? m_pointLightCoarseCullingVkPipeline
+                          : m_spotLightCoarseCullingVkPipeline);
     vkCmdDispatch(vkCmd, (lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1u, 1u);
   };
 
@@ -901,6 +1051,156 @@ void GPUDrivenRenderer::executeLightCullingPass(rhi::CommandList& cmd, const Ren
       .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .memoryBarrierCount = 1,
       .pMemoryBarriers    = &memoryBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+}
+
+void GPUDrivenRenderer::executeClusteredLightCullingPass(rhi::CommandList& cmd, const RenderParams& params)
+{
+  if(!params.debugOptions.enableClusteredLighting || m_clusteredLightCullingVkPipeline == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  if(frameIndex >= m_lightCoarseCullingDescriptorSets.size())
+  {
+    return;
+  }
+  VkDescriptorSet descriptorSet = m_lightCoarseCullingDescriptorSets[frameIndex];
+  if(descriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const VkBuffer statsBuffer = m_lightResources.getClusterStatsBuffer(frameIndex);
+  if(statsBuffer != VK_NULL_HANDLE)
+  {
+    vkCmdFillBuffer(vkCmd, statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
+    const VkMemoryBarrier2 statsResetBarrier{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+    };
+    const VkDependencyInfo statsResetDependency{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &statsResetBarrier,
+    };
+    vkCmdPipelineBarrier2(vkCmd, &statsResetDependency);
+  }
+
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_clusteredLightCullingVkPipeline);
+  vkCmdBindDescriptorSets(vkCmd,
+                          VK_PIPELINE_BIND_POINT_COMPUTE,
+                          m_lightCoarseCullingPipelineLayout,
+                          0,
+                          1,
+                          &descriptorSet,
+                          0,
+                          nullptr);
+  vkCmdDispatch(vkCmd, (shaderio::LClusterCount + 63u) / 64u, 1u, 1u);
+
+  const VkMemoryBarrier2 memoryBarrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_HOST_READ_BIT,
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &memoryBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+}
+
+void GPUDrivenRenderer::executeAOPass(rhi::CommandList& cmd, const RenderParams& params)
+{
+  if(!params.debugOptions.enableAO || m_gtaoPipeline == VK_NULL_HANDLE || m_aoDenoisePipeline == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size()
+     || m_aoRaw.image == VK_NULL_HANDLE || m_aoDenoised.image == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const shaderio::GPUDrivenAOPushConstants push{
+      .params0 = glm::vec4(m_phase7HalfExtent.width, m_phase7HalfExtent.height, params.debugOptions.aoRadius, params.debugOptions.aoIntensity),
+      .params1 = glm::vec4(1.0f / static_cast<float>(std::max(1u, getSceneExtent().width)),
+                           1.0f / static_cast<float>(std::max(1u, getSceneExtent().height)),
+                           64.0f,
+                           0.35f),
+  };
+
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_gtaoPipeline);
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoPipelineLayout, 0, 1, &m_aoDescriptorSets[frameIndex], 0, nullptr);
+  vkCmdPushConstants(vkCmd, m_aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
+
+  const VkMemoryBarrier2 computeBarrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &computeBarrier,
+  };
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoDenoisePipeline);
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoPipelineLayout, 0, 1, &m_aoDenoiseDescriptorSets[frameIndex], 0, nullptr);
+  vkCmdPushConstants(vkCmd, m_aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
+  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+}
+
+void GPUDrivenRenderer::executeSSRPass(rhi::CommandList& cmd, const RenderParams& params)
+{
+  if(!params.debugOptions.enableSSR || m_ssrTracePipeline == VK_NULL_HANDLE || m_ssrRaw.image == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  if(frameIndex >= m_ssrDescriptorSets.size())
+  {
+    return;
+  }
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const shaderio::GPUDrivenSSRPushConstants push{
+      .params0 = glm::vec4(m_phase7HalfExtent.width,
+                           m_phase7HalfExtent.height,
+                           static_cast<float>(std::max(1, params.debugOptions.ssrMaxSteps)),
+                           params.debugOptions.ssrThickness),
+      .params1 = glm::vec4(2.0f, 80.0f, 1.0f, 0.0f),
+  };
+
+  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssrTracePipeline);
+  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssrPipelineLayout, 0, 1, &m_ssrDescriptorSets[frameIndex], 0, nullptr);
+  vkCmdPushConstants(vkCmd, m_ssrPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
+
+  const VkMemoryBarrier2 memoryBarrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &memoryBarrier,
   };
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
@@ -1068,6 +1368,13 @@ void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
     cascadeCamera.projection = cascadeCamera.viewProjection;
     cascadeCamera.view = glm::mat4(1.0f);
     cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
+    cascadeCamera.prevView = cascadeCamera.view;
+    cascadeCamera.prevProjection = cascadeCamera.projection;
+    cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
+    cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
     cascadeCamera.cameraPosition = glm::vec3(0.0f);
     const float baseConstantBias = context.params->lightSettings.depthBias;
     const float baseSlopeBias = context.params->lightSettings.normalBias;
@@ -1085,15 +1392,15 @@ void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
     {
       VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
           getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+      const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
       vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
                               VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipelineLayout,
                               shaderio::LSetScene,
                               1,
                               &cameraDescriptorSet,
-                              1,
-                              &cameraDynamicOffset);
+                              2,
+                              dynamicOffsets);
     }
 
     const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
@@ -1138,6 +1445,184 @@ void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
       .isSwapchain = false,
   });
 
+  context.cmd->endEvent();
+}
+
+void GPUDrivenRenderer::executeShadowAtlasPass(const PassContext& context)
+{
+  m_shadowAtlasAllocatedTiles = 0u;
+  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr
+     || !context.params->debugOptions.enableShadowAtlas || !m_sceneView.usePersistentCullingObjects
+     || m_sceneView.shadowPackedMeshes == nullptr || m_sceneView.shadowPackedMeshCount == 0
+     || m_sceneView.shadowPackedVertexBuffer == VK_NULL_HANDLE || m_sceneView.shadowPackedIndexBuffer == VK_NULL_HANDLE
+     || m_shadowAtlas.image == VK_NULL_HANDLE || m_shadowAtlas.view == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  shaderio::ShadowUniforms* shadowData = getShadowUniformsData();
+  if(shadowData == nullptr)
+  {
+    return;
+  }
+
+  const PipelineHandle shadowPipeline = getCSMShadowPipelineHandle();
+  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(getCSMShadowPipelineLayout());
+  if(shadowPipeline.isNull() || pipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(getNativeGraphicsPipeline(shadowPipeline));
+  if(nativePipeline == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  CSMShadowResources& csm = getCSMShadowResources();
+  const uint32_t tileSize = std::max(1u, m_shadowAtlasTileSize);
+  const uint32_t tilesX = m_shadowAtlasExtent.width / tileSize;
+  const uint32_t tilesY = m_shadowAtlasExtent.height / tileSize;
+  const uint32_t tileCapacity = tilesX * tilesY;
+  const uint32_t cascadeCount = std::min(csm.getCascadeCount(), tileCapacity);
+  if(cascadeCount == 0u)
+  {
+    return;
+  }
+
+  const uint32_t frameIndex = context.frameIndex;
+  const BindGroupHandle cameraBindGroupHandle = getCameraBindGroup(frameIndex);
+  const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, 0);
+  if(cameraBindGroupHandle.isNull() || drawBindGroupHandle.isNull())
+  {
+    return;
+  }
+
+  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(getGraphicsMaterialDescriptorSet());
+  const VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+      getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+  const VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
+      getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+  if(textureSet == VK_NULL_HANDLE || cameraDescriptorSet == VK_NULL_HANDLE || drawDescriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  context.cmd->beginEvent("GPUDrivenShadowAtlas");
+  const rhi::DepthTargetDesc depthTarget{
+      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
+      .view = rhi::TextureViewHandle::fromNative(m_shadowAtlas.view),
+      .state = rhi::ResourceState::DepthStencilAttachment,
+      .loadOp = rhi::LoadOp::clear,
+      .storeOp = rhi::StoreOp::store,
+      .clearValue = {0.0f, 0},
+  };
+  const rhi::Extent2D atlasExtent{m_shadowAtlasExtent.width, m_shadowAtlasExtent.height};
+  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+      .renderArea = {{0, 0}, atlasExtent},
+      .colorTargets = nullptr,
+      .colorTargetCount = 0,
+      .depthTarget = &depthTarget,
+  });
+
+  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
+  rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
+  vkCmdBindDescriptorSets(vkCmd,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipelineLayout,
+                          shaderio::LSetTextures,
+                          1,
+                          &textureSet,
+                          0,
+                          nullptr);
+  rhi::vulkan::cmdBindDescriptorSets(*context.cmd,
+                                     VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                     pipelineLayout,
+                                     shaderio::LSetDraw,
+                                     1,
+                                     &drawDescriptorSet,
+                                     0,
+                                     nullptr);
+
+  constexpr VkDeviceSize vertexOffset = 0;
+  constexpr VkDeviceSize indexOffset = 0;
+  const VkBuffer vertexBuffer = m_sceneView.shadowPackedVertexBuffer;
+  const VkBuffer indexBuffer = m_sceneView.shadowPackedIndexBuffer;
+  rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
+  rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
+
+  for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
+  {
+    const uint32_t tileX = cascadeIndex % tilesX;
+    const uint32_t tileY = cascadeIndex / tilesX;
+    const int32_t viewportX = static_cast<int32_t>(tileX * tileSize);
+    const int32_t viewportY = static_cast<int32_t>(tileY * tileSize);
+    const rhi::Extent2D tileExtent{tileSize, tileSize};
+    context.cmd->setViewport(rhi::Viewport{static_cast<float>(viewportX),
+                                           static_cast<float>(viewportY),
+                                           static_cast<float>(tileSize),
+                                           static_cast<float>(tileSize),
+                                           0.0f,
+                                           1.0f});
+    context.cmd->setScissor(rhi::Rect2D{{viewportX, viewportY}, tileExtent});
+
+    const TransientAllocator::Allocation cameraAlloc =
+        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
+    shaderio::CameraUniforms cascadeCamera{};
+    cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
+    cascadeCamera.projection = cascadeCamera.viewProjection;
+    cascadeCamera.view = glm::mat4(1.0f);
+    cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
+    cascadeCamera.prevView = cascadeCamera.view;
+    cascadeCamera.prevProjection = cascadeCamera.projection;
+    cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
+    cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.cameraPosition = glm::vec3(0.0f);
+    const float baseConstantBias = context.params->lightSettings.depthBias;
+    const float baseSlopeBias = context.params->lightSettings.normalBias;
+    const float biasScale = shadowData->cascadeBiasScale.z;
+    const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
+    const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
+    const glm::vec3 dirToLight = -lightTravelDir;
+    cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
+    cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
+    std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
+    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
+
+    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
+    vkCmdBindDescriptorSets(vkCmd,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout,
+                            shaderio::LSetScene,
+                            1,
+                            &cameraDescriptorSet,
+                            2,
+                            dynamicOffsets);
+
+    for(uint32_t meshIndex = 0; meshIndex < m_sceneView.shadowPackedMeshCount; ++meshIndex)
+    {
+      const ShadowPackedMesh& packedMesh = m_sceneView.shadowPackedMeshes[meshIndex];
+      context.cmd->drawIndexed(packedMesh.indexCount, 1, packedMesh.firstIndex, packedMesh.vertexOffset, meshIndex);
+    }
+  }
+
+  context.cmd->endRenderPass();
+  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
+      .nativeImage = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
+      .aspect = rhi::TextureAspect::depth,
+      .srcStage = rhi::PipelineStage::FragmentShader,
+      .dstStage = rhi::PipelineStage::FragmentShader,
+      .srcAccess = rhi::ResourceAccess::write,
+      .dstAccess = rhi::ResourceAccess::read,
+      .oldState = rhi::ResourceState::DepthStencilAttachment,
+      .newState = rhi::ResourceState::General,
+      .isSwapchain = false,
+  });
+  m_shadowAtlasAllocatedTiles = cascadeCount;
   context.cmd->endEvent();
 }
 
@@ -1243,7 +1728,7 @@ void GPUDrivenRenderer::executeDebugPass(const PassContext& context)
     cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
         getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
   }
-  const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+  const uint32_t sceneDynamicOffsets[] = {cameraAlloc.offset, 0u};
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
 
   if(hasLineDebug)
@@ -1260,8 +1745,8 @@ void GPUDrivenRenderer::executeDebugPass(const PassContext& context)
                               shaderio::LSetScene,
                               1,
                               &cameraDescriptorSet,
-                              1,
-                              &cameraDynamicOffset);
+                              2,
+                              sceneDynamicOffsets);
     }
 
     const uint32_t vertexDataSize = static_cast<uint32_t>(debugVertices.size() * sizeof(shaderio::DebugLineVertex));
@@ -1290,8 +1775,8 @@ void GPUDrivenRenderer::executeDebugPass(const PassContext& context)
                               shaderio::LSetScene,
                               1,
                               &cameraDescriptorSet,
-                              1,
-                              &cameraDynamicOffset);
+                              2,
+                              sceneDynamicOffsets);
     }
 
     const shaderio::PushConstantGPUCullDebug pushValues{
@@ -2114,6 +2599,11 @@ void GPUDrivenRenderer::clearGPUDrivenScene()
   m_persistentDrawDataDirty = false;
   m_previousTransformResetPending = false;
   m_dirtyPersistentDrawIndices.clear();
+  m_temporalCameraUniforms = {};
+  m_previousCameraUniforms = {};
+  m_previousJitteredViewProjection = glm::mat4(1.0f);
+  m_currentTAAJitterUv = glm::vec2(0.0f);
+  m_previousTAAJitterUv = glm::vec2(0.0f);
   m_previousCameraValid = false;
   m_taaHistoryValid = false;
   m_temporalFrameCounter = 0;
@@ -2607,6 +3097,1282 @@ void GPUDrivenRenderer::recordForwardVisibilityPatch(bool patched,
       transparentCapacity > m_runtimeStats.visibilityDiagnostics.maxMobileTransparentDraws;
 }
 
+void GPUDrivenRenderer::initLightingResources()
+{
+  m_lightResources.init(getNativeDeviceHandle(),
+                        getAllocatorHandle(),
+                        GPUDrivenLightResources::CreateInfo{
+                            .maxPointLights = 256,
+                            .maxSpotLights = 128,
+                            .frameCount = std::max(1u, getSwapchainImageCount()),
+                        });
+
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+  const VkSamplerCreateInfo samplerInfo{
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .maxLod = VK_LOD_CLAMP_NONE,
+  };
+  VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &m_linearClampSampler));
+
+  const std::array<VkDescriptorPoolSize, 4> poolSizes{{
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, frameCount * (kGPUDrivenLightPassTextureCount + 1u)},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 12u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameCount * 7u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, frameCount * 2u},
+  }};
+  const VkDescriptorPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+      .maxSets = frameCount * 3u,
+      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+      .pPoolSizes = poolSizes.data(),
+  };
+  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_lightingDescriptorPool));
+
+  const std::array<VkDescriptorSetLayoutBinding, 9> lightingBindings{{
+      VkDescriptorSetLayoutBinding{shaderio::LBindTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kGPUDrivenLightPassTextureCount, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindShadowMap, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+  }};
+  const VkDescriptorSetLayoutCreateInfo lightingLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(lightingBindings.size()),
+      .pBindings = lightingBindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &lightingLayoutInfo, nullptr, &m_lightingSetLayout));
+
+  const std::array<VkDescriptorSetLayoutBinding, 4> sceneBindings{{
+      VkDescriptorSetLayoutBinding{shaderio::LBindCamera, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindLighting, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindLightCulling, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindPostProcess, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+  }};
+  const VkDescriptorSetLayoutCreateInfo sceneLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(sceneBindings.size()),
+      .pBindings = sceneBindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &sceneLayoutInfo, nullptr, &m_lightingSceneSetLayout));
+
+  const std::array<VkDescriptorSetLayoutBinding, 9> cullingBindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+  const VkDescriptorSetLayoutCreateInfo cullingLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(cullingBindings.size()),
+      .pBindings = cullingBindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &cullingLayoutInfo, nullptr, &m_lightCoarseCullingSetLayout));
+
+  std::vector<VkDescriptorSetLayout> lightingLayouts(frameCount, m_lightingSetLayout);
+  m_lightingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo lightingAlloc{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = m_lightingDescriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts = lightingLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &lightingAlloc, m_lightingDescriptorSets.data()));
+
+  std::vector<VkDescriptorSetLayout> cullingLayouts(frameCount, m_lightCoarseCullingSetLayout);
+  m_lightCoarseCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo cullingAlloc{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = m_lightingDescriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts = cullingLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &cullingAlloc, m_lightCoarseCullingDescriptorSets.data()));
+
+  std::vector<VkDescriptorSetLayout> sceneLayouts(frameCount, m_lightingSceneSetLayout);
+  m_lightingSceneDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
+  const VkDescriptorSetAllocateInfo sceneAlloc{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = m_lightingDescriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts = sceneLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &sceneAlloc, m_lightingSceneDescriptorSets.data()));
+  m_lightingSceneDescriptorTransientBuffers.assign(frameCount, VK_NULL_HANDLE);
+
+  const VkPipelineLayoutCreateInfo cullingPipelineLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &m_lightCoarseCullingSetLayout,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &cullingPipelineLayoutInfo, nullptr, &m_lightCoarseCullingPipelineLayout));
+
+  const std::array<VkDescriptorSetLayout, 2> lightSetLayouts{m_lightingSetLayout, m_lightingSceneSetLayout};
+  const VkPipelineLayoutCreateInfo lightPipelineLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = static_cast<uint32_t>(lightSetLayouts.size()),
+      .pSetLayouts = lightSetLayouts.data(),
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &lightPipelineLayoutInfo, nullptr, &m_lightPipelineLayout));
+}
+
+void GPUDrivenRenderer::shutdownLightingResources()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice != VK_NULL_HANDLE)
+  {
+    if(m_lightPipelineLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyPipelineLayout(nativeDevice, m_lightPipelineLayout, nullptr);
+      m_lightPipelineLayout = VK_NULL_HANDLE;
+    }
+    if(m_lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyPipelineLayout(nativeDevice, m_lightCoarseCullingPipelineLayout, nullptr);
+      m_lightCoarseCullingPipelineLayout = VK_NULL_HANDLE;
+    }
+    if(m_lightingSetLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(nativeDevice, m_lightingSetLayout, nullptr);
+      m_lightingSetLayout = VK_NULL_HANDLE;
+    }
+    if(m_lightingSceneSetLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(nativeDevice, m_lightingSceneSetLayout, nullptr);
+      m_lightingSceneSetLayout = VK_NULL_HANDLE;
+    }
+    if(m_lightCoarseCullingSetLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(nativeDevice, m_lightCoarseCullingSetLayout, nullptr);
+      m_lightCoarseCullingSetLayout = VK_NULL_HANDLE;
+    }
+    if(m_lightingDescriptorPool != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorPool(nativeDevice, m_lightingDescriptorPool, nullptr);
+      m_lightingDescriptorPool = VK_NULL_HANDLE;
+    }
+    if(m_linearClampSampler != VK_NULL_HANDLE)
+    {
+      vkDestroySampler(nativeDevice, m_linearClampSampler, nullptr);
+      m_linearClampSampler = VK_NULL_HANDLE;
+    }
+  }
+  m_lightingDescriptorSets.clear();
+  m_lightingSceneDescriptorSets.clear();
+  m_lightingSceneDescriptorTransientBuffers.clear();
+  m_lightCoarseCullingDescriptorSets.clear();
+  m_lightResources.deinit();
+  m_gpuDrivenPointLights.clear();
+  m_gpuDrivenSpotLights.clear();
+}
+
+void GPUDrivenRenderer::initIBLResources()
+{
+  shutdownIBLResources();
+  m_iblEnvironmentPath = kGPUDrivenDefaultIBLEnvironmentPath;
+  m_iblEnvironmentStatus = "Using flat ambient fallback";
+  m_iblUsingFallback = true;
+
+  Ktx2Loader loader;
+  Ktx2Loader::Ktx2Texture texture{};
+  const std::filesystem::path path(kGPUDrivenDefaultIBLEnvironmentPath);
+  if(!std::filesystem::exists(path))
+  {
+    m_iblEnvironmentStatus = "KTX2 environment not found: " + path.string();
+    LOGW("%s", m_iblEnvironmentStatus.c_str());
+    return;
+  }
+  if(!loader.load(path, texture) || texture.data.empty() || texture.width == 0 || texture.height == 0)
+  {
+    m_iblEnvironmentStatus = "Failed to load GPUDriven IBL KTX2: " + loader.getLastError();
+    LOGW("%s", m_iblEnvironmentStatus.c_str());
+    return;
+  }
+
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkImageCreateInfo imageInfo{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = texture.format,
+      .extent = {texture.width, texture.height, 1},
+      .mipLevels = std::max(1u, texture.mipLevels),
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+  VmaAllocationCreateInfo allocInfo{};
+  allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  utils::Image image{};
+  VK_CHECK(vmaCreateImage(getAllocatorHandle(), &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr));
+
+  executeUploadCommand([&](VkCommandBuffer cmd) {
+    BatchUploadContext upload;
+    upload.init(nativeDevice, getAllocatorHandle(), static_cast<VkDeviceSize>(texture.data.size()));
+    utils::cmdInitImageLayout(cmd, image.image);
+    for(uint32_t level = 0; level < std::max(1u, texture.mipLevels); ++level)
+    {
+      if(level >= texture.mipOffsets.size() || level >= texture.mipSizes.size())
+      {
+        continue;
+      }
+      const VkDeviceSize offset = texture.mipOffsets[level];
+      const VkDeviceSize size = texture.mipSizes[level];
+      if(size == 0 || offset + size > texture.data.size())
+      {
+        continue;
+      }
+      const std::span<const std::byte> payload{
+          reinterpret_cast<const std::byte*>(texture.data.data() + static_cast<size_t>(offset)),
+          static_cast<size_t>(size)};
+      const BatchUploadContext::Slice slice = upload.allocate(size, 4);
+      upload.copyToSlices(std::span<const BatchUploadContext::Slice>(&slice, 1),
+                          std::span<const std::span<const std::byte>>(&payload, 1));
+      const VkBufferImageCopy region{
+          .bufferOffset = 0,
+          .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = level, .baseArrayLayer = 0, .layerCount = 1},
+          .imageExtent = {std::max(1u, texture.width >> level), std::max(1u, texture.height >> level), 1},
+      };
+      upload.recordTextureUpload(slice, image.image, region);
+    }
+    upload.executeUploads(cmd);
+    utils::Buffer staging = upload.releaseStagingBuffer();
+    if(staging.buffer != VK_NULL_HANDLE)
+    {
+      m_gpuDrivenStagingBuffers.push_back(staging);
+    }
+  });
+
+  const VkImageViewCreateInfo viewInfo{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = image.image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = texture.format,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = std::max(1u, texture.mipLevels), .baseArrayLayer = 0, .layerCount = 1},
+  };
+  VkImageView view = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &view));
+  m_iblEnvironment = {};
+  m_iblEnvironment.image = image.image;
+  m_iblEnvironment.allocation = image.allocation;
+  m_iblEnvironment.view = view;
+  m_iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
+  m_iblEnvironmentFormat = texture.format;
+  m_iblEnvironmentExtent = {texture.width, texture.height};
+  m_iblEnvironmentMipCount = std::max(1u, texture.mipLevels);
+  m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
+  m_iblEnvironmentLoaded = true;
+  m_iblUsingFallback = false;
+  m_iblEnvironmentStatus = "Loaded GPUDriven equirect HDR KTX2; split-sum cube resources deferred";
+  LOGI("Loaded GPUDriven equirect IBL %s (%ux%u, %u mips, %.2f MiB); split-sum IBL deferred",
+       m_iblEnvironmentPath.c_str(),
+       m_iblEnvironmentExtent.width,
+       m_iblEnvironmentExtent.height,
+       m_iblEnvironmentMipCount,
+       static_cast<double>(m_iblEnvironmentEstimatedBytes) / (1024.0 * 1024.0));
+}
+
+void GPUDrivenRenderer::shutdownIBLResources()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice != VK_NULL_HANDLE && (m_iblEnvironment.view != VK_NULL_HANDLE || m_iblEnvironment.image != VK_NULL_HANDLE))
+  {
+    if(m_iblEnvironment.view != VK_NULL_HANDLE)
+    {
+      vkDestroyImageView(nativeDevice, m_iblEnvironment.view, nullptr);
+    }
+    if(m_iblEnvironment.image != VK_NULL_HANDLE)
+    {
+      vmaDestroyImage(getAllocatorHandle(), m_iblEnvironment.image, m_iblEnvironment.allocation);
+    }
+    m_iblEnvironment = {};
+  }
+  m_iblEnvironmentFormat = VK_FORMAT_UNDEFINED;
+  m_iblEnvironmentExtent = {};
+  m_iblEnvironmentMipCount = 0;
+  m_iblEnvironmentEstimatedBytes = 0;
+  m_iblEnvironmentLoaded = false;
+  m_iblUsingFallback = true;
+  for(utils::Buffer& buffer : m_gpuDrivenStagingBuffers)
+  {
+    if(buffer.buffer != VK_NULL_HANDLE)
+    {
+      vmaDestroyBuffer(getAllocatorHandle(), buffer.buffer, buffer.allocation);
+      buffer = {};
+    }
+  }
+  m_gpuDrivenStagingBuffers.clear();
+}
+
+void GPUDrivenRenderer::initPhase7Resources()
+{
+  shutdownPhase7Resources();
+
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+  const std::array<VkDescriptorPoolSize, 2> poolSizes{{
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount * 7u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, frameCount * 4u},
+  }};
+  const VkDescriptorPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = frameCount * 3u,
+      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+      .pPoolSizes = poolSizes.data(),
+  };
+  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_phase7DescriptorPool));
+
+  const std::array<VkDescriptorSetLayoutBinding, 3> aoBindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+  const VkDescriptorSetLayoutCreateInfo aoLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(aoBindings.size()),
+      .pBindings = aoBindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &aoLayoutInfo, nullptr, &m_aoSetLayout));
+
+  const std::array<VkDescriptorSetLayoutBinding, 4> ssrBindings{{
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  }};
+  const VkDescriptorSetLayoutCreateInfo ssrLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(ssrBindings.size()),
+      .pBindings = ssrBindings.data(),
+  };
+  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &ssrLayoutInfo, nullptr, &m_ssrSetLayout));
+
+  const VkPushConstantRange aoPushRange{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(shaderio::GPUDrivenAOPushConstants),
+  };
+  const VkPipelineLayoutCreateInfo aoPipelineLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &m_aoSetLayout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &aoPushRange,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &aoPipelineLayoutInfo, nullptr, &m_aoPipelineLayout));
+
+  const VkPushConstantRange ssrPushRange{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(shaderio::GPUDrivenSSRPushConstants),
+  };
+  const VkPipelineLayoutCreateInfo ssrPipelineLayoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &m_ssrSetLayout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &ssrPushRange,
+  };
+  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &ssrPipelineLayoutInfo, nullptr, &m_ssrPipelineLayout));
+
+  m_aoDescriptorSets.resize(frameCount);
+  m_aoDenoiseDescriptorSets.resize(frameCount);
+  m_ssrDescriptorSets.resize(frameCount);
+  std::vector<VkDescriptorSetLayout> aoLayouts(frameCount * 2u, m_aoSetLayout);
+  std::vector<VkDescriptorSet> aoSets(frameCount * 2u, VK_NULL_HANDLE);
+  VkDescriptorSetAllocateInfo aoAlloc{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = m_phase7DescriptorPool,
+      .descriptorSetCount = static_cast<uint32_t>(aoSets.size()),
+      .pSetLayouts = aoLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &aoAlloc, aoSets.data()));
+  for(uint32_t i = 0; i < frameCount; ++i)
+  {
+    m_aoDescriptorSets[i] = aoSets[i * 2u + 0u];
+    m_aoDenoiseDescriptorSets[i] = aoSets[i * 2u + 1u];
+  }
+
+  std::vector<VkDescriptorSetLayout> ssrLayouts(frameCount, m_ssrSetLayout);
+  VkDescriptorSetAllocateInfo ssrAlloc{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = m_phase7DescriptorPool,
+      .descriptorSetCount = frameCount,
+      .pSetLayouts = ssrLayouts.data(),
+  };
+  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &ssrAlloc, m_ssrDescriptorSets.data()));
+  resizePhase7Resources();
+}
+
+void GPUDrivenRenderer::shutdownPhase7Resources()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VmaAllocator allocator = getAllocatorHandle();
+  const auto destroyImage = [&](utils::ImageResource& image) {
+    if(nativeDevice != VK_NULL_HANDLE && image.view != VK_NULL_HANDLE)
+    {
+      vkDestroyImageView(nativeDevice, image.view, nullptr);
+    }
+    if(allocator != nullptr && image.image != VK_NULL_HANDLE)
+    {
+      vmaDestroyImage(allocator, image.image, image.allocation);
+    }
+    image = {};
+  };
+  destroyImage(m_aoRaw);
+  destroyImage(m_aoDenoised);
+  destroyImage(m_ssrRaw);
+  destroyImage(m_shadowAtlas);
+
+  if(nativeDevice != VK_NULL_HANDLE)
+  {
+    if(m_aoPipelineLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyPipelineLayout(nativeDevice, m_aoPipelineLayout, nullptr);
+      m_aoPipelineLayout = VK_NULL_HANDLE;
+    }
+    if(m_ssrPipelineLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyPipelineLayout(nativeDevice, m_ssrPipelineLayout, nullptr);
+      m_ssrPipelineLayout = VK_NULL_HANDLE;
+    }
+    if(m_aoSetLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(nativeDevice, m_aoSetLayout, nullptr);
+      m_aoSetLayout = VK_NULL_HANDLE;
+    }
+    if(m_ssrSetLayout != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorSetLayout(nativeDevice, m_ssrSetLayout, nullptr);
+      m_ssrSetLayout = VK_NULL_HANDLE;
+    }
+    if(m_phase7DescriptorPool != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorPool(nativeDevice, m_phase7DescriptorPool, nullptr);
+      m_phase7DescriptorPool = VK_NULL_HANDLE;
+    }
+  }
+  m_aoDescriptorSets.clear();
+  m_aoDenoiseDescriptorSets.clear();
+  m_ssrDescriptorSets.clear();
+  m_phase7HalfExtent = {};
+  m_shadowAtlasAllocatedTiles = 0u;
+}
+
+void GPUDrivenRenderer::resizePhase7Resources()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VmaAllocator allocator = getAllocatorHandle();
+  if(nativeDevice == VK_NULL_HANDLE || allocator == nullptr)
+  {
+    return;
+  }
+  const VkExtent2D sceneExtent = getSceneExtent();
+  const VkExtent2D halfExtent{std::max(1u, (sceneExtent.width + 1u) / 2u), std::max(1u, (sceneExtent.height + 1u) / 2u)};
+  if(m_phase7HalfExtent.width == halfExtent.width && m_phase7HalfExtent.height == halfExtent.height
+     && m_aoRaw.image != VK_NULL_HANDLE && m_aoDenoised.image != VK_NULL_HANDLE && m_ssrRaw.image != VK_NULL_HANDLE
+     && m_shadowAtlas.image != VK_NULL_HANDLE)
+  {
+    return;
+  }
+  waitForIdle();
+  const auto destroyOnlyImage = [&](utils::ImageResource& image) {
+    if(image.view != VK_NULL_HANDLE)
+    {
+      vkDestroyImageView(nativeDevice, image.view, nullptr);
+    }
+    if(image.image != VK_NULL_HANDLE)
+    {
+      vmaDestroyImage(allocator, image.image, image.allocation);
+    }
+    image = {};
+  };
+  destroyOnlyImage(m_aoRaw);
+  destroyOnlyImage(m_aoDenoised);
+  destroyOnlyImage(m_ssrRaw);
+  destroyOnlyImage(m_shadowAtlas);
+  m_phase7HalfExtent = halfExtent;
+
+  const auto createImageResource = [&](VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
+    const VkImageCreateInfo imageInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = format,
+        .extent = {extent.width, extent.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
+    utils::ImageResource resource{};
+    VK_CHECK(vmaCreateImage(allocator, &imageInfo, &allocInfo, &resource.image, &resource.allocation, nullptr));
+    const VkImageViewCreateInfo viewInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = resource.image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {.aspectMask = aspect, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+    };
+    VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &resource.view));
+    resource.layout = VK_IMAGE_LAYOUT_GENERAL;
+    resource.extent = extent;
+    executeUploadCommand([&](VkCommandBuffer cmd) { utils::cmdInitImageLayout(cmd, resource.image, aspect); });
+    return resource;
+  };
+
+  m_aoRaw = createImageResource(kGPUDrivenAOFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+  m_aoDenoised = createImageResource(kGPUDrivenAOFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+  m_ssrRaw = createImageResource(kGPUDrivenSSRFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+  m_shadowAtlas = createImageResource(kGPUDrivenShadowAtlasFormat,
+                                      m_shadowAtlasExtent,
+                                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                      VK_IMAGE_ASPECT_DEPTH_BIT);
+}
+
+void GPUDrivenRenderer::bindPhase7PassResources()
+{
+  if(m_shadowAtlas.image == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  m_passExecutor.bindTexture({
+      .handle = kPassGPUDrivenShadowAtlasHandle,
+      .nativeImage = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
+      .aspect = rhi::TextureAspect::depth,
+      .initialState = rhi::ResourceState::General,
+      .isSwapchain = false,
+  });
+}
+
+void GPUDrivenRenderer::initPhase7Pipelines()
+{
+  shutdownPhase7Pipelines();
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice == VK_NULL_HANDLE || m_aoPipelineLayout == VK_NULL_HANDLE || m_ssrPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  const auto createComputePipeline = [&](const void* shaderData,
+                                         size_t shaderSize,
+                                         const char* entryPoint,
+                                         VkPipelineLayout layout,
+                                         VkPipeline& outPipeline) {
+    VkShaderModule shaderModule = utils::createShaderModule(nativeDevice, {static_cast<const uint32_t*>(shaderData), shaderSize});
+    const VkPipelineShaderStageCreateInfo stage{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shaderModule,
+        .pName = entryPoint,
+    };
+    const VkComputePipelineCreateInfo pipelineInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = stage,
+        .layout = layout,
+    };
+    VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
+    vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+  };
+
+  createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO", m_aoPipelineLayout, m_gtaoPipeline);
+  createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise", m_aoPipelineLayout, m_aoDenoisePipeline);
+  createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace", m_ssrPipelineLayout, m_ssrTracePipeline);
+#endif
+}
+
+void GPUDrivenRenderer::shutdownPhase7Pipelines()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  if(m_gtaoPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gtaoPipeline, nullptr);
+    m_gtaoPipeline = VK_NULL_HANDLE;
+  }
+  if(m_aoDenoisePipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_aoDenoisePipeline, nullptr);
+    m_aoDenoisePipeline = VK_NULL_HANDLE;
+  }
+  if(m_ssrTracePipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_ssrTracePipeline, nullptr);
+    m_ssrTracePipeline = VK_NULL_HANDLE;
+  }
+}
+
+void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
+{
+  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size()
+     || frameIndex >= m_ssrDescriptorSets.size())
+  {
+    return;
+  }
+  const GPUDrivenSceneView& sceneView = m_sceneView;
+  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+     || sceneView.sceneColorHdrView == VK_NULL_HANDLE || m_aoRaw.view == VK_NULL_HANDLE
+     || m_aoDenoised.view == VK_NULL_HANDLE || m_ssrRaw.view == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const std::array<VkDescriptorImageInfo, 3> aoInfos{{
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
+  }};
+  const std::array<VkDescriptorImageInfo, 3> denoiseInfos{{
+      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoDenoised.view, VK_IMAGE_LAYOUT_GENERAL},
+  }};
+  const std::array<VkDescriptorImageInfo, 4> ssrInfos{{
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneColorHdrView, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, m_ssrRaw.view, VK_IMAGE_LAYOUT_GENERAL},
+  }};
+
+  std::array<VkWriteDescriptorSet, 10> writes{};
+  uint32_t writeIndex = 0;
+  const auto addWrite = [&](VkDescriptorSet set,
+                            uint32_t binding,
+                            VkDescriptorType type,
+                            const VkDescriptorImageInfo* info) {
+    writes[writeIndex++] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = binding,
+        .descriptorCount = 1,
+        .descriptorType = type,
+        .pImageInfo = info,
+    };
+  };
+  addWrite(m_aoDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &aoInfos[0]);
+  addWrite(m_aoDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &aoInfos[1]);
+  addWrite(m_aoDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &aoInfos[2]);
+  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[0]);
+  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[1]);
+  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &denoiseInfos[2]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[0]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[1]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[2]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ssrInfos[3]);
+
+  vkUpdateDescriptorSets(getNativeDeviceHandle(), writeIndex, writes.data(), 0, nullptr);
+}
+
+void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)
+{
+  m_gpuDrivenPointLights.clear();
+  m_gpuDrivenSpotLights.clear();
+  if(params.debugOptions.enablePointLights)
+  {
+    glm::vec3 minBounds(-12.0f, 0.5f, -12.0f);
+    glm::vec3 maxBounds(12.0f, 6.0f, 12.0f);
+    if(m_sceneView.sceneBoundsValid)
+    {
+      minBounds = m_sceneView.sceneBoundsMin;
+      maxBounds = m_sceneView.sceneBoundsMax;
+      const glm::vec3 size = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
+      minBounds += size * 0.08f;
+      maxBounds -= size * 0.08f;
+    }
+
+    std::mt19937 rng(0x47505544u);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    const glm::vec3 boundsSize = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
+    m_gpuDrivenPointLights.reserve(kGPUDrivenTestPointLightCount);
+    for(uint32_t i = 0; i < kGPUDrivenTestPointLightCount; ++i)
+    {
+      const float phase = static_cast<float>(i) * 0.6180339f + static_cast<float>(m_temporalFrameCounter) * 0.01f;
+      const glm::vec3 base = glm::mix(minBounds, maxBounds, glm::vec3(unit(rng), unit(rng), unit(rng)));
+      const glm::vec3 offset = glm::vec3(std::sin(phase), std::cos(phase * 1.37f), std::sin(phase * 0.73f)) * boundsSize * 0.08f;
+      shaderio::LightData light{};
+      light.positionOrDirection = glm::clamp(base + offset, minBounds, maxBounds);
+      light.intensity = (8.0f + 18.0f * unit(rng)) * params.debugOptions.pointLightIntensityScale;
+      light.color = glm::vec3(0.45f + 0.55f * unit(rng), 0.45f + 0.55f * unit(rng), 0.45f + 0.55f * unit(rng));
+      light.range = glm::mix(1.0f, params.debugOptions.pointLightMaxRadius, unit(rng));
+      light.lightType = shaderio::LLightTypePoint;
+      m_gpuDrivenPointLights.push_back(light);
+    }
+
+    if(params.debugOptions.enableClusteredLighting)
+    {
+      const glm::vec3 center = (minBounds + maxBounds) * 0.5f;
+      m_gpuDrivenSpotLights.reserve(kGPUDrivenTestSpotLightCount);
+      for(uint32_t i = 0; i < kGPUDrivenTestSpotLightCount; ++i)
+      {
+        const float t = static_cast<float>(i) / static_cast<float>(kGPUDrivenTestSpotLightCount);
+        const float angle = t * kGPUDrivenTwoPi + static_cast<float>(m_temporalFrameCounter) * 0.003f;
+        const float heightT = 0.25f + 0.5f * unit(rng);
+        const glm::vec3 position =
+            glm::clamp(center + glm::vec3(std::cos(angle) * boundsSize.x * 0.35f,
+                                          boundsSize.y * heightT,
+                                          std::sin(angle) * boundsSize.z * 0.35f),
+                       minBounds,
+                       maxBounds);
+
+        shaderio::LightData light{};
+        light.positionOrDirection = position;
+        light.intensity = (18.0f + 20.0f * unit(rng)) * params.debugOptions.pointLightIntensityScale;
+        light.color = glm::vec3(0.65f + 0.35f * unit(rng), 0.55f + 0.45f * unit(rng), 0.45f + 0.55f * unit(rng));
+        light.range = glm::mix(params.debugOptions.pointLightMaxRadius * 0.75f, params.debugOptions.pointLightMaxRadius * 1.5f, unit(rng));
+        light.lightType = shaderio::LLightTypeSpot;
+        light.spotDirection = glm::normalize(center - position);
+        light.spotInnerAngle = 0.35f;
+        light.spotOuterAngle = 0.75f;
+        m_gpuDrivenSpotLights.push_back(light);
+      }
+    }
+  }
+
+  const shaderio::CameraUniforms* camera = params.cameraUniforms;
+  const VkExtent2D extent = getSceneExtent();
+  const glm::mat4 view = camera != nullptr ? camera->view : glm::mat4(1.0f);
+  const glm::mat4 projection = camera != nullptr ? camera->projection : glm::mat4(1.0f);
+  const glm::mat4 inverseView = glm::inverse(view);
+  const uint32_t tileCountX = (extent.width + shaderio::LTileSizeX - 1u) / shaderio::LTileSizeX;
+  const uint32_t tileCountY = (extent.height + shaderio::LTileSizeY - 1u) / shaderio::LTileSizeY;
+  shaderio::LightingUniforms lightingUniforms{};
+  lightingUniforms.light.lightDirectionAndShadowStrength =
+      glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
+  lightingUniforms.light.lightColorAndNormalBias =
+      glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
+  lightingUniforms.light.ambientColorAndTexelSize =
+      glm::vec4(params.lightSettings.ambient, 1.0f / 1024.0f);
+  lightingUniforms.light.shadowMetrics =
+      glm::vec4(1.0f / 1024.0f, params.lightSettings.depthBias, 1.0f, static_cast<float>(shaderio::LCascadeCount));
+  lightingUniforms.light.iblParams =
+      glm::vec4(params.debugOptions.enableIBL ? 1.0f : 0.0f,
+                params.debugOptions.iblIntensity,
+                static_cast<float>(getIBLEnvironmentMipCount() > 0 ? getIBLEnvironmentMipCount() - 1u : 0u),
+                getIBLEnvironmentLoaded() ? 1.0f : 0.0f);
+  lightingUniforms.light.iblDebugInfo =
+      glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode), 0.0f, 0.0f, 0.0f);
+  lightingUniforms.light.phase7Info =
+      glm::vec4(params.debugOptions.enableAO && m_aoDenoised.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
+                params.debugOptions.enableSSR && m_ssrRaw.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
+                0.0f,
+                0.0f);
+
+  const shaderio::LightCoarseCullingUniforms coarseUniforms{
+      .viewProjection = camera != nullptr ? camera->viewProjection : glm::mat4(1.0f),
+      .cameraRight = glm::vec4(glm::normalize(glm::vec3(inverseView[0])), 0.0f),
+      .cameraUp = glm::vec4(glm::normalize(glm::vec3(inverseView[1])), 0.0f),
+      .screenTileInfo = glm::vec4(extent.width, extent.height, tileCountX, tileCountY),
+      .lightCountInfo = glm::vec4(static_cast<float>(m_gpuDrivenPointLights.size()), static_cast<float>(m_gpuDrivenSpotLights.size()), 0.0f, 0.0f),
+      .debugInfo = glm::vec4(params.debugOptions.showLightCoarseCullingHeatmap ? 1.0f : 0.0f,
+                             params.debugOptions.showClusteredLightingHeatmap ? 1.0f : 0.0f,
+                             params.debugOptions.showClusteredLightingOverflow ? 1.0f : 0.0f,
+                             params.debugOptions.enableClusteredLighting ? 1.0f : 0.0f),
+  };
+  const shaderio::ClusteredLightUniforms clusteredUniforms{
+      .screenSizeAndClusterInfo = glm::vec4(extent.width, extent.height, shaderio::LClusterGridSizeX, shaderio::LClusterGridSizeY),
+      .clusterZAndLightInfo = glm::vec4(shaderio::LClusterGridSizeZ, shaderio::LMaxLightsPerCluster, static_cast<float>(m_gpuDrivenPointLights.size()), static_cast<float>(m_gpuDrivenSpotLights.size())),
+      .clipInfo = glm::vec4(0.01f, 1000.0f, 1.0f, 0.0f),
+      .debugInfo = glm::vec4(params.debugOptions.enableClusteredLighting ? 1.0f : 0.0f,
+                             params.debugOptions.showClusteredLightingHeatmap ? 1.0f : 0.0f,
+                             params.debugOptions.showClusteredLightingOverflow ? 1.0f : 0.0f,
+                             0.0f),
+      .viewMatrix = view,
+      .projectionMatrix = projection,
+      .invProjectionMatrix = glm::inverse(projection),
+      .invViewMatrix = inverseView,
+  };
+  m_lightResources.updateLights(frameIndex, m_gpuDrivenPointLights, m_gpuDrivenSpotLights);
+  m_lightResources.updateUniforms(frameIndex, lightingUniforms, coarseUniforms, clusteredUniforms);
+  updateLightingDescriptorSet(frameIndex);
+}
+
+uint64_t GPUDrivenRenderer::getLightingInputDescriptorSet() const
+{
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  return frameIndex < m_lightingDescriptorSets.size()
+             ? reinterpret_cast<uint64_t>(m_lightingDescriptorSets[frameIndex])
+             : 0;
+}
+
+uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) const
+{
+  return frameIndex < m_lightingSceneDescriptorSets.size()
+             ? reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[frameIndex])
+             : 0;
+}
+
+uint64_t GPUDrivenRenderer::getCurrentLightCullingDescriptorSet() const
+{
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  return frameIndex < m_lightCoarseCullingDescriptorSets.size()
+             ? reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[frameIndex])
+             : 0;
+}
+
+void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t frameIndex, VkBuffer transientBuffer, uint32_t)
+{
+  if(frameIndex >= m_lightingSceneDescriptorSets.size() || transientBuffer == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  if(m_lightingSceneDescriptorTransientBuffers.size() < m_lightingSceneDescriptorSets.size())
+  {
+    m_lightingSceneDescriptorTransientBuffers.resize(m_lightingSceneDescriptorSets.size(), VK_NULL_HANDLE);
+  }
+  if(m_lightingSceneDescriptorTransientBuffers[frameIndex] == transientBuffer)
+  {
+    return;
+  }
+
+  const VkDescriptorBufferInfo cameraBufferInfo{
+      .buffer = transientBuffer,
+      .offset = 0,
+      .range = sizeof(shaderio::CameraUniforms),
+  };
+  const VkDescriptorBufferInfo postProcessBufferInfo{
+      .buffer = transientBuffer,
+      .offset = 0,
+      .range = sizeof(shaderio::PostProcessUniforms),
+  };
+  const VkDescriptorBufferInfo lightingBufferInfo{
+      .buffer = m_lightResources.getLightingUniformBuffer(frameIndex),
+      .offset = 0,
+      .range = sizeof(shaderio::LightingUniforms),
+  };
+  const VkDescriptorBufferInfo lightCullingBufferInfo{
+      .buffer = m_lightResources.getCoarseUniformBuffer(frameIndex),
+      .offset = 0,
+      .range = sizeof(shaderio::LightCoarseCullingUniforms),
+  };
+  const std::array<VkWriteDescriptorSet, 4> writes{{
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
+          .dstBinding = shaderio::LBindCamera,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo = &cameraBufferInfo,
+      },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
+          .dstBinding = shaderio::LBindLighting,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo = &lightingBufferInfo,
+      },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
+          .dstBinding = shaderio::LBindLightCulling,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo = &lightCullingBufferInfo,
+      },
+      VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
+          .dstBinding = shaderio::LBindPostProcess,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo = &postProcessBufferInfo,
+      },
+  }};
+  vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  m_lightingSceneDescriptorTransientBuffers[frameIndex] = transientBuffer;
+}
+
+void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
+{
+  if(frameIndex >= m_lightingDescriptorSets.size())
+  {
+    return;
+  }
+
+  const GPUDrivenSceneView& sceneView = m_sceneView;
+  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.sceneColorHdrView == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
+  {
+    if(sceneView.gbufferViews[i] == VK_NULL_HANDLE)
+    {
+      return;
+    }
+  }
+
+  const VkSampler sampler = m_linearClampSampler;
+  if(sampler == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  std::array<VkDescriptorImageInfo, kGPUDrivenLightPassTextureCount> imageInfos{};
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
+  {
+    imageInfos[i] = VkDescriptorImageInfo{sampler, sceneView.gbufferViews[i], VK_IMAGE_LAYOUT_GENERAL};
+  }
+  imageInfos[kGPUDrivenLightPassDepthTextureIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL};
+  const VkImageView safeColorFallback = sceneView.gbufferViews[0];
+  const VkImageView safeDepthFallback = sceneView.sceneDepthView;
+  imageInfos[kGPUDrivenLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHdrView, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomHalfIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomHalfView != VK_NULL_HANDLE ? sceneView.bloomHalfView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomQuarterIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomQuarterView != VK_NULL_HANDLE ? sceneView.bloomQuarterView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassVelocityIndex] = VkDescriptorImageInfo{sampler, sceneView.velocityView != VK_NULL_HANDLE ? sceneView.velocityView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassHistoryReadIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryReadView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassHistoryWriteIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryWriteView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryWriteView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassIBLEnvironmentIndex] =
+      VkDescriptorImageInfo{sampler,
+                            m_iblEnvironment.view != VK_NULL_HANDLE ? m_iblEnvironment.view : safeColorFallback,
+                            VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassAOIndex] =
+      VkDescriptorImageInfo{sampler,
+                            m_aoDenoised.view != VK_NULL_HANDLE ? m_aoDenoised.view : safeDepthFallback,
+                            VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassSSRIndex] =
+      VkDescriptorImageInfo{sampler,
+                            m_ssrRaw.view != VK_NULL_HANDLE ? m_ssrRaw.view : safeColorFallback,
+                            VK_IMAGE_LAYOUT_GENERAL};
+  const VkDescriptorImageInfo shadowInfo{
+      .sampler = sampler,
+      .imageView = getCSMShadowResources().getCascadeView() != VK_NULL_HANDLE ? getCSMShadowResources().getCascadeView() : sceneView.sceneDepthView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+
+  const std::array<VkDescriptorBufferInfo, 7> bufferInfos{{
+      VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{m_lightResources.getCoarseUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
+      VkDescriptorBufferInfo{m_lightResources.getClusterCountsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{m_lightResources.getClusterIndicesBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{m_lightResources.getClusteredUniformBuffer(frameIndex), 0, sizeof(shaderio::ClusteredLightUniforms)},
+      VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+  }};
+  const std::array<VkWriteDescriptorSet, 9> writes{{
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindTextures, .descriptorCount = kGPUDrivenLightPassTextureCount, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = imageInfos.data()},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindShadowMap, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &shadowInfo},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[0]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 3, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[1]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 4, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bufferInfos[2]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 5, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[3]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 6, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[4]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 7, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bufferInfos[5]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 8, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[6]},
+  }};
+  vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+  if(frameIndex < m_lightCoarseCullingDescriptorSets.size())
+  {
+    const std::array<VkDescriptorBufferInfo, 9> cullBuffers{{
+        VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getSpotCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getCoarseUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
+        VkDescriptorBufferInfo{m_lightResources.getClusteredUniformBuffer(frameIndex), 0, sizeof(shaderio::ClusteredLightUniforms)},
+        VkDescriptorBufferInfo{m_lightResources.getClusterCountsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getClusterIndicesBuffer(frameIndex), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{m_lightResources.getClusterStatsBuffer(frameIndex), 0, sizeof(GPUDrivenLightResources::ClusterStats)},
+    }};
+    std::array<VkWriteDescriptorSet, 9> cullWrites{};
+    for(uint32_t i = 0; i < static_cast<uint32_t>(cullWrites.size()); ++i)
+    {
+      cullWrites[i] = VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = m_lightCoarseCullingDescriptorSets[frameIndex],
+          .dstBinding = i,
+          .descriptorCount = 1,
+          .descriptorType = (i == 4 || i == 5) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &cullBuffers[i],
+      };
+    }
+    vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(cullWrites.size()), cullWrites.data(), 0, nullptr);
+  }
+}
+
+
+
+void GPUDrivenRenderer::initLightingPipelines()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice == VK_NULL_HANDLE || m_lightPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+#ifdef USE_SLANG
+  VkShaderModule lightShaderModule =
+      utils::createShaderModule(nativeDevice, {shader_light_slang, std::size(shader_light_slang)});
+  const auto createFullscreenPipeline = [&](const char* fragmentEntry,
+                                            VkFormat colorFormat,
+                                            bool depthTest,
+                                            uint32_t variant) -> PipelineHandle {
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        VkPipelineShaderStageCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                                        .module = lightShaderModule,
+                                        .pName = "vertexMain"},
+        VkPipelineShaderStageCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                        .module = lightShaderModule,
+                                        .pName = fragmentEntry},
+    }};
+    const VkPipelineVertexInputStateCreateInfo vertexInput{.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    const VkPipelineRasterizationStateCreateInfo rasterizer{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    const VkPipelineMultisampleStateCreateInfo multisampling{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    const VkPipelineColorBlendAttachmentState colorBlendAttachment{
+        .blendEnable = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    const VkPipelineColorBlendStateCreateInfo colorBlending{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment,
+    };
+    const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+    const VkPipelineDynamicStateCreateInfo dynamicState{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+        .pDynamicStates = dynamicStates.data(),
+    };
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = depthTest ? VK_TRUE : VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_EQUAL,
+    };
+    const VkPipelineViewportStateCreateInfo viewportState{.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &colorFormat,
+        .depthAttachmentFormat = depthTest ? getSceneDepthFormat() : VK_FORMAT_UNDEFINED,
+    };
+    const VkGraphicsPipelineCreateInfo pipelineInfo{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &renderingInfo,
+        .stageCount = static_cast<uint32_t>(stages.size()),
+        .pStages = stages.data(),
+        .pVertexInputState = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depthStencil,
+        .pColorBlendState = &colorBlending,
+        .pDynamicState = &dynamicState,
+        .layout = m_lightPipelineLayout,
+    };
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateGraphicsPipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+    if(variant == 0x6101u)
+    {
+      m_gpuDrivenLightHdrVkPipeline = pipeline;
+    }
+    else if(variant == 0x6102u)
+    {
+      m_gpuDrivenSkyboxVkPipeline = pipeline;
+    }
+    else if(variant == 0x6103u)
+    {
+      m_gpuDrivenTAAResolveVkPipeline = pipeline;
+    }
+    else if(variant == 0x6104u)
+    {
+      m_gpuDrivenBloomPrefilterVkPipeline = pipeline;
+    }
+    else if(variant == 0x6105u)
+    {
+      m_gpuDrivenBloomDownsampleVkPipeline = pipeline;
+    }
+    else if(variant == 0x6106u)
+    {
+      m_gpuDrivenFinalColorVkPipeline = pipeline;
+    }
+    else if(variant == 0x6107u)
+    {
+      m_gpuDrivenVelocityVkPipeline = pipeline;
+    }
+    return PipelineHandle{variant, 1u};
+  };
+
+  m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain", getSceneColorHdrFormat(), false, 0x6101u);
+  m_gpuDrivenSkyboxPipeline = createFullscreenPipeline("fragmentSkyboxMain", getSceneColorHdrFormat(), true, 0x6102u);
+  m_gpuDrivenTAAResolvePipeline = createFullscreenPipeline("fragmentTAAResolveMain", getSceneColorHdrFormat(), false, 0x6103u);
+  m_gpuDrivenBloomPrefilterPipeline = createFullscreenPipeline("fragmentBloomPrefilterMain", SceneResources::kBloomFormat, false, 0x6104u);
+  m_gpuDrivenBloomDownsamplePipeline = createFullscreenPipeline("fragmentBloomDownsampleMain", SceneResources::kBloomFormat, false, 0x6105u);
+  m_gpuDrivenFinalColorPipeline = createFullscreenPipeline("fragmentFinalColorMain", getOutputTextureFormat(), false, 0x6106u);
+  m_gpuDrivenVelocityPipeline = createFullscreenPipeline("fragmentVelocityMain", getVelocityFormat(), false, 0x6107u);
+
+  if(m_lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
+  {
+    VkShaderModule cullingShaderModule =
+        utils::createShaderModule(nativeDevice, {shader_light_culling_slang, std::size(shader_light_culling_slang)});
+    const auto createComputePipeline = [&](const char* entryPoint, uint32_t variant, VkPipeline& outPipeline) {
+      const VkPipelineShaderStageCreateInfo stage{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+          .module = cullingShaderModule,
+          .pName = entryPoint,
+      };
+      const VkComputePipelineCreateInfo pipelineInfo{
+          .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+          .stage = stage,
+          .layout = m_lightCoarseCullingPipelineLayout,
+      };
+      VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
+      return PipelineHandle{variant, 1u};
+    };
+    m_pointLightCoarseCullingPipeline =
+        createComputePipeline("kernelPointLightCoarseCulling", 0x6201u, m_pointLightCoarseCullingVkPipeline);
+    m_spotLightCoarseCullingPipeline =
+        createComputePipeline("kernelSpotLightCoarseCulling", 0x6202u, m_spotLightCoarseCullingVkPipeline);
+    vkDestroyShaderModule(nativeDevice, cullingShaderModule, nullptr);
+
+    VkShaderModule clusteredShaderModule =
+        utils::createShaderModule(nativeDevice, {clustered_light_cull_slang, std::size(clustered_light_cull_slang)});
+    const VkPipelineShaderStageCreateInfo clusteredStage{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = clusteredShaderModule,
+        .pName = "kernelClusteredLightCulling",
+    };
+    const VkComputePipelineCreateInfo clusteredPipelineInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = clusteredStage,
+        .layout = m_lightCoarseCullingPipelineLayout,
+    };
+    VK_CHECK(vkCreateComputePipelines(nativeDevice,
+                                      VK_NULL_HANDLE,
+                                      1,
+                                      &clusteredPipelineInfo,
+                                      nullptr,
+                                      &m_clusteredLightCullingVkPipeline));
+    m_clusteredLightCullingPipeline = PipelineHandle{0x6203u, 1u};
+    vkDestroyShaderModule(nativeDevice, clusteredShaderModule, nullptr);
+  }
+  vkDestroyShaderModule(nativeDevice, lightShaderModule, nullptr);
+#endif
+}
+
+void GPUDrivenRenderer::shutdownLightingPipelines()
+{
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  if(nativeDevice == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const auto destroyGraphicsPipeline = [&](PipelineHandle& handle) {
+    if(!handle.isNull())
+    {
+      handle = {};
+    }
+  };
+  if(m_gpuDrivenLightHdrVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenLightHdrVkPipeline, nullptr);
+    m_gpuDrivenLightHdrVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenSkyboxVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenSkyboxVkPipeline, nullptr);
+    m_gpuDrivenSkyboxVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenTAAResolveVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenTAAResolveVkPipeline, nullptr);
+    m_gpuDrivenTAAResolveVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenBloomPrefilterVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomPrefilterVkPipeline, nullptr);
+    m_gpuDrivenBloomPrefilterVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenBloomDownsampleVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomDownsampleVkPipeline, nullptr);
+    m_gpuDrivenBloomDownsampleVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenFinalColorVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenFinalColorVkPipeline, nullptr);
+    m_gpuDrivenFinalColorVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_gpuDrivenVelocityVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenVelocityVkPipeline, nullptr);
+    m_gpuDrivenVelocityVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_pointLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_pointLightCoarseCullingVkPipeline, nullptr);
+    m_pointLightCoarseCullingVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_spotLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_spotLightCoarseCullingVkPipeline, nullptr);
+    m_spotLightCoarseCullingVkPipeline = VK_NULL_HANDLE;
+  }
+  if(m_clusteredLightCullingVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_clusteredLightCullingVkPipeline, nullptr);
+    m_clusteredLightCullingVkPipeline = VK_NULL_HANDLE;
+  }
+  destroyGraphicsPipeline(m_gpuDrivenLightHdrPipeline);
+  destroyGraphicsPipeline(m_gpuDrivenSkyboxPipeline);
+  destroyGraphicsPipeline(m_gpuDrivenTAAResolvePipeline);
+  destroyGraphicsPipeline(m_gpuDrivenBloomPrefilterPipeline);
+  destroyGraphicsPipeline(m_gpuDrivenBloomDownsamplePipeline);
+  destroyGraphicsPipeline(m_gpuDrivenFinalColorPipeline);
+  destroyGraphicsPipeline(m_gpuDrivenVelocityPipeline);
+  destroyGraphicsPipeline(m_pointLightCoarseCullingPipeline);
+  destroyGraphicsPipeline(m_spotLightCoarseCullingPipeline);
+  destroyGraphicsPipeline(m_clusteredLightCullingPipeline);
+}
+
 void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                                                    bool     sceneRenderingSuspended,
                                                    uint32_t safeObjectCount)
@@ -2643,7 +4409,9 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                            : (m_sceneView.usePersistentCullingObjects ? GPUDrivenOwnershipState::bridged
                                                                       : GPUDrivenOwnershipState::disabled);
   m_runtimeStats.resourceOwnership.lightingResources =
-      hasLightingResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
+      hasLightingResources && m_runtimeStats.clusteredLightingDiagnostics.resourcesOwned
+          ? GPUDrivenOwnershipState::gpuOwned
+          : (hasLightingResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled);
   m_runtimeStats.resourceOwnership.shadowResources =
       hasShadowResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled;
   m_runtimeStats.resourceOwnership.materialDescriptors =
@@ -2692,8 +4460,12 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                     m_visibilitySortPass != nullptr ? "GPU sort executes; transparent distance keys are still CPU-seeded"
                                                     : "Visibility sort pass is not registered");
   addPassDiagnostic("GPUDrivenLightCulling",
-                    GPUDrivenOwnershipState::bridged,
-                    "Uses shared light resources; clustered mobile path is pending");
+                    m_runtimeStats.clusteredLightingDiagnostics.resourcesOwned
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.clusteredLightingDiagnostics.resourcesOwned
+                        ? "GPUDriven-owned local light buffers and culling descriptors"
+                        : "GPUDriven light resources are unavailable");
   addPassDiagnostic("GPUDrivenCSMShadow",
                     hasShadowResources ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
                     hasShadowResources ? "GPU-driven submission; CSM atlas/resources are still shared"
@@ -2705,9 +4477,16 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                         ? "MDI submission; attachments/material descriptors are still bridged"
                         : "Missing scene attachments or material descriptors");
   addPassDiagnostic("GPUDrivenLightPass",
-                    hasLightingResources ? GPUDrivenOwnershipState::bridged : GPUDrivenOwnershipState::disabled,
-                    hasLightingResources ? "Deferred lighting writes FP16 HDR scene color; lighting descriptors are still shared"
+                    hasLightingResources ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
+                    hasLightingResources ? "Deferred lighting writes FP16 HDR scene color using GPUDriven-owned lighting descriptors"
                                          : "Lighting resources are unavailable");
+  addPassDiagnostic("GPUDrivenSkybox",
+                    m_skyboxPass != nullptr && m_runtimeStats.iblDiagnostics.enabled
+                        ? GPUDrivenOwnershipState::gpuOwned
+                        : GPUDrivenOwnershipState::disabled,
+                    m_runtimeStats.iblDiagnostics.enabled
+                        ? "Depth-tested HDRI skybox fills reverse-Z background pixels"
+                        : "Skybox is disabled with IBL");
   addPassDiagnostic("GPUDrivenForwardPass",
                     hasSceneAttachments ? GPUDrivenOwnershipState::gpuOwned : GPUDrivenOwnershipState::disabled,
                     hasSceneAttachments ? "Transparent visibility is GPU-patched into HDR scene color; ordering seed is still CPU-generated"

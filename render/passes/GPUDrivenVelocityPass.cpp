@@ -78,24 +78,26 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   const VkPipeline pipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(pipelineHandle));
   const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
   const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
-  const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-  const VkDescriptorSet cameraSet = reinterpret_cast<VkDescriptorSet>(
-      m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
+  m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
+                                               reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                               context.cameraAlloc.offset);
+  const VkDescriptorSet sceneDescriptorSet =
+      reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
   if(pipeline != VK_NULL_HANDLE && layout != VK_NULL_HANDLE && textureSet != VK_NULL_HANDLE
-     && cameraSet != VK_NULL_HANDLE)
+     && sceneDescriptorSet != VK_NULL_HANDLE)
   {
     const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
     rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
-    const uint32_t cameraDynamicOffset = context.cameraAlloc.offset;
+    const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, 0u};
     vkCmdBindDescriptorSets(vkCmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             layout,
                             shaderio::LSetScene,
                             1,
-                            &cameraSet,
-                            1,
-                            &cameraDynamicOffset);
+                            &sceneDescriptorSet,
+                            static_cast<uint32_t>(dynamicOffsets.size()),
+                            dynamicOffsets.data());
     context.cmd->draw(3, 1, 0, 0);
   }
 

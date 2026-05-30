@@ -168,6 +168,10 @@ public:
           m_cameraUniforms.projection = m_camera.getProjectionMatrix();
           m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
           m_cameraUniforms.inverseViewProjection = glm::inverse(m_cameraUniforms.viewProjection);
+          m_cameraUniforms.unjitteredViewProjection = m_cameraUniforms.viewProjection;
+          m_cameraUniforms.unjitteredInverseViewProjection = m_cameraUniforms.inverseViewProjection;
+          m_cameraUniforms.prevUnjitteredViewProjection = m_cameraUniforms.viewProjection;
+          m_cameraUniforms.prevJitteredViewProjection = m_cameraUniforms.viewProjection;
           m_cameraUniforms.cameraPosition = m_camera.getPosition();
           m_cameraUniforms.shadowConstantBias = 0.0f;
           m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
@@ -300,6 +304,13 @@ public:
                     m_lightSettings.direction.z);
         ImGui::ColorEdit3("Light Color", &m_lightSettings.color.x);
         ImGui::ColorEdit3("Ambient", &m_lightSettings.ambient.x);
+        ImGui::Checkbox("IBL", &m_debugOptions.enableIBL);
+        if(m_debugOptions.enableIBL)
+        {
+          ImGui::SliderFloat("IBL Intensity", &m_debugOptions.iblIntensity, 0.0f, 2.0f, "%.2f");
+          const char* iblDebugModes[] = {"Off", "Diffuse", "Specular", "Fallback", "Environment"};
+          ImGui::Combo("IBL Debug", &m_debugOptions.iblDebugMode, iblDebugModes, IM_ARRAYSIZE(iblDebugModes));
+        }
         ImGui::SliderFloat("Shadow Distance", &m_lightSettings.shadowDistance, 5.0f, 80.0f);
         ImGui::SliderFloat("Shadow Strength", &m_lightSettings.shadowStrength, 0.0f, 1.0f);
         ImGui::SliderFloat("Normal Bias", &m_lightSettings.normalBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
@@ -329,6 +340,22 @@ public:
                                ImGuiSliderFlags_Logarithmic);
           }
           ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
+          ImGui::Checkbox("Clustered Lighting", &m_debugOptions.enableClusteredLighting);
+          ImGui::Checkbox("Cluster Heatmap", &m_debugOptions.showClusteredLightingHeatmap);
+          ImGui::Checkbox("Cluster Overflow", &m_debugOptions.showClusteredLightingOverflow);
+          ImGui::Checkbox("Ambient Occlusion", &m_debugOptions.enableAO);
+          if(m_debugOptions.enableAO)
+          {
+            ImGui::SliderFloat("AO Radius", &m_debugOptions.aoRadius, 2.0f, 32.0f, "%.1f");
+            ImGui::SliderFloat("AO Intensity", &m_debugOptions.aoIntensity, 0.0f, 2.0f, "%.2f");
+          }
+          ImGui::Checkbox("SSR", &m_debugOptions.enableSSR);
+          if(m_debugOptions.enableSSR)
+          {
+            ImGui::SliderInt("SSR Max Steps", &m_debugOptions.ssrMaxSteps, 8, 64);
+            ImGui::SliderFloat("SSR Thickness", &m_debugOptions.ssrThickness, 0.005f, 0.12f, "%.3f");
+          }
+          ImGui::Checkbox("Shadow Atlas", &m_debugOptions.enableShadowAtlas);
           ImGui::TreePop();
         }
         if(ImGui::TreeNode("Culling Overlays"))
@@ -688,6 +715,87 @@ public:
                         outputMiB,
                         hdrMiB,
                         bloomMiB);
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("IBL Diagnostics"))
+          {
+            const demo::GPUDrivenIBLDiagnostics& iblDiagnostics = gpuDrivenStats.iblDiagnostics;
+            const double iblMiB =
+                static_cast<double>(iblDiagnostics.estimatedMemoryBytes) / (1024.0 * 1024.0);
+            ImGui::Text("Enabled: %s", iblDiagnostics.enabled ? "Yes" : "No");
+            ImGui::Text("State: %s%s",
+                        iblDiagnostics.loaded ? "Loaded" : "Fallback",
+                        iblDiagnostics.fallback ? " (flat ambient)" : "");
+            ImGui::Text("Source: %s", iblDiagnostics.path.empty() ? "<none>" : iblDiagnostics.path.c_str());
+            ImGui::Text("Mode: %s", iblDiagnostics.sourceMode.empty() ? "<unset>" : iblDiagnostics.sourceMode.c_str());
+            ImGui::Text("Status: %s", iblDiagnostics.status.c_str());
+            ImGui::Text("Format: %s", vkFormatLabel(iblDiagnostics.format));
+            ImGui::Text("Size/Mips: %u x %u / %u",
+                        iblDiagnostics.width,
+                        iblDiagnostics.height,
+                        iblDiagnostics.mipCount);
+            ImGui::Text("Intensity: %.2f", iblDiagnostics.intensity);
+            ImGui::Text("Debug Mode: %d", iblDiagnostics.debugMode);
+            ImGui::Text("Split Sum IBL: irradiance %s, prefilter %s, BRDF LUT %s",
+                        iblDiagnostics.irradianceReady ? "Ready" : "Deferred",
+                        iblDiagnostics.prefilteredReady ? "Ready" : "Deferred",
+                        iblDiagnostics.brdfLutReady ? "Ready" : "Deferred");
+            ImGui::Text("Estimated Memory: %.2f MiB", iblMiB);
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("Clustered Lighting Diagnostics"))
+          {
+            const demo::GPUDrivenClusteredLightingDiagnostics& clusterDiagnostics =
+                gpuDrivenStats.clusteredLightingDiagnostics;
+            ImGui::Text("Enabled: %s", clusterDiagnostics.enabled ? "Yes" : "No");
+            ImGui::Text("Owned Resources: %s", clusterDiagnostics.resourcesOwned ? "Yes" : "No");
+            ImGui::Text("Descriptors: %s", clusterDiagnostics.descriptorsReady ? "Ready" : "Missing");
+            ImGui::Text("Fallback: %s", clusterDiagnostics.fallbackActive ? "Active" : "No");
+            ImGui::Text("Grid: %u x %u x %u (%u)",
+                        clusterDiagnostics.gridX,
+                        clusterDiagnostics.gridY,
+                        clusterDiagnostics.gridZ,
+                        clusterDiagnostics.clusterCount);
+            ImGui::Text("Lights: %u point, %u spot",
+                        clusterDiagnostics.activePointLights,
+                        clusterDiagnostics.activeSpotLights);
+            ImGui::Text("Capacity: %u point, %u spot, %u per cluster",
+                        clusterDiagnostics.maxPointLights,
+                        clusterDiagnostics.maxSpotLights,
+                        clusterDiagnostics.maxLightsPerCluster);
+            ImGui::Text("Memory: %.2f MiB cluster, %.2f MiB light",
+                        static_cast<double>(clusterDiagnostics.clusterMemoryBytes) / (1024.0 * 1024.0),
+                        static_cast<double>(clusterDiagnostics.lightMemoryBytes) / (1024.0 * 1024.0));
+            ImGui::Text("Occupancy: %u max, %u refs",
+                        clusterDiagnostics.maxOccupancy,
+                        clusterDiagnostics.appendedLightReferences);
+            ImGui::Text("Overflow Clusters: %u", clusterDiagnostics.overflowClusterCount);
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("AO / Reflections Diagnostics"))
+          {
+            const demo::GPUDrivenAOReflectionDiagnostics& aoRefl = gpuDrivenStats.aoReflectionDiagnostics;
+            ImGui::Text("AO: %s / %s", aoRefl.aoEnabled ? "Enabled" : "Disabled", aoRefl.aoReady ? "Ready" : "Missing");
+            ImGui::Text("AO Extent: %u x %u", aoRefl.aoWidth, aoRefl.aoHeight);
+            ImGui::Text("SSR: %s / %s", aoRefl.ssrEnabled ? "Enabled" : "Disabled", aoRefl.ssrReady ? "Ready" : "Missing");
+            ImGui::Text("SSR Extent: %u x %u", aoRefl.ssrWidth, aoRefl.ssrHeight);
+            ImGui::Text("Memory: %.2f MiB", static_cast<double>(aoRefl.estimatedMemoryBytes) / (1024.0 * 1024.0));
+            ImGui::TreePop();
+          }
+          if(ImGui::TreeNode("Shadow Atlas Diagnostics"))
+          {
+            const demo::GPUDrivenShadowAtlasDiagnostics& atlas = gpuDrivenStats.shadowAtlasDiagnostics;
+            ImGui::Text("Enabled: %s", atlas.enabled ? "Yes" : "No");
+            ImGui::Text("Ready: %s", atlas.ready ? "Yes" : "No");
+            ImGui::Text("Fallback To CSM: %s", atlas.fallbackToCSM ? "Yes" : "No");
+            ImGui::Text("Atlas: %u x %u, tile %u, capacity %u",
+                        atlas.atlasWidth,
+                        atlas.atlasHeight,
+                        atlas.tileSize,
+                        atlas.tileCapacity);
+            ImGui::Text("Allocated Tiles: %u", atlas.allocatedTiles);
+            ImGui::Text("Memory: %.2f MiB", static_cast<double>(atlas.estimatedMemoryBytes) / (1024.0 * 1024.0));
+            ImGui::Text("Status: %s", atlas.status.c_str());
             ImGui::TreePop();
           }
           ImGui::Text("GPU Sort Feedback: %s", gpuDrivenStats.batchStats.sortPassCount > 0 ? "Active" : "Idle");

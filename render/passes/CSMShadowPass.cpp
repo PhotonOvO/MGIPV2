@@ -281,6 +281,13 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   cascadeCamera.projection = cascadeCamera.viewProjection;  // Simplified for shadow pass
   cascadeCamera.view = glm::mat4(1.0f);
   cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
+  cascadeCamera.prevView = cascadeCamera.view;
+  cascadeCamera.prevProjection = cascadeCamera.projection;
+  cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
+  cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
+  cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
+  cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
+  cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
   cascadeCamera.cameraPosition = glm::vec3(0.0f);
   const float baseConstantBias = context.params->lightSettings.depthBias;
   const float baseSlopeBias = context.params->lightSettings.normalBias;
@@ -299,9 +306,9 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
   {
     VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
         m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const uint32_t cameraDynamicOffset = cameraAlloc.offset;
+    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
     vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            shaderio::LSetScene, 1, &cameraDescriptorSet, 1, &cameraDynamicOffset);
+                            shaderio::LSetScene, 1, &cameraDescriptorSet, 2, dynamicOffsets);
   }
 
   // Draw meshes for this cascade layer

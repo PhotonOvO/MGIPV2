@@ -204,6 +204,10 @@ private:
     m_cameraUniforms.projection = m_camera.getProjectionMatrix();
     m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
     m_cameraUniforms.inverseViewProjection = glm::inverse(m_cameraUniforms.viewProjection);
+    m_cameraUniforms.unjitteredViewProjection = m_cameraUniforms.viewProjection;
+    m_cameraUniforms.unjitteredInverseViewProjection = m_cameraUniforms.inverseViewProjection;
+    m_cameraUniforms.prevUnjitteredViewProjection = m_cameraUniforms.viewProjection;
+    m_cameraUniforms.prevJitteredViewProjection = m_cameraUniforms.viewProjection;
     m_cameraUniforms.cameraPosition = m_camera.getPosition();
     m_cameraUniforms.shadowConstantBias = 0.0f;
     m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
