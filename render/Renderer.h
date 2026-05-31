@@ -227,6 +227,9 @@ struct RenderParams
   // Camera data (pointer to App-owned CameraUniforms)
   const shaderio::CameraUniforms*       cameraUniforms{nullptr};
   DirectionalLightSettings               lightSettings{};
+  std::span<const SceneLight>             sceneLights{};
+  std::span<const SceneNode>              sceneLightSceneNodes{};
+  std::span<const GltfNodeData>           sceneLightGltfNodes{};
   DebugPassOptions                       debugOptions{};
   bool                                   useCsmShadowMultiDrawIndirect{false};
   const GPUDrivenSceneView*              gpuDrivenSceneView{nullptr};

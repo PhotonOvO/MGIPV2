@@ -211,6 +211,10 @@ file(GLOB SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/*.slang")
 file(GLOB SHADER_GLSL_FILES  "${CMAKE_CURRENT_LIST_DIR}/shaders/*.glsl")
 file(GLOB SHADER_H_FILES     "${CMAKE_CURRENT_LIST_DIR}/shaders/*.h")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "shader\\.ibl_common\\.slang$")
+list(FIND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang" DEMO_GPU_LIGHT_SHADER_INDEX)
+if(DEMO_GPU_LIGHT_SHADER_INDEX EQUAL -1)
+  list(APPEND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang")
+endif()
 
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/_autogen")
 
@@ -381,6 +385,8 @@ add_library(demo_core STATIC
   render/SceneResources.h
   render/LightResources.cpp
   render/LightResources.h
+  render/IBLResources.cpp
+  render/IBLResources.h
   render/DrawStream.h
   render/DrawStreamDecoder.cpp
   render/DrawStreamDecoder.h

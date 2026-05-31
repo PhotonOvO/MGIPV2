@@ -7,6 +7,14 @@ Sampler2D inTexture[];
 
 [[vk::binding(LBindShadowMap, LSetTextures)]]
 Sampler2DArray shadowMap;
+#ifdef GPU_DRIVEN_SPLIT_SUM_IBL
+[[vk::binding(LBindIBLIrradiance, LSetTextures)]]
+SamplerCube iblIrradianceMap;
+[[vk::binding(LBindIBLPrefiltered, LSetTextures)]]
+SamplerCube iblPrefilteredMap;
+[[vk::binding(LBindIBLBrdfLut, LSetTextures)]]
+Sampler2D iblBrdfLut;
+#endif
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<LightData> pointLightBuffer;
@@ -51,7 +59,7 @@ STATIC_CONST int kAOTextureIndex                   = 11;
 STATIC_CONST int kSSRTextureIndex                  = 12;
 STATIC_CONST float PI                   = 3.14159265359;
 STATIC_CONST float TWO_PI               = 6.28318530718;
-STATIC_CONST float kEquirectSpecularFallbackWeight = 0.0;
+STATIC_CONST float kEquirectSpecularFallbackWeight = 1.0;
 
 float2 signNotZero(float2 v)
 {
@@ -473,13 +481,29 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
     const vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
     const float NdotV = max(dot(N, V), 0.001);
     const vec3 F = Fresnel_Schlick_Roughness(NdotV, F0, roughness);
-    const vec2 envBRDF = approximateEnvironmentBRDF(NdotV, roughness);
     const vec3 kD = (1.0 - F) * (1.0 - metallic);
-    const vec3 irradiance = sampleEquirectEnvironment(N, maxMip);
     const vec3 R = reflect(-V, N);
-    const vec3 prefiltered = sampleEquirectEnvironment(R, roughness * maxMip);
-    const vec3 diffuse = kD * irradiance * baseColor / PI;
-    const vec3 specular = prefiltered * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
+    vec3 diffuse;
+    vec3 specular;
+#ifdef GPU_DRIVEN_SPLIT_SUM_IBL
+    const bool useSplitSumIBL = lighting.light.iblDebugInfo.y > 0.5;
+    if(useSplitSumIBL)
+    {
+        const vec3 irradiance = max(iblIrradianceMap.Sample(N).rgb, 0.0);
+        const vec3 prefiltered = max(iblPrefilteredMap.SampleLevel(R, roughness * maxMip).rgb, 0.0);
+        const vec2 envBRDF = iblBrdfLut.Sample(float2(NdotV, roughness)).rg;
+        diffuse = kD * irradiance * baseColor / PI;
+        specular = prefiltered * (F0 * envBRDF.x + envBRDF.y);
+    }
+    else
+#endif
+    {
+        const vec2 envBRDF = approximateEnvironmentBRDF(NdotV, roughness);
+        const vec3 irradiance = sampleEquirectEnvironment(N, maxMip);
+        const vec3 prefiltered = sampleEquirectEnvironment(R, roughness * maxMip);
+        diffuse = kD * irradiance * baseColor / PI;
+        specular = prefiltered * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
+    }
 
     const uint debugMode = uint(lighting.light.iblDebugInfo.x);
     if(debugMode == 1u)
@@ -502,14 +526,17 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
     return (diffuse * ao + specular) * intensity;
 }
 
-vec3 evaluateSSR(float2 uv, float roughness)
+vec3 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
 {
     if(lighting.light.phase7Info.y <= 0.5 || roughness > 0.72)
     {
         return vec3(0.0);
     }
     const vec4 ssr = inTexture[kSSRTextureIndex].SampleLevel(uv, 0.0);
-    return ssr.rgb * saturate(ssr.a);
+    const vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
+    const vec3 F = Fresnel_Schlick_Roughness(max(dot(N, V), 0.001), F0, roughness);
+    const float roughnessFade = saturate(1.0 - roughness / 0.72);
+    return ssr.rgb * F * saturate(ssr.a) * roughnessFade;
 }
 
 vec3 toneMapACES(vec3 color)
@@ -583,7 +610,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 ssr = evaluateSSR(input.uv, roughness);
+    vec3 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
     vec3 color = ambient + directional + pointLights + ssr + emissiveSample.rgb;
     return float4(toneMapACES(color), 1.0);
 }
@@ -623,7 +650,7 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 ssr = evaluateSSR(input.uv, roughness);
+    vec3 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
     return float4(max(ambient + directional + pointLights + ssr + emissiveSample.rgb, 0.0), 1.0);
 }
 

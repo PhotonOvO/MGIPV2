@@ -24,6 +24,9 @@ using mat4 = glm::mat4;
 STATIC_CONST int LSetTextures  = 0;
 STATIC_CONST int LBindTextures = 0;
 STATIC_CONST int LBindShadowMap = 1;
+STATIC_CONST int LBindIBLIrradiance = 9;
+STATIC_CONST int LBindIBLPrefiltered = 10;
+STATIC_CONST int LBindIBLBrdfLut = 11;
 
 // Set 1: Scene-level uniform buffers
 STATIC_CONST int LSetScene      = 1;

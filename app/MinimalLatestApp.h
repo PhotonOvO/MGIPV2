@@ -28,6 +28,7 @@
 #include <future>
 #include <atomic>
 #include <array>
+#include <algorithm>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
 
@@ -286,24 +287,32 @@ public:
 
         ImGui::Separator();
         ImGui::Text("Directional Light");
-        bool lightDirectionChanged = false;
-        lightDirectionChanged |= ImGui::SliderFloat("Travel Azimuth", &m_lightAzimuthDegrees, -180.0f, 180.0f, "%.1f deg");
-        lightDirectionChanged |= ImGui::SliderFloat("Travel Elevation", &m_lightElevationDegrees, -89.0f, 89.0f, "%.1f deg");
-        if(ImGui::Button("Reset Travel Direction"))
+        ImGui::Checkbox("Test Directional Light", &m_enableTestDirectionalLight);
+        if(m_enableTestDirectionalLight)
         {
-          m_lightSettings.direction = glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f));
-          syncLightAnglesFromDirection();
+          bool lightDirectionChanged = ImGui::DragFloat3("Direction", &m_lightSettings.direction.x, 0.01f, -1.0f, 1.0f, "%.3f");
+          if(ImGui::Button("Reset Travel Direction"))
+          {
+            m_lightSettings.direction = glm::normalize(glm::vec3(0.6f, -0.5f, -0.6f));
+          }
+          if(lightDirectionChanged)
+          {
+            if(glm::length(m_lightSettings.direction) < 0.001f)
+            {
+              m_lightSettings.direction = glm::normalize(glm::vec3(0.6, -0.5, -0.6));
+            }
+            else
+            {
+              m_lightSettings.direction = glm::normalize(m_lightSettings.direction);
+            }
+          }
+          ImGui::Text("Travel Dir: %.3f, %.3f, %.3f",
+                      m_lightSettings.direction.x,
+                      m_lightSettings.direction.y,
+                      m_lightSettings.direction.z);
+          ImGui::ColorEdit3("Test Color", &m_testDirectionalLightColor.x);
+          ImGui::SliderFloat("Test Intensity", &m_testDirectionalLightIntensity, 0.0f, 20.0f, "%.2f");
         }
-        if(lightDirectionChanged)
-        {
-          syncLightDirectionFromAngles();
-        }
-        ImGui::Text("Travel Dir: %.3f, %.3f, %.3f",
-                    m_lightSettings.direction.x,
-                    m_lightSettings.direction.y,
-                    m_lightSettings.direction.z);
-        ImGui::ColorEdit3("Light Color", &m_lightSettings.color.x);
-        ImGui::ColorEdit3("Ambient", &m_lightSettings.ambient.x);
         ImGui::Checkbox("IBL", &m_debugOptions.enableIBL);
         if(m_debugOptions.enableIBL)
         {
@@ -316,6 +325,7 @@ public:
         ImGui::SliderFloat("Normal Bias", &m_lightSettings.normalBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Depth Bias", &m_lightSettings.depthBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::Checkbox("CSM Multi-Draw Indirect", &m_useCsmShadowMultiDrawIndirect);
+        drawSceneLightsUI();
 
         ImGui::Separator();
         ImGui::Text("Debug Overlay");
@@ -331,14 +341,8 @@ public:
         {
           ImGui::Checkbox("Shadow Frustum", &m_debugOptions.showShadowFrustum);
           ImGui::Checkbox("Light Travel Direction", &m_debugOptions.showLightDirection);
-          ImGui::Checkbox("Random Point Lights", &m_debugOptions.enablePointLights);
-          ImGui::Checkbox("Point Lights", &m_debugOptions.showPointLights);
-          if(m_debugOptions.enablePointLights || m_debugOptions.showPointLights)
-          {
-            ImGui::SliderFloat("Point Max Radius", &m_debugOptions.pointLightMaxRadius, 0.5f, 12.0f, "%.2f");
-            ImGui::SliderFloat("Point Intensity", &m_debugOptions.pointLightIntensityScale, 0.25f, 16.0f, "%.2f",
-                               ImGuiSliderFlags_Logarithmic);
-          }
+          ImGui::Checkbox("glTF Local Lights", &m_debugOptions.enablePointLights);
+          ImGui::Checkbox("Local Light Overlay", &m_debugOptions.showPointLights);
           ImGui::Checkbox("Coarse Cull Heatmap", &m_debugOptions.showLightCoarseCullingHeatmap);
           ImGui::Checkbox("Clustered Lighting", &m_debugOptions.enableClusteredLighting);
           ImGui::Checkbox("Cluster Heatmap", &m_debugOptions.showClusteredLightingHeatmap);
@@ -840,7 +844,19 @@ public:
         frameParams.viewportImageRect = viewportImageRect;
         frameParams.gltfModel      = m_currentModel.has_value() ? &(*m_currentModel) : nullptr;
         frameParams.cameraUniforms = &m_cameraUniforms;
-        frameParams.lightSettings  = m_lightSettings;
+        frameParams.lightSettings  = resolveSceneLightSettings();
+        if(const std::vector<demo::SceneLight>* lights = currentSceneLights())
+        {
+          frameParams.sceneLights = *lights;
+        }
+        if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+        {
+          frameParams.sceneLightSceneNodes = m_sceneAsset->nodes;
+        }
+        else if(m_sceneModel.has_value())
+        {
+          frameParams.sceneLightGltfNodes = m_sceneModel->nodes;
+        }
         frameParams.debugOptions   = m_debugOptions;
         frameParams.useCsmShadowMultiDrawIndirect = m_useCsmShadowMultiDrawIndirect;
         // Copy CSM debug settings to debugOptions
@@ -949,6 +965,9 @@ private:
   int m_windowedX{0}, m_windowedY{0};
   int m_windowedWidth{800}, m_windowedHeight{600};
   demo::DirectionalLightSettings m_lightSettings{};
+  bool m_enableTestDirectionalLight{false};
+  glm::vec3 m_testDirectionalLightColor{1.0f, 0.95f, 0.85f};
+  float m_testDirectionalLightIntensity{3.0f};
   float m_lightAzimuthDegrees{0.0f};
   float m_lightElevationDegrees{0.0f};
   demo::DebugPassOptions m_debugOptions{};
@@ -1030,6 +1049,11 @@ private:
   void beginExperimentalSceneUpload();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
+  std::vector<demo::SceneLight>* editableSceneLights();
+  const std::vector<demo::SceneLight>* currentSceneLights() const;
+  glm::mat4 resolveSceneLightNodeTransform(const demo::SceneLight& light) const;
+  demo::DirectionalLightSettings resolveSceneLightSettings() const;
+  void drawSceneLightsUI();
   void drawCSMDebugPanel();
   void updateRuntimeProfiler();
   void drawRuntimeProfilerPanel();
@@ -1062,6 +1086,142 @@ inline void MinimalLatestApp::syncLightDirectionFromAngles()
       planarLength * std::sin(azimuthRadians),
       std::sin(elevationRadians),
       planarLength * std::cos(azimuthRadians)));
+}
+
+inline std::vector<demo::SceneLight>* MinimalLatestApp::editableSceneLights()
+{
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    return &m_sceneAsset->lights;
+  }
+  return m_sceneModel.has_value() ? &m_sceneModel->lights : nullptr;
+}
+
+inline const std::vector<demo::SceneLight>* MinimalLatestApp::currentSceneLights() const
+{
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    return &m_sceneAsset->lights;
+  }
+  return m_sceneModel.has_value() ? &m_sceneModel->lights : nullptr;
+}
+
+inline glm::mat4 MinimalLatestApp::resolveSceneLightNodeTransform(const demo::SceneLight& light) const
+{
+  if(light.nodeIndex >= 0)
+  {
+    const size_t nodeIndex = static_cast<size_t>(light.nodeIndex);
+    if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value()
+       && nodeIndex < m_sceneAsset->nodes.size())
+    {
+      return m_sceneAsset->nodes[nodeIndex].worldTransform;
+    }
+    if(m_sceneModel.has_value() && nodeIndex < m_sceneModel->nodes.size())
+    {
+      return m_sceneModel->nodes[nodeIndex].worldTransform;
+    }
+  }
+  return glm::mat4(1.0f);
+}
+
+inline demo::DirectionalLightSettings MinimalLatestApp::resolveSceneLightSettings() const
+{
+  demo::DirectionalLightSettings settings = m_lightSettings;
+  settings.color = glm::vec3(0.0f);
+  settings.ambient = glm::vec3(0.0f);
+
+  if(m_enableTestDirectionalLight)
+  {
+    settings.direction = m_lightSettings.direction;
+    settings.color = m_testDirectionalLightColor * m_testDirectionalLightIntensity;
+    return settings;
+  }
+
+  const std::vector<demo::SceneLight>* lights = currentSceneLights();
+  if(lights == nullptr)
+  {
+    return settings;
+  }
+
+  for(const demo::SceneLight& light : *lights)
+  {
+    if(!light.enabled || light.type != demo::SceneLightType::directional)
+    {
+      continue;
+    }
+
+    const glm::mat4 worldTransform = resolveSceneLightNodeTransform(light);
+    glm::vec3 direction = glm::vec3(worldTransform * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f));
+    if(glm::length(direction) < 0.001f)
+    {
+      direction = m_lightSettings.direction;
+    }
+    settings.direction = glm::normalize(direction);
+    settings.color = light.color * light.intensity;
+    return settings;
+  }
+
+  return settings;
+}
+
+inline void MinimalLatestApp::drawSceneLightsUI()
+{
+  std::vector<demo::SceneLight>* lights = editableSceneLights();
+  ImGui::Separator();
+  ImGui::Text("glTF Lights");
+  if(lights == nullptr)
+  {
+    ImGui::TextDisabled("No scene loaded.");
+    return;
+  }
+  if(lights->empty())
+  {
+    ImGui::TextDisabled("Current glTF has no KHR_lights_punctual lights.");
+    return;
+  }
+
+  static const char* typeNames[] = {"Directional", "Point", "Spot"};
+  for(size_t lightIndex = 0; lightIndex < lights->size(); ++lightIndex)
+  {
+    demo::SceneLight& light = (*lights)[lightIndex];
+    ImGui::PushID(static_cast<int>(lightIndex));
+    const uint32_t typeIndex = static_cast<uint32_t>(light.type);
+    const char* typeName = typeIndex < 3u ? typeNames[typeIndex] : "Unknown";
+    const std::string label = light.name.empty()
+                                  ? ("Light " + std::to_string(lightIndex) + "##Light")
+                                  : (light.name + "##Light");
+    if(ImGui::TreeNode(label.c_str(), "%s (%s)", light.name.empty() ? "<unnamed>" : light.name.c_str(), typeName))
+    {
+      ImGui::Checkbox("Enabled", &light.enabled);
+      ImGui::ColorEdit3("Color", &light.color.x);
+      ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 100000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+      if(light.type == demo::SceneLightType::point || light.type == demo::SceneLightType::spot)
+      {
+        ImGui::DragFloat("Range", &light.range, 0.05f, 0.0f, 10000.0f, "%.3f");
+        ImGui::TextDisabled("Range 0 uses scene-bounds fallback.");
+      }
+      if(light.type == demo::SceneLightType::spot)
+      {
+        float innerDegrees = glm::degrees(light.innerConeAngle);
+        float outerDegrees = glm::degrees(light.outerConeAngle);
+        bool coneChanged = false;
+        coneChanged |= ImGui::SliderFloat("Inner Cone", &innerDegrees, 0.0f, 89.0f, "%.1f deg");
+        coneChanged |= ImGui::SliderFloat("Outer Cone", &outerDegrees, 0.1f, 90.0f, "%.1f deg");
+        if(coneChanged)
+        {
+          outerDegrees = std::max(outerDegrees, innerDegrees + 0.1f);
+          light.innerConeAngle = glm::radians(innerDegrees);
+          light.outerConeAngle = glm::radians(outerDegrees);
+        }
+      }
+      if(light.nodeIndex >= 0)
+      {
+        ImGui::Text("Node: %d", light.nodeIndex);
+      }
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
+  }
 }
 
 inline void MinimalLatestApp::loadModelAsync(const std::string& path)
@@ -1360,16 +1520,21 @@ inline void MinimalLatestApp::updateAsyncLoading()
 
           if(m_sceneModel.has_value())
           {
-            LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures)",
-                 m_pendingModelPath.c_str(), m_sceneModel->meshes.size(), m_sceneModel->materials.size(), m_sceneModel->images.size());
+            LOGI("Loaded glTF model: %s (%zu meshes, %zu materials, %zu textures, %zu lights)",
+                 m_pendingModelPath.c_str(),
+                 m_sceneModel->meshes.size(),
+                 m_sceneModel->materials.size(),
+                 m_sceneModel->images.size(),
+                 m_sceneModel->lights.size());
           }
           if(m_sceneAsset.has_value())
           {
-            LOGI("Loaded SceneAsset: %s (%zu meshes, %zu materials, %zu textures)",
+            LOGI("Loaded SceneAsset: %s (%zu meshes, %zu materials, %zu textures, %zu lights)",
                  m_pendingModelPath.c_str(),
                  m_sceneAsset->meshes.size(),
                  m_sceneAsset->materials.size(),
-                 m_sceneAsset->textures.size());
+                 m_sceneAsset->textures.size(),
+                 m_sceneAsset->lights.size());
           }
           if(m_sceneUploadPlan.has_value())
           {

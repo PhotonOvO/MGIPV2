@@ -18,6 +18,7 @@ constexpr uint32_t kMaxReasonableMeshCount = 1u << 16;
 constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageCount = 1u << 14;
 constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
+constexpr uint32_t kMaxReasonableLightCount = 1u << 14;
 constexpr uint32_t kMaxReasonableRootNodeCount = 1u << 14;
 constexpr uint32_t kMaxReasonableDependencyCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageDimension = 1u << 14;
@@ -35,9 +36,9 @@ struct CacheHeader
   uint32_t materialCount{0};
   uint32_t imageCount{0};
   uint32_t nodeCount{0};
+  uint32_t lightCount{0};
   uint32_t rootNodeCount{0};
   uint32_t dependencyCount{0};
-  uint32_t reserved1{0};
 };
 
 [[nodiscard]] bool hasReasonableCounts(const CacheHeader& header)
@@ -46,6 +47,7 @@ struct CacheHeader
          && header.materialCount <= kMaxReasonableMaterialCount
          && header.imageCount <= kMaxReasonableImageCount
          && header.nodeCount <= kMaxReasonableNodeCount
+         && header.lightCount <= kMaxReasonableLightCount
          && header.rootNodeCount <= kMaxReasonableRootNodeCount
          && header.dependencyCount <= kMaxReasonableDependencyCount;
 }
@@ -56,6 +58,7 @@ struct CacheHeader
          && model.materials.size() <= kMaxReasonableMaterialCount
          && model.images.size() <= kMaxReasonableImageCount
          && model.nodes.size() <= kMaxReasonableNodeCount
+         && model.lights.size() <= kMaxReasonableLightCount
          && model.rootNodes.size() <= kMaxReasonableRootNodeCount
          && model.dependencies.size() <= kMaxReasonableDependencyCount;
 }
@@ -144,6 +147,8 @@ struct CacheHeader
 
   return std::all_of(model.rootNodes.begin(), model.rootNodes.end(), [&model](int rootNode) {
     return rootNode >= 0 && static_cast<size_t>(rootNode) < model.nodes.size();
+  }) && std::all_of(model.lights.begin(), model.lights.end(), [&model](const SceneLight& light) {
+    return light.nodeIndex < 0 || static_cast<size_t>(light.nodeIndex) < model.nodes.size();
   });
 }
 
@@ -391,6 +396,32 @@ bool readNode(std::istream& stream, GltfNodeData& node)
          && readPod(stream, node.meshCount);
 }
 
+void writeLight(std::ostream& stream, const SceneLight& light)
+{
+  writeString(stream, light.name);
+  writePod(stream, light.nodeIndex);
+  writePod(stream, light.type);
+  writePod(stream, light.enabled);
+  writePod(stream, light.color);
+  writePod(stream, light.intensity);
+  writePod(stream, light.range);
+  writePod(stream, light.innerConeAngle);
+  writePod(stream, light.outerConeAngle);
+}
+
+bool readLight(std::istream& stream, SceneLight& light)
+{
+  return readString(stream, light.name)
+         && readPod(stream, light.nodeIndex)
+         && readPod(stream, light.type)
+         && readPod(stream, light.enabled)
+         && readPod(stream, light.color)
+         && readPod(stream, light.intensity)
+         && readPod(stream, light.range)
+         && readPod(stream, light.innerConeAngle)
+         && readPod(stream, light.outerConeAngle);
+}
+
 }  // namespace
 
 std::filesystem::path SceneCacheSerializer::buildCachePath(const std::filesystem::path& sourcePath)
@@ -431,6 +462,7 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   header.materialCount        = static_cast<uint32_t>(model.materials.size());
   header.imageCount           = static_cast<uint32_t>(model.images.size());
   header.nodeCount            = static_cast<uint32_t>(model.nodes.size());
+  header.lightCount           = static_cast<uint32_t>(model.lights.size());
   header.rootNodeCount        = static_cast<uint32_t>(model.rootNodes.size());
   header.dependencyCount      = static_cast<uint32_t>(model.dependencies.size());
   writePod(stream, header);
@@ -454,6 +486,10 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   for(const auto& node : model.nodes)
   {
     writeNode(stream, node);
+  }
+  for(const SceneLight& light : model.lights)
+  {
+    writeLight(stream, light);
   }
   writeVector(stream, model.rootNodes);
   for(const GltfDependencyData& dependency : model.dependencies)
@@ -507,6 +543,7 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
     loadedModel.materials.resize(header.materialCount);
     loadedModel.images.resize(header.imageCount);
     loadedModel.nodes.resize(header.nodeCount);
+    loadedModel.lights.resize(header.lightCount);
     loadedModel.dependencies.resize(header.dependencyCount);
 
     if(!readString(stream, loadedModel.name))
@@ -549,6 +586,14 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
       if(!readNode(stream, node))
       {
         m_lastError = "Failed to read node payload";
+        return false;
+      }
+    }
+    for(SceneLight& light : loadedModel.lights)
+    {
+      if(!readLight(stream, light))
+      {
+        m_lastError = "Failed to read light payload";
         return false;
       }
     }
@@ -663,6 +708,14 @@ bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, 
   {
     GltfNodeData ignoredNode;
     if(!readNode(stream, ignoredNode))
+    {
+      return false;
+    }
+  }
+  for(uint32_t lightIndex = 0; lightIndex < header.lightCount; ++lightIndex)
+  {
+    SceneLight ignoredLight;
+    if(!readLight(stream, ignoredLight))
     {
       return false;
     }

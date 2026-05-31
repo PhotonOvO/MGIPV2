@@ -4,6 +4,7 @@
 #include "GPUDrivenLightResources.h"
 #include "GPUMeshletBuffer.h"
 #include "HiZDepthPyramid.h"
+#include "IBLResources.h"
 #include "MeshletConverter.h"
 #include "passes/DebugPass.h"
 #include "passes/ForwardPass.h"
@@ -665,7 +666,7 @@ public:
   void executeLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeClusteredLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   void executeAOPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeSSRPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeSSRPass(rhi::CommandList& cmd, const RenderParams& params, VkBuffer cameraBuffer, uint32_t cameraOffset);
   void executeCSMShadowPass(const PassContext& context);
   void executeShadowAtlasPass(const PassContext& context);
   void executeDebugPass(const PassContext& context);
@@ -886,6 +887,7 @@ private:
   std::vector<shaderio::LightData>   m_gpuDrivenPointLights;
   std::vector<shaderio::LightData>   m_gpuDrivenSpotLights;
   utils::ImageResource               m_iblEnvironment{};
+  IBLResources                       m_iblResources{};
   std::vector<utils::Buffer>         m_gpuDrivenStagingBuffers;
   VkFormat                           m_iblEnvironmentFormat{VK_FORMAT_UNDEFINED};
   VkExtent2D                         m_iblEnvironmentExtent{};

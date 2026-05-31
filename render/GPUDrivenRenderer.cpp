@@ -43,9 +43,6 @@ constexpr uint32_t kGPUDrivenLightPassHistoryWriteIndex = kPackedGBufferTargetCo
 constexpr uint32_t kGPUDrivenLightPassIBLEnvironmentIndex = kPackedGBufferTargetCount + 7u;
 constexpr uint32_t kGPUDrivenLightPassAOIndex = kPackedGBufferTargetCount + 8u;
 constexpr uint32_t kGPUDrivenLightPassSSRIndex = kPackedGBufferTargetCount + 9u;
-constexpr uint32_t kGPUDrivenTestPointLightCount = 128u;
-constexpr uint32_t kGPUDrivenTestSpotLightCount = 16u;
-constexpr float kGPUDrivenTwoPi = 6.28318530718f;
 constexpr VkFormat kGPUDrivenAOFormat = VK_FORMAT_R16_SFLOAT;
 constexpr VkFormat kGPUDrivenSSRFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kGPUDrivenShadowAtlasFormat = VK_FORMAT_D32_SFLOAT;
@@ -77,6 +74,50 @@ uint64_t estimateTextureBytes(VkExtent2D extent, VkFormat format)
 {
   return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
          * static_cast<uint64_t>(bytesPerPixelForFormat(format));
+}
+
+glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+{
+  const float length = glm::length(value);
+  return length > 1.0e-5f ? value / length : fallback;
+}
+
+glm::mat4 resolveSceneLightTransform(const SceneLight& light,
+                                      std::span<const SceneNode> sceneNodes,
+                                      std::span<const GltfNodeData> gltfNodes)
+{
+  if(light.nodeIndex >= 0)
+  {
+    const size_t nodeIndex = static_cast<size_t>(light.nodeIndex);
+    if(nodeIndex < sceneNodes.size())
+    {
+      return sceneNodes[nodeIndex].worldTransform;
+    }
+    if(nodeIndex < gltfNodes.size())
+    {
+      return gltfNodes[nodeIndex].worldTransform;
+    }
+  }
+  return glm::mat4(1.0f);
+}
+
+glm::vec3 sceneLightTravelDirection(const glm::mat4& transform)
+{
+  return safeNormalize(glm::vec3(transform * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)),
+                       glm::vec3(-0.45f, -0.8f, -0.25f));
+}
+
+float sceneLightEffectiveRange(const SceneLight& light, const GPUDrivenSceneView& sceneView)
+{
+  if(light.range > 0.0f)
+  {
+    return light.range;
+  }
+  if(sceneView.sceneBoundsValid)
+  {
+    return std::max(glm::length(sceneView.sceneBoundsMax - sceneView.sceneBoundsMin) * 1.25f, 4.0f);
+  }
+  return 32.0f;
 }
 
 float halton(uint64_t index, uint32_t base)
@@ -321,9 +362,9 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_passExecutor.addPass(*m_shadowAtlasPass);
   m_passExecutor.addPass(*m_gbufferPass);
   m_passExecutor.addPass(*m_aoPass);
+  m_passExecutor.addPass(*m_ssrPass);
   m_passExecutor.addPass(*m_lightPass);
   m_passExecutor.addPass(*m_skyboxPass);
-  m_passExecutor.addPass(*m_ssrPass);
   m_passExecutor.addPass(*m_forwardPass);
   m_passExecutor.addPass(*m_velocityPass);
   m_passExecutor.addPass(*m_taaResolvePass);
@@ -446,6 +487,10 @@ void GPUDrivenRenderer::render(const RenderParams& params)
                             + (cachedDrawCounts.transparentCount > 0u ? 1u : 0u));
   m_runtimeStats.batchStats.sortPassCount = 0u;
   const uint32_t frameIndex = getCurrentFrameIndexHint();
+  if(params.cameraUniforms != nullptr)
+  {
+    getCSMShadowResources().updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+  }
   updateGPUDrivenLights(params, frameIndex);
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
   m_runtimeStats.visibilityDiagnostics = GPUDrivenVisibilityDiagnostics{
@@ -796,13 +841,15 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .enabled = gpuParams.debugOptions.enableIBL,
         .loaded = getIBLEnvironmentLoaded(),
         .fallback = getIBLUsingFallback(),
-        .irradianceReady = false,
-        .prefilteredReady = false,
-        .brdfLutReady = false,
-        .splitSumReady = false,
+        .irradianceReady = m_iblResources.isSplitSumReady(),
+        .prefilteredReady = m_iblResources.isSplitSumReady(),
+        .brdfLutReady = m_iblResources.isInitialized(),
+        .splitSumReady = m_iblResources.isSplitSumReady(),
         .debugMode = gpuParams.debugOptions.iblDebugMode,
         .path = getIBLEnvironmentPath(),
-        .sourceMode = getIBLEnvironmentLoaded() ? "equirect_fallback" : "flat_ambient",
+        .sourceMode = m_iblResources.isSplitSumReady()
+                          ? "split_sum"
+                          : (getIBLEnvironmentLoaded() ? "equirect_fallback" : "flat_ambient"),
         .status = getIBLEnvironmentStatus(),
     };
     m_lightResources.cacheClusterStats(frameIndex);
@@ -1165,9 +1212,13 @@ void GPUDrivenRenderer::executeAOPass(rhi::CommandList& cmd, const RenderParams&
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
 
-void GPUDrivenRenderer::executeSSRPass(rhi::CommandList& cmd, const RenderParams& params)
+void GPUDrivenRenderer::executeSSRPass(rhi::CommandList& cmd,
+                                       const RenderParams& params,
+                                       VkBuffer cameraBuffer,
+                                       uint32_t cameraOffset)
 {
-  if(!params.debugOptions.enableSSR || m_ssrTracePipeline == VK_NULL_HANDLE || m_ssrRaw.image == VK_NULL_HANDLE)
+  if(!params.debugOptions.enableSSR || m_ssrTracePipeline == VK_NULL_HANDLE || m_ssrRaw.image == VK_NULL_HANDLE
+     || cameraBuffer == VK_NULL_HANDLE)
   {
     return;
   }
@@ -1177,12 +1228,27 @@ void GPUDrivenRenderer::executeSSRPass(rhi::CommandList& cmd, const RenderParams
     return;
   }
   const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+  const VkDescriptorBufferInfo cameraBufferInfo{
+      .buffer = cameraBuffer,
+      .offset = cameraOffset,
+      .range = sizeof(shaderio::CameraUniforms),
+  };
+  const VkWriteDescriptorSet cameraWrite{
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = m_ssrDescriptorSets[frameIndex],
+      .dstBinding = 5,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .pBufferInfo = &cameraBufferInfo,
+  };
+  vkUpdateDescriptorSets(getNativeDeviceHandle(), 1, &cameraWrite, 0, nullptr);
+
   const shaderio::GPUDrivenSSRPushConstants push{
       .params0 = glm::vec4(m_phase7HalfExtent.width,
                            m_phase7HalfExtent.height,
                            static_cast<float>(std::max(1, params.debugOptions.ssrMaxSteps)),
                            params.debugOptions.ssrThickness),
-      .params1 = glm::vec4(2.0f, 80.0f, 1.0f, 0.0f),
+      .params1 = glm::vec4(0.05f, 80.0f, 1.0f, 0.0f),
   };
 
   vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssrTracePipeline);
@@ -3122,7 +3188,7 @@ void GPUDrivenRenderer::initLightingResources()
   VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &m_linearClampSampler));
 
   const std::array<VkDescriptorPoolSize, 4> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, frameCount * (kGPUDrivenLightPassTextureCount + 1u)},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, frameCount * (kGPUDrivenLightPassTextureCount + 4u)},
       VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 12u},
       VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameCount * 7u},
       VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, frameCount * 2u},
@@ -3136,7 +3202,7 @@ void GPUDrivenRenderer::initLightingResources()
   };
   VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_lightingDescriptorPool));
 
-  const std::array<VkDescriptorSetLayoutBinding, 9> lightingBindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 12> lightingBindings{{
       VkDescriptorSetLayoutBinding{shaderio::LBindTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kGPUDrivenLightPassTextureCount, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
       VkDescriptorSetLayoutBinding{shaderio::LBindShadowMap, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
@@ -3146,6 +3212,9 @@ void GPUDrivenRenderer::initLightingResources()
       VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
       VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
       VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindIBLIrradiance, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindIBLPrefiltered, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{shaderio::LBindIBLBrdfLut, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
   }};
   const VkDescriptorSetLayoutCreateInfo lightingLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -3289,6 +3358,15 @@ void GPUDrivenRenderer::initIBLResources()
   m_iblEnvironmentStatus = "Using flat ambient fallback";
   m_iblUsingFallback = true;
 
+  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const auto initFallbackSplitSumResources = [&]() {
+    IBLResources::CreateInfo fallbackInfo{
+        .cubeMapSize = 128,
+        .dfgLUTSize = 256,
+    };
+    executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(nativeDevice, getAllocatorHandle(), cmd, fallbackInfo); });
+  };
+
   Ktx2Loader loader;
   Ktx2Loader::Ktx2Texture texture{};
   const std::filesystem::path path(kGPUDrivenDefaultIBLEnvironmentPath);
@@ -3296,16 +3374,17 @@ void GPUDrivenRenderer::initIBLResources()
   {
     m_iblEnvironmentStatus = "KTX2 environment not found: " + path.string();
     LOGW("%s", m_iblEnvironmentStatus.c_str());
+    initFallbackSplitSumResources();
     return;
   }
   if(!loader.load(path, texture) || texture.data.empty() || texture.width == 0 || texture.height == 0)
   {
     m_iblEnvironmentStatus = "Failed to load GPUDriven IBL KTX2: " + loader.getLastError();
     LOGW("%s", m_iblEnvironmentStatus.c_str());
+    initFallbackSplitSumResources();
     return;
   }
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
   const VkImageCreateInfo imageInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
@@ -3381,18 +3460,32 @@ void GPUDrivenRenderer::initIBLResources()
   m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
   m_iblEnvironmentLoaded = true;
   m_iblUsingFallback = false;
-  m_iblEnvironmentStatus = "Loaded GPUDriven equirect HDR KTX2; split-sum cube resources deferred";
-  LOGI("Loaded GPUDriven equirect IBL %s (%ux%u, %u mips, %.2f MiB); split-sum IBL deferred",
+  IBLResources::CreateInfo iblCreateInfo{
+      .cubeMapSize = 128,
+      .dfgLUTSize = 256,
+      .sourceEnvironmentView = view,
+      .sourceWidth = texture.width,
+      .sourceHeight = texture.height,
+      .sourceMipCount = std::max(1u, texture.mipLevels),
+  };
+  executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(nativeDevice, getAllocatorHandle(), cmd, iblCreateInfo); });
+
+  m_iblEnvironmentStatus = m_iblResources.isSplitSumReady()
+                                ? "Loaded GPUDriven equirect HDR KTX2 with split-sum IBL"
+                                : "Loaded GPUDriven equirect HDR KTX2; split-sum IBL unavailable";
+  LOGI("Loaded GPUDriven equirect IBL %s (%ux%u, %u mips, %.2f MiB); split-sum %s",
        m_iblEnvironmentPath.c_str(),
        m_iblEnvironmentExtent.width,
        m_iblEnvironmentExtent.height,
        m_iblEnvironmentMipCount,
-       static_cast<double>(m_iblEnvironmentEstimatedBytes) / (1024.0 * 1024.0));
+       static_cast<double>(m_iblEnvironmentEstimatedBytes) / (1024.0 * 1024.0),
+       m_iblResources.isSplitSumReady() ? "ready" : "unavailable");
 }
 
 void GPUDrivenRenderer::shutdownIBLResources()
 {
   const VkDevice nativeDevice = getNativeDeviceHandle();
+  m_iblResources.deinit();
   if(nativeDevice != VK_NULL_HANDLE && (m_iblEnvironment.view != VK_NULL_HANDLE || m_iblEnvironment.image != VK_NULL_HANDLE))
   {
     if(m_iblEnvironment.view != VK_NULL_HANDLE)
@@ -3432,9 +3525,10 @@ void GPUDrivenRenderer::initPhase7Resources()
     return;
   }
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
-  const std::array<VkDescriptorPoolSize, 2> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount * 7u},
+  const std::array<VkDescriptorPoolSize, 3> poolSizes{{
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount * 8u},
       VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, frameCount * 4u},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameCount},
   }};
   const VkDescriptorPoolCreateInfo poolInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -3456,11 +3550,13 @@ void GPUDrivenRenderer::initPhase7Resources()
   };
   VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &aoLayoutInfo, nullptr, &m_aoSetLayout));
 
-  const std::array<VkDescriptorSetLayoutBinding, 4> ssrBindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 6> ssrBindings{{
       VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
   }};
   const VkDescriptorSetLayoutCreateInfo ssrLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -3740,7 +3836,8 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
     return;
   }
   const GPUDrivenSceneView& sceneView = m_sceneView;
-  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[0] == VK_NULL_HANDLE
+     || sceneView.gbufferViews[1] == VK_NULL_HANDLE
      || sceneView.sceneColorHdrView == VK_NULL_HANDLE || m_aoRaw.view == VK_NULL_HANDLE
      || m_aoDenoised.view == VK_NULL_HANDLE || m_ssrRaw.view == VK_NULL_HANDLE)
   {
@@ -3757,14 +3854,19 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoDenoised.view, VK_IMAGE_LAYOUT_GENERAL},
   }};
-  const std::array<VkDescriptorImageInfo, 4> ssrInfos{{
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneColorHdrView, VK_IMAGE_LAYOUT_GENERAL},
+  const std::array<VkDescriptorImageInfo, 5> ssrInfos{{
+      VkDescriptorImageInfo{VK_NULL_HANDLE,
+                            sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE
+                                ? sceneView.sceneColorHistoryReadView
+                                : sceneView.sceneColorHdrView,
+                            VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[0], VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_ssrRaw.view, VK_IMAGE_LAYOUT_GENERAL},
   }};
 
-  std::array<VkWriteDescriptorSet, 10> writes{};
+  std::array<VkWriteDescriptorSet, 11> writes{};
   uint32_t writeIndex = 0;
   const auto addWrite = [&](VkDescriptorSet set,
                             uint32_t binding,
@@ -3788,7 +3890,8 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
   addWrite(m_ssrDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[0]);
   addWrite(m_ssrDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[1]);
   addWrite(m_ssrDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[2]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ssrInfos[3]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[3]);
+  addWrite(m_ssrDescriptorSets[frameIndex], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ssrInfos[4]);
 
   vkUpdateDescriptorSets(getNativeDeviceHandle(), writeIndex, writes.data(), 0, nullptr);
 }
@@ -3799,61 +3902,41 @@ void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32
   m_gpuDrivenSpotLights.clear();
   if(params.debugOptions.enablePointLights)
   {
-    glm::vec3 minBounds(-12.0f, 0.5f, -12.0f);
-    glm::vec3 maxBounds(12.0f, 6.0f, 12.0f);
-    if(m_sceneView.sceneBoundsValid)
+    m_gpuDrivenPointLights.reserve(std::min<size_t>(params.sceneLights.size(), m_lightResources.getMaxPointLights()));
+    m_gpuDrivenSpotLights.reserve(std::min<size_t>(params.sceneLights.size(), m_lightResources.getMaxSpotLights()));
+    for(const SceneLight& sceneLight : params.sceneLights)
     {
-      minBounds = m_sceneView.sceneBoundsMin;
-      maxBounds = m_sceneView.sceneBoundsMax;
-      const glm::vec3 size = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
-      minBounds += size * 0.08f;
-      maxBounds -= size * 0.08f;
-    }
-
-    std::mt19937 rng(0x47505544u);
-    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
-    const glm::vec3 boundsSize = glm::max(maxBounds - minBounds, glm::vec3(1.0f));
-    m_gpuDrivenPointLights.reserve(kGPUDrivenTestPointLightCount);
-    for(uint32_t i = 0; i < kGPUDrivenTestPointLightCount; ++i)
-    {
-      const float phase = static_cast<float>(i) * 0.6180339f + static_cast<float>(m_temporalFrameCounter) * 0.01f;
-      const glm::vec3 base = glm::mix(minBounds, maxBounds, glm::vec3(unit(rng), unit(rng), unit(rng)));
-      const glm::vec3 offset = glm::vec3(std::sin(phase), std::cos(phase * 1.37f), std::sin(phase * 0.73f)) * boundsSize * 0.08f;
-      shaderio::LightData light{};
-      light.positionOrDirection = glm::clamp(base + offset, minBounds, maxBounds);
-      light.intensity = (8.0f + 18.0f * unit(rng)) * params.debugOptions.pointLightIntensityScale;
-      light.color = glm::vec3(0.45f + 0.55f * unit(rng), 0.45f + 0.55f * unit(rng), 0.45f + 0.55f * unit(rng));
-      light.range = glm::mix(1.0f, params.debugOptions.pointLightMaxRadius, unit(rng));
-      light.lightType = shaderio::LLightTypePoint;
-      m_gpuDrivenPointLights.push_back(light);
-    }
-
-    if(params.debugOptions.enableClusteredLighting)
-    {
-      const glm::vec3 center = (minBounds + maxBounds) * 0.5f;
-      m_gpuDrivenSpotLights.reserve(kGPUDrivenTestSpotLightCount);
-      for(uint32_t i = 0; i < kGPUDrivenTestSpotLightCount; ++i)
+      if(!sceneLight.enabled)
       {
-        const float t = static_cast<float>(i) / static_cast<float>(kGPUDrivenTestSpotLightCount);
-        const float angle = t * kGPUDrivenTwoPi + static_cast<float>(m_temporalFrameCounter) * 0.003f;
-        const float heightT = 0.25f + 0.5f * unit(rng);
-        const glm::vec3 position =
-            glm::clamp(center + glm::vec3(std::cos(angle) * boundsSize.x * 0.35f,
-                                          boundsSize.y * heightT,
-                                          std::sin(angle) * boundsSize.z * 0.35f),
-                       minBounds,
-                       maxBounds);
+        continue;
+      }
+      if(sceneLight.type != SceneLightType::point && sceneLight.type != SceneLightType::spot)
+      {
+        continue;
+      }
 
-        shaderio::LightData light{};
-        light.positionOrDirection = position;
-        light.intensity = (18.0f + 20.0f * unit(rng)) * params.debugOptions.pointLightIntensityScale;
-        light.color = glm::vec3(0.65f + 0.35f * unit(rng), 0.55f + 0.45f * unit(rng), 0.45f + 0.55f * unit(rng));
-        light.range = glm::mix(params.debugOptions.pointLightMaxRadius * 0.75f, params.debugOptions.pointLightMaxRadius * 1.5f, unit(rng));
-        light.lightType = shaderio::LLightTypeSpot;
-        light.spotDirection = glm::normalize(center - position);
-        light.spotInnerAngle = 0.35f;
-        light.spotOuterAngle = 0.75f;
-        m_gpuDrivenSpotLights.push_back(light);
+      const glm::mat4 worldTransform =
+          resolveSceneLightTransform(sceneLight, params.sceneLightSceneNodes, params.sceneLightGltfNodes);
+      shaderio::LightData light{};
+      light.positionOrDirection = glm::vec3(worldTransform[3]);
+      light.intensity = sceneLight.intensity;
+      light.color = sceneLight.color;
+      light.range = sceneLightEffectiveRange(sceneLight, m_sceneView);
+      light.lightType = sceneLight.type == SceneLightType::spot ? shaderio::LLightTypeSpot : shaderio::LLightTypePoint;
+      light.spotDirection = sceneLightTravelDirection(worldTransform);
+      light.spotInnerAngle = sceneLight.innerConeAngle;
+      light.spotOuterAngle = std::max(sceneLight.outerConeAngle, sceneLight.innerConeAngle + 0.001f);
+
+      if(sceneLight.type == SceneLightType::spot)
+      {
+        if(m_gpuDrivenSpotLights.size() < m_lightResources.getMaxSpotLights())
+        {
+          m_gpuDrivenSpotLights.push_back(light);
+        }
+      }
+      else if(m_gpuDrivenPointLights.size() < m_lightResources.getMaxPointLights())
+      {
+        m_gpuDrivenPointLights.push_back(light);
       }
     }
   }
@@ -3866,21 +3949,36 @@ void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32
   const uint32_t tileCountX = (extent.width + shaderio::LTileSizeX - 1u) / shaderio::LTileSizeX;
   const uint32_t tileCountY = (extent.height + shaderio::LTileSizeY - 1u) / shaderio::LTileSizeY;
   shaderio::LightingUniforms lightingUniforms{};
+  const shaderio::ShadowUniforms* shadowData = getCSMShadowResources().getShadowUniformsData();
+  if(shadowData != nullptr)
+  {
+    for(int i = 0; i < shaderio::LCascadeCount; ++i)
+    {
+      lightingUniforms.light.worldToShadow[i] = shadowData->cascadeViewProjection[i];
+    }
+    lightingUniforms.light.cascadeSplitDistances = shadowData->cascadeSplitDistances;
+  }
   lightingUniforms.light.lightDirectionAndShadowStrength =
       glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
   lightingUniforms.light.lightColorAndNormalBias =
       glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
   lightingUniforms.light.ambientColorAndTexelSize =
-      glm::vec4(params.lightSettings.ambient, 1.0f / 1024.0f);
+      glm::vec4(params.lightSettings.ambient,
+                1.0f / static_cast<float>(std::max(1u, getCSMShadowResources().getCascadeResolution())));
   lightingUniforms.light.shadowMetrics =
-      glm::vec4(1.0f / 1024.0f, params.lightSettings.depthBias, 1.0f, static_cast<float>(shaderio::LCascadeCount));
+      glm::vec4(1.0f / static_cast<float>(std::max(1u, getCSMShadowResources().getCascadeResolution())),
+                params.lightSettings.depthBias,
+                params.lightSettings.normalBias,
+                static_cast<float>(shaderio::LCascadeCount));
   lightingUniforms.light.iblParams =
       glm::vec4(params.debugOptions.enableIBL ? 1.0f : 0.0f,
                 params.debugOptions.iblIntensity,
-                static_cast<float>(getIBLEnvironmentMipCount() > 0 ? getIBLEnvironmentMipCount() - 1u : 0u),
+                static_cast<float>(m_iblResources.isSplitSumReady()
+                                       ? m_iblResources.getMaxMipLevel()
+                                       : (getIBLEnvironmentMipCount() > 0 ? getIBLEnvironmentMipCount() - 1u : 0u)),
                 getIBLEnvironmentLoaded() ? 1.0f : 0.0f);
   lightingUniforms.light.iblDebugInfo =
-      glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode), 0.0f, 0.0f, 0.0f);
+      glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode), m_iblResources.isSplitSumReady() ? 1.0f : 0.0f, 0.0f, 0.0f);
   lightingUniforms.light.phase7Info =
       glm::vec4(params.debugOptions.enableAO && m_aoDenoised.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
                 params.debugOptions.enableSSR && m_ssrRaw.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
@@ -4068,6 +4166,21 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
       .imageView = getCSMShadowResources().getCascadeView() != VK_NULL_HANDLE ? getCSMShadowResources().getCascadeView() : sceneView.sceneDepthView,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
+  const VkDescriptorImageInfo iblIrradianceInfo{
+      .sampler = m_iblResources.getCubeMapSampler(),
+      .imageView = m_iblResources.getIrradianceMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  const VkDescriptorImageInfo iblPrefilteredInfo{
+      .sampler = m_iblResources.getCubeMapSampler(),
+      .imageView = m_iblResources.getPrefilteredMapView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  const VkDescriptorImageInfo iblBrdfLutInfo{
+      .sampler = m_iblResources.getLUTSampler(),
+      .imageView = m_iblResources.getDFGLUTView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
 
   const std::array<VkDescriptorBufferInfo, 7> bufferInfos{{
       VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
@@ -4078,7 +4191,7 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
       VkDescriptorBufferInfo{m_lightResources.getClusteredUniformBuffer(frameIndex), 0, sizeof(shaderio::ClusteredLightUniforms)},
       VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
   }};
-  const std::array<VkWriteDescriptorSet, 9> writes{{
+  const std::array<VkWriteDescriptorSet, 12> writes{{
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindTextures, .descriptorCount = kGPUDrivenLightPassTextureCount, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = imageInfos.data()},
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindShadowMap, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &shadowInfo},
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[0]},
@@ -4088,6 +4201,9 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 6, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[4]},
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 7, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bufferInfos[5]},
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 8, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[6]},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLIrradiance, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblIrradianceInfo},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLPrefiltered, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblPrefilteredInfo},
+      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLBrdfLut, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblBrdfLutInfo},
   }};
   vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -4132,7 +4248,7 @@ void GPUDrivenRenderer::initLightingPipelines()
 
 #ifdef USE_SLANG
   VkShaderModule lightShaderModule =
-      utils::createShaderModule(nativeDevice, {shader_light_slang, std::size(shader_light_slang)});
+      utils::createShaderModule(nativeDevice, {shader_light_gpu_driven_slang, std::size(shader_light_gpu_driven_slang)});
   const auto createFullscreenPipeline = [&](const char* fragmentEntry,
                                             VkFormat colorFormat,
                                             bool depthTest,

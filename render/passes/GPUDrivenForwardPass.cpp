@@ -42,8 +42,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenForwardPass::getDependenc
 {
   static const std::array<PassResourceDependency, 2> dependencies = {
       PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
-                                      rhi::ResourceState::DepthStencilAttachment),
+      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
   };
   return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 }
@@ -63,7 +62,12 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     context.cmd->endEvent();
     return;
   }
+  bool depthInAttachmentLayout = false;
   const auto restoreDepthForSampling = [&]() {
+    if(!depthInAttachmentLayout)
+    {
+      return;
+    }
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
         .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
@@ -76,6 +80,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
         .newState = rhi::ResourceState::General,
         .isSwapchain = false,
     });
+    depthInAttachmentLayout = false;
   };
 
   const VkImageView outputImageView = sceneView->sceneColorHdrView;
@@ -83,7 +88,6 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const rhi::Extent2D renderExtent = {vkExtent.width, vkExtent.height};
   if(outputImageView == VK_NULL_HANDLE || renderExtent.width == 0 || renderExtent.height == 0)
   {
-    restoreDepthForSampling();
     context.cmd->endEvent();
     return;
   }
@@ -94,7 +98,6 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const uint64_t countBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
   if(objectCount == 0 || indirectBufferHandle == 0 || countBufferHandle == 0)
   {
-    restoreDepthForSampling();
     context.cmd->endEvent();
     return;
   }
@@ -140,6 +143,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
       .newState = rhi::ResourceState::DepthStencilAttachment,
       .isSwapchain = false,
   });
+  depthInAttachmentLayout = true;
 
   const PipelineHandle forwardPipeline = m_renderer->getForwardMDIPipelineHandle();
   if(forwardPipeline.isNull())

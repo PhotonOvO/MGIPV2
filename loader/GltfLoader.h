@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "../scene/SceneLight.h"
+
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -96,6 +98,7 @@ struct GltfModel {
     std::vector<GltfMaterialData> materials;
     std::vector<GltfImageData> images;
     std::vector<GltfNodeData> nodes;
+    std::vector<SceneLight> lights;
     std::vector<int> rootNodes;
     std::string name;
     std::string sourcePath;
@@ -114,7 +117,9 @@ public:
 private:
     std::string m_lastError;
     std::vector<uint8_t> m_nodeVisitState;
+    std::vector<SceneLight> m_lightDefinitions;
 
+    void processLightDefinitions(const tinygltf::Model& model);
     bool processNode(const tinygltf::Model& model,
                      int nodeIndex,
                      int parentNodeIndex,

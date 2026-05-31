@@ -185,7 +185,7 @@ void fragmentMain(
     float roughness = draw.materialWorkflow == 1 ? (1.0 - draw.roughnessFactor) : draw.roughnessFactor;
     float ao = 1.0;
 
-    // Sample metallic-roughness texture (glTF: G=metallic, B=roughness)
+    // Sample metallic-roughness texture (glTF: G=roughness, B=metallic)
     if(draw.metallicRoughnessTextureIndex >= 0)
     {
         uint metallicRoughnessTextureIndex = NonUniformResourceIndex(uint(draw.metallicRoughnessTextureIndex));
@@ -197,8 +197,8 @@ void fragmentMain(
         }
         else
         {
-            metallic = mrSample.g * draw.metallicFactor;
-            roughness = mrSample.b * draw.roughnessFactor;
+            metallic = mrSample.b * draw.metallicFactor;
+            roughness = mrSample.g * draw.roughnessFactor;
         }
     }
 
@@ -280,8 +280,8 @@ void fragmentMdiMain(
         }
         else
         {
-            metallic = mrSample.g * draw.metallicFactor;
-            roughness = mrSample.b * draw.roughnessFactor;
+            metallic = mrSample.b * draw.metallicFactor;
+            roughness = mrSample.g * draw.roughnessFactor;
         }
     }
     if(draw.occlusionTextureIndex >= 0)

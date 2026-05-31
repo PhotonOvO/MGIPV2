@@ -7,6 +7,7 @@
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -315,6 +316,53 @@ float readFloatExtensionFactor(const tinygltf::Value& extension, const char* nam
     return value.IsNumber() ? static_cast<float>(value.GetNumberAsDouble()) : fallback;
 }
 
+glm::vec3 readVec3Value(const tinygltf::Value& object, const char* name, const glm::vec3& fallback)
+{
+    if(!object.IsObject())
+    {
+        return fallback;
+    }
+
+    const tinygltf::Value& value = object.Get(name);
+    if(!value.IsArray() || value.ArrayLen() < 3)
+    {
+        return fallback;
+    }
+
+    glm::vec3 result = fallback;
+    for(size_t i = 0; i < 3; ++i)
+    {
+        const tinygltf::Value& component = value.Get(i);
+        if(component.IsNumber())
+        {
+            result[static_cast<glm::length_t>(i)] = static_cast<float>(component.GetNumberAsDouble());
+        }
+    }
+    return result;
+}
+
+float readFloatValue(const tinygltf::Value& object, const char* name, float fallback)
+{
+    if(!object.IsObject())
+    {
+        return fallback;
+    }
+
+    const tinygltf::Value& value = object.Get(name);
+    return value.IsNumber() ? static_cast<float>(value.GetNumberAsDouble()) : fallback;
+}
+
+std::string readStringValue(const tinygltf::Value& object, const char* name, const std::string& fallback = {})
+{
+    if(!object.IsObject())
+    {
+        return fallback;
+    }
+
+    const tinygltf::Value& value = object.Get(name);
+    return value.IsString() ? value.Get<std::string>() : fallback;
+}
+
 }  // namespace
 
 // Forward declarations for tangent generation
@@ -338,6 +386,7 @@ static bool readFloatAccessor(
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     outModel = {};
     m_nodeVisitState.clear();
+    m_lightDefinitions.clear();
     outModel.sourcePath = filepath;
     outModel.sourceDirectory = std::filesystem::path(filepath).parent_path().string();
 
@@ -399,6 +448,7 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     processMaterials(model, outModel);
     processImages(model, std::filesystem::path(filepath), outModel);
     recordBasisuFallbackImages(model, outModel);
+    processLightDefinitions(model);
 
     // Set model name from file
     size_t lastSlash = filepath.find_last_of("/\\");
@@ -443,6 +493,102 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     }
 
     return true;
+}
+
+void GltfLoader::processLightDefinitions(const tinygltf::Model& model)
+{
+    m_lightDefinitions.clear();
+
+    if(!model.lights.empty())
+    {
+        m_lightDefinitions.reserve(model.lights.size());
+        for(size_t lightIndex = 0; lightIndex < model.lights.size(); ++lightIndex)
+        {
+            const tinygltf::Light& gltfLight = model.lights[lightIndex];
+            SceneLight light{};
+            light.name = gltfLight.name.empty() ? ("Light " + std::to_string(lightIndex)) : gltfLight.name;
+            if(gltfLight.type == "directional")
+            {
+                light.type = SceneLightType::directional;
+            }
+            else if(gltfLight.type == "spot")
+            {
+                light.type = SceneLightType::spot;
+            }
+            else
+            {
+                light.type = SceneLightType::point;
+            }
+            if(gltfLight.color.size() >= 3)
+            {
+                light.color = glm::vec3(static_cast<float>(gltfLight.color[0]),
+                                        static_cast<float>(gltfLight.color[1]),
+                                        static_cast<float>(gltfLight.color[2]));
+            }
+            light.intensity = static_cast<float>(gltfLight.intensity);
+            light.range = static_cast<float>(gltfLight.range);
+            light.innerConeAngle = static_cast<float>(gltfLight.spot.innerConeAngle);
+            light.outerConeAngle = static_cast<float>(gltfLight.spot.outerConeAngle);
+            light.outerConeAngle = std::max(light.outerConeAngle, light.innerConeAngle + 0.001f);
+            m_lightDefinitions.push_back(std::move(light));
+        }
+        return;
+    }
+
+    const auto extensionIt = model.extensions.find("KHR_lights_punctual");
+    if(extensionIt == model.extensions.end() || !extensionIt->second.IsObject())
+    {
+        return;
+    }
+
+    const tinygltf::Value& lights = extensionIt->second.Get("lights");
+    if(!lights.IsArray())
+    {
+        return;
+    }
+
+    m_lightDefinitions.reserve(lights.ArrayLen());
+    for(size_t lightIndex = 0; lightIndex < lights.ArrayLen(); ++lightIndex)
+    {
+        const tinygltf::Value& lightValue = lights.Get(static_cast<int>(lightIndex));
+        if(!lightValue.IsObject())
+        {
+            m_lightDefinitions.push_back(SceneLight{});
+            continue;
+        }
+
+        SceneLight light{};
+        light.name = readStringValue(lightValue, "name", "Light " + std::to_string(lightIndex));
+        const std::string type = readStringValue(lightValue, "type", "point");
+        if(type == "directional")
+        {
+            light.type = SceneLightType::directional;
+        }
+        else if(type == "spot")
+        {
+            light.type = SceneLightType::spot;
+        }
+        else
+        {
+            light.type = SceneLightType::point;
+        }
+
+        light.color = readVec3Value(lightValue, "color", glm::vec3(1.0f));
+        light.intensity = readFloatValue(lightValue, "intensity", 1.0f);
+        light.range = readFloatValue(lightValue, "range", 0.0f);
+        light.innerConeAngle = 0.0f;
+        light.outerConeAngle = glm::quarter_pi<float>();
+
+        const tinygltf::Value& spot = lightValue.Get("spot");
+        if(spot.IsObject())
+        {
+            light.innerConeAngle = readFloatValue(spot, "innerConeAngle", light.innerConeAngle);
+            light.outerConeAngle = readFloatValue(spot, "outerConeAngle", light.outerConeAngle);
+        }
+        light.outerConeAngle = std::max(light.outerConeAngle, light.innerConeAngle + 0.001f);
+
+        m_lightDefinitions.push_back(std::move(light));
+    }
 }
 
 bool GltfLoader::processNode(const tinygltf::Model& model,
@@ -548,6 +694,23 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
         outModel.nodes[parentNodeIndex].children.push_back(currentNodeIndex);
     } else {
         outModel.rootNodes.push_back(currentNodeIndex);
+    }
+
+    int lightIndex = node.light;
+    const auto lightExtensionIt = node.extensions.find("KHR_lights_punctual");
+    if(lightIndex < 0 && lightExtensionIt != node.extensions.end() && lightExtensionIt->second.IsObject())
+    {
+        readTinyGltfInt(lightExtensionIt->second.Get("light"), lightIndex);
+    }
+    if(lightIndex >= 0 && static_cast<size_t>(lightIndex) < m_lightDefinitions.size())
+    {
+        SceneLight light = m_lightDefinitions[static_cast<size_t>(lightIndex)];
+        light.nodeIndex = currentNodeIndex;
+        if(light.name.empty())
+        {
+            light.name = nodeData.name;
+        }
+        outModel.lights.push_back(std::move(light));
     }
 
     // Process mesh if present

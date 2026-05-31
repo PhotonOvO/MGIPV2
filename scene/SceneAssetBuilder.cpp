@@ -88,6 +88,7 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
   buildMaterials(asset, model);
   buildTextures(asset, model);
   buildNodes(asset, model);
+  asset.lights = model.lights;
 
   if(options.buildMeshlets) {
     buildMeshlets(asset, model);

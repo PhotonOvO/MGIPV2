@@ -9,7 +9,7 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  static constexpr uint32_t kCurrentVersion = 3;
+  static constexpr uint32_t kCurrentVersion = 4;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 
