@@ -22,6 +22,8 @@ constexpr float kShadowKernelRadius          = 1.0f;  // 1 => 3x3 PCF
 constexpr float kCascadeBiasScaleFactor      = 0.5f;  // Bias decreases for farther cascades
 constexpr float kCascadeNearPlanePadding     = 25.0f; // Padding for near plane in ortho projection
 constexpr float kCascadeCasterDepthPaddingScale = 0.02f;
+constexpr float kCascadeCasterExtrusionPaddingScale = 0.25f;
+constexpr float kCascadeCasterMinGuardTexels = 8.0f;
 
 [[nodiscard]] float extractNearPlane(const glm::mat4& projection, const clipspace::ProjectionConvention& convention)
 {
@@ -188,17 +190,31 @@ void snapToTexelGrid(float& left, float& right, float& bottom, float& top, uint3
   return length > 0.0f ? plane / length : plane;
 }
 
-[[nodiscard]] std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> extractFrustumPlanes(
-    const glm::mat4& viewProjection)
+[[nodiscard]] std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> makeOrthoCullingPlanes(
+    const glm::mat4& lightView,
+    float left,
+    float right,
+    float bottom,
+    float top,
+    float nearPlane,
+    float farPlane)
 {
-  const glm::mat4 transposed = glm::transpose(viewProjection);
+  const glm::mat4 worldToLight = lightView;
+  const glm::mat4 lightToWorld = glm::inverse(worldToLight);
+  const glm::vec3 lightRight = glm::normalize(glm::vec3(lightToWorld[0]));
+  const glm::vec3 lightUp = glm::normalize(glm::vec3(lightToWorld[1]));
+  const glm::vec3 lightForward = -glm::normalize(glm::vec3(lightToWorld[2]));
+  const glm::vec3 lightOrigin = glm::vec3(lightToWorld[3]);
+  const glm::vec3 nearCenter = lightOrigin + lightForward * nearPlane;
+  const glm::vec3 farCenter = lightOrigin + lightForward * farPlane;
+
   return {
-      makeNormalizedPlane(transposed[3] + transposed[0]),
-      makeNormalizedPlane(transposed[3] - transposed[0]),
-      makeNormalizedPlane(transposed[3] + transposed[1]),
-      makeNormalizedPlane(transposed[3] - transposed[1]),
-      makeNormalizedPlane(transposed[3] + transposed[2]),
-      makeNormalizedPlane(transposed[3] - transposed[2]),
+      makeNormalizedPlane(glm::vec4( lightRight, -(glm::dot( lightRight, lightOrigin) + left))),
+      makeNormalizedPlane(glm::vec4(-lightRight,  (glm::dot( lightRight, lightOrigin) + right))),
+      makeNormalizedPlane(glm::vec4( lightUp,    -(glm::dot( lightUp,    lightOrigin) + bottom))),
+      makeNormalizedPlane(glm::vec4(-lightUp,     (glm::dot( lightUp,    lightOrigin) + top))),
+      makeNormalizedPlane(glm::vec4( lightForward, -glm::dot( lightForward, nearCenter))),
+      makeNormalizedPlane(glm::vec4(-lightForward,  glm::dot( lightForward, farCenter))),
   };
 }
 
@@ -463,37 +479,58 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
     stableCenterLightSpace.y = snappedCenterXY.y;
     const glm::vec3 stableCenterWorld =
         glm::vec3(glm::inverse(stableLightView) * glm::vec4(stableCenterLightSpace, 1.0f));
-    const glm::vec3 lightPosition = stableCenterWorld - lightDirection * boundingSphere.radius;
-    const glm::mat4 lightView     = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
-    cascadeData.lightPosition = lightPosition;
-    cascadeData.lightView = lightView;
+    glm::vec3 lightPosition = stableCenterWorld - lightDirection * boundingSphere.radius;
+    glm::mat4 lightView     = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
 
     // Transform corners to light space to find ortho bounds
     glm::vec3 minLightSpace(std::numeric_limits<float>::max());
     glm::vec3 maxLightSpace(std::numeric_limits<float>::lowest());
 
-    for(const glm::vec3& corner : sliceCorners)
-    {
-      const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
-      minLightSpace = glm::min(minLightSpace, lightSpaceCorner);
-      maxLightSpace = glm::max(maxLightSpace, lightSpaceCorner);
-    }
-    cascadeData.receiverMinLightSpace = minLightSpace;
-    cascadeData.receiverMaxLightSpace = maxLightSpace;
-
     glm::vec3 casterMinLightSpace = minLightSpace;
     glm::vec3 casterMaxLightSpace = maxLightSpace;
-    if(useCasterBounds)
-    {
-      casterMinLightSpace = glm::vec3(std::numeric_limits<float>::max());
-      casterMaxLightSpace = glm::vec3(std::numeric_limits<float>::lowest());
-      for(const glm::vec3& corner : casterCorners)
+    const auto updateLightSpaceBounds = [&] {
+      minLightSpace = glm::vec3(std::numeric_limits<float>::max());
+      maxLightSpace = glm::vec3(std::numeric_limits<float>::lowest());
+      for(const glm::vec3& corner : sliceCorners)
       {
         const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
-        casterMinLightSpace = glm::min(casterMinLightSpace, lightSpaceCorner);
-        casterMaxLightSpace = glm::max(casterMaxLightSpace, lightSpaceCorner);
+        minLightSpace = glm::min(minLightSpace, lightSpaceCorner);
+        maxLightSpace = glm::max(maxLightSpace, lightSpaceCorner);
+      }
+
+      casterMinLightSpace = minLightSpace;
+      casterMaxLightSpace = maxLightSpace;
+      if(useCasterBounds)
+      {
+        casterMinLightSpace = glm::vec3(std::numeric_limits<float>::max());
+        casterMaxLightSpace = glm::vec3(std::numeric_limits<float>::lowest());
+        for(const glm::vec3& corner : casterCorners)
+        {
+          const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+          casterMinLightSpace = glm::min(casterMinLightSpace, lightSpaceCorner);
+          casterMaxLightSpace = glm::max(casterMaxLightSpace, lightSpaceCorner);
+        }
+      }
+    };
+
+    updateLightSpaceBounds();
+
+    if(useCasterBounds)
+    {
+      const float nearCasterGuard = std::max(kCascadeNearPlanePadding, casterDepthPadding);
+      const float lightCameraShift = std::max(0.0f, casterMaxLightSpace.z + nearCasterGuard);
+      if(lightCameraShift > 0.0f)
+      {
+        lightPosition -= lightDirection * lightCameraShift;
+        lightView = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
+        updateLightSpaceBounds();
       }
     }
+
+    cascadeData.lightPosition = lightPosition;
+    cascadeData.lightView = lightView;
+    cascadeData.receiverMinLightSpace = minLightSpace;
+    cascadeData.receiverMaxLightSpace = maxLightSpace;
     cascadeData.casterMinLightSpace = casterMinLightSpace;
     cascadeData.casterMaxLightSpace = casterMaxLightSpace;
 
@@ -511,6 +548,14 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
     // Snap bounds to texel grid for stability
     snapToTexelGrid(left, right, bottom, top, m_cascadeResolution);
 
+    const float casterDepthRange = std::max(0.0f, casterMaxLightSpace.z - casterMinLightSpace.z);
+    const float casterGuard = std::max(texelSize * kCascadeCasterMinGuardTexels,
+                                       casterDepthRange * kCascadeCasterExtrusionPaddingScale);
+    const float cullLeft = useCasterBounds ? std::min(left, casterMinLightSpace.x - casterGuard) : left;
+    const float cullRight = useCasterBounds ? std::max(right, casterMaxLightSpace.x + casterGuard) : right;
+    const float cullBottom = useCasterBounds ? std::min(bottom, casterMinLightSpace.y - casterGuard) : bottom;
+    const float cullTop = useCasterBounds ? std::max(top, casterMaxLightSpace.y + casterGuard) : top;
+
     // Compute near/far planes with padding
     const float depthPadding = useCasterBounds
         ? std::max(kCascadeNearPlanePadding, casterDepthPadding)
@@ -527,10 +572,15 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
     cascadeData.lightProjection = lightProjection;
 
     const glm::mat4 lightViewProjection = lightProjection * lightView;
+    const glm::mat4 lightCullingProjection = clipspace::makeOrthographicProjection(
+        cullLeft, cullRight, cullBottom, cullTop, nearPlane, farPlane, m_projectionConvention);
+    const glm::mat4 lightCullingViewProjection = lightCullingProjection * lightView;
     cascadeData.viewProjection = lightViewProjection;
+    cascadeData.cullingViewProjection = lightCullingViewProjection;
     cascadeData.worldToShadowTexture =
         clipspace::makeNdcToShadowTextureMatrix(m_projectionConvention) * lightViewProjection;
-    cascadeData.cullingPlanes = extractFrustumPlanes(lightViewProjection);
+    cascadeData.cullingPlanes = makeOrthoCullingPlanes(
+        lightView, cullLeft, cullRight, cullBottom, cullTop, nearPlane, farPlane);
 
     // Store cascade matrices
     m_shadowUniformsData.cascadeViewProjection[cascadeIndex]          = lightViewProjection;

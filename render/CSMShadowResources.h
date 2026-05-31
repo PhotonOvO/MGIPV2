@@ -24,6 +24,7 @@ public:
     glm::mat4 lightView{1.0f};
     glm::mat4 lightProjection{1.0f};
     glm::mat4 viewProjection{1.0f};
+    glm::mat4 cullingViewProjection{1.0f};
     glm::mat4 worldToShadowTexture{1.0f};
     glm::vec3 receiverMinLightSpace{0.0f};
     glm::vec3 receiverMaxLightSpace{0.0f};

@@ -219,12 +219,11 @@ void CSMShadowPass::renderCascadeLayer(const PassContext& context, uint32_t casc
                                    && !m_renderer->getCSMShadowMDIDrawBindGroup(context.frameIndex, cascadeIndex).isNull();
   const bool hasShadowIndirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(context.frameIndex) != 0;
   const bool useShadowMdi = usePackedShadowPath && hasShadowIndirectBuffer;
-  const bool useMultiDrawIndirect = context.params->useCsmShadowMultiDrawIndirect
-                                    && useShadowMdi
-                                    && m_renderer->getShadowCullingPipelineHandle().isNull() == false
-                                    && m_renderer->getShadowCullingDescriptorSetOpaque(context.frameIndex) != 0;
+  const bool useShadowCulling = useShadowMdi
+                                && m_renderer->getShadowCullingPipelineHandle().isNull() == false
+                                && m_renderer->getShadowCullingDescriptorSetOpaque(context.frameIndex) != 0;
 
-  if(useMultiDrawIndirect && !prepareMultiDrawIndirect(context, cascadeIndex))
+  if(useShadowCulling && !prepareMultiDrawIndirect(context, cascadeIndex))
   {
     return;
   }

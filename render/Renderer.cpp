@@ -403,6 +403,43 @@ struct PendingMipGeneration
   return drawData;
 }
 
+[[nodiscard]] shaderio::DrawUniforms buildShadowDrawUniforms(const MeshRecord& mesh,
+                                                             const SceneUploadResult::SceneDrawRecord& drawRecord)
+{
+  shaderio::DrawUniforms drawData = buildShadowDrawUniforms(mesh);
+  drawData.modelMatrix = drawRecord.worldTransform;
+  drawData.prevModelMatrix = drawRecord.worldTransform;
+  drawData.alphaMode = static_cast<int32_t>(drawRecord.alphaMode);
+  drawData.alphaCutoff = drawRecord.alphaCutoff;
+  return drawData;
+}
+
+[[nodiscard]] glm::vec4 computeBoundsSphere(const MeshRecord& mesh, const glm::mat4& transform)
+{
+  const std::array<glm::vec3, 8> corners{{
+      {mesh.localBoundsMin.x, mesh.localBoundsMin.y, mesh.localBoundsMin.z},
+      {mesh.localBoundsMax.x, mesh.localBoundsMin.y, mesh.localBoundsMin.z},
+      {mesh.localBoundsMin.x, mesh.localBoundsMax.y, mesh.localBoundsMin.z},
+      {mesh.localBoundsMax.x, mesh.localBoundsMax.y, mesh.localBoundsMin.z},
+      {mesh.localBoundsMin.x, mesh.localBoundsMin.y, mesh.localBoundsMax.z},
+      {mesh.localBoundsMax.x, mesh.localBoundsMin.y, mesh.localBoundsMax.z},
+      {mesh.localBoundsMin.x, mesh.localBoundsMax.y, mesh.localBoundsMax.z},
+      {mesh.localBoundsMax.x, mesh.localBoundsMax.y, mesh.localBoundsMax.z},
+  }};
+
+  glm::vec3 boundsMin(std::numeric_limits<float>::max());
+  glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+  for(const glm::vec3& corner : corners)
+  {
+    const glm::vec3 worldCorner = glm::vec3(transform * glm::vec4(corner, 1.0f));
+    boundsMin = glm::min(boundsMin, worldCorner);
+    boundsMax = glm::max(boundsMax, worldCorner);
+  }
+
+  const glm::vec3 center = 0.5f * (boundsMin + boundsMax);
+  return glm::vec4(center, glm::length(boundsMax - center));
+}
+
 struct OverlayCircle
 {
   ImVec2 center{};
@@ -3071,8 +3108,11 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
       continue;
     }
 
+    const glm::vec4 casterBounds = packedMesh.boundsSphere.w > 0.0f
+        ? packedMesh.boundsSphere
+        : glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
     objects[meshIndex] = shaderio::ShadowCullObject{
-        .sphereCenterRadius = glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius),
+        .sphereCenterRadius = casterBounds,
         .indexCount         = packedMesh.indexCount,
         .firstIndex         = packedMesh.firstIndex,
         .vertexOffset       = packedMesh.vertexOffset,
@@ -3085,7 +3125,7 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
         .vertexOffset  = packedMesh.vertexOffset,
         .firstInstance = meshIndex,
     };
-    drawData[meshIndex] = buildShadowDrawUniforms(*meshRecord);
+    drawData[meshIndex] = packedMesh.boundsSphere.w > 0.0f ? packedMesh.drawData : buildShadowDrawUniforms(*meshRecord);
   }
 
   if(objectCount > 0)
@@ -8493,7 +8533,6 @@ SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const
       .alphaCutoff = alphaCutoff,
     });
     result.drawMeshHandles.push_back(meshHandle);
-    result.shadowCasterDrawIndices.push_back(drawRecordIndex);
     if(bucket == SceneDrawBucket::Transparent)
     {
       result.transparentDrawIndices.push_back(drawRecordIndex);
@@ -8501,10 +8540,12 @@ SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const
     }
     else if(bucket == SceneDrawBucket::AlphaMask)
     {
+      result.shadowCasterDrawIndices.push_back(drawRecordIndex);
       result.alphaTestDrawIndices.push_back(drawRecordIndex);
     }
     else
     {
+      result.shadowCasterDrawIndices.push_back(drawRecordIndex);
       result.opaqueDrawIndices.push_back(drawRecordIndex);
     }
     return drawRecordIndex;
@@ -8989,6 +9030,9 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
     {
       continue;
     }
+    const MeshRecord* meshRecord = meshIndex < result.meshes.size()
+        ? m_meshPool.tryGet(result.meshes[meshIndex])
+        : nullptr;
 
     const uint32_t vertexCount = static_cast<uint32_t>(meshData.positions.size() / 3u);
     const uint32_t vertexBase = static_cast<uint32_t>(packedVertexData.size() / 48u);
@@ -9053,6 +9097,10 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
         .indexCount    = static_cast<uint32_t>(meshData.indices.size()),
         .firstIndex    = firstIndex,
         .vertexOffset  = 0,
+        .boundsSphere  = meshRecord != nullptr
+            ? glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius)
+            : glm::vec4(0.0f),
+        .drawData      = meshRecord != nullptr ? buildShadowDrawUniforms(*meshRecord) : shaderio::DrawUniforms{},
     });
   }
 
@@ -9095,7 +9143,7 @@ void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadRe
   destroyBuffer(m_device.allocator, result.shadowPackedIndexBuffer);
   result.shadowPackedMeshes.clear();
 
-  if(result.shadowCasterIndices.empty())
+  if(result.shadowCasterDrawIndices.empty() && result.shadowCasterIndices.empty())
   {
     return;
   }
@@ -9103,11 +9151,12 @@ void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadRe
   std::vector<uint8_t> packedVertexData;
   std::vector<uint32_t> packedIndexData;
 
-  for(const size_t meshIndex : result.shadowCasterIndices)
-  {
+  const auto appendPackedMesh = [&](size_t meshIndex,
+                                    const glm::vec4& boundsSphere,
+                                    const shaderio::DrawUniforms& drawData) {
     if(meshIndex >= asset.meshes.size())
     {
-      continue;
+      return;
     }
 
     const SceneMesh& mesh = asset.meshes[meshIndex];
@@ -9118,7 +9167,7 @@ void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadRe
     if(vertexByteOffset + vertexByteSize > asset.vertexPayload.size()
        || indexByteOffset + indexByteSize > asset.indexPayload.size())
     {
-      continue;
+      return;
     }
 
     const uint32_t vertexBase = static_cast<uint32_t>(packedVertexData.size() / 48u);
@@ -9138,7 +9187,57 @@ void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadRe
         .indexCount = mesh.indexCount,
         .firstIndex = firstIndex,
         .vertexOffset = 0,
+        .boundsSphere = boundsSphere,
+        .drawData = drawData,
     });
+  };
+
+  if(!result.shadowCasterDrawIndices.empty())
+  {
+    for(const size_t drawRecordIndex : result.shadowCasterDrawIndices)
+    {
+      if(drawRecordIndex >= result.drawRecords.size())
+      {
+        continue;
+      }
+
+      const SceneUploadResult::SceneDrawRecord& drawRecord = result.drawRecords[drawRecordIndex];
+      if(drawRecord.meshIndex >= result.meshes.size())
+      {
+        continue;
+      }
+
+      const MeshRecord* meshRecord = m_meshPool.tryGet(drawRecord.meshHandle);
+      if(meshRecord == nullptr)
+      {
+        continue;
+      }
+
+      const glm::vec4 boundsSphere = drawRecord.boundsSphere.w > 0.0f
+          ? drawRecord.boundsSphere
+          : computeBoundsSphere(*meshRecord, drawRecord.worldTransform);
+      appendPackedMesh(drawRecord.meshIndex, boundsSphere, buildShadowDrawUniforms(*meshRecord, drawRecord));
+    }
+  }
+  else
+  {
+    for(const size_t meshIndex : result.shadowCasterIndices)
+    {
+      if(meshIndex >= result.meshes.size())
+      {
+        continue;
+      }
+
+      const MeshRecord* meshRecord = m_meshPool.tryGet(result.meshes[meshIndex]);
+      if(meshRecord == nullptr)
+      {
+        continue;
+      }
+
+      appendPackedMesh(meshIndex,
+                       glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius),
+                       buildShadowDrawUniforms(*meshRecord));
+    }
   }
 
   if(result.shadowPackedMeshes.empty())

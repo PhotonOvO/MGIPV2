@@ -293,7 +293,7 @@ public:
           bool lightDirectionChanged = ImGui::DragFloat3("Direction", &m_lightSettings.direction.x, 0.01f, -1.0f, 1.0f, "%.3f");
           if(ImGui::Button("Reset Travel Direction"))
           {
-            m_lightSettings.direction = glm::normalize(glm::vec3(0.6f, -0.5f, -0.6f));
+            m_lightSettings.direction = glm::normalize(glm::vec3(0.27f, -0.9f, -0.3f));
           }
           if(lightDirectionChanged)
           {
@@ -320,11 +320,10 @@ public:
           const char* iblDebugModes[] = {"Off", "Diffuse", "Specular", "Fallback", "Environment"};
           ImGui::Combo("IBL Debug", &m_debugOptions.iblDebugMode, iblDebugModes, IM_ARRAYSIZE(iblDebugModes));
         }
-        ImGui::SliderFloat("Shadow Distance", &m_lightSettings.shadowDistance, 5.0f, 80.0f);
+        ImGui::SliderFloat("Shadow Distance", &m_lightSettings.shadowDistance, 10.0f, 250.0f, "%.1f m", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Shadow Strength", &m_lightSettings.shadowStrength, 0.0f, 1.0f);
         ImGui::SliderFloat("Normal Bias", &m_lightSettings.normalBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Depth Bias", &m_lightSettings.depthBias, 0.0001f, 0.02f, "%.4f", ImGuiSliderFlags_Logarithmic);
-        ImGui::Checkbox("CSM Multi-Draw Indirect", &m_useCsmShadowMultiDrawIndirect);
         drawSceneLightsUI();
 
         ImGui::Separator();
@@ -858,7 +857,6 @@ public:
           frameParams.sceneLightGltfNodes = m_sceneModel->nodes;
         }
         frameParams.debugOptions   = m_debugOptions;
-        frameParams.useCsmShadowMultiDrawIndirect = m_useCsmShadowMultiDrawIndirect;
         // Copy CSM debug settings to debugOptions
         frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
         frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
@@ -971,7 +969,6 @@ private:
   float m_lightAzimuthDegrees{0.0f};
   float m_lightElevationDegrees{0.0f};
   demo::DebugPassOptions m_debugOptions{};
-  bool m_useCsmShadowMultiDrawIndirect{false};
 
   // CSM Shadow debug settings (copied to debugOptions in run())
   bool  m_showShadowCascades{true};

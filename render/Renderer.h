@@ -61,7 +61,7 @@ struct DirectionalLightSettings
 {
   // World-space light travel direction, from the light toward the scene.
   glm::vec3 direction{glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f))};
-  float     shadowDistance{35.0f};
+  float     shadowDistance{100.0f};
   glm::vec3 color{glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f};
   float     shadowStrength{0.9f};
   glm::vec3 ambient{0.1f, 0.12f, 0.15f};
@@ -152,6 +152,8 @@ struct ShadowPackedMesh
   uint32_t indexCount{0};
   uint32_t firstIndex{0};
   int32_t  vertexOffset{0};
+  glm::vec4 boundsSphere{0.0f};
+  shaderio::DrawUniforms drawData{};
 };
 
 struct GPUDrivenSceneView
@@ -231,7 +233,6 @@ struct RenderParams
   std::span<const SceneNode>              sceneLightSceneNodes{};
   std::span<const GltfNodeData>           sceneLightGltfNodes{};
   DebugPassOptions                       debugOptions{};
-  bool                                   useCsmShadowMultiDrawIndirect{false};
   const GPUDrivenSceneView*              gpuDrivenSceneView{nullptr};
 };
 

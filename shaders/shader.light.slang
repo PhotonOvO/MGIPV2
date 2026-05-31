@@ -261,6 +261,12 @@ int selectCascadeIndex(float viewDepth)
 
 float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
 {
+    const float maxShadowDistance = lighting.light.cascadeSplitDistances.w;
+    const float fadeWidth = max(maxShadowDistance * 0.08, 2.0);
+    const float distanceFade = saturate((maxShadowDistance - viewDepth) / fadeWidth);
+    if(distanceFade <= 0.0)
+        return 1.0;
+
     int cascadeIdx = selectCascadeIndex(viewDepth);
 
     float4 shadowClip = mul(lighting.light.worldToShadow[cascadeIdx], float4(worldPos, 1.0));
@@ -300,7 +306,7 @@ float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
         }
     }
 
-    return visibility / 9.0;
+    return lerp(1.0, visibility / 9.0, distanceFade);
 }
 
 vec3 evaluateDirectBRDF(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 baseColor, float metallic, float roughness)

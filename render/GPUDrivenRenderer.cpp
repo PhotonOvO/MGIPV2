@@ -199,6 +199,29 @@ glm::vec4 computeTransformedBoundsSphere(const MeshRecord& meshRecord, const glm
   return glm::vec4(center, radius);
 }
 
+void includeBoundsSphere(glm::vec3& boundsMin, glm::vec3& boundsMax, bool& boundsValid, const glm::vec4& sphere)
+{
+  if(sphere.w <= 0.0f)
+  {
+    return;
+  }
+
+  const glm::vec3 center = glm::vec3(sphere);
+  const glm::vec3 extent(sphere.w);
+  const glm::vec3 sphereMin = center - extent;
+  const glm::vec3 sphereMax = center + extent;
+  boundsMin = boundsValid ? glm::min(boundsMin, sphereMin) : sphereMin;
+  boundsMax = boundsValid ? glm::max(boundsMax, sphereMax) : sphereMax;
+  boundsValid = true;
+}
+
+void includeMeshBounds(glm::vec3& boundsMin, glm::vec3& boundsMax, bool& boundsValid, const MeshRecord& mesh)
+{
+  boundsMin = boundsValid ? glm::min(boundsMin, mesh.worldBoundsMin) : mesh.worldBoundsMin;
+  boundsMax = boundsValid ? glm::max(boundsMax, mesh.worldBoundsMax) : mesh.worldBoundsMax;
+  boundsValid = true;
+}
+
 utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
 {
   const VkBufferUsageFlags2CreateInfoKHR usageInfo{
@@ -1339,14 +1362,19 @@ void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
     return;
   }
 
-  const bool useMultiDrawIndirect = context.params->useCsmShadowMultiDrawIndirect
-                                    && !getShadowCullingPipelineHandle().isNull()
-                                    && getShadowCullingPipelineLayout() != 0
-                                    && getShadowCullingDescriptorSetOpaque(frameIndex) != 0;
+  const bool useShadowCulling = !getShadowCullingPipelineHandle().isNull()
+                                && getShadowCullingPipelineLayout() != 0
+                                && getShadowCullingDescriptorSetOpaque(frameIndex) != 0;
+  if(!useShadowCulling)
+  {
+    LOGW("Skipping GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
+    context.cmd->endEvent();
+    return;
+  }
 
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
-    if(useMultiDrawIndirect)
+    if(useShadowCulling)
     {
       const VkPipeline computePipeline =
           reinterpret_cast<VkPipeline>(getNativeComputePipeline(getShadowCullingPipelineHandle()));
@@ -3051,22 +3079,41 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
   m_sceneView.depthPyramidGeneration = m_hiZDepthPyramid.getGenerationCount();
   m_sceneView.depthPyramidValid = m_hiZDepthPyramid.isValid();
-  if(m_activeUploadResult != nullptr && !m_activeUploadResult->meshes.empty())
+  if(m_activeUploadResult != nullptr)
   {
     glm::vec3 boundsMin(std::numeric_limits<float>::max());
     glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
     bool boundsValid = false;
-    for(const MeshHandle meshHandle : m_activeUploadResult->meshes)
+
+    if(!m_activeUploadResult->shadowPackedMeshes.empty())
     {
-      const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
-      if(mesh == nullptr)
+      for(const ShadowPackedMesh& packedMesh : m_activeUploadResult->shadowPackedMeshes)
       {
-        continue;
+        includeBoundsSphere(boundsMin, boundsMax, boundsValid, packedMesh.boundsSphere);
       }
-      boundsMin = glm::min(boundsMin, mesh->worldBoundsMin);
-      boundsMax = glm::max(boundsMax, mesh->worldBoundsMax);
-      boundsValid = true;
     }
+
+    if(!boundsValid && !m_sceneDrawRecords.empty())
+    {
+      for(const SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
+      {
+        includeBoundsSphere(boundsMin, boundsMax, boundsValid, drawRecord.boundsSphere);
+      }
+    }
+
+    if(!boundsValid)
+    {
+      for(const MeshHandle meshHandle : m_activeUploadResult->meshes)
+      {
+        const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
+        if(mesh == nullptr)
+        {
+          continue;
+        }
+        includeMeshBounds(boundsMin, boundsMax, boundsValid, *mesh);
+      }
+    }
+
     if(boundsValid)
     {
       m_sceneView.sceneBoundsMin = boundsMin;
