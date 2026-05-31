@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -20,6 +21,7 @@ constexpr float kShadowIntensity             = 1.0f;
 constexpr float kShadowKernelRadius          = 1.0f;  // 1 => 3x3 PCF
 constexpr float kCascadeBiasScaleFactor      = 0.5f;  // Bias decreases for farther cascades
 constexpr float kCascadeNearPlanePadding     = 25.0f; // Padding for near plane in ortho projection
+constexpr float kCascadeCasterDepthPaddingScale = 0.02f;
 
 [[nodiscard]] float extractNearPlane(const glm::mat4& projection, const clipspace::ProjectionConvention& convention)
 {
@@ -35,6 +37,13 @@ constexpr float kCascadeNearPlanePadding     = 25.0f; // Padding for near plane 
 {
   const float lengthSq = glm::dot(value, value);
   return lengthSq > 1e-6f ? value * glm::inversesqrt(lengthSq) : fallback;
+}
+
+[[nodiscard]] glm::mat4 resolveCascadeCameraViewProjection(const shaderio::CameraUniforms& camera)
+{
+  const glm::mat4& unjittered = camera.unjitteredViewProjection;
+  const float determinant = glm::determinant(unjittered);
+  return std::abs(determinant) > 1.0e-6f ? unjittered : camera.viewProjection;
 }
 
 // Compute cascade split distances using practical split scheme
@@ -57,7 +66,7 @@ void computeCascadeSplits(float* splits, uint32_t count, float nearDist, float f
     float sliceNear,
     float sliceFar)
 {
-  const glm::mat4 invViewProjection = glm::inverse(camera.viewProjection);
+  const glm::mat4 invViewProjection = glm::inverse(resolveCascadeCameraViewProjection(camera));
   const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection, projectionConvention));
   const float cameraFar  = std::max(cameraNear + 0.01f, extractFarPlane(camera.projection, projectionConvention));
 
@@ -142,6 +151,55 @@ void snapToTexelGrid(float& left, float& right, float& bottom, float& top, uint3
     bottom = std::floor(bottom / texelSize) * texelSize;
     top    = std::ceil(top / texelSize) * texelSize;
   }
+}
+
+[[nodiscard]] glm::vec2 snapCenterToTexelGrid(const glm::vec2& center, float diameter, uint32_t resolution)
+{
+  const float texelSize = diameter / static_cast<float>(std::max(resolution, 1u));
+  if(texelSize <= 0.0f)
+  {
+    return center;
+  }
+  return glm::floor(center / texelSize + glm::vec2(0.5f)) * texelSize;
+}
+
+[[nodiscard]] bool isValidBounds(const glm::vec3& boundsMin, const glm::vec3& boundsMax)
+{
+  return glm::all(glm::lessThanEqual(boundsMin, boundsMax));
+}
+
+[[nodiscard]] std::array<glm::vec3, 8> computeAabbCorners(const glm::vec3& boundsMin, const glm::vec3& boundsMax)
+{
+  return {
+      glm::vec3(boundsMin.x, boundsMin.y, boundsMin.z),
+      glm::vec3(boundsMax.x, boundsMin.y, boundsMin.z),
+      glm::vec3(boundsMin.x, boundsMax.y, boundsMin.z),
+      glm::vec3(boundsMax.x, boundsMax.y, boundsMin.z),
+      glm::vec3(boundsMin.x, boundsMin.y, boundsMax.z),
+      glm::vec3(boundsMax.x, boundsMin.y, boundsMax.z),
+      glm::vec3(boundsMin.x, boundsMax.y, boundsMax.z),
+      glm::vec3(boundsMax.x, boundsMax.y, boundsMax.z),
+  };
+}
+
+[[nodiscard]] glm::vec4 makeNormalizedPlane(const glm::vec4& plane)
+{
+  const float length = glm::length(glm::vec3(plane));
+  return length > 0.0f ? plane / length : plane;
+}
+
+[[nodiscard]] std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> extractFrustumPlanes(
+    const glm::mat4& viewProjection)
+{
+  const glm::mat4 transposed = glm::transpose(viewProjection);
+  return {
+      makeNormalizedPlane(transposed[3] + transposed[0]),
+      makeNormalizedPlane(transposed[3] - transposed[0]),
+      makeNormalizedPlane(transposed[3] + transposed[1]),
+      makeNormalizedPlane(transposed[3] - transposed[1]),
+      makeNormalizedPlane(transposed[3] + transposed[2]),
+      makeNormalizedPlane(transposed[3] - transposed[2]),
+  };
 }
 
 }  // namespace
@@ -318,10 +376,44 @@ void CSMShadowResources::deinit()
 
 void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& camera, const glm::vec3& lightDir)
 {
+  updateCascadeMatrices(camera, lightDir, kDefaultMaxShadowDistance);
+}
+
+void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& camera,
+                                               const glm::vec3& lightDir,
+                                               float maxShadowDistance)
+{
+  updateCascadeMatrices(camera, lightDir, maxShadowDistance, glm::vec3(0.0f), glm::vec3(0.0f), false);
+}
+
+void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& camera,
+                                               const glm::vec3& lightDir,
+                                               float requestedMaxShadowDistance,
+                                               const glm::vec3& casterBoundsMin,
+                                               const glm::vec3& casterBoundsMax,
+                                               bool casterBoundsValid)
+{
   const float cameraFar         = std::max(1.0f, extractFarPlane(camera.projection, m_projectionConvention));
-  const float maxShadowDistance = std::min(kDefaultMaxShadowDistance, cameraFar);
   const float cameraNear        = std::max(0.01f, extractNearPlane(camera.projection, m_projectionConvention));
+  const float requestedShadowDistance = requestedMaxShadowDistance > 0.0f
+      ? requestedMaxShadowDistance
+      : kDefaultMaxShadowDistance;
+  const float maxShadowDistance = glm::clamp(requestedShadowDistance, cameraNear + 0.01f, cameraFar);
   const glm::vec3 lightDirection = safeNormalize(lightDir, glm::vec3(0.0f, -1.0f, 0.0f));
+  const bool useCasterBounds = casterBoundsValid && isValidBounds(casterBoundsMin, casterBoundsMax);
+  const std::array<glm::vec3, 8> casterCorners =
+      useCasterBounds ? computeAabbCorners(casterBoundsMin, casterBoundsMax) : std::array<glm::vec3, 8>{};
+  const float casterDepthPadding = useCasterBounds
+      ? std::max(1.0f, glm::length(casterBoundsMax - casterBoundsMin) * kCascadeCasterDepthPaddingScale)
+      : 0.0f;
+
+  m_frameData = FrameData{};
+  m_frameData.cascadeCount = m_cascadeCount;
+  m_frameData.lightDirection = lightDirection;
+  m_frameData.maxShadowDistance = maxShadowDistance;
+  m_frameData.casterBoundsMin = casterBoundsMin;
+  m_frameData.casterBoundsMax = casterBoundsMax;
+  m_frameData.casterBoundsValid = useCasterBounds;
 
   // Compute cascade split distances using practical split scheme
   float cascadeSplits[shaderio::LCascadeCount];
@@ -333,6 +425,7 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
       m_cascadeCount > 1 ? cascadeSplits[1] : 0.0f,
       m_cascadeCount > 2 ? cascadeSplits[2] : 0.0f,
       m_cascadeCount > 3 ? cascadeSplits[3] : 0.0f);
+  m_frameData.splitDistances = m_shadowUniformsData.cascadeSplitDistances;
 
   // Choose world-up vector for light view matrix (avoid near-parallel with light direction)
   const glm::vec3 worldUp = std::abs(lightDirection.y) > 0.95f
@@ -344,17 +437,36 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
   for(uint32_t cascadeIndex = 0; cascadeIndex < m_cascadeCount; ++cascadeIndex)
   {
     const float splitDistance = cascadeSplits[cascadeIndex];
+    CascadeData& cascadeData = m_frameData.cascades[cascadeIndex];
+    cascadeData.splitNear = prevSplitDistance;
+    cascadeData.splitFar = splitDistance;
 
     // Get frustum corners for this cascade slice
     const std::array<glm::vec3, 8> sliceCorners =
         computeFrustumSliceCornersWorld(camera, m_projectionConvention, prevSplitDistance, splitDistance);
+    cascadeData.receiverCornersWorld = sliceCorners;
 
     // Compute bounding sphere (rotation-stable)
     const BoundingSphere boundingSphere = computeBoundingSphere(sliceCorners);
+    cascadeData.receiverCenter = boundingSphere.center;
+    cascadeData.receiverRadius = boundingSphere.radius;
 
-    // Position light camera to view the bounding sphere
-    const glm::vec3 lightPosition = boundingSphere.center - lightDirection * boundingSphere.radius;
-    const glm::mat4 lightView     = glm::lookAt(lightPosition, boundingSphere.center, worldUp);
+    const float diameter = boundingSphere.radius * 2.0f;
+
+    // Position the cascade on a stable light-space texel grid. This keeps static shadows
+    // from swimming when the camera moves by sub-texel amounts.
+    const glm::mat4 stableLightView = glm::lookAt(glm::vec3(0.0f), lightDirection, worldUp);
+    glm::vec3 stableCenterLightSpace = glm::vec3(stableLightView * glm::vec4(boundingSphere.center, 1.0f));
+    const glm::vec2 snappedCenterXY =
+        snapCenterToTexelGrid(glm::vec2(stableCenterLightSpace), diameter, m_cascadeResolution);
+    stableCenterLightSpace.x = snappedCenterXY.x;
+    stableCenterLightSpace.y = snappedCenterXY.y;
+    const glm::vec3 stableCenterWorld =
+        glm::vec3(glm::inverse(stableLightView) * glm::vec4(stableCenterLightSpace, 1.0f));
+    const glm::vec3 lightPosition = stableCenterWorld - lightDirection * boundingSphere.radius;
+    const glm::mat4 lightView     = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
+    cascadeData.lightPosition = lightPosition;
+    cascadeData.lightView = lightView;
 
     // Transform corners to light space to find ortho bounds
     glm::vec3 minLightSpace(std::numeric_limits<float>::max());
@@ -366,13 +478,30 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
       minLightSpace = glm::min(minLightSpace, lightSpaceCorner);
       maxLightSpace = glm::max(maxLightSpace, lightSpaceCorner);
     }
+    cascadeData.receiverMinLightSpace = minLightSpace;
+    cascadeData.receiverMaxLightSpace = maxLightSpace;
 
-    // Use bounding sphere diameter for uniform projection (rotation stability)
-    const float diameter  = boundingSphere.radius * 2.0f;
-    const float halfSize  = diameter * 0.5f;
-    const glm::vec2 centerXY = glm::vec2(
-        (minLightSpace.x + maxLightSpace.x) * 0.5f,
-        (minLightSpace.y + maxLightSpace.y) * 0.5f);
+    glm::vec3 casterMinLightSpace = minLightSpace;
+    glm::vec3 casterMaxLightSpace = maxLightSpace;
+    if(useCasterBounds)
+    {
+      casterMinLightSpace = glm::vec3(std::numeric_limits<float>::max());
+      casterMaxLightSpace = glm::vec3(std::numeric_limits<float>::lowest());
+      for(const glm::vec3& corner : casterCorners)
+      {
+        const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+        casterMinLightSpace = glm::min(casterMinLightSpace, lightSpaceCorner);
+        casterMaxLightSpace = glm::max(casterMaxLightSpace, lightSpaceCorner);
+      }
+    }
+    cascadeData.casterMinLightSpace = casterMinLightSpace;
+    cascadeData.casterMaxLightSpace = casterMaxLightSpace;
+
+    // Use a square projection for rotation stability, then snap the bounds to the texel grid.
+    const float projectionDiameter = diameter;
+    const float texelSize = projectionDiameter / static_cast<float>(std::max(m_cascadeResolution, 1u));
+    const float halfSize  = projectionDiameter * 0.5f + texelSize;
+    const glm::vec2 centerXY = glm::vec2(lightView * glm::vec4(stableCenterWorld, 1.0f));
 
     float left   = centerXY.x - halfSize;
     float right  = centerXY.x + halfSize;
@@ -383,20 +512,29 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
     snapToTexelGrid(left, right, bottom, top, m_cascadeResolution);
 
     // Compute near/far planes with padding
-    const float depthPadding = std::max(kCascadeNearPlanePadding, boundingSphere.radius);
-    const float nearPlane    = std::max(0.1f, -maxLightSpace.z - depthPadding);
-    const float farPlane     = std::max(nearPlane + 1.0f, -minLightSpace.z + depthPadding);
+    const float depthPadding = useCasterBounds
+        ? std::max(kCascadeNearPlanePadding, casterDepthPadding)
+        : std::max(kCascadeNearPlanePadding, boundingSphere.radius);
+    const float nearPlane    = std::max(0.1f, -casterMaxLightSpace.z - depthPadding);
+    const float farPlane     = std::max(nearPlane + 1.0f, -casterMinLightSpace.z + depthPadding);
+    cascadeData.nearPlane = nearPlane;
+    cascadeData.farPlane = farPlane;
+    cascadeData.texelSize = texelSize;
 
     // Create orthographic projection
     const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
         left, right, bottom, top, nearPlane, farPlane, m_projectionConvention);
+    cascadeData.lightProjection = lightProjection;
 
     const glm::mat4 lightViewProjection = lightProjection * lightView;
+    cascadeData.viewProjection = lightViewProjection;
+    cascadeData.worldToShadowTexture =
+        clipspace::makeNdcToShadowTextureMatrix(m_projectionConvention) * lightViewProjection;
+    cascadeData.cullingPlanes = extractFrustumPlanes(lightViewProjection);
 
     // Store cascade matrices
     m_shadowUniformsData.cascadeViewProjection[cascadeIndex]          = lightViewProjection;
-    m_shadowUniformsData.cascadeWorldToShadowTexture[cascadeIndex] =
-        clipspace::makeNdcToShadowTextureMatrix(m_projectionConvention) * lightViewProjection;
+    m_shadowUniformsData.cascadeWorldToShadowTexture[cascadeIndex] = cascadeData.worldToShadowTexture;
 
     prevSplitDistance = splitDistance;
   }

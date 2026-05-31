@@ -4,11 +4,47 @@
 #include "../shaders/shader_io.h"
 #include "ClipSpaceConvention.h"
 
+#include <array>
+
 namespace demo {
 
 class CSMShadowResources
 {
 public:
+  struct CascadeData
+  {
+    float splitNear{0.0f};
+    float splitFar{0.0f};
+    float texelSize{0.0f};
+    float receiverRadius{0.0f};
+    float nearPlane{0.0f};
+    float farPlane{0.0f};
+    glm::vec3 receiverCenter{0.0f};
+    glm::vec3 lightPosition{0.0f};
+    glm::mat4 lightView{1.0f};
+    glm::mat4 lightProjection{1.0f};
+    glm::mat4 viewProjection{1.0f};
+    glm::mat4 worldToShadowTexture{1.0f};
+    glm::vec3 receiverMinLightSpace{0.0f};
+    glm::vec3 receiverMaxLightSpace{0.0f};
+    glm::vec3 casterMinLightSpace{0.0f};
+    glm::vec3 casterMaxLightSpace{0.0f};
+    std::array<glm::vec3, 8> receiverCornersWorld{};
+    std::array<glm::vec4, shaderio::LGPUCullingFrustumPlaneCount> cullingPlanes{};
+  };
+
+  struct FrameData
+  {
+    std::array<CascadeData, shaderio::LCascadeCount> cascades{};
+    uint32_t cascadeCount{0};
+    glm::vec4 splitDistances{0.0f};
+    glm::vec3 lightDirection{0.0f, -1.0f, 0.0f};
+    float maxShadowDistance{0.0f};
+    glm::vec3 casterBoundsMin{0.0f};
+    glm::vec3 casterBoundsMax{0.0f};
+    bool casterBoundsValid{false};
+  };
+
   struct CreateInfo
   {
     uint32_t                          cascadeCount{4};
@@ -25,6 +61,15 @@ public:
   void deinit();
 
   void updateCascadeMatrices(const shaderio::CameraUniforms& camera, const glm::vec3& lightDir);
+  void updateCascadeMatrices(const shaderio::CameraUniforms& camera,
+                             const glm::vec3& lightDir,
+                             float maxShadowDistance);
+  void updateCascadeMatrices(const shaderio::CameraUniforms& camera,
+                             const glm::vec3& lightDir,
+                             float maxShadowDistance,
+                             const glm::vec3& casterBoundsMin,
+                             const glm::vec3& casterBoundsMax,
+                             bool casterBoundsValid);
 
   // Texture2DArray access (all cascades)
   [[nodiscard]] VkImage getCascadeImage() const { return m_cascadeArray.image; }
@@ -49,6 +94,12 @@ public:
   [[nodiscard]] VkBuffer getShadowUniformBuffer() const { return m_shadowUniformBuffer.buffer; }
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return &m_shadowUniformsData; }
   [[nodiscard]] const shaderio::ShadowUniforms* getShadowUniformsData() const { return &m_shadowUniformsData; }
+  [[nodiscard]] const FrameData& getFrameData() const { return m_frameData; }
+  [[nodiscard]] const CascadeData& getCascadeData(uint32_t cascadeIndex) const
+  {
+    assert(cascadeIndex < m_cascadeCount);
+    return m_frameData.cascades[cascadeIndex];
+  }
 
 private:
   VkDevice                        m_device{VK_NULL_HANDLE};
@@ -62,6 +113,7 @@ private:
 
   utils::Buffer            m_shadowUniformBuffer{};
   shaderio::ShadowUniforms m_shadowUniformsData{};
+  FrameData                m_frameData{};
   void*                    m_shadowUniformMapped{nullptr};
 
   uint32_t m_cascadeCount{4};

@@ -489,7 +489,12 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   if(params.cameraUniforms != nullptr)
   {
-    getCSMShadowResources().updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+    getCSMShadowResources().updateCascadeMatrices(*params.cameraUniforms,
+                                                  params.lightSettings.direction,
+                                                  params.lightSettings.shadowDistance,
+                                                  m_sceneView.sceneBoundsMin,
+                                                  m_sceneView.sceneBoundsMax,
+                                                  m_sceneView.sceneBoundsValid);
   }
   updateGPUDrivenLights(params, frameIndex);
   m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;

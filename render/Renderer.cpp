@@ -4203,7 +4203,13 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
     // Update CSM cascade matrices based on current camera and light direction
     if(params.cameraUniforms != nullptr)
     {
-      m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms, params.lightSettings.direction);
+      const Aabb sceneBounds = computeSceneBounds(params.gltfModel, params.gpuDrivenSceneView);
+      m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms,
+                                                 params.lightSettings.direction,
+                                                 params.lightSettings.shadowDistance,
+                                                 sceneBounds.min,
+                                                 sceneBounds.max,
+                                                 sceneBounds.valid);
     }
 
     m_frameLightingState = buildFrameLightingState(params);
@@ -5077,7 +5083,8 @@ shaderio::ShadowCullPushConstants Renderer::buildShadowCullPushConstants(uint32_
     return pushConstants;
   }
 
-  const auto frustumPlanes = extractFrustumPlanes(shadowUniforms->cascadeViewProjection[cascadeIndex]);
+  const CSMShadowResources::CascadeData& cascadeData = m_csmShadowResources.getCascadeData(cascadeIndex);
+  const auto& frustumPlanes = cascadeData.cullingPlanes;
   for(uint32_t planeIndex = 0; planeIndex < shaderio::LGPUCullingFrustumPlaneCount; ++planeIndex)
   {
     pushConstants.frustumPlanes[planeIndex] = frustumPlanes[planeIndex];
