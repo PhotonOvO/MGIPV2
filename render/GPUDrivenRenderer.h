@@ -143,10 +143,11 @@ struct GPUDrivenPostProcessDiagnostics
   float    minAutoExposure{0.25f};
   float    maxAutoExposure{4.0f};
   float    bloomIntensity{0.35f};
-  float    bloomThreshold{1.0f};
+  float    bloomThreshold{0.0f};
   float    colorSaturation{1.0f};
   float    colorContrast{1.0f};
   float    colorGamma{1.0f};
+  float    colorLutStrength{0.0f};
   float    vignetteIntensity{0.0f};
   float    lensDirtIntensity{0.0f};
   float    taaBlendWeight{0.90f};
@@ -395,6 +396,10 @@ public:
   {
     return m_gpuDrivenBloomDownsamplePipeline;
   }
+  [[nodiscard]] PipelineHandle getBloomUpsamplePipelineHandle() const
+  {
+    return m_gpuDrivenBloomUpsamplePipeline;
+  }
   [[nodiscard]] PipelineHandle getFinalColorPipelineHandle() const
   {
     return m_gpuDrivenFinalColorPipeline;
@@ -580,6 +585,30 @@ public:
   [[nodiscard]] VkImage getBloomQuarterImage() const { return m_renderer.getBloomQuarterImage(); }
   [[nodiscard]] VkImageView getBloomQuarterView() const { return m_renderer.getBloomQuarterView(); }
   [[nodiscard]] VkExtent2D getBloomQuarterExtent() const { return m_renderer.getBloomQuarterExtent(); }
+  [[nodiscard]] VkImage getBloomEighthImage() const { return m_renderer.getBloomEighthImage(); }
+  [[nodiscard]] VkImageView getBloomEighthView() const { return m_renderer.getBloomEighthView(); }
+  [[nodiscard]] VkExtent2D getBloomEighthExtent() const { return m_renderer.getBloomEighthExtent(); }
+  [[nodiscard]] VkImage getBloomSixteenthImage() const { return m_renderer.getBloomSixteenthImage(); }
+  [[nodiscard]] VkImageView getBloomSixteenthView() const { return m_renderer.getBloomSixteenthView(); }
+  [[nodiscard]] VkExtent2D getBloomSixteenthExtent() const { return m_renderer.getBloomSixteenthExtent(); }
+  [[nodiscard]] VkImage getBloomThirtySecondImage() const { return m_renderer.getBloomThirtySecondImage(); }
+  [[nodiscard]] VkImageView getBloomThirtySecondView() const { return m_renderer.getBloomThirtySecondView(); }
+  [[nodiscard]] VkExtent2D getBloomThirtySecondExtent() const { return m_renderer.getBloomThirtySecondExtent(); }
+  [[nodiscard]] VkImage getBloomUpsampleSixteenthImage() const { return m_renderer.getBloomUpsampleSixteenthImage(); }
+  [[nodiscard]] VkImageView getBloomUpsampleSixteenthView() const { return m_renderer.getBloomUpsampleSixteenthView(); }
+  [[nodiscard]] VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_renderer.getBloomUpsampleSixteenthExtent(); }
+  [[nodiscard]] VkImage getBloomUpsampleEighthImage() const { return m_renderer.getBloomUpsampleEighthImage(); }
+  [[nodiscard]] VkImageView getBloomUpsampleEighthView() const { return m_renderer.getBloomUpsampleEighthView(); }
+  [[nodiscard]] VkExtent2D getBloomUpsampleEighthExtent() const { return m_renderer.getBloomUpsampleEighthExtent(); }
+  [[nodiscard]] VkImage getBloomUpsampleQuarterImage() const { return m_renderer.getBloomUpsampleQuarterImage(); }
+  [[nodiscard]] VkImageView getBloomUpsampleQuarterView() const { return m_renderer.getBloomUpsampleQuarterView(); }
+  [[nodiscard]] VkExtent2D getBloomUpsampleQuarterExtent() const { return m_renderer.getBloomUpsampleQuarterExtent(); }
+  [[nodiscard]] VkImage getBloomOutputImage() const { return m_renderer.getBloomOutputImage(); }
+  [[nodiscard]] VkImageView getBloomOutputView() const { return m_renderer.getBloomOutputView(); }
+  [[nodiscard]] VkExtent2D getBloomOutputExtent() const { return m_renderer.getBloomOutputExtent(); }
+  [[nodiscard]] VkImage getColorGradingLutImage() const { return m_renderer.getColorGradingLutImage(); }
+  [[nodiscard]] VkImageView getColorGradingLutView() const { return m_renderer.getColorGradingLutView(); }
+  [[nodiscard]] VkExtent2D getColorGradingLutExtent() const { return m_renderer.getColorGradingLutExtent(); }
   [[nodiscard]] uint64_t getBloomEstimatedBytes() const { return m_renderer.getBloomEstimatedBytes(); }
   [[nodiscard]] VkImage getVelocityImage() const { return m_renderer.getVelocityImage(); }
   [[nodiscard]] VkImageView getVelocityView() const { return m_renderer.getVelocityView(); }
@@ -632,6 +661,11 @@ public:
        && pipelineHandle.generation == m_gpuDrivenBloomDownsamplePipeline.generation)
     {
       return reinterpret_cast<uint64_t>(m_gpuDrivenBloomDownsampleVkPipeline);
+    }
+    if(pipelineHandle.index == m_gpuDrivenBloomUpsamplePipeline.index
+       && pipelineHandle.generation == m_gpuDrivenBloomUpsamplePipeline.generation)
+    {
+      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomUpsampleVkPipeline);
     }
     if(pipelineHandle.index == m_gpuDrivenFinalColorPipeline.index
        && pipelineHandle.generation == m_gpuDrivenFinalColorPipeline.generation)
@@ -855,10 +889,12 @@ private:
   VkPipeline                         m_gpuDrivenTAAResolveVkPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_gpuDrivenBloomPrefilterPipeline{};
   PipelineHandle                     m_gpuDrivenBloomDownsamplePipeline{};
+  PipelineHandle                     m_gpuDrivenBloomUpsamplePipeline{};
   PipelineHandle                     m_gpuDrivenFinalColorPipeline{};
   PipelineHandle                     m_gpuDrivenVelocityPipeline{};
   VkPipeline                         m_gpuDrivenBloomPrefilterVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_gpuDrivenBloomDownsampleVkPipeline{VK_NULL_HANDLE};
+  VkPipeline                         m_gpuDrivenBloomUpsampleVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_gpuDrivenFinalColorVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_gpuDrivenVelocityVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_pointLightCoarseCullingVkPipeline{VK_NULL_HANDLE};

@@ -57,6 +57,14 @@ STATIC_CONST int kSceneColorHistoryWriteIndex      = 9;
 STATIC_CONST int kIBLEnvironmentIndex              = 10;
 STATIC_CONST int kAOTextureIndex                   = 11;
 STATIC_CONST int kSSRTextureIndex                  = 12;
+STATIC_CONST int kBloomEighthIndex                 = 13;
+STATIC_CONST int kBloomSixteenthIndex              = 14;
+STATIC_CONST int kBloomThirtySecondIndex           = 15;
+STATIC_CONST int kBloomUpsampleSixteenthIndex      = 16;
+STATIC_CONST int kBloomUpsampleEighthIndex         = 17;
+STATIC_CONST int kBloomUpsampleQuarterIndex        = 18;
+STATIC_CONST int kBloomOutputIndex                 = 19;
+STATIC_CONST int kColorGradingLutIndex             = 20;
 STATIC_CONST float PI                   = 3.14159265359;
 STATIC_CONST float TWO_PI               = 6.28318530718;
 STATIC_CONST float kEquirectSpecularFallbackWeight = 1.0;
@@ -671,19 +679,73 @@ int selectTemporalSceneColorIndex()
     return postProcess.params5.x > 0.5 ? kSceneColorHistoryWriteIndex : kSceneColorHdrIndex;
 }
 
-float3 sampleBloomSource(int textureIndex, float2 uv, float2 texelSize)
+float3 samplePostTexture(int textureIndex, float2 uv)
 {
-    float3 color = inTexture[textureIndex].Sample(uv).rgb * 0.40;
-    color += inTexture[textureIndex].Sample(uv + float2(texelSize.x, 0.0)).rgb * 0.15;
-    color += inTexture[textureIndex].Sample(uv - float2(texelSize.x, 0.0)).rgb * 0.15;
-    color += inTexture[textureIndex].Sample(uv + float2(0.0, texelSize.y)).rgb * 0.15;
-    color += inTexture[textureIndex].Sample(uv - float2(0.0, texelSize.y)).rgb * 0.15;
-    return color;
+    return max(inTexture[textureIndex].Sample(uv).rgb, 0.0);
 }
 
 float luminance(float3 color)
 {
     return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 karisAverage(float3 a, float3 b, float3 c, float3 d)
+{
+    float wa = 1.0 / (1.0 + luminance(a));
+    float wb = 1.0 / (1.0 + luminance(b));
+    float wc = 1.0 / (1.0 + luminance(c));
+    float wd = 1.0 / (1.0 + luminance(d));
+    return (a * wa + b * wb + c * wc + d * wd) / max(wa + wb + wc + wd, 1.0e-4);
+}
+
+float3 sampleBloomKaris2x2(int textureIndex, float2 uv, float2 texelSize)
+{
+    float2 o = texelSize * 0.5;
+    float3 a = samplePostTexture(textureIndex, uv + float2(-o.x, -o.y));
+    float3 b = samplePostTexture(textureIndex, uv + float2( o.x, -o.y));
+    float3 c = samplePostTexture(textureIndex, uv + float2(-o.x,  o.y));
+    float3 d = samplePostTexture(textureIndex, uv + float2( o.x,  o.y));
+    return karisAverage(a, b, c, d);
+}
+
+float3 sampleBloomDownsample13Tap(int textureIndex, float2 uv, float2 texelSize)
+{
+    float x = texelSize.x;
+    float y = texelSize.y;
+
+    float3 a = samplePostTexture(textureIndex, uv + float2(-2.0 * x,  2.0 * y));
+    float3 b = samplePostTexture(textureIndex, uv + float2( 0.0,      2.0 * y));
+    float3 c = samplePostTexture(textureIndex, uv + float2( 2.0 * x,  2.0 * y));
+    float3 d = samplePostTexture(textureIndex, uv + float2(-2.0 * x,  0.0));
+    float3 e = samplePostTexture(textureIndex, uv);
+    float3 f = samplePostTexture(textureIndex, uv + float2( 2.0 * x,  0.0));
+    float3 g = samplePostTexture(textureIndex, uv + float2(-2.0 * x, -2.0 * y));
+    float3 h = samplePostTexture(textureIndex, uv + float2( 0.0,     -2.0 * y));
+    float3 i = samplePostTexture(textureIndex, uv + float2( 2.0 * x, -2.0 * y));
+    float3 j = samplePostTexture(textureIndex, uv + float2(-x,  y));
+    float3 k = samplePostTexture(textureIndex, uv + float2( x,  y));
+    float3 l = samplePostTexture(textureIndex, uv + float2(-x, -y));
+    float3 m = samplePostTexture(textureIndex, uv + float2( x, -y));
+
+    return e * 0.125
+         + (a + c + g + i) * 0.03125
+         + (b + d + f + h) * 0.0625
+         + (j + k + l + m) * 0.125;
+}
+
+float3 sampleBloomUpsampleTent(int textureIndex, float2 uv, float2 texelSize, float radius)
+{
+    float2 d = texelSize * radius;
+    float3 color = samplePostTexture(textureIndex, uv + float2(-d.x, -d.y)) * 1.0;
+    color += samplePostTexture(textureIndex, uv + float2( 0.0, -d.y)) * 2.0;
+    color += samplePostTexture(textureIndex, uv + float2( d.x, -d.y)) * 1.0;
+    color += samplePostTexture(textureIndex, uv + float2(-d.x,  0.0)) * 2.0;
+    color += samplePostTexture(textureIndex, uv) * 4.0;
+    color += samplePostTexture(textureIndex, uv + float2( d.x,  0.0)) * 2.0;
+    color += samplePostTexture(textureIndex, uv + float2(-d.x,  d.y)) * 1.0;
+    color += samplePostTexture(textureIndex, uv + float2( 0.0,  d.y)) * 2.0;
+    color += samplePostTexture(textureIndex, uv + float2( d.x,  d.y)) * 1.0;
+    return color * 0.0625;
 }
 
 float computeAdaptiveExposure()
@@ -703,12 +765,29 @@ float computeAdaptiveExposure()
     return clamp(postProcess.params2.y / averageLum, postProcess.params2.z, postProcess.params2.w);
 }
 
+float3 sampleColorGradingLut(float3 color)
+{
+    const float lutSize = 32.0;
+    const float lutWidth = lutSize * lutSize;
+    float3 coord = saturate(color) * (lutSize - 1.0);
+    float slice0 = floor(coord.b);
+    float slice1 = min(slice0 + 1.0, lutSize - 1.0);
+    float blend = frac(coord.b);
+
+    float2 uv0 = (float2(coord.r + slice0 * lutSize, coord.g) + 0.5) / float2(lutWidth, lutSize);
+    float2 uv1 = (float2(coord.r + slice1 * lutSize, coord.g) + 0.5) / float2(lutWidth, lutSize);
+    float3 grade0 = samplePostTexture(kColorGradingLutIndex, uv0);
+    float3 grade1 = samplePostTexture(kColorGradingLutIndex, uv1);
+    return lerp(grade0, grade1, blend);
+}
+
 float3 applyColorGrade(float3 color, float2 uv)
 {
     float gray = luminance(color);
     color = lerp(float3(gray, gray, gray), color, postProcess.params3.x);
     color = (color - 0.5) * postProcess.params3.y + 0.5;
     color = pow(max(color, 0.0), float3(1.0 / max(postProcess.params3.z, 0.01)));
+    color = lerp(color, sampleColorGradingLut(color), saturate(postProcess.params4.z));
 
     float2 centeredUv = uv * 2.0 - 1.0;
     float vignette = saturate(1.0 - dot(centeredUv, centeredUv) * postProcess.params3.w);
@@ -726,16 +805,33 @@ float proceduralLensDirt(float2 uv)
 [shader("fragment")]
 float4 fragmentBloomPrefilterMain(VSOutput input) : SV_Target
 {
-    float3 hdrColor = sampleBloomSource(selectTemporalSceneColorIndex(), input.uv, postProcess.params1.xy);
-    float brightness = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
-    float contribution = saturate((brightness - postProcess.params0.z) / max(brightness, 1e-4));
-    return float4(hdrColor * contribution, 1.0);
+    float3 hdrColor = sampleBloomKaris2x2(selectTemporalSceneColorIndex(), input.uv, postProcess.params1.xy);
+    float threshold = max(postProcess.params0.z, 0.0);
+    if(threshold > 0.001)
+    {
+        float brightness = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
+        float contribution = smoothstep(threshold * 0.5, threshold, brightness);
+        hdrColor *= contribution;
+    }
+    return float4(hdrColor, 1.0);
 }
 
 [shader("fragment")]
 float4 fragmentBloomDownsampleMain(VSOutput input) : SV_Target
 {
-    return float4(sampleBloomSource(kBloomHalfIndex, input.uv, postProcess.params1.xy), 1.0);
+    int sourceIndex = postProcess.params5.y > 0.5 ? int(postProcess.params5.y + 0.5) : kBloomHalfIndex;
+    return float4(sampleBloomDownsample13Tap(sourceIndex, input.uv, postProcess.params1.xy), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentBloomUpsampleMain(VSOutput input) : SV_Target
+{
+    int currentIndex = int(postProcess.params5.y + 0.5);
+    int lowerIndex = int(postProcess.params5.z + 0.5);
+    float radius = max(postProcess.params5.w, 0.25);
+    float3 current = samplePostTexture(currentIndex, input.uv);
+    float3 lower = sampleBloomUpsampleTent(lowerIndex, input.uv, postProcess.params1.xy, radius);
+    return float4(current + lower, 1.0);
 }
 
 [shader("fragment")]
@@ -749,8 +845,12 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
     }
 
     float3 hdrColor = inTexture[selectTemporalSceneColorIndex()].Sample(input.uv).rgb;
-    float3 bloom = inTexture[kBloomHalfIndex].Sample(input.uv).rgb * 0.65
-                 + inTexture[kBloomQuarterIndex].Sample(input.uv).rgb * 0.35;
+    float3 bloom = samplePostTexture(kBloomOutputIndex, input.uv);
+    if(luminance(bloom) <= 1.0e-6)
+    {
+        bloom = samplePostTexture(kBloomHalfIndex, input.uv) * 0.65
+              + samplePostTexture(kBloomQuarterIndex, input.uv) * 0.35;
+    }
     float bloomEnabled = postProcess.params0.w;
     float exposure = lerp(postProcess.params0.x, computeAdaptiveExposure(), postProcess.params2.x);
     float lensEnabled = postProcess.params4.x;

@@ -112,6 +112,13 @@ inline constexpr TextureHandle kPassVelocityHandle{0xF10Cu, 1u};
 inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
 inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
 inline constexpr TextureHandle kPassGPUDrivenShadowAtlasHandle{0xF10Fu, 1u};
+inline constexpr TextureHandle kPassBloomEighthHandle{0xF110u, 1u};
+inline constexpr TextureHandle kPassBloomSixteenthHandle{0xF111u, 1u};
+inline constexpr TextureHandle kPassBloomThirtySecondHandle{0xF112u, 1u};
+inline constexpr TextureHandle kPassBloomUpsampleSixteenthHandle{0xF113u, 1u};
+inline constexpr TextureHandle kPassBloomUpsampleEighthHandle{0xF114u, 1u};
+inline constexpr TextureHandle kPassBloomUpsampleQuarterHandle{0xF115u, 1u};
+inline constexpr TextureHandle kPassBloomOutputHandle{0xF116u, 1u};
 inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
 class PassNode

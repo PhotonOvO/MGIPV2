@@ -32,7 +32,7 @@ constexpr float kGPUDrivenHiZConservativeRadiusBias = 0.1f;
 constexpr float kGPUDrivenHiZNearRejectEpsilon = 1.0e-4f;
 constexpr float kGPUDrivenHiZLargeObjectFootprintThreshold = 192.0f;
 constexpr float kGPUDrivenHiZFastCameraFallbackDistance = 8.0f;
-constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 10u;
+constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 18u;
 constexpr uint32_t kGPUDrivenLightPassDepthTextureIndex = kPackedGBufferTargetCount;
 constexpr uint32_t kGPUDrivenLightPassSceneColorHdrIndex = kPackedGBufferTargetCount + 1u;
 constexpr uint32_t kGPUDrivenLightPassBloomHalfIndex = kPackedGBufferTargetCount + 2u;
@@ -43,6 +43,14 @@ constexpr uint32_t kGPUDrivenLightPassHistoryWriteIndex = kPackedGBufferTargetCo
 constexpr uint32_t kGPUDrivenLightPassIBLEnvironmentIndex = kPackedGBufferTargetCount + 7u;
 constexpr uint32_t kGPUDrivenLightPassAOIndex = kPackedGBufferTargetCount + 8u;
 constexpr uint32_t kGPUDrivenLightPassSSRIndex = kPackedGBufferTargetCount + 9u;
+constexpr uint32_t kGPUDrivenLightPassBloomEighthIndex = kPackedGBufferTargetCount + 10u;
+constexpr uint32_t kGPUDrivenLightPassBloomSixteenthIndex = kPackedGBufferTargetCount + 11u;
+constexpr uint32_t kGPUDrivenLightPassBloomThirtySecondIndex = kPackedGBufferTargetCount + 12u;
+constexpr uint32_t kGPUDrivenLightPassBloomUpsampleSixteenthIndex = kPackedGBufferTargetCount + 13u;
+constexpr uint32_t kGPUDrivenLightPassBloomUpsampleEighthIndex = kPackedGBufferTargetCount + 14u;
+constexpr uint32_t kGPUDrivenLightPassBloomUpsampleQuarterIndex = kPackedGBufferTargetCount + 15u;
+constexpr uint32_t kGPUDrivenLightPassBloomOutputIndex = kPackedGBufferTargetCount + 16u;
+constexpr uint32_t kGPUDrivenLightPassColorGradingLutIndex = kPackedGBufferTargetCount + 17u;
 constexpr VkFormat kGPUDrivenAOFormat = VK_FORMAT_R16_SFLOAT;
 constexpr VkFormat kGPUDrivenSSRFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kGPUDrivenShadowAtlasFormat = VK_FORMAT_D32_SFLOAT;
@@ -826,6 +834,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .colorSaturation = gpuParams.debugOptions.colorSaturation,
         .colorContrast = gpuParams.debugOptions.colorContrast,
         .colorGamma = gpuParams.debugOptions.colorGamma,
+        .colorLutStrength = gpuParams.debugOptions.colorLutStrength,
         .vignetteIntensity = gpuParams.debugOptions.vignetteIntensity,
         .lensDirtIntensity = gpuParams.debugOptions.lensDirtIntensity,
         .taaBlendWeight = gpuParams.debugOptions.taaBlendWeight,
@@ -852,9 +861,12 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .bloomPassActive = gpuParams.debugOptions.enableBloom
                            && gpuParams.debugOptions.enablePostProcessing
                            && !getBloomPrefilterPipelineHandle().isNull()
-                           && !getBloomDownsamplePipelineHandle().isNull(),
+                           && !getBloomDownsamplePipelineHandle().isNull()
+                           && !getBloomUpsamplePipelineHandle().isNull(),
         .colorGradingLutActive = gpuParams.debugOptions.enablePostProcessing
-                                 && gpuParams.debugOptions.enableColorGrading,
+                                 && gpuParams.debugOptions.enableColorGrading
+                                 && gpuParams.debugOptions.colorLutStrength > 0.0f
+                                 && m_sceneView.colorGradingLutView != VK_NULL_HANDLE,
         .lensEffectsActive = gpuParams.debugOptions.enablePostProcessing
                              && gpuParams.debugOptions.enableLensEffects,
     };
@@ -3067,6 +3079,30 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.bloomQuarterImage = getBloomQuarterImage();
   m_sceneView.bloomQuarterView = getBloomQuarterView();
   m_sceneView.bloomQuarterExtent = getBloomQuarterExtent();
+  m_sceneView.bloomEighthImage = getBloomEighthImage();
+  m_sceneView.bloomEighthView = getBloomEighthView();
+  m_sceneView.bloomEighthExtent = getBloomEighthExtent();
+  m_sceneView.bloomSixteenthImage = getBloomSixteenthImage();
+  m_sceneView.bloomSixteenthView = getBloomSixteenthView();
+  m_sceneView.bloomSixteenthExtent = getBloomSixteenthExtent();
+  m_sceneView.bloomThirtySecondImage = getBloomThirtySecondImage();
+  m_sceneView.bloomThirtySecondView = getBloomThirtySecondView();
+  m_sceneView.bloomThirtySecondExtent = getBloomThirtySecondExtent();
+  m_sceneView.bloomUpsampleSixteenthImage = getBloomUpsampleSixteenthImage();
+  m_sceneView.bloomUpsampleSixteenthView = getBloomUpsampleSixteenthView();
+  m_sceneView.bloomUpsampleSixteenthExtent = getBloomUpsampleSixteenthExtent();
+  m_sceneView.bloomUpsampleEighthImage = getBloomUpsampleEighthImage();
+  m_sceneView.bloomUpsampleEighthView = getBloomUpsampleEighthView();
+  m_sceneView.bloomUpsampleEighthExtent = getBloomUpsampleEighthExtent();
+  m_sceneView.bloomUpsampleQuarterImage = getBloomUpsampleQuarterImage();
+  m_sceneView.bloomUpsampleQuarterView = getBloomUpsampleQuarterView();
+  m_sceneView.bloomUpsampleQuarterExtent = getBloomUpsampleQuarterExtent();
+  m_sceneView.bloomOutputImage = getBloomOutputImage();
+  m_sceneView.bloomOutputView = getBloomOutputView();
+  m_sceneView.bloomOutputExtent = getBloomOutputExtent();
+  m_sceneView.colorGradingLutImage = getColorGradingLutImage();
+  m_sceneView.colorGradingLutView = getColorGradingLutView();
+  m_sceneView.colorGradingLutExtent = getColorGradingLutExtent();
   m_sceneView.velocityImage = getVelocityImage();
   m_sceneView.velocityView = getVelocityView();
   m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(1);
@@ -4198,6 +4234,14 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
   imageInfos[kGPUDrivenLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHdrView, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassBloomHalfIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomHalfView != VK_NULL_HANDLE ? sceneView.bloomHalfView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassBloomQuarterIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomQuarterView != VK_NULL_HANDLE ? sceneView.bloomQuarterView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomEighthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomEighthView != VK_NULL_HANDLE ? sceneView.bloomEighthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomSixteenthView != VK_NULL_HANDLE ? sceneView.bloomSixteenthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomThirtySecondView != VK_NULL_HANDLE ? sceneView.bloomThirtySecondView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleSixteenthView != VK_NULL_HANDLE ? sceneView.bloomUpsampleSixteenthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleEighthView != VK_NULL_HANDLE ? sceneView.bloomUpsampleEighthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleQuarterView != VK_NULL_HANDLE ? sceneView.bloomUpsampleQuarterView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomOutputIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomOutputView != VK_NULL_HANDLE ? sceneView.bloomOutputView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassColorGradingLutIndex] = VkDescriptorImageInfo{sampler, sceneView.colorGradingLutView != VK_NULL_HANDLE ? sceneView.colorGradingLutView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassVelocityIndex] = VkDescriptorImageInfo{sampler, sceneView.velocityView != VK_NULL_HANDLE ? sceneView.velocityView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassHistoryReadIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryReadView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassHistoryWriteIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryWriteView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryWriteView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
@@ -4404,6 +4448,10 @@ void GPUDrivenRenderer::initLightingPipelines()
     {
       m_gpuDrivenVelocityVkPipeline = pipeline;
     }
+    else if(variant == 0x6108u)
+    {
+      m_gpuDrivenBloomUpsampleVkPipeline = pipeline;
+    }
     return PipelineHandle{variant, 1u};
   };
 
@@ -4414,6 +4462,7 @@ void GPUDrivenRenderer::initLightingPipelines()
   m_gpuDrivenBloomDownsamplePipeline = createFullscreenPipeline("fragmentBloomDownsampleMain", SceneResources::kBloomFormat, false, 0x6105u);
   m_gpuDrivenFinalColorPipeline = createFullscreenPipeline("fragmentFinalColorMain", getOutputTextureFormat(), false, 0x6106u);
   m_gpuDrivenVelocityPipeline = createFullscreenPipeline("fragmentVelocityMain", getVelocityFormat(), false, 0x6107u);
+  m_gpuDrivenBloomUpsamplePipeline = createFullscreenPipeline("fragmentBloomUpsampleMain", SceneResources::kBloomFormat, false, 0x6108u);
 
   if(m_lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
   {
@@ -4504,6 +4553,11 @@ void GPUDrivenRenderer::shutdownLightingPipelines()
     vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomDownsampleVkPipeline, nullptr);
     m_gpuDrivenBloomDownsampleVkPipeline = VK_NULL_HANDLE;
   }
+  if(m_gpuDrivenBloomUpsampleVkPipeline != VK_NULL_HANDLE)
+  {
+    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomUpsampleVkPipeline, nullptr);
+    m_gpuDrivenBloomUpsampleVkPipeline = VK_NULL_HANDLE;
+  }
   if(m_gpuDrivenFinalColorVkPipeline != VK_NULL_HANDLE)
   {
     vkDestroyPipeline(nativeDevice, m_gpuDrivenFinalColorVkPipeline, nullptr);
@@ -4534,6 +4588,7 @@ void GPUDrivenRenderer::shutdownLightingPipelines()
   destroyGraphicsPipeline(m_gpuDrivenTAAResolvePipeline);
   destroyGraphicsPipeline(m_gpuDrivenBloomPrefilterPipeline);
   destroyGraphicsPipeline(m_gpuDrivenBloomDownsamplePipeline);
+  destroyGraphicsPipeline(m_gpuDrivenBloomUpsamplePipeline);
   destroyGraphicsPipeline(m_gpuDrivenFinalColorPipeline);
   destroyGraphicsPipeline(m_gpuDrivenVelocityPipeline);
   destroyGraphicsPipeline(m_pointLightCoarseCullingPipeline);

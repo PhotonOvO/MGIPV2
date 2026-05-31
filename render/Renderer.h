@@ -104,7 +104,7 @@ struct DebugPassOptions
   int   upscalingMode{1};  // 0=Off, 1=TAA, 2=Spatial fallback
   float postExposure{1.0f};
   float bloomIntensity{0.35f};
-  float bloomThreshold{1.0f};
+  float bloomThreshold{0.0f};
   float taaJitterScale{1.0f};
   float taaBlendWeight{0.90f};
   float renderScale{1.0f};
@@ -114,6 +114,7 @@ struct DebugPassOptions
   float colorSaturation{1.0f};
   float colorContrast{1.0f};
   float colorGamma{1.0f};
+  float colorLutStrength{0.35f};
   float vignetteIntensity{0.15f};
   float lensDirtIntensity{0.0f};
   float iblIntensity{1.0f};
@@ -201,6 +202,30 @@ struct GPUDrivenSceneView
   VkImage                            bloomQuarterImage{VK_NULL_HANDLE};
   VkImageView                        bloomQuarterView{VK_NULL_HANDLE};
   VkExtent2D                         bloomQuarterExtent{};
+  VkImage                            bloomEighthImage{VK_NULL_HANDLE};
+  VkImageView                        bloomEighthView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomEighthExtent{};
+  VkImage                            bloomSixteenthImage{VK_NULL_HANDLE};
+  VkImageView                        bloomSixteenthView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomSixteenthExtent{};
+  VkImage                            bloomThirtySecondImage{VK_NULL_HANDLE};
+  VkImageView                        bloomThirtySecondView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomThirtySecondExtent{};
+  VkImage                            bloomUpsampleSixteenthImage{VK_NULL_HANDLE};
+  VkImageView                        bloomUpsampleSixteenthView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomUpsampleSixteenthExtent{};
+  VkImage                            bloomUpsampleEighthImage{VK_NULL_HANDLE};
+  VkImageView                        bloomUpsampleEighthView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomUpsampleEighthExtent{};
+  VkImage                            bloomUpsampleQuarterImage{VK_NULL_HANDLE};
+  VkImageView                        bloomUpsampleQuarterView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomUpsampleQuarterExtent{};
+  VkImage                            bloomOutputImage{VK_NULL_HANDLE};
+  VkImageView                        bloomOutputView{VK_NULL_HANDLE};
+  VkExtent2D                         bloomOutputExtent{};
+  VkImage                            colorGradingLutImage{VK_NULL_HANDLE};
+  VkImageView                        colorGradingLutView{VK_NULL_HANDLE};
+  VkExtent2D                         colorGradingLutExtent{};
   VkImage                            velocityImage{VK_NULL_HANDLE};
   VkImageView                        velocityView{VK_NULL_HANDLE};
   VkImage                            sceneColorHistoryReadImage{VK_NULL_HANDLE};
@@ -549,6 +574,30 @@ public:
   VkImage getBloomQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomQuarterImage(); }
   VkImageView getBloomQuarterView() const { return m_swapchainDependent.sceneResources.getBloomQuarterView(); }
   VkExtent2D getBloomQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomQuarterExtent(); }
+  VkImage getBloomEighthImage() const { return m_swapchainDependent.sceneResources.getBloomEighthImage(); }
+  VkImageView getBloomEighthView() const { return m_swapchainDependent.sceneResources.getBloomEighthView(); }
+  VkExtent2D getBloomEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomEighthExtent(); }
+  VkImage getBloomSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomSixteenthImage(); }
+  VkImageView getBloomSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomSixteenthView(); }
+  VkExtent2D getBloomSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomSixteenthExtent(); }
+  VkImage getBloomThirtySecondImage() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondImage(); }
+  VkImageView getBloomThirtySecondView() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondView(); }
+  VkExtent2D getBloomThirtySecondExtent() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondExtent(); }
+  VkImage getBloomUpsampleSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage(); }
+  VkImageView getBloomUpsampleSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthView(); }
+  VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthExtent(); }
+  VkImage getBloomUpsampleEighthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage(); }
+  VkImageView getBloomUpsampleEighthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthView(); }
+  VkExtent2D getBloomUpsampleEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthExtent(); }
+  VkImage getBloomUpsampleQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage(); }
+  VkImageView getBloomUpsampleQuarterView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterView(); }
+  VkExtent2D getBloomUpsampleQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterExtent(); }
+  VkImage getBloomOutputImage() const { return m_swapchainDependent.sceneResources.getBloomOutputImage(); }
+  VkImageView getBloomOutputView() const { return m_swapchainDependent.sceneResources.getBloomOutputView(); }
+  VkExtent2D getBloomOutputExtent() const { return m_swapchainDependent.sceneResources.getBloomOutputExtent(); }
+  VkImage getColorGradingLutImage() const { return m_swapchainDependent.sceneResources.getColorGradingLutImage(); }
+  VkImageView getColorGradingLutView() const { return m_swapchainDependent.sceneResources.getColorGradingLutView(); }
+  VkExtent2D getColorGradingLutExtent() const { return m_swapchainDependent.sceneResources.getColorGradingLutExtent(); }
   uint64_t getBloomEstimatedBytes() const { return m_swapchainDependent.sceneResources.getBloomEstimatedBytes(); }
   VkImage getVelocityImage() const { return m_swapchainDependent.sceneResources.getVelocityImage(); }
   VkImageView getVelocityView() const { return m_swapchainDependent.sceneResources.getVelocityView(); }

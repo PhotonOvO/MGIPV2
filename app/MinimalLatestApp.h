@@ -406,7 +406,7 @@ public:
           if(m_debugOptions.enableBloom)
           {
             ImGui::SliderFloat("Intensity", &m_debugOptions.bloomIntensity, 0.0f, 2.0f, "%.2f");
-            ImGui::SliderFloat("Threshold", &m_debugOptions.bloomThreshold, 0.1f, 8.0f, "%.2f");
+            ImGui::SliderFloat("Threshold", &m_debugOptions.bloomThreshold, 0.0f, 8.0f, "%.2f");
           }
           ImGui::TreePop();
         }
@@ -418,6 +418,7 @@ public:
             ImGui::SliderFloat("Saturation", &m_debugOptions.colorSaturation, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("Contrast", &m_debugOptions.colorContrast, 0.5f, 2.0f, "%.2f");
             ImGui::SliderFloat("Gamma", &m_debugOptions.colorGamma, 0.5f, 2.5f, "%.2f");
+            ImGui::SliderFloat("LUT Strength", &m_debugOptions.colorLutStrength, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Vignette", &m_debugOptions.vignetteIntensity, 0.0f, 1.0f, "%.2f");
           }
           ImGui::TreePop();
@@ -701,13 +702,14 @@ public:
             ImGui::Text("Bloom: %.2f / threshold %.2f",
                         postDiagnostics.bloomIntensity,
                         postDiagnostics.bloomThreshold);
-            ImGui::Text("Grade S/C/G/V: %.2f / %.2f / %.2f / %.2f",
+            ImGui::Text("Grade S/C/G/LUT/V: %.2f / %.2f / %.2f / %.2f / %.2f",
                         postDiagnostics.colorSaturation,
                         postDiagnostics.colorContrast,
                         postDiagnostics.colorGamma,
+                        postDiagnostics.colorLutStrength,
                         postDiagnostics.vignetteIntensity);
             ImGui::Text("Lens Dirt: %.2f", postDiagnostics.lensDirtIntensity);
-            ImGui::Text("Passes E/AE/B/F/Grade/Lens: %s / %s / %s / %s / %s / %s",
+            ImGui::Text("Passes E/AE/B/F/LUT/Lens: %s / %s / %s / %s / %s / %s",
                         postDiagnostics.exposurePassActive ? "On" : "Off",
                         postDiagnostics.adaptiveExposureActive ? "On" : "Off",
                         postDiagnostics.bloomPassActive ? "On" : "Off",

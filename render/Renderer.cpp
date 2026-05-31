@@ -33,7 +33,7 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
-constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 10u;
+constexpr uint32_t kLightPassTextureCount         = kPackedGBufferTargetCount + 18u;
 constexpr uint32_t kLightPassDepthTextureIndex    = kPackedGBufferTargetCount;
 constexpr uint32_t kLightPassSceneColorHdrIndex   = kPackedGBufferTargetCount + 1u;
 constexpr uint32_t kLightPassBloomHalfIndex       = kPackedGBufferTargetCount + 2u;
@@ -44,6 +44,14 @@ constexpr uint32_t kLightPassHistoryWriteIndex    = kPackedGBufferTargetCount + 
 constexpr uint32_t kLightPassIBLEnvironmentIndex  = kPackedGBufferTargetCount + 7u;
 constexpr uint32_t kLightPassAOIndex              = kPackedGBufferTargetCount + 8u;
 constexpr uint32_t kLightPassSSRIndex             = kPackedGBufferTargetCount + 9u;
+constexpr uint32_t kLightPassBloomEighthIndex     = kPackedGBufferTargetCount + 10u;
+constexpr uint32_t kLightPassBloomSixteenthIndex  = kPackedGBufferTargetCount + 11u;
+constexpr uint32_t kLightPassBloomThirtySecondIndex = kPackedGBufferTargetCount + 12u;
+constexpr uint32_t kLightPassBloomUpsampleSixteenthIndex = kPackedGBufferTargetCount + 13u;
+constexpr uint32_t kLightPassBloomUpsampleEighthIndex = kPackedGBufferTargetCount + 14u;
+constexpr uint32_t kLightPassBloomUpsampleQuarterIndex = kPackedGBufferTargetCount + 15u;
+constexpr uint32_t kLightPassBloomOutputIndex     = kPackedGBufferTargetCount + 16u;
+constexpr uint32_t kLightPassColorGradingLutIndex = kPackedGBufferTargetCount + 17u;
 constexpr uint32_t kLightCoarseCullingThreadCount = 64;
 constexpr uint32_t kTestPointLightCount           = 128;
 constexpr const char* kDefaultIBLEnvironmentPath  = "resources/environment/lilienstein_4k.ktx2";
@@ -2256,6 +2264,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
   if(sceneResources.getSceneColorHdrView() == VK_NULL_HANDLE
       || sceneResources.getBloomHalfView() == VK_NULL_HANDLE
       || sceneResources.getBloomQuarterView() == VK_NULL_HANDLE
+      || sceneResources.getColorGradingLutView() == VK_NULL_HANDLE
       || sceneResources.getVelocityView() == VK_NULL_HANDLE
       || sceneResources.getSceneColorHistoryView(0) == VK_NULL_HANDLE
       || sceneResources.getSceneColorHistoryView(1) == VK_NULL_HANDLE)
@@ -2308,6 +2317,46 @@ void Renderer::updateGBufferTextureDescriptorSet()
   imageInfos[kLightPassBloomQuarterIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
       .imageView   = sceneResources.getBloomQuarterView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomEighthIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomEighthView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomSixteenthView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomThirtySecondView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomUpsampleSixteenthView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomUpsampleEighthView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomUpsampleQuarterView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassBloomOutputIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getBloomOutputView(),
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  imageInfos[kLightPassColorGradingLutIndex] = VkDescriptorImageInfo{
+      .sampler     = linearSampler,
+      .imageView   = sceneResources.getColorGradingLutView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassVelocityIndex] = VkDescriptorImageInfo{
@@ -4189,6 +4238,55 @@ void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
   passExecutor.bindTexture({
       .handle       = kPassBloomQuarterHandle,
       .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomQuarterImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomEighthHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomEighthImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomSixteenthHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomSixteenthImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomThirtySecondHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomThirtySecondImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomUpsampleSixteenthHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomUpsampleEighthHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomUpsampleQuarterHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage()),
+      .aspect       = rhi::TextureAspect::color,
+      .initialState = rhi::ResourceState::general,
+      .isSwapchain  = false,
+  });
+  passExecutor.bindTexture({
+      .handle       = kPassBloomOutputHandle,
+      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomOutputImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,

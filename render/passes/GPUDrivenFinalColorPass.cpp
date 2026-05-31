@@ -17,10 +17,9 @@ GPUDrivenFinalColorPass::GPUDrivenFinalColorPass(GPUDrivenRenderer* renderer)
 
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenFinalColorPass::getDependencies() const
 {
-  static const std::array<PassResourceDependency, 4> dependencies = {
+  static const std::array<PassResourceDependency, 3> dependencies = {
       PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassBloomHalfHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassBloomQuarterHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
+      PassResourceDependency::texture(kPassBloomOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
       PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::ColorAttachment),
   };
@@ -145,7 +144,10 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
         .params4 = glm::vec4((context.params->debugOptions.enablePostProcessing
                                && context.params->debugOptions.enableLensEffects) ? 1.0f : 0.0f,
                               context.params->debugOptions.lensDirtIntensity,
-                              0.0f,
+                              (context.params->debugOptions.enablePostProcessing
+                               && context.params->debugOptions.enableColorGrading)
+                                  ? std::clamp(context.params->debugOptions.colorLutStrength, 0.0f, 1.0f)
+                                  : 0.0f,
                               0.0f),
         .params5 = glm::vec4((context.params->debugOptions.enablePostProcessing
                               && context.params->debugOptions.enableTAA

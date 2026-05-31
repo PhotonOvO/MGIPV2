@@ -106,7 +106,7 @@ struct PostProcessUniforms
   vec4 params1;  // source texel size x/y, output texel size x/y
   vec4 params2;  // adaptive enabled, target luminance, min exposure, max exposure
   vec4 params3;  // saturation, contrast, gamma, vignette intensity
-  vec4 params4;  // lens effects enabled, lens dirt intensity, reserved, reserved
+  vec4 params4;  // lens effects enabled, lens dirt intensity, color LUT strength, reserved
   vec4 params5;  // TAA enabled, history valid, blend weight, show velocity
 };
 
