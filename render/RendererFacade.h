@@ -6,14 +6,13 @@ namespace demo {
 
 enum class RendererBackend
 {
-  legacy,
   gpuDriven,
 };
 
 class RendererFacade
 {
 public:
-  RendererFacade();
+  RendererFacade() = default;
 
   void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
@@ -49,19 +48,15 @@ public:
   [[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData();
   [[nodiscard]] CSMShadowResources& getCSMShadowResources();
-  [[nodiscard]] RendererBackend getBackend() const { return m_backend; }
+  [[nodiscard]] RendererBackend getBackend() const { return RendererBackend::gpuDriven; }
   [[nodiscard]] const char* getBackendName() const;
   [[nodiscard]] GPUDrivenRuntimeStats getGPUDrivenRuntimeStats() const;
   [[nodiscard]] bool isExperimentalMeshletPathEnabled() const;
 
 private:
-  Renderer&          legacy() { return m_legacyRenderer; }
-  const Renderer&    legacy() const { return m_legacyRenderer; }
   GPUDrivenRenderer& gpuDriven() { return m_gpuDrivenRenderer; }
   const GPUDrivenRenderer& gpuDriven() const { return m_gpuDrivenRenderer; }
 
-  RendererBackend   m_backend{RendererBackend::gpuDriven};
-  Renderer          m_legacyRenderer;
   GPUDrivenRenderer m_gpuDrivenRenderer;
 };
 

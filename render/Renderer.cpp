@@ -1575,11 +1575,6 @@ PipelineHandle Renderer::getDebugPipelineHandle() const
   return m_debugPipeline;
 }
 
-PipelineHandle Renderer::getSpotLightCoarseCullingPipelineHandle() const
-{
-  return m_spotLightCoarseCullingPipeline;
-}
-
 PipelineHandle Renderer::getGPUCullingDebugPipelineHandle() const
 {
   return m_gpuCullingDebugPipeline;
@@ -1719,11 +1714,6 @@ RuntimeProfileSnapshot Renderer::getRuntimeProfileSnapshot() const
                                      m_passGpuProfile.latestPassDurationsMs.begin() + static_cast<ptrdiff_t>(safePassCount));
   snapshot.gpuValid = m_passGpuProfile.latestValid;
   return snapshot;
-}
-
-void Renderer::render(const RenderParams& params)
-{
-  renderWithPassExecutor(params, m_passExecutor);
 }
 
 void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
@@ -4322,11 +4312,6 @@ rhi::CommandList& Renderer::beginCommandRecording()
   rhi::vulkan::setBindingResolver(*frame.commandList,
                                   m_bindingResolverOverride != nullptr ? m_bindingResolverOverride : this);
   return *frame.commandList;
-}
-
-void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params)
-{
-  drawFrame(cmd, params, m_passExecutor);
 }
 
 void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor)
@@ -9588,16 +9573,6 @@ void Renderer::updateLightCoarseCullingResources(uint32_t frameIndex, const shad
   m_lightResources.updatePointLights(frameIndex, m_testPointLights);
   m_lightResources.updateSpotLights(frameIndex, m_testSpotLights);
   m_lightResources.updateCoarseCullingUniforms(frameIndex, uniforms);
-}
-
-uint32_t Renderer::getActivePointLightCount() const
-{
-  return std::min<uint32_t>(static_cast<uint32_t>(m_testPointLights.size()), m_lightResources.getMaxPointLights());
-}
-
-uint32_t Renderer::getActiveSpotLightCount() const
-{
-  return std::min<uint32_t>(static_cast<uint32_t>(m_testSpotLights.size()), m_lightResources.getMaxSpotLights());
 }
 
 uint64_t Renderer::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const

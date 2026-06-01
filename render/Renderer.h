@@ -360,15 +360,7 @@ public:
   [[nodiscard]] bool        getVSync() const { return m_swapchainDependent.vSync; }
   void setFullscreen(bool enabled, void* platformHandle = nullptr);
   [[nodiscard]] const char* getSwapchainPresentModeName() const;
-  void requestSwapchainRebuild()
-  {
-    if(m_swapchainDependent.swapchain)
-    {
-      m_swapchainDependent.swapchain->requestRebuild();
-    }
-  }
   void resize(rhi::Extent2D size);
-  void render(const RenderParams& params);
   void renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor);
 
   // Pass execution helpers (wrappers for per-pass commands)
@@ -377,7 +369,6 @@ public:
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params);
   void beginPresentPass(rhi::CommandList& cmd);
   void endPresentPass(rhi::CommandList& cmd);
-  [[nodiscard]] bool isPresentPassActive() const { return m_presentPassActive; }
   uint32_t           allocateDrawDynamicOffset(rhi::ResourceIndex materialIndex, const RenderParams& params);
   rhi::ResourceIndex resolveMaterialResourceIndex(MaterialHandle handle) const;
   [[nodiscard]] rhi::ResourceIndex getSceneBindlessResourceIndex() const { return kSceneBindlessInfoIndex; }
@@ -432,7 +423,6 @@ public:
   PipelineHandle getForwardPipelineHandle() const;
   PipelineHandle getForwardMDIPipelineHandle() const;
   PipelineHandle getShadowPipelineHandle() const;
-  PipelineHandle getSpotLightCoarseCullingPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
   PipelineHandle getGPUCullingDebugPipelineHandle() const;
   void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
@@ -503,8 +493,6 @@ public:
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const;
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const;
   void updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms);
-  [[nodiscard]] uint32_t getActivePointLightCount() const;
-  [[nodiscard]] uint32_t getActiveSpotLightCount() const;
   uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
@@ -1045,7 +1033,6 @@ private:
   bool              acquireSwapchainImageForPresent();
   void              updateSwapchainTextureBinding(rhi::ResourceState initialState);
   rhi::CommandList& beginCommandRecording();
-  void              drawFrame(rhi::CommandList& cmd, const RenderParams& params);
   void              drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor);
   void              endFrame(rhi::CommandList& cmd);
   void              beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const;
