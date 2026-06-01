@@ -299,12 +299,6 @@ add_library(demo_core STATIC
   render/GPUMeshletBuffer.cpp
   render/ImguiAxis.cpp
   render/ImguiAxis.h
-  render/passes/DepthPrepass.h
-  render/passes/DepthPrepass.cpp
-  render/passes/DepthPyramidPass.h
-  render/passes/DepthPyramidPass.cpp
-  render/passes/GPUCullingPass.h
-  render/passes/GPUCullingPass.cpp
   render/passes/GPUDrivenDepthPyramidPass.h
   render/passes/GPUDrivenDepthPyramidPass.cpp
   render/passes/GPUDrivenCullingPass.h
@@ -351,28 +345,6 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenVisibilitySortPass.cpp
   render/passes/MeshletCullingPass.h
   render/passes/MeshletCullingPass.cpp
-  render/passes/AnimateVerticesPass.h
-  render/passes/AnimateVerticesPass.cpp
-  render/passes/GBufferPass.h
-  render/passes/GBufferPass.cpp
-  render/passes/LightPass.h
-  render/passes/LightPass.cpp
-  render/passes/LightCullingPass.h
-  render/passes/LightCullingPass.cpp
-  render/passes/CSMShadowPass.h
-  render/passes/CSMShadowPass.cpp
-  render/passes/ForwardPass.h
-  render/passes/ForwardPass.cpp
-  render/passes/DebugPass.h
-  render/passes/DebugPass.cpp
-  render/passes/LightCullingPass.h
-  render/passes/LightCullingPass.cpp
-  render/passes/SceneOpaquePass.h
-  render/passes/SceneOpaquePass.cpp
-  render/passes/PresentPass.h
-  render/passes/PresentPass.cpp
-  render/passes/ImguiPass.h
-  render/passes/ImguiPass.cpp
   render/BindGroups.h
   render/Pass.h
   render/TransientAllocator.cpp

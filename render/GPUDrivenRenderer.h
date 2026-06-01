@@ -6,8 +6,6 @@
 #include "HiZDepthPyramid.h"
 #include "IBLResources.h"
 #include "MeshletConverter.h"
-#include "passes/DebugPass.h"
-#include "passes/ForwardPass.h"
 #include "passes/GPUDrivenCSMShadowPass.h"
 #include "passes/GPUDrivenCullingPass.h"
 #include "passes/GPUDrivenDebugPass.h"
