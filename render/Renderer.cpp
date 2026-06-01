@@ -1440,11 +1440,6 @@ MaterialHandle Renderer::getMaterialHandle(uint32_t slot) const
   return kNullMaterialHandle;
 }
 
-PipelineHandle Renderer::getGraphicsPipelineHandle(GraphicsPipelineVariant variant) const
-{
-  return selectGraphicsPipelineHandle(variant);
-}
-
 PipelineHandle Renderer::getLightPipelineHandle() const
 {
   return m_lightPipeline;
@@ -1756,16 +1751,6 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
 }
 
 // Pass execution wrappers (used by PassNode implementations)
-void Renderer::executeComputePass(rhi::CommandList& cmd, const RenderParams& params) const
-{
-  recordComputeCommands(cmd, params);
-}
-
-void Renderer::executeGraphicsPass(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream)
-{
-  recordGraphicCommands(cmd, params, drawStream);
-}
-
 void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
 {
   if(!m_presentPassActive)
@@ -4506,36 +4491,6 @@ void Renderer::endDynamicRenderingToSwapchain(const rhi::CommandList& cmd)
   rhi::vulkan::cmdEndRendering(cmd);
 }
 
-void Renderer::recordComputeCommands(rhi::CommandList& cmd, const RenderParams& params) const
-{
-  DBG_VK_SCOPE(rhi::vulkan::getNativeCommandBuffer(cmd));
-  ASSERT(m_device.computePipelineLayout != nullptr, "Compute pipeline layout must be initialized before compute recording");
-  const VkPipelineLayout computePipelineLayout =
-      reinterpret_cast<VkPipelineLayout>(m_device.computePipelineLayout->getNativeHandle());
-
-  const shaderio::PushConstantCompute pushValues{
-      .bufferAddress = m_device.vertexBuffer.address,
-      .rotationAngle = 1.2f * params.deltaTime,
-      .numVertex     = 3,
-  };
-
-  const VkPushConstantsInfo pushInfo{
-      .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
-      .layout     = computePipelineLayout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset     = 0,
-      .size       = sizeof(shaderio::PushConstantCompute),
-      .pValues    = &pushValues,
-  };
-  rhi::vulkan::cmdPushConstants(cmd, pushInfo);
-
-  const PipelineHandle computePipelineHandle = selectComputePipelineHandle();
-  rhi::vulkan::cmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                               reinterpret_cast<VkPipeline>(getPipelineOpaque(
-                                   computePipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE))));
-  rhi::vulkan::cmdDispatch(cmd, 1, 1, 1);
-}
-
 void Renderer::executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params)
 {
   if(params.cameraUniforms == nullptr || m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
@@ -5356,204 +5311,6 @@ void Renderer::buildDebugDrawList(const RenderParams& params)
     m_debugDrawList.addSphere(params.cameraUniforms->cameraPosition, params.debugOptions.cullDistance,
                               glm::vec4(0.95f, 0.20f, 0.30f, 0.70f), 48);
   }
-}
-
-rhi::ResourceIndex Renderer::resolveMaterialResourceIndex(MaterialHandle handle) const
-{
-  const MaterialResources::MaterialRecord* materialRecord = tryGetMaterial(handle);
-  if(materialRecord == nullptr)
-  {
-    LOGW("Renderer::resolveMaterialResourceIndex rejected stale/invalid material handle (index=%u generation=%u)",
-         handle.index, handle.generation);
-    return rhi::kInvalidResourceIndex;
-  }
-
-  const MaterialResources::TextureHotData* textureHot = tryGetTextureHot(materialRecord->sampledTexture);
-  if(textureHot == nullptr)
-  {
-    LOGW("Renderer::resolveMaterialResourceIndex encountered stale/invalid texture handle (index=%u generation=%u)",
-         materialRecord->sampledTexture.index, materialRecord->sampledTexture.generation);
-    return rhi::kInvalidResourceIndex;
-  }
-
-  if(textureHot->runtimeKind != MaterialResources::TextureRuntimeKind::materialSampled)
-  {
-    return rhi::kInvalidResourceIndex;
-  }
-
-  return materialRecord->descriptorIndex;
-}
-
-uint32_t Renderer::allocateDrawDynamicOffset(rhi::ResourceIndex materialIndex, const RenderParams& params)
-{
-  VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
-  const uint32_t dynamicAlignment = alignUp(uint32_t(sizeof(shaderio::SceneInfo)),
-                                            uint32_t(deviceProperties2.properties.limits.minUniformBufferOffsetAlignment));
-
-  const float time        = static_cast<float>(5.0 * params.timeSeconds);
-  const float sineValue   = std::sin(time) + 1.0f;
-  const float mappedValue = 0.5f * sineValue + 0.5f;
-
-  shaderio::SceneInfo sceneInfo{};
-  sceneInfo.animValue         = mappedValue;
-  sceneInfo.dataBufferAddress = m_device.pointsBuffer.address;
-  sceneInfo.resolution = glm::vec2(m_swapchainDependent.viewportSize.width, m_swapchainDependent.viewportSize.height);
-  sceneInfo.numData    = uint32_t(s_points.size());
-  sceneInfo.texId      = materialIndex;
-
-  const uint32_t      currentFrameIndex  = m_perFrame.frameContext->getCurrentFrameIndex();
-  TransientAllocator& transientAllocator = m_perFrame.frameUserData[currentFrameIndex].transientAllocator;
-  const TransientAllocator::Allocation allocation =
-      transientAllocator.allocate(uint32_t(sizeof(shaderio::SceneInfo)), dynamicAlignment);
-  std::memcpy(allocation.cpuPtr, &sceneInfo, sizeof(sceneInfo));
-  transientAllocator.flushAllocation(allocation, uint32_t(sizeof(sceneInfo)));
-  ASSERT(allocation.handle == kTransientAllocatorBufferHandle, "Scene dynamic allocations must originate from transient allocator handle");
-  return allocation.offset;
-}
-
-void Renderer::recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream)
-{
-  DBG_VK_SCOPE(rhi::vulkan::getNativeCommandBuffer(cmd));
-  ASSERT(m_device.graphicPipelineLayout != nullptr, "Graphics pipeline layout must be initialized before graphics recording");
-  const VkPipelineLayout graphicsPipelineLayout =
-      reinterpret_cast<VkPipelineLayout>(m_device.graphicPipelineLayout->getNativeHandle());
-
-  if(!m_drawStreamDecoder.decode(DrawStream(drawStream.begin(), drawStream.end()), m_perPass.decodedDraws))
-  {
-    LOGW("Renderer::recordGraphicCommands received malformed DrawStream; skipping pass");
-    return;
-  }
-
-  const VkViewport viewport{
-      0.0F, 0.0F, float(m_swapchainDependent.viewportSize.width), float(m_swapchainDependent.viewportSize.height),
-      0.0F, 1.0F};
-  const VkRect2D scissor{{0, 0}, m_swapchainDependent.viewportSize};
-
-  shaderio::PushConstant    pushValues{};
-  const VkPushConstantsInfo pushInfo{
-      .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
-      .layout     = graphicsPipelineLayout,
-      .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
-      .offset     = 0,
-      .size       = sizeof(shaderio::PushConstant),
-      .pValues    = &pushValues,
-  };
-
-  const std::array<VkRenderingAttachmentInfo, 1> colorAttachment{{{
-      .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-      .imageView   = m_swapchainDependent.sceneResources.getColorImageView(),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-      .clearValue  = {{{params.clearColor.r, params.clearColor.g, params.clearColor.b, params.clearColor.a}}},
-  }}};
-
-  const VkRenderingAttachmentInfo depthAttachment{
-      .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-      .imageView   = m_swapchainDependent.sceneResources.getDepthImageView(),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-      .clearValue  = {{{0.0f, 0}}},
-  };
-
-  const VkRenderingInfo renderingInfo{
-      .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-      .renderArea           = {{0, 0}, m_swapchainDependent.sceneResources.getSize()},
-      .layerCount           = 1,
-      .colorAttachmentCount = uint32_t(colorAttachment.size()),
-      .pColorAttachments    = colorAttachment.data(),
-      .pDepthAttachment     = &depthAttachment,
-  };
-
-  rhi::vulkan::cmdBeginRendering(cmd, renderingInfo);
-
-  rhi::vulkan::cmdSetViewport(cmd, viewport);
-  rhi::vulkan::cmdSetScissor(cmd, scissor);
-
-  const std::optional<uint32_t> materialSetIndex = mapSetSlotToLegacyShaderSet(BindGroupSetSlot::material);
-  ASSERT(materialSetIndex.has_value(), "material bind-group slot must map to active shader set");
-  const std::optional<uint32_t> sceneSetIndex = mapSetSlotToLegacyShaderSet(BindGroupSetSlot::drawDynamic);
-  ASSERT(sceneSetIndex.has_value(), "drawDynamic bind-group slot must map to active shader set");
-
-  const uint64_t materialBindTableHandle =
-      getBindGroupDescriptorSetOpaque(getCurrentMaterialBindGroupHandle(), BindGroupSetSlot::material);
-  rhi::vulkan::cmdBindDescriptorSetOpaque(cmd, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                          m_device.graphicPipelineLayout->getNativeHandle(), materialSetIndex.value(),
-                                          materialBindTableHandle, 0, nullptr);
-
-  const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
-  const auto&    frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
-  const uint64_t sceneBindTableHandle = getBindGroupDescriptorSetOpaque(frameUserData.sceneBindGroup, BindGroupSetSlot::drawDynamic);
-  uint64_t currentVertexBufferHandle = 0;
-  uint64_t currentIndexBufferHandle = 0;
-  for(const DrawStreamDecoder::DecodedDraw& decodedDraw : m_perPass.decodedDraws)
-  {
-    ASSERT(decodedDraw.state.dynamicBufferIndex == getSceneBindlessResourceIndex(),
-           "Draw stream dynamic data must reference scene bindless logical index");
-    ASSERT(rhi::isValidResourceIndex(decodedDraw.state.materialIndex), "Draw stream must provide a valid material bindless logical index");
-    ASSERT(decodedDraw.state.dynamicOffset != kDrawStreamInvalidDynamicOffset,
-           "Draw stream must provide valid dynamic offset before draw");
-    const uint32_t dynamicSceneOffset = decodedDraw.state.dynamicOffset;
-    rhi::vulkan::cmdBindDescriptorSetOpaque(cmd, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                            m_device.graphicPipelineLayout->getNativeHandle(), sceneSetIndex.value(),
-                                            sceneBindTableHandle, 1, &dynamicSceneOffset);
-
-    rhi::vulkan::cmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                 reinterpret_cast<VkPipeline>(this->getPipelineOpaque(
-                                     decodedDraw.state.pipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS))));
-
-    // Check if we're using a glTF mesh or the default vertex buffer
-    const MeshRecord* meshRecord = m_meshPool.tryGet(decodedDraw.state.mesh);
-    if(meshRecord != nullptr)
-    {
-      VkBuffer vertexBuffer = meshRecord->getNativeVertexBuffer();
-      VkBuffer indexBuffer = meshRecord->getNativeIndexBuffer();
-      if(meshRecord->vertexBufferHandle != currentVertexBufferHandle)
-      {
-        const VkDeviceSize vertexOffset = 0;
-        rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &vertexOffset);
-        currentVertexBufferHandle = meshRecord->vertexBufferHandle;
-      }
-      if(meshRecord->indexBufferHandle != currentIndexBufferHandle)
-      {
-        rhi::vulkan::cmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        currentIndexBufferHandle = meshRecord->indexBufferHandle;
-      }
-
-      // Use default push constants for now
-      pushValues.color = glm::vec3(1, 1, 1);
-      rhi::vulkan::cmdPushConstants(cmd, pushInfo);
-
-      // Indexed draw
-      if(decodedDraw.isIndexed)
-      {
-        rhi::vulkan::cmdDrawIndexed(cmd, decodedDraw.indexCount, decodedDraw.instanceCount,
-                                    meshRecord->firstIndex + decodedDraw.firstIndex,
-                                    meshRecord->vertexOffset + decodedDraw.vertexOffsetIndexed,
-                                    decodedDraw.firstInstance);
-      }
-      else
-      {
-        rhi::vulkan::cmdDraw(cmd, decodedDraw.vertexCount, decodedDraw.instanceCount, 0, 0);
-      }
-    }
-    else
-    {
-      // Use default vertex buffer (triangle)
-      const VkDeviceSize drawVertexOffset = static_cast<VkDeviceSize>(decodedDraw.vertexOffset) * sizeof(shaderio::Vertex);
-      const VkDeviceSize drawOffsets[] = {drawVertexOffset};
-      rhi::vulkan::cmdBindVertexBuffers(cmd, 0, 1, &m_device.vertexBuffer.buffer, drawOffsets);
-
-      pushValues.color = (decodedDraw.vertexOffset == 0) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
-      rhi::vulkan::cmdPushConstants(cmd, pushInfo);
-
-      rhi::vulkan::cmdDraw(cmd, decodedDraw.vertexCount, decodedDraw.instanceCount, 0, 0);
-    }
-  }
-
-  rhi::vulkan::cmdEndRendering(cmd);
 }
 
 void Renderer::prebuildRequiredPipelineVariants()

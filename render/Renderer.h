@@ -351,19 +351,14 @@ public:
   void renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor);
 
   // Pass execution helpers (wrappers for per-pass commands)
-  void executeComputePass(rhi::CommandList& cmd, const RenderParams& params) const;
-  void executeGraphicsPass(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream);
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params);
   void beginPresentPass(rhi::CommandList& cmd);
   void endPresentPass(rhi::CommandList& cmd);
-  uint32_t           allocateDrawDynamicOffset(rhi::ResourceIndex materialIndex, const RenderParams& params);
-  rhi::ResourceIndex resolveMaterialResourceIndex(MaterialHandle handle) const;
   [[nodiscard]] rhi::ResourceIndex getSceneBindlessResourceIndex() const { return kSceneBindlessInfoIndex; }
 
   TextureHandle  getViewportTextureHandle() const;
   ImTextureID    getViewportTextureID(TextureHandle handle) const;
   MaterialHandle getMaterialHandle(uint32_t slot) const;
-  PipelineHandle getGraphicsPipelineHandle(GraphicsPipelineVariant variant) const;
 
   // glTF model support
   GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
@@ -828,8 +823,7 @@ private:
   // Lifetime trigger: reset each recorded pass; no persistent renderer-owned pass data yet.
   struct PerPassResources
   {
-    DrawStream                                  drawStream;
-    std::vector<DrawStreamDecoder::DecodedDraw> decodedDraws;
+    DrawStream drawStream;
   };
 
   bool                                 m_presentPassActive{false};
@@ -1010,8 +1004,6 @@ private:
   void              endDynamicRenderingToSwapchain(const rhi::CommandList& cmd);
   void              updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms);
   void              updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms);
-  void              recordComputeCommands(rhi::CommandList& cmd, const RenderParams& params) const;
-  void recordGraphicCommands(rhi::CommandList& cmd, const RenderParams& params, std::span<const StreamEntry> drawStream);
   void                 prebuildRequiredPipelineVariants();
   void                 createPrebuiltGraphicsPipelineVariants();
   void                 createPrebuiltComputePipelineVariant();
@@ -1138,7 +1130,6 @@ private:
   std::vector<TestPointLightMotion> m_testPointLightMotions;
   Aabb                     m_testPointLightSceneBounds{};
   std::vector<shaderio::LightData> m_testSpotLights;
-  DrawStreamDecoder           m_drawStreamDecoder;
   FrameLightingState          m_frameLightingState;
   DebugDrawList               m_debugDrawList;
   shaderio::GPUCullStats      m_lastGPUCullingStats{};
