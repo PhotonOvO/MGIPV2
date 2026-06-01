@@ -277,8 +277,8 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanPipelines.cpp
   rhi/vulkan/VulkanSwapchain.h
   rhi/vulkan/VulkanSwapchain.cpp
-  render/Renderer.cpp
-  render/Renderer.h
+  render/RenderDevice.cpp
+  render/RenderDevice.h
   render/RendererFacade.h
   render/RendererFacade.cpp
   render/AsyncLoadingCoordinator.h  

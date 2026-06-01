@@ -1,7 +1,7 @@
 #include "GPUDrivenForwardPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../Renderer.h"
+#include "../RenderDevice.h"
 #include "../MeshPool.h"
 #include "../ClipSpaceConvention.h"
 #include "../../common/TracyProfiling.h"

@@ -28,7 +28,7 @@
 #include "passes/GPUDrivenTAAResolvePass.h"
 #include "passes/GPUDrivenPresentPass.h"
 #include "passes/GPUDrivenVisibilitySortPass.h"
-#include "Renderer.h"
+#include "RenderDevice.h"
 #include "../rhi/RHIDescriptor.h"
 
 #include <array>

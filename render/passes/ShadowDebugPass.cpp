@@ -1,5 +1,5 @@
 #include "ShadowDebugPass.h"
-#include "../Renderer.h"
+#include "../RenderDevice.h"
 #include "../CSMShadowResources.h"
 #include "../ClipSpaceConvention.h"
 #include "../../shaders/shader_io.h"
