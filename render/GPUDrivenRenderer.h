@@ -31,8 +31,10 @@
 #include "passes/GPUDrivenPresentPass.h"
 #include "passes/GPUDrivenVisibilitySortPass.h"
 #include "Renderer.h"
+#include "../rhi/RHIDescriptor.h"
 
 #include <array>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -268,9 +270,17 @@ struct GPUDrivenRuntimeStats
   std::vector<GPUDrivenPassDiagnostic> passDiagnostics;
 };
 
-class GPUDrivenRenderer
+class GPUDrivenRenderer : public rhi::BindingResolver
 {
 public:
+  // rhi::BindingResolver — resolves both this renderer's own pipelines/sets and,
+  // by delegation, the inner Renderer's. Injected into the frame command list so
+  // GPUDriven passes can bind through handles even though these pipelines live
+  // outside the inner Renderer's registry.
+  [[nodiscard]] uint64_t resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const override;
+  [[nodiscard]] uint64_t resolvePipelineLayout(PipelineHandle handle) const override;
+  [[nodiscard]] uint64_t resolveBindGroupDescriptorSet(BindGroupHandle handle) const override;
+
   void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
   void setVSync(bool enabled) { m_renderer.setVSync(enabled); }
@@ -436,7 +446,7 @@ public:
   [[nodiscard]] uint64_t getPostProcessPipelineLayout() const { return m_renderer.getPostProcessPipelineLayout(); }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
   [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
-  void updateLightingSceneDescriptorSet(uint32_t frameIndex, VkBuffer transientBuffer, uint32_t cameraOffset);
+  void updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t cameraOffset);
   [[nodiscard]] bool getIBLEnvironmentLoaded() const { return m_iblEnvironmentLoaded; }
   [[nodiscard]] bool getIBLUsingFallback() const { return m_iblUsingFallback; }
   [[nodiscard]] VkFormat getIBLEnvironmentFormat() const { return m_iblEnvironmentFormat; }
@@ -679,6 +689,72 @@ public:
     }
     return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS));
   }
+  // True for the fullscreen pipelines this renderer owns directly. They all share
+  // m_lightPipelineLayout, so the resolver can report their layout generically.
+  [[nodiscard]] bool isGpuDrivenFullscreenPipeline(PipelineHandle h) const
+  {
+    const auto eq = [&](PipelineHandle p) { return h.index == p.index && h.generation == p.generation; };
+    return eq(m_gpuDrivenLightHdrPipeline) || eq(m_gpuDrivenSkyboxPipeline) || eq(m_gpuDrivenTAAResolvePipeline)
+           || eq(m_gpuDrivenBloomPrefilterPipeline) || eq(m_gpuDrivenBloomDownsamplePipeline)
+           || eq(m_gpuDrivenBloomUpsamplePipeline) || eq(m_gpuDrivenFinalColorPipeline)
+           || eq(m_gpuDrivenVelocityPipeline);
+  }
+  // BindGroup wrapping the per-frame lighting-scene descriptor set (set LSetScene),
+  // so GPUDriven fullscreen passes can bind it through cmd->bindBindGroup.
+  [[nodiscard]] BindGroupHandle getLightingSceneBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_lightingSceneBindGroups.size() ? m_lightingSceneBindGroups[frameIndex] : BindGroupHandle{};
+  }
+  // BindGroup wrapping the GBuffer/lighting-input texture set (set LSetTextures).
+  [[nodiscard]] BindGroupHandle getLightingInputBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_lightingInputBindGroups.size() ? m_lightingInputBindGroups[frameIndex] : BindGroupHandle{};
+  }
+
+  // rhi-typed render targets for the fullscreen screen-space passes (skybox, etc.),
+  // so passes never name a Vulkan type. Native handles are read from m_sceneView here.
+  struct ScreenPassTargets
+  {
+    uint64_t              colorImage{0};
+    rhi::TextureViewHandle colorView{};
+    uint64_t              depthImage{0};
+    rhi::TextureViewHandle depthView{};
+    rhi::TextureAspect    depthAspect{rhi::TextureAspect::depth};
+    rhi::Extent2D         extent{};
+    bool                  valid{false};
+  };
+  [[nodiscard]] ScreenPassTargets getScreenColorDepthTargets() const
+  {
+    ScreenPassTargets targets{};
+    const bool ready = m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE && m_sceneView.sceneColorHdrView != VK_NULL_HANDLE
+                       && m_sceneView.sceneDepthImage != VK_NULL_HANDLE && m_sceneView.sceneDepthView != VK_NULL_HANDLE
+                       && m_sceneView.sceneDepthExtent.width != 0u && m_sceneView.sceneDepthExtent.height != 0u;
+    if(!ready)
+    {
+      return targets;
+    }
+    targets.colorImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHdrImage);
+    targets.colorView   = rhi::TextureViewHandle::fromNative(m_sceneView.sceneColorHdrView);
+    targets.depthImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneDepthImage);
+    targets.depthView   = rhi::TextureViewHandle::fromNative(m_sceneView.sceneDepthView);
+    targets.depthAspect = depthAspectForFormat(m_sceneView.sceneDepthFormat);
+    targets.extent      = {m_sceneView.sceneDepthExtent.width, m_sceneView.sceneDepthExtent.height};
+    targets.valid       = true;
+    return targets;
+  }
+
+  [[nodiscard]] static rhi::TextureAspect depthAspectForFormat(VkFormat format)
+  {
+    switch(format)
+    {
+      case VK_FORMAT_D16_UNORM_S8_UINT:
+      case VK_FORMAT_D24_UNORM_S8_UINT:
+      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return rhi::TextureAspect::depthStencil;
+      default:
+        return rhi::TextureAspect::depth;
+    }
+  }
   void uploadSharedMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
   {
     m_renderer.uploadMDIDrawData(frameIndex, drawData);
@@ -876,6 +952,14 @@ private:
   VkDescriptorSetLayout              m_lightingSceneSetLayout{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_lightingSceneDescriptorSets;
   std::vector<VkBuffer>              m_lightingSceneDescriptorTransientBuffers;
+  // BindGroup wrappers that adopt the lighting-scene sets above so they flow
+  // through the RHI bind path. The adapter objects must outlive the bind groups.
+  // BindGroup wrappers for the lighting-scene set (set LSetScene) and the
+  // lighting-input texture set (set LSetTextures). The adapter BindTable/Layout
+  // objects are owned by the bind-group pool (deleted in destroyBindGroups), so
+  // only the handles are tracked here.
+  std::vector<BindGroupHandle>                         m_lightingSceneBindGroups;
+  std::vector<BindGroupHandle>                         m_lightingInputBindGroups;
   VkSampler                          m_linearClampSampler{VK_NULL_HANDLE};
   VkPipelineLayout                   m_lightCoarseCullingPipelineLayout{VK_NULL_HANDLE};
   VkPipelineLayout                   m_lightPipelineLayout{VK_NULL_HANDLE};

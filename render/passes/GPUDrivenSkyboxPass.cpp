@@ -1,29 +1,11 @@
 #include "GPUDrivenSkyboxPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
 
 namespace demo {
-
-namespace {
-
-[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
-{
-  switch(format)
-  {
-    case VK_FORMAT_D16_UNORM_S8_UINT:
-    case VK_FORMAT_D24_UNORM_S8_UINT:
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-      return rhi::TextureAspect::depthStencil;
-    default:
-      return rhi::TextureAspect::depth;
-  }
-}
-
-}  // namespace
 
 GPUDrivenSkyboxPass::GPUDrivenSkyboxPass(GPUDrivenRenderer* renderer)
     : m_renderer(renderer)
@@ -44,138 +26,93 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyboxPass::getDependenci
 void GPUDrivenSkyboxPass::execute(const PassContext& context) const
 {
   if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr
-     || !context.params->debugOptions.enableIBL)
+     || !context.params->debugOptions.enableIBL || context.params->gpuDrivenSceneView == nullptr
+     || !context.cameraAllocValid)
   {
     return;
   }
 
-  const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->sceneColorHdrImage == VK_NULL_HANDLE
-     || sceneView->sceneColorHdrView == VK_NULL_HANDLE || sceneView->sceneDepthImage == VK_NULL_HANDLE
-     || sceneView->sceneDepthView == VK_NULL_HANDLE || sceneView->sceneDepthExtent.width == 0u
-     || sceneView->sceneDepthExtent.height == 0u)
-  {
-    return;
-  }
-
-  const PipelineHandle skyboxPipeline = m_renderer->getGPUDrivenSkyboxPipelineHandle();
-  if(skyboxPipeline.isNull())
+  const GPUDrivenRenderer::ScreenPassTargets targets = m_renderer->getScreenColorDepthTargets();
+  const PipelineHandle  skyboxPipeline = m_renderer->getGPUDrivenSkyboxPipelineHandle();
+  if(!targets.valid || skyboxPipeline.isNull())
   {
     return;
   }
 
   context.cmd->beginEvent("GPUDrivenSkybox");
 
-  const rhi::TextureAspect depthAspect = sceneDepthAspect(sceneView->sceneDepthFormat);
-  const auto restoreResourcesForSampling = [&]() {
+  // Single source of truth for the color/depth state flips around the pass.
+  const auto transition = [&](TextureHandle handle, uint64_t nativeImage, rhi::TextureAspect aspect,
+                              rhi::ResourceAccess srcAccess, rhi::ResourceAccess dstAccess, rhi::ResourceState from,
+                              rhi::ResourceState to) {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-        .aspect = depthAspect,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::read,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::DepthStencilAttachment,
-        .newState = rhi::ResourceState::General,
+        .texture     = rhi::TextureHandle{handle.index, handle.generation},
+        .nativeImage = nativeImage,
+        .aspect      = aspect,
+        .srcStage    = rhi::PipelineStage::FragmentShader,
+        .dstStage    = rhi::PipelineStage::FragmentShader,
+        .srcAccess   = srcAccess,
+        .dstAccess   = dstAccess,
+        .oldState    = from,
+        .newState    = to,
         .isSwapchain = false,
     });
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-      .aspect = depthAspect,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
+  transition(kPassSceneColorHdrHandle, targets.colorImage, rhi::TextureAspect::color, rhi::ResourceAccess::read,
+             rhi::ResourceAccess::write, rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
+  transition(kPassSceneDepthHandle, targets.depthImage, targets.depthAspect, rhi::ResourceAccess::read,
+             rhi::ResourceAccess::read, rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
-  const rhi::Extent2D extent{sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
-  rhi::RenderTargetDesc colorTarget{
+  const rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->sceneColorHdrView),
-      .state = rhi::ResourceState::ColorAttachment,
-      .loadOp = rhi::LoadOp::load,
+      .view    = targets.colorView,
+      .state   = rhi::ResourceState::ColorAttachment,
+      .loadOp  = rhi::LoadOp::load,
       .storeOp = rhi::StoreOp::store,
   };
   const rhi::DepthTargetDesc depthTarget{
-      .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->sceneDepthView),
-      .state = rhi::ResourceState::DepthStencilAttachment,
-      .loadOp = rhi::LoadOp::load,
-      .storeOp = rhi::StoreOp::store,
+      .texture    = {},
+      .view       = targets.depthView,
+      .state      = rhi::ResourceState::DepthStencilAttachment,
+      .loadOp     = rhi::LoadOp::load,
+      .storeOp    = rhi::StoreOp::store,
       .clearValue = {0.0f, 0},
   };
 
   context.cmd->beginRenderPass(rhi::RenderPassDesc{
-      .renderArea = {{0, 0}, extent},
-      .colorTargets = &colorTarget,
+      .renderArea       = {{0, 0}, targets.extent},
+      .colorTargets     = &colorTarget,
       .colorTargetCount = 1,
-      .depthTarget = &depthTarget,
+      .depthTarget      = &depthTarget,
   });
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(targets.extent.width),
+                                         static_cast<float>(targets.extent.height), 0.0f, 1.0f});
+  context.cmd->setScissor(rhi::Rect2D{{0, 0}, targets.extent});
 
-  const VkPipeline pipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(skyboxPipeline));
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
-  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
-  if(pipeline != VK_NULL_HANDLE && layout != VK_NULL_HANDLE && textureSet != VK_NULL_HANDLE && context.cameraAllocValid)
-  {
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-    vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+  // Pipeline + both descriptor sets bind purely through the RHI: the resolver maps
+  // the GPUDriven-owned pipeline handle to its native pipeline and tracks the layout,
+  // and the texture/scene sets flow through BindGroup handles.
+  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, skyboxPipeline);
+  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex), nullptr, 0);
 
-    m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                                 reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
-                                                 context.cameraAlloc.offset);
-    VkDescriptorSet sceneDescriptorSet =
-        reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
-    if(sceneDescriptorSet != VK_NULL_HANDLE)
-    {
-      const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, 0u};
-      vkCmdBindDescriptorSets(vkCmd,
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              layout,
-                              shaderio::LSetScene,
-                              1,
-                              &sceneDescriptorSet,
-                              static_cast<uint32_t>(dynamicOffsets.size()),
-                              dynamicOffsets.data());
-    }
-    context.cmd->draw(3, 1, 0, 0);
-  }
+  // Point the lighting-scene set at this frame's transient camera allocation, then
+  // bind it (with its 2 dynamic UBOs) through the RHI bind group path.
+  m_renderer->updateLightingSceneDescriptorSet(context.frameIndex, context.transientAllocator->getBufferOpaque(),
+                                               context.cameraAlloc.offset);
+  const uint32_t sceneDynamicOffsets[] = {context.cameraAlloc.offset, 0u};
+  context.cmd->bindBindGroup(shaderio::LSetScene, m_renderer->getLightingSceneBindGroup(context.frameIndex),
+                             sceneDynamicOffsets, 2);
+
+  context.cmd->draw(3, 1, 0, 0);
 
   context.cmd->endRenderPass();
-  restoreResourcesForSampling();
+
+  transition(kPassSceneColorHdrHandle, targets.colorImage, rhi::TextureAspect::color, rhi::ResourceAccess::write,
+             rhi::ResourceAccess::read, rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+  transition(kPassSceneDepthHandle, targets.depthImage, targets.depthAspect, rhi::ResourceAccess::read,
+             rhi::ResourceAccess::read, rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
+
   context.cmd->endEvent();
 }
 

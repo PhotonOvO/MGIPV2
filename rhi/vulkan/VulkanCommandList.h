@@ -5,6 +5,10 @@
 
 #include <vector>
 
+namespace demo::rhi {
+class BindingResolver;
+}
+
 namespace demo::rhi::vulkan {
 
 class VulkanCommandList final : public demo::rhi::CommandList
@@ -13,6 +17,8 @@ public:
   VulkanCommandList() = default;
 
   void setCommandBuffer(VkCommandBuffer commandBuffer) { m_commandBuffer = commandBuffer; }
+
+  void setBindingResolver(demo::rhi::BindingResolver* resolver) { m_resolver = resolver; }
 
   void clearResourceStates() { m_resourceStates.clear(); }
 
@@ -71,7 +77,12 @@ private:
 
   VkCommandBuffer                 m_commandBuffer{VK_NULL_HANDLE};
   std::vector<ResourceStateEntry> m_resourceStates;
+  demo::rhi::BindingResolver*     m_resolver{nullptr};
+  VkPipelineLayout                m_currentPipelineLayout{VK_NULL_HANDLE};
 };
+
+// Inject the resolver used to map handles to native objects during recording.
+void setBindingResolver(demo::rhi::CommandList& commandList, demo::rhi::BindingResolver* resolver);
 
 VkCommandBuffer getNativeCommandBuffer(demo::rhi::CommandList& commandList);
 VkCommandBuffer getNativeCommandBuffer(const demo::rhi::CommandList& commandList);

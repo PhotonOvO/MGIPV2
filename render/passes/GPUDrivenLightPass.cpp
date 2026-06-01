@@ -145,7 +145,7 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
 
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                               reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                               context.transientAllocator->getBufferOpaque(),
                                                cameraAlloc.offset);
   VkDescriptorSet sceneDescriptorSet =
       reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));

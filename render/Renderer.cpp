@@ -4319,6 +4319,8 @@ rhi::CommandList& Renderer::beginCommandRecording()
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
   rhi::FrameData& frame = m_perFrame.frameContext->getCurrentFrame();
   ASSERT(frame.commandList != nullptr, "Current frame command list must be valid");
+  rhi::vulkan::setBindingResolver(*frame.commandList,
+                                  m_bindingResolverOverride != nullptr ? m_bindingResolverOverride : this);
   return *frame.commandList;
 }
 
@@ -6409,7 +6411,8 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     DBG_VK_NAME(lightPipeline);
     m_lightPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                        reinterpret_cast<uint64_t>(lightPipeline),
-                                       2);  // specialization variant
+                                       2,  // specialization variant
+                                       reinterpret_cast<uint64_t>(m_device.lightPipelineLayout));
 
     if(m_device.postProcessPipelineLayout == VK_NULL_HANDLE)
     {
@@ -8068,14 +8071,40 @@ void Renderer::createShadowCullingPipeline()
 #endif
 }
 
-PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant)
+PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
+                                          uint64_t nativeLayout)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
   return m_device.pipelineRegistry.emplace(DeviceLifetimeResources::PipelineRecord{
       .bindPoint             = bindPoint,
       .nativePipeline        = nativePipeline,
       .specializationVariant = specializationVariant,
+      .nativeLayout          = nativeLayout,
   });
+}
+
+uint64_t Renderer::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
+{
+  const uint32_t vkBindPoint = bindPoint == rhi::PipelineBindPoint::compute
+                                   ? static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE)
+                                   : static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS);
+  return getPipelineOpaque(handle, vkBindPoint);
+}
+
+uint64_t Renderer::resolvePipelineLayout(PipelineHandle handle) const
+{
+  const DeviceLifetimeResources::PipelineRecord* record = tryGetPipelineRecord(handle);
+  return record != nullptr ? record->nativeLayout : 0;
+}
+
+uint64_t Renderer::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
+{
+  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
+  if(bindGroup == nullptr || bindGroup->desc.table == nullptr)
+  {
+    return 0;
+  }
+  return bindGroup->desc.table->getNativeHandle();
 }
 
 void Renderer::destroyPipelines()
@@ -9475,6 +9504,23 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
+}
+
+uint64_t Renderer::getGBufferTextureSetLayout() const
+{
+  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSetLayout);
+}
+
+uint64_t Renderer::getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const
+{
+  return frameIndex < m_device.gbufferTextureSets.size()
+             ? reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex])
+             : 0;
+}
+
+uint32_t Renderer::getFrameResourceCount() const
+{
+  return static_cast<uint32_t>(m_perFrame.frameUserData.size());
 }
 
 uint64_t Renderer::getGraphicsMaterialDescriptorSet() const

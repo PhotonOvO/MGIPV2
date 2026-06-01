@@ -1,5 +1,7 @@
 #include "VulkanCommandList.h"
 
+#include "../RHIBindingResolver.h"
+
 #include <stdexcept>
 
 namespace demo::rhi::vulkan {
@@ -427,9 +429,26 @@ void VulkanCommandList::transitionTexture(const TextureBarrierDesc& desc)
   setResourceState(trackedResource, desc.newState);
 }
 
-void VulkanCommandList::bindPipeline(PipelineBindPoint, PipelineHandle)
+void VulkanCommandList::bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline)
 {
   ensureCommandBuffer(m_commandBuffer);
+  if(m_resolver == nullptr || pipeline.isNull())
+  {
+    return;
+  }
+
+  const VkPipelineBindPoint vkBindPoint =
+      bindPoint == PipelineBindPoint::compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
+  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(m_resolver->resolvePipeline(pipeline, bindPoint));
+  if(nativePipeline == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  vkCmdBindPipeline(m_commandBuffer, vkBindPoint, nativePipeline);
+
+  // Remember the layout so subsequent bindBindGroup calls can bind descriptor
+  // sets compatibly without the caller having to pass the layout explicitly.
+  m_currentPipelineLayout = reinterpret_cast<VkPipelineLayout>(m_resolver->resolvePipelineLayout(pipeline));
 }
 
 void VulkanCommandList::bindBindTable(PipelineBindPoint, uint32_t, BindTableHandle, const uint32_t*, uint32_t)
@@ -437,10 +456,32 @@ void VulkanCommandList::bindBindTable(PipelineBindPoint, uint32_t, BindTableHand
   ensureCommandBuffer(m_commandBuffer);
 }
 
-void VulkanCommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+void VulkanCommandList::bindBindGroup(uint32_t        slot,
+                                      BindGroupHandle bindGroup,
+                                      const uint32_t* dynamicOffsets,
+                                      uint32_t        dynamicOffsetCount)
 {
   ensureCommandBuffer(m_commandBuffer);
-  // Placeholder implementation - will be properly implemented after Pipeline tracks BindGroupLayout
+  if(m_resolver == nullptr || bindGroup.isNull() || m_currentPipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkDescriptorSet descriptorSet =
+      reinterpret_cast<VkDescriptorSet>(m_resolver->resolveBindGroupDescriptorSet(bindGroup));
+  if(descriptorSet == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  vkCmdBindDescriptorSets(m_commandBuffer,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_currentPipelineLayout,
+                          slot,
+                          1,
+                          &descriptorSet,
+                          dynamicOffsetCount,
+                          dynamicOffsets);
 }
 
 void VulkanCommandList::bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
@@ -553,6 +594,11 @@ VkCommandBuffer getNativeCommandBuffer(demo::rhi::CommandList& commandList)
 VkCommandBuffer getNativeCommandBuffer(const demo::rhi::CommandList& commandList)
 {
   return static_cast<const VulkanCommandList&>(commandList).nativeHandle();
+}
+
+void setBindingResolver(demo::rhi::CommandList& commandList, demo::rhi::BindingResolver* resolver)
+{
+  static_cast<VulkanCommandList&>(commandList).setBindingResolver(resolver);
 }
 
 void cmdPipelineBarrier(const demo::rhi::CommandList& commandList, const VkDependencyInfo& dependencyInfo)

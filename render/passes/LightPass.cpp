@@ -63,150 +63,79 @@ void LightPass::execute(const PassContext& context) const
 
     context.cmd->beginEvent("GPUDrivenLight");
 
-    // Get output texture view and fixed extent
-    rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(
-        m_renderer->getOutputTextureView());
-    const VkExtent2D outputExtent = m_renderer->getSceneResources().getSize();
-    const rhi::Extent2D extent = {outputExtent.width, outputExtent.height};
+    const rhi::TextureViewHandle outputViewHandle =
+        rhi::TextureViewHandle::fromNative(m_renderer->getOutputTextureView());
+    const VkExtent2D    outputExtent = m_renderer->getSceneResources().getSize();
+    const rhi::Extent2D extent       = {outputExtent.width, outputExtent.height};
+    const PipelineHandle lightPipeline = m_renderer->getLightPipelineHandle();
 
-    if(outputViewHandle.isNull())
+    if(outputViewHandle.isNull() || lightPipeline.isNull() || !context.cameraAllocValid)
     {
         context.cmd->endEvent();
         return;
     }
 
-    rhi::RenderTargetDesc colorTarget = {
-        .texture = {},  // Not used when view carries native pointer
-        .view = outputViewHandle,
-        .state = rhi::ResourceState::ColorAttachment,
-        .loadOp = rhi::LoadOp::clear,  // Clear output texture
-        .storeOp = rhi::StoreOp::store,
-        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},  // Black background
+    // Single source of truth for the output-texture state flip around the pass.
+    const auto transitionOutput = [&](rhi::ResourceState from, rhi::ResourceState to,
+                                      rhi::ResourceAccess srcAccess, rhi::ResourceAccess dstAccess) {
+        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
+            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
+            .aspect      = rhi::TextureAspect::color,
+            .srcStage    = rhi::PipelineStage::FragmentShader,
+            .dstStage    = rhi::PipelineStage::FragmentShader,
+            .srcAccess   = srcAccess,
+            .dstAccess   = dstAccess,
+            .oldState    = from,
+            .newState    = to,
+            .isSwapchain = false,
+        });
     };
 
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
-        .aspect      = rhi::TextureAspect::color,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::FragmentShader,
-        .srcAccess   = rhi::ResourceAccess::read,
-        .dstAccess   = rhi::ResourceAccess::write,
-        .oldState    = rhi::ResourceState::General,
-        .newState    = rhi::ResourceState::ColorAttachment,
-        .isSwapchain = false,
-    });
+    transitionOutput(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment,
+                     rhi::ResourceAccess::read, rhi::ResourceAccess::write);
 
-    // Begin render pass using RHI interface
+    const rhi::RenderTargetDesc colorTarget = {
+        .texture    = {},
+        .view       = outputViewHandle,
+        .state      = rhi::ResourceState::ColorAttachment,
+        .loadOp     = rhi::LoadOp::clear,
+        .storeOp    = rhi::StoreOp::store,
+        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
+    };
     const rhi::RenderPassDesc passDesc = {
-        .renderArea = {{0, 0}, extent},
-        .colorTargets = &colorTarget,
+        .renderArea       = {{0, 0}, extent},
+        .colorTargets     = &colorTarget,
         .colorTargetCount = 1,
-        .depthTarget = nullptr,
+        .depthTarget      = nullptr,
     };
     context.cmd->beginRenderPass(passDesc);
 
-    // Set viewport and scissor using RHI interface
-    const rhi::Viewport viewport{
-        0.0f, 0.0f,
-        static_cast<float>(extent.width),
-        static_cast<float>(extent.height),
-        0.0f, 1.0f
-    };
-    const rhi::Rect2D scissor{{0, 0}, extent};
-    context.cmd->setViewport(viewport);
-    context.cmd->setScissor(scissor);
+    context.cmd->setViewport({0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+    context.cmd->setScissor({{0, 0}, extent});
 
-    // Bind light pipeline
-    // BLOCKER: RHI bindPipeline is a stub placeholder, using native Vulkan binding
-    const PipelineHandle lightPipeline = m_renderer->getLightPipelineHandle();
-    if(lightPipeline.isNull())
-    {
-        context.cmd->endRenderPass();
-        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
-            .aspect      = rhi::TextureAspect::color,
-            .srcStage    = rhi::PipelineStage::FragmentShader,
-            .dstStage    = rhi::PipelineStage::FragmentShader,
-            .srcAccess   = rhi::ResourceAccess::write,
-            .dstAccess   = rhi::ResourceAccess::read,
-            .oldState    = rhi::ResourceState::ColorAttachment,
-            .newState    = rhi::ResourceState::General,
-            .isSwapchain = false,
-        });
-        context.cmd->endEvent();
-        return;
-    }
+    // Pipeline + per-frame camera/scene uniforms bind through pure RHI. The
+    // resolver maps the handles to native objects and tracks the layout.
+    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, lightPipeline);
 
-    const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
-        m_renderer->getPipelineOpaque(lightPipeline, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS)));
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
+    const uint32_t cameraDynamicOffsets[] = {context.cameraAlloc.offset, 0u};
+    context.cmd->bindBindGroup(shaderio::LSetScene, m_renderer->getCameraBindGroup(context.frameIndex),
+                               cameraDynamicOffsets, 2);
 
-    const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(
-        m_renderer->getLightPipelineLayout());
+    // Hidden dependency: the GBuffer input texture set is still an externally
+    // managed VkDescriptorSet (Renderer::m_device.gbufferTextureSets), not a
+    // BindGroup, so it remains the one native bind in this pass. Promoting it to
+    // a BindGroup would make this pass fully native-free.
+    const VkDescriptorSet  textureSet     = reinterpret_cast<VkDescriptorSet>(m_renderer->getGBufferTextureDescriptorSet());
+    const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
+    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineLayout, shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
 
-    const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(
-        m_renderer->getGBufferTextureDescriptorSet());
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
-
-    // Use shared camera allocation from PassContext (allocated once per frame by Renderer)
-    if(!context.cameraAllocValid)
-    {
-        context.cmd->endRenderPass();
-        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-            .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-            .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
-            .aspect      = rhi::TextureAspect::color,
-            .srcStage    = rhi::PipelineStage::FragmentShader,
-            .dstStage    = rhi::PipelineStage::FragmentShader,
-            .srcAccess   = rhi::ResourceAccess::write,
-            .dstAccess   = rhi::ResourceAccess::read,
-            .oldState    = rhi::ResourceState::ColorAttachment,
-            .newState    = rhi::ResourceState::General,
-            .isSwapchain = false,
-        });
-        context.cmd->endEvent();
-        return;
-    }
-    const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
-
-    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-    if(!cameraBindGroupHandle.isNull())
-    {
-      VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              2,
-                              dynamicOffsets);
-    }
-
-    // Draw fullscreen triangle using RHI interface
     context.cmd->draw(3, 1, 0, 0);
-
-    // End render pass using RHI interface
     context.cmd->endRenderPass();
 
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(m_renderer->getSceneResources().getOutputTextureImage()),
-        .aspect      = rhi::TextureAspect::color,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::FragmentShader,
-        .srcAccess   = rhi::ResourceAccess::write,
-        .dstAccess   = rhi::ResourceAccess::read,
-        .oldState    = rhi::ResourceState::ColorAttachment,
-        .newState    = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    transitionOutput(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General,
+                     rhi::ResourceAccess::write, rhi::ResourceAccess::read);
 
     context.cmd->endEvent();
 }

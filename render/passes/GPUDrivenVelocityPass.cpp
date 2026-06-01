@@ -79,7 +79,7 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
   const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                               reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                               context.transientAllocator->getBufferOpaque(),
                                                context.cameraAlloc.offset);
   const VkDescriptorSet sceneDescriptorSet =
       reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));

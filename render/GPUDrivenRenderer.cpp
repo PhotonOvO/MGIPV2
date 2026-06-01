@@ -4,6 +4,7 @@
 #include "../common/TracyProfiling.h"
 #include "../loader/Ktx2Loader.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
+#include "../rhi/vulkan/VulkanAdoptedBindGroup.h"
 
 #include <algorithm>
 #include <cstring>
@@ -343,6 +344,7 @@ constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
 void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_renderer.init(window, surface, vSync);
+  m_renderer.setBindingResolverOverride(this);
   m_sceneRegistry.init(getNativeDeviceHandle(), getAllocatorHandle());
   initLightingResources();
   initIBLResources();
@@ -3352,6 +3354,23 @@ void GPUDrivenRenderer::initLightingResources()
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &lightingAlloc, m_lightingDescriptorSets.data()));
 
+  // Wrap each lighting-input set (set LSetTextures) as a BindGroup so screen-space
+  // passes can bind it through cmd->bindBindGroup. The adapter objects are owned by
+  // the bind-group pool (deleted in destroyBindGroups), matching the convention used
+  // for the camera/material bind groups.
+  m_lightingInputBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t i = 0; i < frameCount; ++i)
+  {
+    BindGroupDesc inputBindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightingSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightingDescriptorSets[i])),
+        .primaryLogicalIndex = shaderio::LBindTextures,
+        .debugName           = "gpu-driven-lighting-input",
+    };
+    m_lightingInputBindGroups[i] = m_renderer.registerExternalBindGroup(inputBindGroupDesc);
+  }
+
   std::vector<VkDescriptorSetLayout> cullingLayouts(frameCount, m_lightCoarseCullingSetLayout);
   m_lightCoarseCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
   const VkDescriptorSetAllocateInfo cullingAlloc{
@@ -3372,6 +3391,22 @@ void GPUDrivenRenderer::initLightingResources()
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &sceneAlloc, m_lightingSceneDescriptorSets.data()));
   m_lightingSceneDescriptorTransientBuffers.assign(frameCount, VK_NULL_HANDLE);
+
+  // Wrap each lighting-scene set as a BindGroup so GPUDriven fullscreen passes can
+  // bind it through cmd->bindBindGroup. The adapters adopt the existing set/layout
+  // and are owned here; they live until shutdownLightingResources().
+  m_lightingSceneBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t i = 0; i < frameCount; ++i)
+  {
+    BindGroupDesc sceneBindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightingSceneSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[i])),
+        .primaryLogicalIndex = shaderio::LBindCamera,
+        .debugName           = "gpu-driven-lighting-scene",
+    };
+    m_lightingSceneBindGroups[i] = m_renderer.registerExternalBindGroup(sceneBindGroupDesc);
+  }
 
   const VkPipelineLayoutCreateInfo cullingPipelineLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -3433,6 +3468,10 @@ void GPUDrivenRenderer::shutdownLightingResources()
   m_lightingDescriptorSets.clear();
   m_lightingSceneDescriptorSets.clear();
   m_lightingSceneDescriptorTransientBuffers.clear();
+  // Adapter objects are deleted by m_renderer's destroyBindGroups() during
+  // shutdown; here we only drop the (now-stale) handles.
+  m_lightingSceneBindGroups.clear();
+  m_lightingInputBindGroups.clear();
   m_lightCoarseCullingDescriptorSets.clear();
   m_lightResources.deinit();
   m_gpuDrivenPointLights.clear();
@@ -4110,6 +4149,26 @@ uint64_t GPUDrivenRenderer::getLightingInputDescriptorSet() const
              : 0;
 }
 
+uint64_t GPUDrivenRenderer::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
+{
+  return bindPoint == rhi::PipelineBindPoint::compute ? getNativeComputePipeline(handle)
+                                                      : getNativeGraphicsPipeline(handle);
+}
+
+uint64_t GPUDrivenRenderer::resolvePipelineLayout(PipelineHandle handle) const
+{
+  if(isGpuDrivenFullscreenPipeline(handle))
+  {
+    return reinterpret_cast<uint64_t>(m_lightPipelineLayout);
+  }
+  return m_renderer.resolvePipelineLayout(handle);
+}
+
+uint64_t GPUDrivenRenderer::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
+{
+  return m_renderer.resolveBindGroupDescriptorSet(handle);
+}
+
 uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) const
 {
   return frameIndex < m_lightingSceneDescriptorSets.size()
@@ -4125,8 +4184,9 @@ uint64_t GPUDrivenRenderer::getCurrentLightCullingDescriptorSet() const
              : 0;
 }
 
-void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t frameIndex, VkBuffer transientBuffer, uint32_t)
+void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t)
 {
+  const VkBuffer transientBuffer = reinterpret_cast<VkBuffer>(transientBufferOpaque);
   if(frameIndex >= m_lightingSceneDescriptorSets.size() || transientBuffer == VK_NULL_HANDLE)
   {
     return;

@@ -31,6 +31,7 @@
 #include "CSMShadowResources.h"
 #include "TransientAllocator.h"
 #include "UploadUtils.h"
+#include "../rhi/RHIBindingResolver.h"
 #include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
 #include "../rhi/RHIDevice.h"
@@ -323,10 +324,26 @@ struct GPUCullOverlayObject
   uint32_t  result{shaderio::LGPUCullResultVisible};
 };
 
-class Renderer
+class Renderer : public rhi::BindingResolver
 {
 public:
   static constexpr uint32_t kDemoMaterialSlotCount = 2;
+
+  // rhi::BindingResolver — maps opaque handles to native objects for the
+  // backend command list during pass recording.
+  [[nodiscard]] uint64_t resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const override;
+  [[nodiscard]] uint64_t resolvePipelineLayout(PipelineHandle handle) const override;
+  [[nodiscard]] uint64_t resolveBindGroupDescriptorSet(BindGroupHandle handle) const override;
+
+  // Lets a wrapping renderer (e.g. GPUDrivenRenderer, which owns pipelines and
+  // descriptor sets outside this registry) supply the resolver injected into the
+  // frame command list. When null, this renderer resolves its own handles.
+  void setBindingResolverOverride(rhi::BindingResolver* resolver) { m_bindingResolverOverride = resolver; }
+
+  // Register a bind group that adopts caller-owned BindTable/BindTableLayout
+  // objects (e.g. wrapping an externally-managed descriptor set). The caller must
+  // keep those objects alive for the lifetime of the returned handle.
+  BindGroupHandle registerExternalBindGroup(BindGroupDesc desc) { return createBindGroup(std::move(desc)); }
 
   enum class GraphicsPipelineVariant : uint32_t
   {
@@ -471,6 +488,9 @@ public:
   uint64_t       getGraphicsMDIPipelineLayout() const;
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
+  uint64_t       getGBufferTextureSetLayout() const;      // Layout of the GBuffer texture set
+  uint64_t       getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const; // Per-frame GBuffer texture set
+  uint32_t       getFrameResourceCount() const;           // Number of per-frame resource slots
   uint64_t       getGraphicsMaterialDescriptorSet() const;
   uint64_t       getLightingInputDescriptorSet() const;
   uint64_t       getLightCullingDescriptorSet() const;
@@ -698,6 +718,7 @@ private:
       uint32_t bindPoint{0};
       uint64_t nativePipeline{0};
       uint32_t specializationVariant{0};
+      uint64_t nativeLayout{0};
     };
 
     std::unique_ptr<rhi::Device> device;
@@ -855,6 +876,8 @@ private:
 
   // glTF support
   MeshPool m_meshPool;
+
+  rhi::BindingResolver* m_bindingResolverOverride{nullptr};
 
   // Light pipeline
   PipelineHandle m_lightPipeline{};
@@ -1091,7 +1114,8 @@ private:
   BindGroupHandle                           createBindGroup(BindGroupDesc desc);
   void           updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const;
   // destroyBindGroup is provided by public RHI interface (line 145)
-  PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant);
+  PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
+                                  uint64_t nativeLayout = 0);
   void           destroyPipelines();
   const DeviceLifetimeResources::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;
   const BindGroupResource* tryGetBindGroup(BindGroupHandle handle) const;

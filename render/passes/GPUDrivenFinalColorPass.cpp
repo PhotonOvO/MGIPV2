@@ -161,7 +161,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
     std::memcpy(postProcessAlloc.cpuPtr, &postProcessUniforms, sizeof(postProcessUniforms));
     context.transientAllocator->flushAllocation(postProcessAlloc, sizeof(postProcessUniforms));
     m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                                 reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque()),
+                                                 context.transientAllocator->getBufferOpaque(),
                                                  context.cameraAlloc.offset);
     const VkDescriptorSet sceneDescriptorSet =
         reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
