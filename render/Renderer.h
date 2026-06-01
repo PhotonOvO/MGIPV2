@@ -332,13 +332,6 @@ public:
   // keep those objects alive for the lifetime of the returned handle.
   BindGroupHandle registerExternalBindGroup(BindGroupDesc desc) { return createBindGroup(std::move(desc)); }
 
-  enum class GraphicsPipelineVariant : uint32_t
-  {
-    nonTextured = 0,
-    textured    = 1,
-    light       = 2,
-  };
-
   Renderer() = default;
 
   void init(void* window, rhi::Surface& surface, bool vSync);
@@ -1054,8 +1047,6 @@ private:
   void                 updateGBufferTextureDescriptorSet();
   void                 destroyBindGroups();
   utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
-  PipelineHandle       selectComputePipelineHandle() const;
-  PipelineHandle       selectGraphicsPipelineHandle(GraphicsPipelineVariant variant) const;
   rhi::ResourceIndex   getBindGroupPrimaryLogicalIndex(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   const MaterialResources::MaterialRecord*  tryGetMaterial(MaterialHandle handle) const;
   const MaterialResources::TextureHotData*  tryGetTextureHot(TextureHandle handle) const;

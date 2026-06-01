@@ -7843,25 +7843,6 @@ void Renderer::destroyPipelines()
   m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
 
-PipelineHandle Renderer::selectComputePipelineHandle() const
-{
-  return m_device.prebuiltPipelines.compute;
-}
-
-PipelineHandle Renderer::selectGraphicsPipelineHandle(GraphicsPipelineVariant variant) const
-{
-  switch(variant)
-  {
-    case GraphicsPipelineVariant::textured:
-      return m_device.prebuiltPipelines.graphicsTextured;
-    case GraphicsPipelineVariant::nonTextured:
-      return m_device.prebuiltPipelines.graphicsNonTextured;
-    default:
-      ASSERT(false, "Unsupported graphics pipeline variant");
-      return kNullPipelineHandle;
-  }
-}
-
 const Renderer::DeviceLifetimeResources::PipelineRecord* Renderer::tryGetPipelineRecord(PipelineHandle handle) const
 {
   return m_device.pipelineRegistry.tryGet(handle);
