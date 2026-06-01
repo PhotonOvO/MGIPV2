@@ -845,21 +845,6 @@ private:
     std::vector<DrawStreamDecoder::DecodedDraw> decodedDraws;
   };
 
-  // Per-frame passes
-  std::unique_ptr<GBufferPass>         m_gbufferPass;
-  std::unique_ptr<AnimateVerticesPass> m_animateVerticesPass;
-  std::unique_ptr<SceneOpaquePass>     m_sceneOpaquePass;
-  std::unique_ptr<DepthPrepass>         m_depthPrepass;
-  std::unique_ptr<DepthPyramidPass>     m_depthPyramidPass;
-  std::unique_ptr<GPUCullingPass>       m_gpuCullingPass;
-  std::unique_ptr<LightCullingPass>     m_lightCullingPass;
-  std::unique_ptr<CSMShadowPass>        m_csmShadowPass;
-  std::unique_ptr<LightPass>           m_lightPass;
-  std::unique_ptr<ForwardPass>         m_forwardPass;
-  std::unique_ptr<DebugPass>           m_debugPass;
-  std::unique_ptr<PresentPass>         m_presentPass;
-  std::unique_ptr<ImguiPass>           m_imguiPass;
-  demo::PassExecutor                   m_passExecutor;
   bool                                 m_presentPassActive{false};
 
   // glTF support
@@ -1031,7 +1016,6 @@ private:
   void              rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize = std::nullopt);
   bool              prepareFrameResources();
   bool              acquireSwapchainImageForPresent();
-  void              updateSwapchainTextureBinding(rhi::ResourceState initialState);
   rhi::CommandList& beginCommandRecording();
   void              drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor);
   void              endFrame(rhi::CommandList& cmd);
@@ -1089,7 +1073,6 @@ private:
   void                 createIBLResources(VkCommandBuffer cmd);
   void                 destroyIBLResources();
   void                 updateGBufferTextureDescriptorSet();
-  void                 bindStaticPassResources();  // Bind static resources once per swapchain rebuild
   void                 destroyBindGroups();
   utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
   PipelineHandle       selectComputePipelineHandle() const;

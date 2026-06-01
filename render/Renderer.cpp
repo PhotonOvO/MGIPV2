@@ -1119,36 +1119,6 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
 
   updateGraphicsDescriptorSet();
-
-  // Initialize passes and pass executor
-  m_gbufferPass         = std::make_unique<GBufferPass>(this);
-  m_animateVerticesPass = std::make_unique<AnimateVerticesPass>(this);
-  m_sceneOpaquePass     = std::make_unique<SceneOpaquePass>(this);
-  m_depthPrepass        = std::make_unique<DepthPrepass>(this);
-  m_depthPyramidPass    = std::make_unique<DepthPyramidPass>(this);
-  m_gpuCullingPass      = std::make_unique<GPUCullingPass>(this);
-  m_lightCullingPass    = std::make_unique<LightCullingPass>(this);
-  m_csmShadowPass       = std::make_unique<CSMShadowPass>(this);
-  m_lightPass           = std::make_unique<LightPass>(this);
-  m_forwardPass         = std::make_unique<ForwardPass>(this);
-  m_debugPass           = std::make_unique<DebugPass>(this);
-  m_presentPass         = std::make_unique<PresentPass>(this);
-  m_imguiPass           = std::make_unique<ImguiPass>(this);
-  m_passExecutor.clear();
-  m_passExecutor.addPass(*m_depthPrepass);
-  m_passExecutor.addPass(*m_depthPyramidPass);
-  m_passExecutor.addPass(*m_gpuCullingPass);
-  m_passExecutor.addPass(*m_lightCullingPass);
-  m_passExecutor.addPass(*m_csmShadowPass);
-  m_passExecutor.addPass(*m_gbufferPass);
-  // m_passExecutor.addPass(*m_animateVerticesPass);
-  // m_passExecutor.addPass(*m_sceneOpaquePass);
-  m_passExecutor.addPass(*m_lightPass);
-  m_passExecutor.addPass(*m_forwardPass);
-  m_passExecutor.addPass(*m_debugPass);
-  m_passExecutor.addPass(*m_presentPass);
-  m_passExecutor.addPass(*m_imguiPass);
-  createPassGpuProfileResources(m_passExecutor);
 }
 
 void Renderer::shutdown(rhi::Surface& surface)
@@ -2070,7 +2040,6 @@ bool Renderer::acquireSwapchainImageForPresent()
     {
       m_swapchainDependent.swapchain->requestRebuild();
     }
-    updateSwapchainTextureBinding(rhi::ResourceState::Undefined);
     return false;
   }
 
@@ -2080,23 +2049,7 @@ bool Renderer::acquireSwapchainImageForPresent()
   }
 
   m_swapchainDependent.hasAcquiredImage = true;
-  updateSwapchainTextureBinding(m_swapchainDependent.imageStates[m_swapchainDependent.currentImageIndex]);
   return true;
-}
-
-void Renderer::updateSwapchainTextureBinding(rhi::ResourceState initialState)
-{
-  ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before binding the present target");
-
-  m_passExecutor.bindTexture({
-      .handle       = kPassSwapchainHandle,
-      .nativeImage  = m_swapchainDependent.hasAcquiredImage
-                        ? m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex)
-                        : 0,
-      .aspect       = rhi::TextureAspect::color,
-      .initialState = initialState,
-      .isSwapchain  = true,
-  });
 }
 
 void Renderer::createIBLResources(VkCommandBuffer cmd)
@@ -4132,14 +4085,6 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
     updateGPUCullingDescriptorSet(frameIndex);
   }
 
-  // Bind static pass resources once after swapchain/resources rebuild
-  m_passExecutor.clearResourceBindings();
-  bindStaticPassResources();
-}
-
-void Renderer::bindStaticPassResources()
-{
-  bindStaticPassResources(m_passExecutor);
 }
 
 void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
