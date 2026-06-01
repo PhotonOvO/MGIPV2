@@ -4,13 +4,13 @@
 
 namespace demo {
 
-class Renderer;
+class RenderDevice;
 
 // Debug pass to draw CSM cascade frustum wireframes as 3D lines
 // Draws 4 cascade frustums color-coded: Red (c0), Green (c1), Blue (c2), Cyan (c3)
 class ShadowDebugPass : public RenderPassNode {
 public:
-    explicit ShadowDebugPass(Renderer* renderer);
+    explicit ShadowDebugPass(RenderDevice* renderer);
     ~ShadowDebugPass() override = default;
 
     [[nodiscard]] const char* getName() const override { return "ShadowDebugPass"; }
@@ -18,7 +18,7 @@ public:
     void execute(const PassContext& context) const override;
 
 private:
-    Renderer* m_renderer;
+    RenderDevice* m_renderer;
 
     // Vertex structure for debug lines
     struct DebugVertex {

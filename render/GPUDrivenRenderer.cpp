@@ -2893,8 +2893,8 @@ void GPUDrivenRenderer::uploadPersistentDrawData()
         drawIndex < m_sceneDrawRecords.size() ? &m_sceneDrawRecords[drawIndex] : nullptr;
     const MaterialHandle drawMaterialHandle =
         drawRecord != nullptr ? drawRecord->materialHandle : kNullMaterialHandle;
-    const Renderer::MaterialTextureIndices drawMaterialTextures =
-        drawMaterialHandle.isNull() ? Renderer::MaterialTextureIndices{}
+    const RenderDevice::MaterialTextureIndices drawMaterialTextures =
+        drawMaterialHandle.isNull() ? RenderDevice::MaterialTextureIndices{}
                                     : m_renderer.getMaterialTextureIndices(drawMaterialHandle, m_activeUploadResult);
     shaderio::DrawUniforms drawData{};
     drawData.modelMatrix = drawRecord != nullptr ? drawRecord->worldTransform : mesh->transform;

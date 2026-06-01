@@ -311,7 +311,7 @@ struct GPUCullOverlayObject
   uint32_t  result{shaderio::LGPUCullResultVisible};
 };
 
-class Renderer : public rhi::BindingResolver
+class RenderDevice : public rhi::BindingResolver
 {
 public:
   static constexpr uint32_t kDemoMaterialSlotCount = 2;
@@ -332,7 +332,7 @@ public:
   // keep those objects alive for the lifetime of the returned handle.
   BindGroupHandle registerExternalBindGroup(BindGroupDesc desc) { return createBindGroup(std::move(desc)); }
 
-  Renderer() = default;
+  RenderDevice() = default;
 
   void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
@@ -671,8 +671,8 @@ private:
     std::unordered_map<VkSamplerCreateInfo, VkSampler, SamplerCreateInfoHash, SamplerCreateInfoEqual> m_samplerMap;
   };
 
-  // Created during Renderer::init() after feature negotiation.
-  // Destroyed during Renderer::shutdown() after vkDeviceWaitIdle.
+  // Created during RenderDevice::init() after feature negotiation.
+  // Destroyed during RenderDevice::shutdown() after vkDeviceWaitIdle.
   // Rebuild trigger: none while device is alive; recreated only on full renderer/device re-init.
   struct DeviceLifetimeResources
   {
@@ -1098,7 +1098,7 @@ private:
 
   struct PassProfilingHooks final : PassExecutor::ExecutionHooks
   {
-    explicit PassProfilingHooks(Renderer* owner)
+    explicit PassProfilingHooks(RenderDevice* owner)
         : renderer(owner)
     {
     }
@@ -1106,7 +1106,7 @@ private:
     void beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const override;
     void afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const override;
 
-    Renderer* renderer{nullptr};
+    RenderDevice* renderer{nullptr};
   };
 
   DeviceLifetimeResources     m_device;

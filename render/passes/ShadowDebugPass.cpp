@@ -13,7 +13,7 @@
 
 namespace demo {
 
-ShadowDebugPass::ShadowDebugPass(Renderer* renderer)
+ShadowDebugPass::ShadowDebugPass(RenderDevice* renderer)
     : m_renderer(renderer)
 {
 }

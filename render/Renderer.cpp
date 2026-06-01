@@ -502,7 +502,7 @@ static VkFormat selectSwapchainImageFormat(VkPhysicalDevice physicalDevice, VkSu
 
   uint32_t formatCount = 0;
   VK_CHECK(vkGetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, &surfaceInfo2, &formatCount, nullptr));
-  ASSERT(formatCount > 0, "Renderer::init requires at least one surface format");
+  ASSERT(formatCount > 0, "RenderDevice::init requires at least one surface format");
 
   std::vector<VkSurfaceFormat2KHR> formats(formatCount, {.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR});
   VK_CHECK(vkGetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, &surfaceInfo2, &formatCount, formats.data()));
@@ -774,7 +774,7 @@ static rhi::ShaderReflectionData buildRasterShaderReflection()
   reflection.resourceBindings = {
       rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
                                  rhi::ShaderStageFlagBits::fragment, static_cast<uint32_t>(shaderio::LSetTextures),
-                                 static_cast<uint32_t>(shaderio::LBindTextures), Renderer::kDemoMaterialSlotCount, 0},
+                                 static_cast<uint32_t>(shaderio::LBindTextures), RenderDevice::kDemoMaterialSlotCount, 0},
       rhi::ShaderResourceBinding{"sceneInfo", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                  rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
                                  static_cast<uint32_t>(shaderio::LSetScene), static_cast<uint32_t>(shaderio::LBindSceneInfo), 1, 0},
@@ -804,7 +804,7 @@ static rhi::ShaderReflectionData buildComputeShaderReflection()
   return reflection;
 }
 
-std::optional<uint32_t> Renderer::mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot)
+std::optional<uint32_t> RenderDevice::mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot)
 {
   switch(slot)
   {
@@ -817,7 +817,7 @@ std::optional<uint32_t> Renderer::mapSetSlotToLegacyShaderSet(BindGroupSetSlot s
   }
 }
 
-void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
+void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_swapchainDependent.vSync = vSync;
   m_materials                = MaterialResources{};
@@ -857,9 +857,9 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_device.device->init(deviceCreateInfo);
 
   const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
-  ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "Renderer::init requires RHI Core capability tier");
+  ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "RenderDevice::init requires RHI Core capability tier");
   ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
-         "Renderer::init requires graphics+compute+bindless capability floor");
+         "RenderDevice::init requires graphics+compute+bindless capability floor");
 
   const VkInstance nativeInstance = fromNativeHandle<VkInstance>(m_device.device->getNativeInstance());
   const VkPhysicalDevice nativePhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
@@ -888,7 +888,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_meshPool.init(nativeDevice, m_device.allocator, m_device.staticBufferUploadPolicy);
 
   const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
-  ASSERT(nativeSurface != VK_NULL_HANDLE, "Renderer::init requires a valid initialized surface");
+  ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
   DBG_VK_NAME(nativeSurface);
   m_swapchainDependent.swapchainImageFormat = selectSwapchainImageFormat(nativePhysicalDevice, nativeSurface);
 
@@ -1008,7 +1008,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
       DBG_VK_NAME(m_device.gbufferTextureSetLayout);
 
       const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-      ASSERT(frameCount > 0, "Renderer::init requires per-frame data before allocating LightPass descriptor sets");
+      ASSERT(frameCount > 0, "RenderDevice::init requires per-frame data before allocating LightPass descriptor sets");
 
       std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.gbufferTextureSetLayout);
       m_device.gbufferTextureSets.resize(frameCount, VK_NULL_HANDLE);
@@ -1121,7 +1121,7 @@ void Renderer::init(void* window, rhi::Surface& surface, bool vSync)
   updateGraphicsDescriptorSet();
 }
 
-void Renderer::shutdown(rhi::Surface& surface)
+void RenderDevice::shutdown(rhi::Surface& surface)
 {
   m_device.device->waitIdle();
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
@@ -1351,12 +1351,12 @@ void Renderer::shutdown(rhi::Surface& surface)
   }
 }
 
-void Renderer::resize(rhi::Extent2D size)
+void RenderDevice::resize(rhi::Extent2D size)
 {
   rebuildSwapchainDependentResources(VkExtent2D{size.width, size.height});
 }
 
-void Renderer::setVSync(bool enabled)
+void RenderDevice::setVSync(bool enabled)
 {
   m_swapchainDependent.vSync = enabled;
   if(m_swapchainDependent.swapchain == nullptr)
@@ -1368,7 +1368,7 @@ void Renderer::setVSync(bool enabled)
   vkSwapchain->setVSync(enabled);
 }
 
-void Renderer::setFullscreen(bool enabled, void* platformHandle)
+void RenderDevice::setFullscreen(bool enabled, void* platformHandle)
 {
   if(m_swapchainDependent.swapchain == nullptr)
   {
@@ -1380,7 +1380,7 @@ void Renderer::setFullscreen(bool enabled, void* platformHandle)
   vkSwapchain->requestRebuild();
 }
 
-const char* Renderer::getSwapchainPresentModeName() const
+const char* RenderDevice::getSwapchainPresentModeName() const
 {
   if(m_swapchainDependent.swapchain == nullptr)
   {
@@ -1403,17 +1403,17 @@ const char* Renderer::getSwapchainPresentModeName() const
   }
 }
 
-TextureHandle Renderer::getViewportTextureHandle() const
+TextureHandle RenderDevice::getViewportTextureHandle() const
 {
   return m_materials.viewportTextureHandle;
 }
 
-ImTextureID Renderer::getViewportTextureID(TextureHandle handle) const
+ImTextureID RenderDevice::getViewportTextureID(TextureHandle handle) const
 {
   const MaterialResources::TextureHotData* textureHot = tryGetTextureHot(handle);
   if(textureHot == nullptr)
   {
-    LOGW("Renderer::getViewportTextureID rejected stale/invalid texture handle (index=%u generation=%u)", handle.index,
+    LOGW("RenderDevice::getViewportTextureID rejected stale/invalid texture handle (index=%u generation=%u)", handle.index,
          handle.generation);
     return ImTextureID{};
   }
@@ -1431,7 +1431,7 @@ ImTextureID Renderer::getViewportTextureID(TextureHandle handle) const
   return ImTextureID{};
 }
 
-MaterialHandle Renderer::getMaterialHandle(uint32_t slot) const
+MaterialHandle RenderDevice::getMaterialHandle(uint32_t slot) const
 {
   if(slot < kDemoMaterialSlotCount)
   {
@@ -1440,117 +1440,117 @@ MaterialHandle Renderer::getMaterialHandle(uint32_t slot) const
   return kNullMaterialHandle;
 }
 
-PipelineHandle Renderer::getLightPipelineHandle() const
+PipelineHandle RenderDevice::getLightPipelineHandle() const
 {
   return m_lightPipeline;
 }
 
-PipelineHandle Renderer::getGPUDrivenLightHdrPipelineHandle() const
+PipelineHandle RenderDevice::getGPUDrivenLightHdrPipelineHandle() const
 {
   return m_gpuDrivenLightHdrPipeline.isNull() ? m_lightPipeline : m_gpuDrivenLightHdrPipeline;
 }
 
-PipelineHandle Renderer::getGPUDrivenSkyboxPipelineHandle() const
+PipelineHandle RenderDevice::getGPUDrivenSkyboxPipelineHandle() const
 {
   return m_gpuDrivenSkyboxPipeline;
 }
 
-PipelineHandle Renderer::getBloomPrefilterPipelineHandle() const
+PipelineHandle RenderDevice::getBloomPrefilterPipelineHandle() const
 {
   return m_bloomPrefilterPipeline;
 }
 
-PipelineHandle Renderer::getBloomDownsamplePipelineHandle() const
+PipelineHandle RenderDevice::getBloomDownsamplePipelineHandle() const
 {
   return m_bloomDownsamplePipeline;
 }
 
-PipelineHandle Renderer::getFinalColorPipelineHandle() const
+PipelineHandle RenderDevice::getFinalColorPipelineHandle() const
 {
   return m_finalColorPipeline;
 }
 
-PipelineHandle Renderer::getVelocityPipelineHandle() const
+PipelineHandle RenderDevice::getVelocityPipelineHandle() const
 {
   return m_velocityPipeline;
 }
 
-PipelineHandle Renderer::getTAAResolvePipelineHandle() const
+PipelineHandle RenderDevice::getTAAResolvePipelineHandle() const
 {
   return m_taaResolvePipeline;
 }
 
-PipelineHandle Renderer::getDepthPrepassOpaquePipelineHandle() const
+PipelineHandle RenderDevice::getDepthPrepassOpaquePipelineHandle() const
 {
   return m_depthPrepassOpaquePipeline;
 }
 
-PipelineHandle Renderer::getDepthPrepassAlphaTestPipelineHandle() const
+PipelineHandle RenderDevice::getDepthPrepassAlphaTestPipelineHandle() const
 {
   return m_depthPrepassAlphaTestPipeline;
 }
 
-PipelineHandle Renderer::getDepthPrepassOpaqueMDIPipelineHandle() const
+PipelineHandle RenderDevice::getDepthPrepassOpaqueMDIPipelineHandle() const
 {
   return m_depthPrepassOpaqueMDIPipeline;
 }
 
-PipelineHandle Renderer::getDepthPrepassAlphaTestMDIPipelineHandle() const
+PipelineHandle RenderDevice::getDepthPrepassAlphaTestMDIPipelineHandle() const
 {
   return m_depthPrepassAlphaTestMDIPipeline;
 }
 
-PipelineHandle Renderer::getGBufferOpaquePipelineHandle() const
+PipelineHandle RenderDevice::getGBufferOpaquePipelineHandle() const
 {
   return m_gbufferOpaquePipeline;
 }
 
-PipelineHandle Renderer::getGBufferAlphaTestPipelineHandle() const
+PipelineHandle RenderDevice::getGBufferAlphaTestPipelineHandle() const
 {
   return m_gbufferAlphaTestPipeline;
 }
 
-PipelineHandle Renderer::getGBufferOpaqueMDIPipelineHandle() const
+PipelineHandle RenderDevice::getGBufferOpaqueMDIPipelineHandle() const
 {
   return m_gbufferOpaqueMDIPipeline;
 }
 
-PipelineHandle Renderer::getGBufferAlphaTestMDIPipelineHandle() const
+PipelineHandle RenderDevice::getGBufferAlphaTestMDIPipelineHandle() const
 {
   return m_gbufferAlphaTestMDIPipeline;
 }
 
-PipelineHandle Renderer::getForwardPipelineHandle() const
+PipelineHandle RenderDevice::getForwardPipelineHandle() const
 {
   return m_forwardPipeline;
 }
 
-PipelineHandle Renderer::getForwardMDIPipelineHandle() const
+PipelineHandle RenderDevice::getForwardMDIPipelineHandle() const
 {
   return m_forwardMDIPipeline;
 }
 
-PipelineHandle Renderer::getShadowPipelineHandle() const
+PipelineHandle RenderDevice::getShadowPipelineHandle() const
 {
   return m_shadowPipeline;
 }
 
-PipelineHandle Renderer::getDebugPipelineHandle() const
+PipelineHandle RenderDevice::getDebugPipelineHandle() const
 {
   return m_debugPipeline;
 }
 
-PipelineHandle Renderer::getGPUCullingDebugPipelineHandle() const
+PipelineHandle RenderDevice::getGPUCullingDebugPipelineHandle() const
 {
   return m_gpuCullingDebugPipeline;
 }
 
-PipelineHandle Renderer::getCSMShadowPipelineHandle() const
+PipelineHandle RenderDevice::getCSMShadowPipelineHandle() const
 {
   return m_csmShadowPipeline.isNull() ? m_shadowPipeline : m_csmShadowPipeline;
 }
 
-uint64_t Renderer::getCSMShadowPipelineLayout() const
+uint64_t RenderDevice::getCSMShadowPipelineLayout() const
 {
   if(m_device.csmShadowMdiPipelineLayout)
   {
@@ -1559,27 +1559,27 @@ uint64_t Renderer::getCSMShadowPipelineLayout() const
   return getGBufferPipelineLayout();
 }
 
-PipelineHandle Renderer::getShadowCullingPipelineHandle() const
+PipelineHandle RenderDevice::getShadowCullingPipelineHandle() const
 {
   return m_shadowCullingPipeline;
 }
 
-PipelineHandle Renderer::getGPUCullingPipelineHandle() const
+PipelineHandle RenderDevice::getGPUCullingPipelineHandle() const
 {
   return m_gpuCullingPipeline;
 }
 
-uint64_t Renderer::getShadowCullingPipelineLayout() const
+uint64_t RenderDevice::getShadowCullingPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout);
 }
 
-uint64_t Renderer::getGPUCullingPipelineLayout() const
+uint64_t RenderDevice::getGPUCullingPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.gpuCullingPipelineLayout);
 }
 
-uint64_t Renderer::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
+uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_device.shadowCullingDescriptorSets.size())
   {
@@ -1588,7 +1588,7 @@ uint64_t Renderer::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) cons
   return reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]);
 }
 
-uint64_t Renderer::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_device.gpuCullingDescriptorSets.size())
   {
@@ -1597,7 +1597,7 @@ uint64_t Renderer::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
   return reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex]);
 }
 
-uint64_t Renderer::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
+uint64_t RenderDevice::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -1606,7 +1606,7 @@ uint64_t Renderer::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) con
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer.buffer);
 }
 
-uint32_t Renderer::getShadowCullingMeshCapacity(uint32_t frameIndex) const
+uint32_t RenderDevice::getShadowCullingMeshCapacity(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -1615,12 +1615,12 @@ uint32_t Renderer::getShadowCullingMeshCapacity(uint32_t frameIndex) const
   return m_perFrame.frameUserData[frameIndex].shadowCullingMeshCapacity;
 }
 
-PipelineHandle Renderer::getLightCullingPipelineHandle() const
+PipelineHandle RenderDevice::getLightCullingPipelineHandle() const
 {
   return m_pointLightCoarseCullingPipeline;
 }
 
-VkImageView Renderer::getCurrentSwapchainImageView() const
+VkImageView RenderDevice::getCurrentSwapchainImageView() const
 {
   if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
   {
@@ -1630,7 +1630,7 @@ VkImageView Renderer::getCurrentSwapchainImageView() const
       m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
 }
 
-VkImage Renderer::getCurrentSwapchainImage() const
+VkImage RenderDevice::getCurrentSwapchainImage() const
 {
   if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
   {
@@ -1640,27 +1640,27 @@ VkImage Renderer::getCurrentSwapchainImage() const
       m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex));
 }
 
-VkImageView Renderer::getOutputTextureView() const
+VkImageView RenderDevice::getOutputTextureView() const
 {
   return m_swapchainDependent.sceneResources.getOutputTextureView();
 }
 
-VkImageView Renderer::getShadowMapView() const
+VkImageView RenderDevice::getShadowMapView() const
 {
   return m_csmShadowResources.getCascadeView();
 }
 
-VkImage Renderer::getShadowMapImage() const
+VkImage RenderDevice::getShadowMapImage() const
 {
   return m_csmShadowResources.getCascadeImage();
 }
 
-shaderio::ShadowUniforms* Renderer::getShadowUniformsData()
+shaderio::ShadowUniforms* RenderDevice::getShadowUniformsData()
 {
   return m_csmShadowResources.getShadowUniformsData();
 }
 
-RuntimeProfileSnapshot Renderer::getRuntimeProfileSnapshot() const
+RuntimeProfileSnapshot RenderDevice::getRuntimeProfileSnapshot() const
 {
   RuntimeProfileSnapshot snapshot{};
   static constexpr size_t kMaxReasonableProfilePassCount = 256;
@@ -1681,9 +1681,9 @@ RuntimeProfileSnapshot Renderer::getRuntimeProfileSnapshot() const
   return snapshot;
 }
 
-void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
+void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
 {
-  TRACY_ZONE_SCOPED("Renderer::renderWithPassExecutor");
+  TRACY_ZONE_SCOPED("RenderDevice::renderWithPassExecutor");
 
   m_presentPassActive = false;
 
@@ -1692,7 +1692,7 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
 
   {
     demo::profiling::ScopedCpuRange profileSetupRange("RendererPreRecord.ProfileSetup");
-    TRACY_ZONE_SCOPED("Renderer::ProfileSetup");
+    TRACY_ZONE_SCOPED("RenderDevice::ProfileSetup");
     if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
     {
       createPassGpuProfileResources(passExecutor);
@@ -1719,7 +1719,7 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
 
   {
     demo::profiling::ScopedCpuRange resizeCheckRange("RendererPreRecord.ResizeCheck");
-    TRACY_ZONE_SCOPED("Renderer::ResizeCheck");
+    TRACY_ZONE_SCOPED("RenderDevice::ResizeCheck");
     if(params.viewportSize.width > 0 && params.viewportSize.height > 0
        && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
            || params.viewportSize.height != m_swapchainDependent.viewportSize.height))
@@ -1733,7 +1733,7 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
 
   {
     demo::profiling::ScopedCpuRange cacheStatsRange("RendererPreRecord.CacheGPUCullingStats");
-    TRACY_ZONE_SCOPED("Renderer::CacheGPUCullingStats");
+    TRACY_ZONE_SCOPED("RenderDevice::CacheGPUCullingStats");
     cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex(), params.debugOptions.showGPUCullingOverlay);
   }
   }
@@ -1741,17 +1741,17 @@ void Renderer::renderWithPassExecutor(const RenderParams& params, PassExecutor& 
   rhi::CommandList* cmd = nullptr;
   {
     demo::profiling::ScopedCpuRange recordCommandBufferRange("RecordCommandBuffer");
-    TRACY_ZONE_SCOPED("Renderer::beginCommandRecording");
+    TRACY_ZONE_SCOPED("RenderDevice::beginCommandRecording");
     cmd = &beginCommandRecording();
-    ASSERT(cmd != nullptr, "Renderer::renderWithPassExecutor requires a command list");
+    ASSERT(cmd != nullptr, "RenderDevice::renderWithPassExecutor requires a command list");
     drawFrame(*cmd, params, passExecutor);
   }
-  ASSERT(cmd != nullptr, "Renderer::renderWithPassExecutor requires a command list");
+  ASSERT(cmd != nullptr, "RenderDevice::renderWithPassExecutor requires a command list");
   endFrame(*cmd);
 }
 
 // Pass execution wrappers (used by PassNode implementations)
-void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
+void RenderDevice::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
 {
   if(!m_presentPassActive)
   {
@@ -1774,7 +1774,7 @@ void Renderer::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& param
   }
 }
 
-void Renderer::beginPresentPass(rhi::CommandList& cmd)
+void RenderDevice::beginPresentPass(rhi::CommandList& cmd)
 {
   m_presentPassActive = false;
 
@@ -1807,7 +1807,7 @@ void Renderer::beginPresentPass(rhi::CommandList& cmd)
   m_presentPassActive = true;
 }
 
-void Renderer::endPresentPass(rhi::CommandList& cmd)
+void RenderDevice::endPresentPass(rhi::CommandList& cmd)
 {
   if(!m_presentPassActive)
   {
@@ -1851,7 +1851,7 @@ void Renderer::endPresentPass(rhi::CommandList& cmd)
                        rhi::ResourceState::Present);
 }
 
-void Renderer::createTransientCommandPool()
+void RenderDevice::createTransientCommandPool()
 {
   const rhi::QueueInfo          graphicsQueueInfo = m_device.device->getGraphicsQueue();
   const VkDevice                device            = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
@@ -1882,7 +1882,7 @@ void Renderer::createTransientCommandPool()
   DBG_VK_NAME(m_device.computeCmdPool);
 }
 
-void Renderer::createFrameSubmission(uint32_t numFrames)
+void RenderDevice::createFrameSubmission(uint32_t numFrames)
 {
   const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
   const VkDevice       device            = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
@@ -1954,7 +1954,7 @@ void Renderer::createFrameSubmission(uint32_t numFrames)
 #endif
 }
 
-bool Renderer::prepareFrameResources()
+bool RenderDevice::prepareFrameResources()
 {
   demo::profiling::ScopedCpuRange prepareFrameRange("RendererPreRecord.PrepareFrameResources");
   TRACY_ZONE_SCOPED("prepareFrameResources");
@@ -2012,7 +2012,7 @@ bool Renderer::prepareFrameResources()
   return true;
 }
 
-bool Renderer::acquireSwapchainImageForPresent()
+bool RenderDevice::acquireSwapchainImageForPresent()
 {
   TRACY_ZONE_SCOPED("lateAcquireSwapchainImage");
 
@@ -2037,7 +2037,7 @@ bool Renderer::acquireSwapchainImageForPresent()
   return true;
 }
 
-void Renderer::createIBLResources(VkCommandBuffer cmd)
+void RenderDevice::createIBLResources(VkCommandBuffer cmd)
 {
   destroyIBLResources();
 
@@ -2147,7 +2147,7 @@ void Renderer::createIBLResources(VkCommandBuffer cmd)
        static_cast<double>(ktxTexture.data.size()) / (1024.0 * 1024.0));
 }
 
-void Renderer::destroyIBLResources()
+void RenderDevice::destroyIBLResources()
 {
   const VkDevice nativeDevice = m_device.device
                                     ? fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())
@@ -2164,7 +2164,7 @@ void Renderer::destroyIBLResources()
   m_device.iblUsingFallback = true;
 }
 
-void Renderer::updateGBufferTextureDescriptorSet()
+void RenderDevice::updateGBufferTextureDescriptorSet()
 {
   if(m_device.gbufferTextureSets.empty() || m_perFrame.frameUserData.empty())
   {
@@ -2449,7 +2449,7 @@ void Renderer::updateGBufferTextureDescriptorSet()
   }
 }
 
-void Renderer::updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms)
+void RenderDevice::updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2460,7 +2460,7 @@ void Renderer::updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::
   writeHostVisibleBuffer(m_device.allocator, frameUserData.lightingBuffer, &lightingUniforms, sizeof(lightingUniforms));
 }
 
-void Renderer::updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms)
+void RenderDevice::updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2471,7 +2471,7 @@ void Renderer::updateLightCullingUniformBuffer(uint32_t frameIndex, const shader
   writeHostVisibleBuffer(m_device.allocator, frameUserData.lightCullingBuffer, &cullingUniforms, sizeof(cullingUniforms));
 }
 
-void Renderer::waitForAllFrameSlots()
+void RenderDevice::waitForAllFrameSlots()
 {
   if(m_perFrame.frameContext == nullptr)
   {
@@ -2485,7 +2485,7 @@ void Renderer::waitForAllFrameSlots()
   }
 }
 
-void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
+void RenderDevice::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
 {
   const uint32_t requiredCapacity = std::max(requiredMeshCount, 1u);
   if(frameUserData.gpuCullingMeshCapacity >= requiredCapacity)
@@ -2548,7 +2548,7 @@ void Renderer::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUs
   frameUserData.gpuCullingScratchObjects.resize(requiredCapacity);
 }
 
-void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
+void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2648,7 +2648,7 @@ void Renderer::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& 
   writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
 }
 
-void Renderer::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
+void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount)
 {
   const uint32_t requiredCapacity = std::max(requiredMeshCount, 1u);
   if(frameUserData.shadowCullingMeshCapacity >= requiredCapacity)
@@ -2699,7 +2699,7 @@ void Renderer::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& fram
   updateShadowCullingDrawDataDescriptorSet(frameIndex);
 }
 
-void Renderer::updateShadowCullingDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateShadowCullingDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingDescriptorSets.size()
      || m_device.shadowCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
@@ -2741,7 +2741,7 @@ void Renderer::updateShadowCullingDescriptorSet(uint32_t frameIndex)
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void Renderer::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2788,7 +2788,7 @@ void Renderer::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
   }
 }
 
-void Renderer::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+void RenderDevice::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
   if(frameUserData.gbufferMdiDrawCapacity >= requiredCapacity)
@@ -2816,7 +2816,7 @@ void Renderer::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserData& 
   updateGBufferMdiDrawDataDescriptorSet(frameIndex);
 }
 
-void Renderer::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+void RenderDevice::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
   if(frameUserData.mdiDrawCapacity >= requiredCapacity)
@@ -2844,7 +2844,7 @@ void Renderer::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUs
   updateMdiDrawDataDescriptorSet(frameIndex);
 }
 
-void Renderer::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
+void RenderDevice::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
   if(frameUserData.depthMdiDrawCapacity >= requiredCapacity)
@@ -2872,7 +2872,7 @@ void Renderer::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& fr
   updateDepthMdiDrawDataDescriptorSet(frameIndex);
 }
 
-void Renderer::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
+void RenderDevice::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
                                                              uint32_t                          requiredDrawCount)
 {
   const uint32_t requiredCapacity = std::max(requiredDrawCount, 1u);
@@ -2897,7 +2897,7 @@ void Renderer::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::
   frameUserData.gpuDrivenPersistentIndirectStreamCapacity = requiredCapacity;
 }
 
-void Renderer::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2935,7 +2935,7 @@ void Renderer::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
   vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
 }
 
-void Renderer::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2973,7 +2973,7 @@ void Renderer::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
   vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
 }
 
-void Renderer::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -3011,7 +3011,7 @@ void Renderer::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
   vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
 }
 
-void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
+void RenderDevice::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
 {
   struct ShadowCullingSource
   {
@@ -3116,7 +3116,7 @@ void Renderer::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParam
   }
 }
 
-void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects)
+void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -3130,14 +3130,14 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects
   }
 
   {
-    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullStats");
+    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullStats");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
     std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped, sizeof(m_lastGPUCullingStats));
   }
   m_lastGPUCullingDrawCounts = {};
   if(frameUserData.gpuCullingDrawCountBuffer.allocation != nullptr && frameUserData.gpuCullingDrawCountBuffer.mapped != nullptr)
   {
-    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullDrawCounts");
+    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullDrawCounts");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                      frameUserData.gpuCullingDrawCountBuffer.allocation,
                                      0,
@@ -3159,7 +3159,7 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects
   }
 
   {
-    TRACY_ZONE_SCOPED("Renderer::ReadGPUCullResults");
+    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullResults");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                      frameUserData.gpuCullingResultBuffer.allocation,
                                      0,
@@ -3193,7 +3193,7 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects
     }
 
     {
-      TRACY_ZONE_SCOPED("Renderer::ReadGPUCullObjects");
+      TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullObjects");
       VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                        frameUserData.gpuCullingObjectBuffer.allocation,
                                        0,
@@ -3206,7 +3206,7 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects
                                      ? std::min<size_t>(objectCount, m_externalGPUCullingOverlayObjectCount)
                                      : objectCount;
   {
-    TRACY_ZONE_SCOPED("Renderer::BuildGPUCullOverlayObjects");
+    TRACY_ZONE_SCOPED("RenderDevice::BuildGPUCullOverlayObjects");
     for(size_t objectIndex = 0; objectIndex < safeObjectCount; ++objectIndex)
     {
       const shaderio::GPUCullObject& object = objectData[objectIndex];
@@ -3225,7 +3225,7 @@ void Renderer::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects
   }
 }
 
-void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
+void RenderDevice::drawGPUCullingOverlay(const RenderParams& params) const
 {
   ImGui::Text("Visible %u / %u", m_lastGPUCullingStats.visibleCount, m_lastGPUCullingStats.totalCount);
   ImGui::Text("Opaque %u / %u", m_lastGPUCullingStats.opaqueVisibleCount, m_lastGPUCullingStats.opaqueCount);
@@ -3263,7 +3263,7 @@ void Renderer::drawGPUCullingOverlay(const RenderParams& params) const
   }
 }
 
-void Renderer::createPassGpuProfileResources(const PassExecutor& passExecutor)
+void RenderDevice::createPassGpuProfileResources(const PassExecutor& passExecutor)
 {
   destroyPassGpuProfileResources();
 
@@ -3317,7 +3317,7 @@ void Renderer::createPassGpuProfileResources(const PassExecutor& passExecutor)
   }
 }
 
-void Renderer::destroyPassGpuProfileResources()
+void RenderDevice::destroyPassGpuProfileResources()
 {
   if(m_device.device != nullptr)
   {
@@ -3346,7 +3346,7 @@ void Renderer::destroyPassGpuProfileResources()
   m_passGpuProfile.currentCpuPassStartNs.clear();
 }
 
-void Renderer::resolvePassGpuProfileResults(uint32_t frameIndex)
+void RenderDevice::resolvePassGpuProfileResults(uint32_t frameIndex)
 {
   if(frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
@@ -3404,7 +3404,7 @@ void Renderer::resolvePassGpuProfileResults(uint32_t frameIndex)
   }
 }
 
-void Renderer::resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex)
+void RenderDevice::resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex)
 {
   if(frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
@@ -3422,7 +3422,7 @@ void Renderer::resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t 
   m_passGpuProfile.frames[frameIndex].hasRecordedQueries = false;
 }
 
-void Renderer::writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const
+void RenderDevice::writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const
 {
   if(context.cmd == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
@@ -3447,7 +3447,7 @@ void Renderer::writePassGpuProfileTimestamp(const PassContext& context, uint32_t
                        queryIndex);
 }
 
-void Renderer::drawPassGpuProfileOverlay(const RenderParams& params) const
+void RenderDevice::drawPassGpuProfileOverlay(const RenderParams& params) const
 {
   if(m_passGpuProfile.passNames.empty())
   {
@@ -3518,7 +3518,7 @@ void Renderer::drawPassGpuProfileOverlay(const RenderParams& params) const
   gpuGraph.RenderTimings(graphWidth, legendWidth, 120, 0, maxFrameTime);
 }
 
-void Renderer::drawGPUInfoOverlay(const RenderParams& params) const
+void RenderDevice::drawGPUInfoOverlay(const RenderParams& params) const
 {
   ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize;
   if(params.viewportImageRect.z > 1.0f && params.viewportImageRect.w > 1.0f)
@@ -3549,7 +3549,7 @@ void Renderer::drawGPUInfoOverlay(const RenderParams& params) const
   ImGui::End();
 }
 
-void Renderer::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+void RenderDevice::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
 {
   if(renderer != nullptr)
   {
@@ -3568,7 +3568,7 @@ void Renderer::PassProfilingHooks::beforePass(const PassContext& context, const 
   }
 }
 
-void Renderer::PassProfilingHooks::afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
+void RenderDevice::PassProfilingHooks::afterPass(const PassContext& context, const PassNode& pass, uint32_t passIndex) const
 {
   (void)pass;
   if(renderer != nullptr)
@@ -3591,7 +3591,7 @@ void Renderer::PassProfilingHooks::afterPass(const PassContext& context, const P
   }
 }
 
-void Renderer::createGPUCullingResources()
+void RenderDevice::createGPUCullingResources()
 {
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
@@ -3640,7 +3640,7 @@ void Renderer::createGPUCullingResources()
   }
 }
 
-void Renderer::createShadowCullingResources()
+void RenderDevice::createShadowCullingResources()
 {
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
@@ -3689,7 +3689,7 @@ void Renderer::createShadowCullingResources()
   }
 }
 
-void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingDescriptorSets.size()
      || m_device.gpuCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
@@ -3824,7 +3824,7 @@ void Renderer::updateGPUCullingDescriptorSet(uint32_t frameIndex)
   vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void Renderer::createLightCoarseCullingResources()
+void RenderDevice::createLightCoarseCullingResources()
 {
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
@@ -3898,7 +3898,7 @@ void Renderer::createLightCoarseCullingResources()
   DBG_VK_NAME(m_device.lightCoarseCullingPipelineLayout);
 }
 
-void Renderer::createDepthPyramidResources()
+void RenderDevice::createDepthPyramidResources()
 {
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
 
@@ -3946,7 +3946,7 @@ void Renderer::createDepthPyramidResources()
   updateDepthPyramidDescriptorSet();
 }
 
-void Renderer::updateDepthPyramidDescriptorSet()
+void RenderDevice::updateDepthPyramidDescriptorSet()
 {
   if(m_device.depthPyramidDescriptorSet == VK_NULL_HANDLE)
   {
@@ -4016,7 +4016,7 @@ void Renderer::updateDepthPyramidDescriptorSet()
                          static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
+void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
 {
   if(requestedViewportSize.has_value() && isValidExtent(requestedViewportSize.value()))
   {
@@ -4072,7 +4072,7 @@ void Renderer::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requ
 
 }
 
-void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
+void RenderDevice::bindStaticPassResources(PassExecutor& passExecutor) const
 {
   // Bind static resources that don't change per-frame
   // Called once after swapchain/resources rebuild
@@ -4234,7 +4234,7 @@ void Renderer::bindStaticPassResources(PassExecutor& passExecutor) const
   });
 }
 
-rhi::CommandList& Renderer::beginCommandRecording()
+rhi::CommandList& RenderDevice::beginCommandRecording()
 {
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
   rhi::FrameData& frame = m_perFrame.frameContext->getCurrentFrame();
@@ -4244,7 +4244,7 @@ rhi::CommandList& Renderer::beginCommandRecording()
   return *frame.commandList;
 }
 
-void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor)
+void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor)
 {
   TRACY_ZONE_SCOPED("drawFrame");
 
@@ -4427,7 +4427,7 @@ void Renderer::drawFrame(rhi::CommandList& cmd, const RenderParams& params, Pass
   }
 }
 
-void Renderer::endFrame(rhi::CommandList& cmd)
+void RenderDevice::endFrame(rhi::CommandList& cmd)
 {
   TRACY_ZONE_SCOPED("endFrame");
 
@@ -4463,7 +4463,7 @@ void Renderer::endFrame(rhi::CommandList& cmd)
   TRACY_CPU_FRAME_MARK();
 }
 
-void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const
+void RenderDevice::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const
 {
   const VkImageView swapchainImageView =
       fromNativeHandle<VkImageView>(m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
@@ -4486,12 +4486,12 @@ void Renderer::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) con
   rhi::vulkan::cmdBeginRendering(cmd, renderingInfo);
 }
 
-void Renderer::endDynamicRenderingToSwapchain(const rhi::CommandList& cmd)
+void RenderDevice::endDynamicRenderingToSwapchain(const rhi::CommandList& cmd)
 {
   rhi::vulkan::cmdEndRendering(cmd);
 }
 
-void Renderer::executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params)
+void RenderDevice::executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params)
 {
   if(params.cameraUniforms == nullptr || m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
   {
@@ -4567,7 +4567,7 @@ void Renderer::executeLightCoarseCullingPass(rhi::CommandList& cmd, const Render
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
 
-void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams&)
+void RenderDevice::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams&)
 {
   if(m_depthPyramidPipeline.isNull() || m_device.depthPyramidPipelineLayout == VK_NULL_HANDLE
      || m_device.depthPyramidDescriptorSet == VK_NULL_HANDLE)
@@ -4623,7 +4623,7 @@ void Renderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams
   vkCmdDispatch(vkCmd, (pyramidExtent.width + 7u) / 8u, (pyramidExtent.height + 7u) / 8u, 1u);
 }
 
-void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params)
+void RenderDevice::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params)
 {
   const bool useExternalPersistentObjects =
       params.gpuDrivenSceneView != nullptr
@@ -4701,13 +4701,13 @@ void Renderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& 
   vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
 }
 
-void Renderer::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
+void RenderDevice::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
 {
   vertices.push_back(shaderio::DebugLineVertex{a, color});
   vertices.push_back(shaderio::DebugLineVertex{b, color});
 }
 
-void Renderer::DebugDrawList::addAabb(const Aabb& bounds, const glm::vec4& color)
+void RenderDevice::DebugDrawList::addAabb(const Aabb& bounds, const glm::vec4& color)
 {
   if(!bounds.valid)
   {
@@ -4727,7 +4727,7 @@ void Renderer::DebugDrawList::addAabb(const Aabb& bounds, const glm::vec4& color
   addFrustum(corners, color);
 }
 
-void Renderer::DebugDrawList::addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color)
+void RenderDevice::DebugDrawList::addFrustum(const std::array<glm::vec3, 8>& corners, const glm::vec4& color)
 {
   static constexpr std::array<std::pair<uint32_t, uint32_t>, 12> kEdges{{
       {0, 1}, {1, 3}, {3, 2}, {2, 0},
@@ -4741,7 +4741,7 @@ void Renderer::DebugDrawList::addFrustum(const std::array<glm::vec3, 8>& corners
   }
 }
 
-void Renderer::DebugDrawList::addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments)
+void RenderDevice::DebugDrawList::addSphere(const glm::vec3& center, float radius, const glm::vec4& color, uint32_t segments)
 {
   if(radius <= 0.0f || segments < 3)
   {
@@ -4762,7 +4762,7 @@ void Renderer::DebugDrawList::addSphere(const glm::vec3& center, float radius, c
   }
 }
 
-void Renderer::DebugDrawList::addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color)
+void RenderDevice::DebugDrawList::addArrow(const glm::vec3& origin, const glm::vec3& direction, float length, const glm::vec4& color)
 {
   if(length <= 0.0f)
   {
@@ -4783,7 +4783,7 @@ void Renderer::DebugDrawList::addArrow(const glm::vec3& origin, const glm::vec3&
   addLine(end, end - dir * headLength - bitangent * headLength * 0.5f, color);
 }
 
-Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const
+RenderDevice::Aabb RenderDevice::computeSceneBounds(const GltfUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const
 {
   Aabb bounds{};
 
@@ -4834,7 +4834,7 @@ Renderer::Aabb Renderer::computeSceneBounds(const GltfUploadResult* gltfModel, c
   return bounds;
 }
 
-void Renderer::ensureTestPointLights(const RenderParams& params)
+void RenderDevice::ensureTestPointLights(const RenderParams& params)
 {
   glm::vec3 minBounds(-12.0f, 0.5f, -12.0f);
   glm::vec3 maxBounds(12.0f, 6.0f, 12.0f);
@@ -4940,7 +4940,7 @@ void Renderer::ensureTestPointLights(const RenderParams& params)
   }
 }
 
-std::array<glm::vec3, 8> Renderer::computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
+std::array<glm::vec3, 8> RenderDevice::computePerspectiveFrustumCorners(const shaderio::CameraUniforms& cameraUniforms,
                                                                     float nearDistance,
                                                                     float farDistance) const
 {
@@ -4973,7 +4973,7 @@ std::array<glm::vec3, 8> Renderer::computePerspectiveFrustumCorners(const shader
   }};
 }
 
-std::array<glm::vec3, 8> Renderer::computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const
+std::array<glm::vec3, 8> RenderDevice::computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const
 {
   const clipspace::ProjectionConvention projectionConvention =
       clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
@@ -4997,7 +4997,7 @@ std::array<glm::vec3, 8> Renderer::computeOrthoFrustumCorners(const glm::mat4& i
   return worldCorners;
 }
 
-shaderio::LightCullingUniforms Renderer::buildLightCullingUniforms(const RenderParams& params) const
+shaderio::LightCullingUniforms RenderDevice::buildLightCullingUniforms(const RenderParams& params) const
 {
   shaderio::LightCullingUniforms uniforms{};
   const VkExtent2D extent = m_swapchainDependent.sceneResources.getSize();
@@ -5038,7 +5038,7 @@ shaderio::LightCullingUniforms Renderer::buildLightCullingUniforms(const RenderP
   return uniforms;
 }
 
-shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParams& params, uint32_t objectCount) const
+shaderio::GPUCullingUniforms RenderDevice::buildGPUCullingUniforms(const RenderParams& params, uint32_t objectCount) const
 {
   shaderio::GPUCullingUniforms uniforms{};
   const VkExtent2D screenExtent = m_swapchainDependent.sceneResources.getSize();
@@ -5099,7 +5099,7 @@ shaderio::GPUCullingUniforms Renderer::buildGPUCullingUniforms(const RenderParam
   return uniforms;
 }
 
-shaderio::ShadowCullPushConstants Renderer::buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const
+shaderio::ShadowCullPushConstants RenderDevice::buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const
 {
   shaderio::ShadowCullPushConstants pushConstants{};
   const shaderio::ShadowUniforms* shadowUniforms = m_csmShadowResources.getShadowUniformsData();
@@ -5118,7 +5118,7 @@ shaderio::ShadowCullPushConstants Renderer::buildShadowCullPushConstants(uint32_
   return pushConstants;
 }
 
-Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParams& params) const
+RenderDevice::FrameLightingState RenderDevice::buildFrameLightingState(const RenderParams& params) const
 {
   FrameLightingState state{};
   const shaderio::CameraUniforms fallbackCamera{
@@ -5265,7 +5265,7 @@ Renderer::FrameLightingState Renderer::buildFrameLightingState(const RenderParam
   return state;
 }
 
-void Renderer::buildDebugDrawList(const RenderParams& params)
+void RenderDevice::buildDebugDrawList(const RenderParams& params)
 {
   m_debugDrawList.clear();
   if(!params.debugOptions.enabled)
@@ -5313,7 +5313,7 @@ void Renderer::buildDebugDrawList(const RenderParams& params)
   }
 }
 
-void Renderer::prebuildRequiredPipelineVariants()
+void RenderDevice::prebuildRequiredPipelineVariants()
 {
   createPrebuiltGraphicsPipelineVariants();
   createPrebuiltComputePipelineVariant();
@@ -5323,7 +5323,7 @@ void Renderer::prebuildRequiredPipelineVariants()
   createLightCoarseCullingPipelines();
 }
 
-void Renderer::createPrebuiltGraphicsPipelineVariants()
+void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 {
 #ifdef USE_SLANG
   const char* vertEntryName = "vertexMain";
@@ -5818,7 +5818,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     gbufferReflection.resourceBindings = {
         rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
                                    rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   Renderer::kDemoMaterialSlotCount, 0},
+                                   RenderDevice::kDemoMaterialSlotCount, 0},
         rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                    rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
         rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
@@ -5856,7 +5856,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     mdiReflection.resourceBindings = {
         rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
                                    rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   Renderer::kDemoMaterialSlotCount, 0},
+                                   RenderDevice::kDemoMaterialSlotCount, 0},
         rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                    rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
         rhi::ShaderResourceBinding{"drawData", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
@@ -5893,7 +5893,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
     csmShadowMdiReflection.resourceBindings = {
         rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
                                    rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   Renderer::kDemoMaterialSlotCount, 0},
+                                   RenderDevice::kDemoMaterialSlotCount, 0},
         rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
                                    rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
         rhi::ShaderResourceBinding{"drawData", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
@@ -6904,7 +6904,7 @@ void Renderer::createPrebuiltGraphicsPipelineVariants()
   }
 }
 
-void Renderer::initImGui(void* window)
+void RenderDevice::initImGui(void* window)
 {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
@@ -6945,7 +6945,7 @@ void Renderer::initImGui(void* window)
   ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 }
 
-void Renderer::createDescriptorPool()
+void RenderDevice::createDescriptorPool()
 {
   VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
   vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
@@ -7060,7 +7060,7 @@ static void writeHostVisibleBufferRange(const VmaAllocator allocator,
   }
 }
 
-void Renderer::createMaterialBindGroup()
+void RenderDevice::createMaterialBindGroup()
 {
   // Create per-frame material bind groups early - needed for pipeline layout creation
   std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
@@ -7101,7 +7101,7 @@ void Renderer::createMaterialBindGroup()
       m_materials.materialBindGroups.empty() ? kNullBindGroupHandle : m_materials.materialBindGroups.front();
 }
 
-void Renderer::createGraphicDescriptorSet()
+void RenderDevice::createGraphicDescriptorSet()
 {
   if(m_materials.materialBindGroups.size() < m_perFrame.frameUserData.size())
   {
@@ -7164,7 +7164,7 @@ void Renderer::createGraphicDescriptorSet()
   }
 }
 
-void Renderer::updateGraphicsDescriptorSet()
+void RenderDevice::updateGraphicsDescriptorSet()
 {
   const VkSampler sampler = m_device.samplerPool.acquireSampler({
       .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -7256,7 +7256,7 @@ void Renderer::updateGraphicsDescriptorSet()
   }
 }
 
-void Renderer::syncMaterialBindGroup(uint32_t frameIndex)
+void RenderDevice::syncMaterialBindGroup(uint32_t frameIndex)
 {
   if(frameIndex >= m_materials.materialBindGroups.size() || frameIndex >= m_materials.materialBindGroupGenerations.size())
   {
@@ -7343,7 +7343,7 @@ void Renderer::syncMaterialBindGroup(uint32_t frameIndex)
   m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
 }
 
-BindGroupHandle Renderer::getCurrentMaterialBindGroupHandle() const
+BindGroupHandle RenderDevice::getCurrentMaterialBindGroupHandle() const
 {
   if(m_materials.materialBindGroups.empty())
   {
@@ -7362,7 +7362,7 @@ BindGroupHandle Renderer::getCurrentMaterialBindGroupHandle() const
   return m_materials.materialBindGroups[frameIndex];
 }
 
-rhi::BindGroupLayoutHandle Renderer::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
+rhi::BindGroupLayoutHandle RenderDevice::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
 {
   // Convert BindGroupLayoutDesc to BindTableLayoutEntry format
   std::vector<rhi::BindTableLayoutEntry> tableEntries;
@@ -7382,7 +7382,7 @@ rhi::BindGroupLayoutHandle Renderer::createBindGroupLayout(const rhi::BindGroupL
   return m_materials.bindGroupLayoutPool.emplace(std::move(layout));
 }
 
-rhi::BindGroupHandle Renderer::createBindGroup(const rhi::BindGroupDesc& desc)
+rhi::BindGroupHandle RenderDevice::createBindGroup(const rhi::BindGroupDesc& desc)
 {
   // TODO: Implement BindGroup creation using new RHI interface
   // This will be implemented in a later task
@@ -7390,13 +7390,13 @@ rhi::BindGroupHandle Renderer::createBindGroup(const rhi::BindGroupDesc& desc)
   return rhi::BindGroupHandle{};
 }
 
-void Renderer::destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle)
+void RenderDevice::destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle)
 {
   // TODO: Implement BindGroupLayout destruction
   // This will be implemented in a later task
 }
 
-void Renderer::destroyBindGroup(rhi::BindGroupHandle handle)
+void RenderDevice::destroyBindGroup(rhi::BindGroupHandle handle)
 {
   BindGroupResource* bindGroup = m_materials.bindGroupPool.tryGet(handle);
   if(bindGroup == nullptr)
@@ -7412,7 +7412,7 @@ void Renderer::destroyBindGroup(rhi::BindGroupHandle handle)
   m_materials.bindGroupPool.destroy(handle);
 }
 
-BindGroupHandle Renderer::createBindGroup(BindGroupDesc desc)
+BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
 {
   ASSERT(isStableBindGroupSetSlot(desc.slot), "BindGroupDesc slot must be one of stable set slots 0..3");
   ASSERT(desc.layout != nullptr, "BindGroupDesc layout must be valid");
@@ -7422,7 +7422,7 @@ BindGroupHandle Renderer::createBindGroup(BindGroupDesc desc)
   return m_materials.bindGroupPool.emplace(BindGroupResource{.desc = std::move(desc)});
 }
 
-void Renderer::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const
+void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const
 {
   if(writeCount == 0 || writes == nullptr)
   {
@@ -7434,7 +7434,7 @@ void Renderer::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite
   bindGroup->desc.table->update(writeCount, writes);
 }
 
-void Renderer::destroyBindGroups()
+void RenderDevice::destroyBindGroups()
 {
   std::vector<BindGroupHandle> bindGroups;
   m_materials.bindGroupPool.forEachActive(
@@ -7461,12 +7461,12 @@ void Renderer::destroyBindGroups()
   }
 }
 
-const BindGroupResource* Renderer::tryGetBindGroup(BindGroupHandle handle) const
+const BindGroupResource* RenderDevice::tryGetBindGroup(BindGroupHandle handle) const
 {
   return m_materials.bindGroupPool.tryGet(handle);
 }
 
-uint64_t Renderer::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
+uint64_t RenderDevice::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
 {
   const BindGroupResource* bindGroup = tryGetBindGroup(handle);
   ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
@@ -7474,7 +7474,7 @@ uint64_t Renderer::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSet
   return bindGroup->desc.layout->getNativeHandle();
 }
 
-uint64_t Renderer::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
+uint64_t RenderDevice::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
 {
   const BindGroupResource* bindGroup = tryGetBindGroup(handle);
   ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
@@ -7482,7 +7482,7 @@ uint64_t Renderer::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindG
   return bindGroup->desc.table->getNativeHandle();
 }
 
-rhi::ResourceIndex Renderer::getBindGroupPrimaryLogicalIndex(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
+rhi::ResourceIndex RenderDevice::getBindGroupPrimaryLogicalIndex(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
 {
   const BindGroupResource* bindGroup = tryGetBindGroup(handle);
   ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
@@ -7490,7 +7490,7 @@ rhi::ResourceIndex Renderer::getBindGroupPrimaryLogicalIndex(BindGroupHandle han
   return bindGroup->desc.primaryLogicalIndex;
 }
 
-utils::ImageResource Renderer::loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename)
+utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename)
 {
   int            w = 0, h = 0, comp = 0, req_comp{4};
   const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
@@ -7563,7 +7563,7 @@ utils::ImageResource Renderer::loadAndCreateImage(rhi::CommandList& cmd, const s
   return image;
 }
 
-void Renderer::createPrebuiltComputePipelineVariant()
+void RenderDevice::createPrebuiltComputePipelineVariant()
 {
   const rhi::ShaderReflectionData computeReflection = buildComputeShaderReflection();
   rhi::PipelineLayoutDesc         layoutDesc        = rhi::derivePipelineLayoutDesc(computeReflection);
@@ -7611,7 +7611,7 @@ void Renderer::createPrebuiltComputePipelineVariant()
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), compute, nullptr);
 }
 
-void Renderer::createLightCoarseCullingPipelines()
+void RenderDevice::createLightCoarseCullingPipelines()
 {
   if(m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
   {
@@ -7651,7 +7651,7 @@ void Renderer::createLightCoarseCullingPipelines()
 #endif
 }
 
-void Renderer::createDepthPyramidPipeline()
+void RenderDevice::createDepthPyramidPipeline()
 {
   if(m_device.depthPyramidPipelineLayout == VK_NULL_HANDLE)
   {
@@ -7688,7 +7688,7 @@ void Renderer::createDepthPyramidPipeline()
 #endif
 }
 
-void Renderer::createGPUCullingPipeline()
+void RenderDevice::createGPUCullingPipeline()
 {
   if(m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
   {
@@ -7723,7 +7723,7 @@ void Renderer::createGPUCullingPipeline()
 #endif
 }
 
-void Renderer::createShadowCullingPipeline()
+void RenderDevice::createShadowCullingPipeline()
 {
   if(m_device.shadowCullingPipelineLayout == VK_NULL_HANDLE)
   {
@@ -7758,7 +7758,7 @@ void Renderer::createShadowCullingPipeline()
 #endif
 }
 
-PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
+PipelineHandle RenderDevice::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
                                           uint64_t nativeLayout)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
@@ -7770,7 +7770,7 @@ PipelineHandle Renderer::registerPipeline(uint32_t bindPoint, uint64_t nativePip
   });
 }
 
-uint64_t Renderer::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
+uint64_t RenderDevice::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
 {
   const uint32_t vkBindPoint = bindPoint == rhi::PipelineBindPoint::compute
                                    ? static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE)
@@ -7778,13 +7778,13 @@ uint64_t Renderer::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint
   return getPipelineOpaque(handle, vkBindPoint);
 }
 
-uint64_t Renderer::resolvePipelineLayout(PipelineHandle handle) const
+uint64_t RenderDevice::resolvePipelineLayout(PipelineHandle handle) const
 {
   const DeviceLifetimeResources::PipelineRecord* record = tryGetPipelineRecord(handle);
   return record != nullptr ? record->nativeLayout : 0;
 }
 
-uint64_t Renderer::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
+uint64_t RenderDevice::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
 {
   const BindGroupResource* bindGroup = tryGetBindGroup(handle);
   if(bindGroup == nullptr || bindGroup->desc.table == nullptr)
@@ -7794,7 +7794,7 @@ uint64_t Renderer::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
   return bindGroup->desc.table->getNativeHandle();
 }
 
-void Renderer::destroyPipelines()
+void RenderDevice::destroyPipelines()
 {
   std::vector<PipelineHandle> handles;
   m_device.pipelineRegistry.forEachActive(
@@ -7843,12 +7843,12 @@ void Renderer::destroyPipelines()
   m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
 
-const Renderer::DeviceLifetimeResources::PipelineRecord* Renderer::tryGetPipelineRecord(PipelineHandle handle) const
+const RenderDevice::DeviceLifetimeResources::PipelineRecord* RenderDevice::tryGetPipelineRecord(PipelineHandle handle) const
 {
   return m_device.pipelineRegistry.tryGet(handle);
 }
 
-uint64_t Renderer::getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const
+uint64_t RenderDevice::getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const
 {
   const DeviceLifetimeResources::PipelineRecord* record = tryGetPipelineRecord(handle);
   ASSERT(record != nullptr, "PipelineHandle must resolve to an active pipeline record");
@@ -7857,30 +7857,30 @@ uint64_t Renderer::getPipelineOpaque(PipelineHandle handle, uint32_t expectedBin
   return record->nativePipeline;
 }
 
-const Renderer::MaterialResources::TextureHotData* Renderer::tryGetTextureHot(TextureHandle handle) const
+const RenderDevice::MaterialResources::TextureHotData* RenderDevice::tryGetTextureHot(TextureHandle handle) const
 {
   const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
   return textureRecord != nullptr ? &textureRecord->hot : nullptr;
 }
 
-const Renderer::MaterialResources::MaterialRecord* Renderer::tryGetMaterial(MaterialHandle handle) const
+const RenderDevice::MaterialResources::MaterialRecord* RenderDevice::tryGetMaterial(MaterialHandle handle) const
 {
   return m_materials.materialPool.tryGet(handle);
 }
 
-const Renderer::MaterialResources::TextureColdData* Renderer::tryGetTextureCold(TextureHandle handle) const
+const RenderDevice::MaterialResources::TextureColdData* RenderDevice::tryGetTextureCold(TextureHandle handle) const
 {
   const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
   return textureRecord != nullptr ? &textureRecord->cold : nullptr;
 }
 
-void Renderer::waitForIdle()
+void RenderDevice::waitForIdle()
 {
   flushPendingUploadCommands(true);
   m_device.device->waitIdle();
 }
 
-VkDevice Renderer::getNativeDeviceHandle() const
+VkDevice RenderDevice::getNativeDeviceHandle() const
 {
   if(m_device.device == nullptr)
   {
@@ -7889,7 +7889,7 @@ VkDevice Renderer::getNativeDeviceHandle() const
   return fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
 }
 
-void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
+void RenderDevice::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
 {
   flushPendingUploadCommands(true);
 
@@ -7923,7 +7923,7 @@ void Renderer::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadF
   m_perFrame.frameUserData[frameIndex].pendingUploadFences.push_back(uploadFence);
 }
 
-void Renderer::flushPendingUploadCommands(bool waitForCompletion)
+void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
 {
   if(m_perFrame.frameUserData.empty() || m_device.device == nullptr)
   {
@@ -7996,7 +7996,7 @@ void Renderer::flushPendingUploadCommands(bool waitForCompletion)
   }
 }
 
-GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
+GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
 {
   GltfUploadResult result;
   initializeGltfUploadResult(model, result);
@@ -8012,7 +8012,7 @@ GltfUploadResult Renderer::uploadGltfModel(const GltfModel& model, VkCommandBuff
   return result;
 }
 
-SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd)
+SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd)
 {
   const SceneUploadPlanValidationResult validation =
       SceneUploadPlanner::validate(makeSceneAssetView(asset), plan);
@@ -8445,7 +8445,7 @@ SceneUploadResult Renderer::commitSceneUploadPlan(const SceneAsset& asset, const
   return result;
 }
 
-void Renderer::initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const
+void RenderDevice::initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const
 {
   outResult = {};
   outResult.meshes.resize(model.meshes.size(), kNullMeshHandle);
@@ -8453,7 +8453,7 @@ void Renderer::initializeGltfUploadResult(const GltfModel& model, GltfUploadResu
   outResult.textures.resize(model.images.size(), kNullTextureHandle);
 }
 
-void Renderer::uploadGltfModelBatch(const GltfModel&          model,
+void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
                                     std::span<const uint32_t> textureIndices,
                                     std::span<const uint32_t> materialIndices,
                                     std::span<const uint32_t> meshIndices,
@@ -8793,7 +8793,7 @@ void Renderer::uploadGltfModelBatch(const GltfModel&          model,
   rebuildShadowPackedBuffers(model, ioResult, cmd);
 }
 
-void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd)
+void RenderDevice::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd)
 {
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
@@ -8927,7 +8927,7 @@ void Renderer::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResu
       &m_device.stagingBuffers);
 }
 
-void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd)
+void RenderDevice::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd)
 {
   const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
@@ -9063,7 +9063,7 @@ void Renderer::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadRe
       &m_device.stagingBuffers);
 }
 
-void Renderer::destroyGltfResources(const GltfUploadResult& result)
+void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
 {
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
@@ -9100,62 +9100,62 @@ void Renderer::destroyGltfResources(const GltfUploadResult& result)
   }
 }
 
-void Renderer::updateMeshTransform(MeshHandle handle, const glm::mat4& transform)
+void RenderDevice::updateMeshTransform(MeshHandle handle, const glm::mat4& transform)
 {
   m_meshPool.updateTransform(handle, transform);
 }
 
-uint64_t Renderer::getLightPipelineLayout() const
+uint64_t RenderDevice::getLightPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
 }
 
-uint64_t Renderer::getPostProcessPipelineLayout() const
+uint64_t RenderDevice::getPostProcessPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.postProcessPipelineLayout);
 }
 
-uint64_t Renderer::getLightCullingPipelineLayout() const
+uint64_t RenderDevice::getLightCullingPipelineLayout() const
 {
   return 0;
 }
 
-uint64_t Renderer::getDebugPipelineLayout() const
+uint64_t RenderDevice::getDebugPipelineLayout() const
 {
   return m_device.debugPipelineLayout ? m_device.debugPipelineLayout->getNativeHandle() : 0;
 }
 
-uint64_t Renderer::getGraphicsPipelineLayout() const
+uint64_t RenderDevice::getGraphicsPipelineLayout() const
 {
   return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
 }
 
-uint64_t Renderer::getGBufferPipelineLayout() const
+uint64_t RenderDevice::getGBufferPipelineLayout() const
 {
   return m_device.gbufferPipelineLayout ? m_device.gbufferPipelineLayout->getNativeHandle() : 0;
 }
 
-uint64_t Renderer::getMDIPipelineLayout() const
+uint64_t RenderDevice::getMDIPipelineLayout() const
 {
   return m_device.mdiPipelineLayout ? m_device.mdiPipelineLayout->getNativeHandle() : 0;
 }
 
-uint64_t Renderer::getGraphicsScenePipelineLayout() const
+uint64_t RenderDevice::getGraphicsScenePipelineLayout() const
 {
   return getGBufferPipelineLayout();
 }
 
-uint64_t Renderer::getGraphicsMDIPipelineLayout() const
+uint64_t RenderDevice::getGraphicsMDIPipelineLayout() const
 {
   return getMDIPipelineLayout();
 }
 
-uint64_t Renderer::getGBufferColorDescriptorSet() const
+uint64_t RenderDevice::getGBufferColorDescriptorSet() const
 {
   return getBindGroupDescriptorSetOpaque(getCurrentMaterialBindGroupHandle(), BindGroupSetSlot::material);
 }
 
-uint64_t Renderer::getGBufferTextureDescriptorSet() const
+uint64_t RenderDevice::getGBufferTextureDescriptorSet() const
 {
   if(m_device.gbufferTextureSets.empty())
   {
@@ -9174,34 +9174,34 @@ uint64_t Renderer::getGBufferTextureDescriptorSet() const
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
 }
 
-uint64_t Renderer::getGBufferTextureSetLayout() const
+uint64_t RenderDevice::getGBufferTextureSetLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.gbufferTextureSetLayout);
 }
 
-uint64_t Renderer::getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const
+uint64_t RenderDevice::getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const
 {
   return frameIndex < m_device.gbufferTextureSets.size()
              ? reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex])
              : 0;
 }
 
-uint32_t Renderer::getFrameResourceCount() const
+uint32_t RenderDevice::getFrameResourceCount() const
 {
   return static_cast<uint32_t>(m_perFrame.frameUserData.size());
 }
 
-uint64_t Renderer::getGraphicsMaterialDescriptorSet() const
+uint64_t RenderDevice::getGraphicsMaterialDescriptorSet() const
 {
   return getGBufferColorDescriptorSet();
 }
 
-uint64_t Renderer::getLightingInputDescriptorSet() const
+uint64_t RenderDevice::getLightingInputDescriptorSet() const
 {
   return getGBufferTextureDescriptorSet();
 }
 
-uint64_t Renderer::getLightCullingDescriptorSet() const
+uint64_t RenderDevice::getLightCullingDescriptorSet() const
 {
   const uint32_t frameIndex = m_perFrame.frameContext != nullptr ? m_perFrame.frameContext->getCurrentFrameIndex() : 0u;
   if(frameIndex >= m_device.lightCoarseCullingDescriptorSets.size())
@@ -9211,54 +9211,54 @@ uint64_t Renderer::getLightCullingDescriptorSet() const
   return reinterpret_cast<uint64_t>(m_device.lightCoarseCullingDescriptorSets[frameIndex]);
 }
 
-bool Renderer::getIBLEnvironmentLoaded() const
+bool RenderDevice::getIBLEnvironmentLoaded() const
 {
   return m_device.iblEnvironmentLoaded;
 }
 
-bool Renderer::getIBLUsingFallback() const
+bool RenderDevice::getIBLUsingFallback() const
 {
   return m_device.iblUsingFallback;
 }
 
-VkFormat Renderer::getIBLEnvironmentFormat() const
+VkFormat RenderDevice::getIBLEnvironmentFormat() const
 {
   return m_device.iblEnvironmentFormat;
 }
 
-VkExtent2D Renderer::getIBLEnvironmentExtent() const
+VkExtent2D RenderDevice::getIBLEnvironmentExtent() const
 {
   return m_device.iblEnvironmentExtent;
 }
 
-uint32_t Renderer::getIBLEnvironmentMipCount() const
+uint32_t RenderDevice::getIBLEnvironmentMipCount() const
 {
   return m_device.iblEnvironmentMipCount;
 }
 
-uint64_t Renderer::getIBLEnvironmentEstimatedBytes() const
+uint64_t RenderDevice::getIBLEnvironmentEstimatedBytes() const
 {
   return m_device.iblEnvironmentEstimatedBytes;
 }
 
-const std::string& Renderer::getIBLEnvironmentPath() const
+const std::string& RenderDevice::getIBLEnvironmentPath() const
 {
   return m_device.iblEnvironmentPath;
 }
 
-const std::string& Renderer::getIBLEnvironmentStatus() const
+const std::string& RenderDevice::getIBLEnvironmentStatus() const
 {
   return m_device.iblEnvironmentStatus;
 }
 
-void Renderer::updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)
+void RenderDevice::updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms)
 {
   m_lightResources.updatePointLights(frameIndex, m_testPointLights);
   m_lightResources.updateSpotLights(frameIndex, m_testSpotLights);
   m_lightResources.updateCoarseCullingUniforms(frameIndex, uniforms);
 }
 
-uint64_t Renderer::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9272,7 +9272,7 @@ uint64_t Renderer::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
   return static_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.address);
 }
 
-uint64_t Renderer::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9281,7 +9281,7 @@ uint64_t Renderer::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
   return static_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer.address);
 }
 
-uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9290,7 +9290,7 @@ uint64_t Renderer::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
-uint64_t Renderer::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9299,7 +9299,7 @@ uint64_t Renderer::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBuffer.buffer);
 }
 
-uint32_t Renderer::getGPUCullingObjectCount(uint32_t frameIndex) const
+uint32_t RenderDevice::getGPUCullingObjectCount(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9308,7 +9308,7 @@ uint32_t Renderer::getGPUCullingObjectCount(uint32_t frameIndex) const
   return m_perFrame.frameUserData[frameIndex].gpuCullingObjectCount;
 }
 
-uint32_t Renderer::getCurrentFrameIndexHint() const
+uint32_t RenderDevice::getCurrentFrameIndexHint() const
 {
   if(m_perFrame.frameContext == nullptr)
   {
@@ -9317,7 +9317,7 @@ uint32_t Renderer::getCurrentFrameIndexHint() const
   return m_perFrame.frameContext->getCurrentFrameIndex();
 }
 
-uint64_t Renderer::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const
+uint64_t RenderDevice::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const
 {
   const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
   if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
@@ -9329,7 +9329,7 @@ uint64_t Renderer::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFra
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer.buffer);
 }
 
-uint64_t Renderer::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const
+uint64_t RenderDevice::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const
 {
   const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
   if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
@@ -9341,7 +9341,7 @@ uint64_t Renderer::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFr
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer.buffer);
 }
 
-uint64_t Renderer::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
+uint64_t RenderDevice::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9350,7 +9350,7 @@ uint64_t Renderer::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameInde
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer.buffer);
 }
 
-uint32_t Renderer::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, const GltfUploadResult* gltfModel) const
+uint32_t RenderDevice::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, const GltfUploadResult* gltfModel) const
 {
   const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
   if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
@@ -9376,7 +9376,7 @@ uint32_t Renderer::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, 
   return previousFrame.gpuCullingObjectCount;
 }
 
-BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const
+BindGroupHandle RenderDevice::getCameraBindGroup(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
@@ -9385,7 +9385,7 @@ BindGroupHandle Renderer::getCameraBindGroup(uint32_t frameIndex) const
   return kNullBindGroupHandle;
 }
 
-BindGroupHandle Renderer::getDrawBindGroup(uint32_t frameIndex) const
+BindGroupHandle RenderDevice::getDrawBindGroup(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
@@ -9394,7 +9394,7 @@ BindGroupHandle Renderer::getDrawBindGroup(uint32_t frameIndex) const
   return kNullBindGroupHandle;
 }
 
-BindGroupHandle Renderer::getMDIDrawBindGroup(uint32_t frameIndex) const
+BindGroupHandle RenderDevice::getMDIDrawBindGroup(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
@@ -9403,7 +9403,7 @@ BindGroupHandle Renderer::getMDIDrawBindGroup(uint32_t frameIndex) const
   return kNullBindGroupHandle;
 }
 
-BindGroupHandle Renderer::getGBufferMDIDrawBindGroup(uint32_t frameIndex) const
+BindGroupHandle RenderDevice::getGBufferMDIDrawBindGroup(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
@@ -9412,7 +9412,7 @@ BindGroupHandle Renderer::getGBufferMDIDrawBindGroup(uint32_t frameIndex) const
   return kNullBindGroupHandle;
 }
 
-BindGroupHandle Renderer::getDepthMDIDrawBindGroup(uint32_t frameIndex) const
+BindGroupHandle RenderDevice::getDepthMDIDrawBindGroup(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
@@ -9421,7 +9421,7 @@ BindGroupHandle Renderer::getDepthMDIDrawBindGroup(uint32_t frameIndex) const
   return kNullBindGroupHandle;
 }
 
-BindGroupHandle Renderer::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const
+BindGroupHandle RenderDevice::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size() && cascadeIndex < shaderio::LCascadeCount)
   {
@@ -9430,12 +9430,12 @@ BindGroupHandle Renderer::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint
   return kNullBindGroupHandle;
 }
 
-uint64_t Renderer::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
+uint64_t RenderDevice::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
 {
   return getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
 }
 
-void Renderer::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
+void RenderDevice::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
   {
@@ -9453,7 +9453,7 @@ void Renderer::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData)
+void RenderDevice::uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
   {
@@ -9474,7 +9474,7 @@ void Renderer::uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawInd
                               sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
+void RenderDevice::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
   {
@@ -9492,7 +9492,7 @@ void Renderer::uploadGBufferMDIDrawData(uint32_t frameIndex, std::span<const sha
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadGBufferMDIDrawDataRange(uint32_t frameIndex,
+void RenderDevice::uploadGBufferMDIDrawDataRange(uint32_t frameIndex,
                                              uint32_t firstDrawIndex,
                                              std::span<const shaderio::DrawUniforms> drawData)
 {
@@ -9515,7 +9515,7 @@ void Renderer::uploadGBufferMDIDrawDataRange(uint32_t frameIndex,
                               sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
+void RenderDevice::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
 {
   if(frameIndex >= m_perFrame.frameUserData.size() || drawData.empty())
   {
@@ -9533,7 +9533,7 @@ void Renderer::uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shade
                          sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::uploadDepthMDIDrawDataRange(uint32_t frameIndex,
+void RenderDevice::uploadDepthMDIDrawDataRange(uint32_t frameIndex,
                                            uint32_t firstDrawIndex,
                                            std::span<const shaderio::DrawUniforms> drawData)
 {
@@ -9556,7 +9556,7 @@ void Renderer::uploadDepthMDIDrawDataRange(uint32_t frameIndex,
                               sizeof(shaderio::DrawUniforms) * drawData.size());
 }
 
-void Renderer::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount)
+void RenderDevice::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -9567,12 +9567,12 @@ void Renderer::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint
   ensureGPUDrivenPersistentIndirectStreamBuffer(frameUserData, requiredDrawCount);
 }
 
-rhi::BindGroupHandle Renderer::getGlobalBindlessGroup() const
+rhi::BindGroupHandle RenderDevice::getGlobalBindlessGroup() const
 {
   return getCurrentMaterialBindGroupHandle();
 }
 
-glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const
+glm::vec4 RenderDevice::getMaterialBaseColorFactor(MaterialHandle handle) const
 {
   const MaterialResources::MaterialRecord* material = tryGetMaterial(handle);
   if(material)
@@ -9582,7 +9582,7 @@ glm::vec4 Renderer::getMaterialBaseColorFactor(MaterialHandle handle) const
   return glm::vec4(1.0f);
 }
 
-int32_t Renderer::getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
+int32_t RenderDevice::getMaterialBaseColorTextureIndex(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
 {
   if(!gltfModel)
   {
@@ -9608,7 +9608,7 @@ int32_t Renderer::getMaterialBaseColorTextureIndex(MaterialHandle materialHandle
   return -1;
 }
 
-Renderer::MaterialTextureIndices Renderer::getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
+RenderDevice::MaterialTextureIndices RenderDevice::getMaterialTextureIndices(MaterialHandle materialHandle, const GltfUploadResult* gltfModel) const
 {
   MaterialTextureIndices result;
 
@@ -9658,7 +9658,7 @@ Renderer::MaterialTextureIndices Renderer::getMaterialTextureIndices(MaterialHan
   return result;
 }
 
-void Renderer::updateBindlessTexture(uint32_t index, TextureHandle textureHandle)
+void RenderDevice::updateBindlessTexture(uint32_t index, TextureHandle textureHandle)
 {
   const MaterialResources::TextureHotData* textureHot = tryGetTextureHot(textureHandle);
   if(!textureHot || textureHot->runtimeKind != MaterialResources::TextureRuntimeKind::materialSampled)
@@ -9697,7 +9697,7 @@ void Renderer::updateBindlessTexture(uint32_t index, TextureHandle textureHandle
   }
 }
 
-void Renderer::invalidateBindlessTexture(uint32_t index)
+void RenderDevice::invalidateBindlessTexture(uint32_t index)
 {
   if(index >= m_materials.materialDescriptorImageInfos.size() || index >= m_materials.materialDescriptorValid.size())
   {

@@ -272,9 +272,9 @@ class GPUDrivenRenderer : public rhi::BindingResolver
 {
 public:
   // rhi::BindingResolver — resolves both this renderer's own pipelines/sets and,
-  // by delegation, the inner Renderer's. Injected into the frame command list so
+  // by delegation, the inner RenderDevice's. Injected into the frame command list so
   // GPUDriven passes can bind through handles even though these pipelines live
-  // outside the inner Renderer's registry.
+  // outside the inner RenderDevice's registry.
   [[nodiscard]] uint64_t resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const override;
   [[nodiscard]] uint64_t resolvePipelineLayout(PipelineHandle handle) const override;
   [[nodiscard]] uint64_t resolveBindGroupDescriptorSet(BindGroupHandle handle) const override;
@@ -878,7 +878,7 @@ private:
   void            shutdownPhase7Pipelines();
   void            updatePhase7Descriptors(uint32_t frameIndex);
 
-  Renderer                           m_renderer;
+  RenderDevice                           m_renderer;
   PassExecutor                       m_passExecutor;
   GPUSceneRegistry                   m_sceneRegistry;
   HiZDepthPyramid                    m_hiZDepthPyramid;
