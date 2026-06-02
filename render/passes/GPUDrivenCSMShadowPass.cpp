@@ -159,8 +159,6 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, csmPipeline);
     context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
 
-    const TransientAllocator::Allocation cameraAlloc =
-        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
     shaderio::CameraUniforms cascadeCamera{};
     cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
     cascadeCamera.projection = cascadeCamera.viewProjection;
@@ -182,8 +180,7 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     const glm::vec3 dirToLight = -lightTravelDir;
     cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
     cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
-    std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
-    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
+    const TransientAllocator::Allocation cameraAlloc = context.transientAllocator->allocateAndWrite(cascadeCamera, 256);
 
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(frameIndex);
     if(!cameraBindGroupHandle.isNull())

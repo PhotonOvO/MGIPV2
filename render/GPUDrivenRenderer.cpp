@@ -2642,20 +2642,21 @@ void GPUDrivenRenderer::initPhase7Resources()
   };
   VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &aoLayoutInfo, nullptr, &m_aoSetLayout));
 
-  const std::array<VkDescriptorSetLayoutBinding, 6> ssrBindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  // Phase 6: SSR uses a per-frame temporary bind group, so its set layout is created
+  // through the RHI (createBindGroupLayout) instead of raw Vulkan. The native
+  // VkDescriptorSetLayout is cached for building the compute pipeline layout below.
+  const std::array<rhi::BindGroupLayoutEntry, 6> ssrLayoutEntries{{
+      {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {2, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {3, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {4, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageTexture, 1},
+      {5, rhi::ShaderStage::compute, rhi::BindlessResourceType::uniformBuffer, 1},
   }};
-  const VkDescriptorSetLayoutCreateInfo ssrLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(ssrBindings.size()),
-      .pBindings = ssrBindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &ssrLayoutInfo, nullptr, &m_ssrSetLayout));
+  m_ssrLayoutHandle = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = ssrLayoutEntries.data(), .entryCount = static_cast<uint32_t>(ssrLayoutEntries.size())});
+  m_ssrSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
+      static_cast<uintptr_t>(m_renderer.getBindGroupLayoutHandleNative(m_ssrLayoutHandle)));
 
   const VkPushConstantRange aoPushRange{
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -2687,7 +2688,6 @@ void GPUDrivenRenderer::initPhase7Resources()
 
   m_aoDescriptorSets.resize(frameCount);
   m_aoDenoiseDescriptorSets.resize(frameCount);
-  m_ssrDescriptorSets.resize(frameCount);
   std::vector<VkDescriptorSetLayout> aoLayouts(frameCount * 2u, m_aoSetLayout);
   std::vector<VkDescriptorSet> aoSets(frameCount * 2u, VK_NULL_HANDLE);
   VkDescriptorSetAllocateInfo aoAlloc{
@@ -2703,19 +2703,11 @@ void GPUDrivenRenderer::initPhase7Resources()
     m_aoDenoiseDescriptorSets[i] = aoSets[i * 2u + 1u];
   }
 
-  std::vector<VkDescriptorSetLayout> ssrLayouts(frameCount, m_ssrSetLayout);
-  VkDescriptorSetAllocateInfo ssrAlloc{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_phase7DescriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts = ssrLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &ssrAlloc, m_ssrDescriptorSets.data()));
-
-  // Phase 6: adopt the AO/SSR descriptor sets as RHI bind groups so passes bind them
+  // Phase 6: adopt the AO descriptor sets as RHI bind groups so the AO pass binds them
   // via cmd->bindBindGroup. Sets are allocated once here (resize only recreates the
   // images / rewrites contents), so a single adoption per frame is stable for the
-  // app lifetime; the bind-group pool frees the adapters at device shutdown.
+  // app lifetime; the bind-group pool frees the adapters at device shutdown. (SSR
+  // instead builds a per-frame temporary bind group in acquireSSRTempBindGroup.)
   const auto adoptComputeSet = [&](VkDescriptorSet set, VkDescriptorSetLayout setLayout, const char* name) {
     return m_renderer.registerExternalBindGroup(BindGroupDesc{
         .slot                = BindGroupSetSlot::shaderSpecific,
@@ -2727,12 +2719,10 @@ void GPUDrivenRenderer::initPhase7Resources()
   };
   m_aoBindGroups.assign(frameCount, BindGroupHandle{});
   m_aoDenoiseBindGroups.assign(frameCount, BindGroupHandle{});
-  m_ssrBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
     m_aoBindGroups[i]        = adoptComputeSet(m_aoDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao");
     m_aoDenoiseBindGroups[i] = adoptComputeSet(m_aoDenoiseDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao-denoise");
-    m_ssrBindGroups[i]       = adoptComputeSet(m_ssrDescriptorSets[i], m_ssrSetLayout, "gpu-driven-ssr");
   }
 
   resizePhase7Resources();
@@ -2775,11 +2765,9 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
       vkDestroyDescriptorSetLayout(nativeDevice, m_aoSetLayout, nullptr);
       m_aoSetLayout = VK_NULL_HANDLE;
     }
-    if(m_ssrSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_ssrSetLayout, nullptr);
-      m_ssrSetLayout = VK_NULL_HANDLE;
-    }
+    // m_ssrSetLayout is owned by the RHI bind-group-layout pool (m_ssrLayoutHandle),
+    // not raw-created here, so it is not destroyed in this function.
+    m_ssrSetLayout = VK_NULL_HANDLE;
     if(m_phase7DescriptorPool != VK_NULL_HANDLE)
     {
       vkDestroyDescriptorPool(nativeDevice, m_phase7DescriptorPool, nullptr);
@@ -2788,12 +2776,10 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
   }
   m_aoDescriptorSets.clear();
   m_aoDenoiseDescriptorSets.clear();
-  m_ssrDescriptorSets.clear();
   // Adapter objects are freed by RenderDevice::destroyBindGroups at device shutdown;
   // just drop our handle references here.
   m_aoBindGroups.clear();
   m_aoDenoiseBindGroups.clear();
-  m_ssrBindGroups.clear();
   m_phase7HalfExtent = {};
   m_shadowAtlasAllocatedTiles = 0u;
 }
@@ -2964,20 +2950,19 @@ void GPUDrivenRenderer::shutdownPhase7Pipelines()
 
 void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
 {
-  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size()
-     || frameIndex >= m_ssrDescriptorSets.size())
+  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size())
   {
     return;
   }
   const GPUDrivenSceneView& sceneView = m_sceneView;
-  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[0] == VK_NULL_HANDLE
-     || sceneView.gbufferViews[1] == VK_NULL_HANDLE
-     || sceneView.sceneColorHdrView == VK_NULL_HANDLE || m_aoRaw.view == VK_NULL_HANDLE
-     || m_aoDenoised.view == VK_NULL_HANDLE || m_ssrRaw.view == VK_NULL_HANDLE)
+  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+     || m_aoRaw.view == VK_NULL_HANDLE || m_aoDenoised.view == VK_NULL_HANDLE)
   {
     return;
   }
 
+  // SSR is bound via a per-frame temporary bind group (acquireSSRTempBindGroup); only
+  // the persistent AO/denoise sets are rewritten here.
   const std::array<VkDescriptorImageInfo, 3> aoInfos{{
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
@@ -2988,19 +2973,8 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
       VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoDenoised.view, VK_IMAGE_LAYOUT_GENERAL},
   }};
-  const std::array<VkDescriptorImageInfo, 5> ssrInfos{{
-      VkDescriptorImageInfo{VK_NULL_HANDLE,
-                            sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE
-                                ? sceneView.sceneColorHistoryReadView
-                                : sceneView.sceneColorHdrView,
-                            VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[0], VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, m_ssrRaw.view, VK_IMAGE_LAYOUT_GENERAL},
-  }};
 
-  std::array<VkWriteDescriptorSet, 11> writes{};
+  std::array<VkWriteDescriptorSet, 6> writes{};
   uint32_t writeIndex = 0;
   const auto addWrite = [&](VkDescriptorSet set,
                             uint32_t binding,
@@ -3021,13 +2995,46 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
   addWrite(m_aoDenoiseDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[0]);
   addWrite(m_aoDenoiseDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[1]);
   addWrite(m_aoDenoiseDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &denoiseInfos[2]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[0]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[1]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[2]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ssrInfos[3]);
-  addWrite(m_ssrDescriptorSets[frameIndex], 4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ssrInfos[4]);
 
   vkUpdateDescriptorSets(getNativeDeviceHandle(), writeIndex, writes.data(), 0, nullptr);
+}
+
+BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer, uint32_t cameraOffset)
+{
+  if(m_ssrLayoutHandle.isNull() || cameraBuffer == 0)
+  {
+    return BindGroupHandle{};
+  }
+  const GPUDrivenSceneView& sceneView = m_sceneView;
+  const VkImageView historyView = sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE
+                                      ? sceneView.sceneColorHistoryReadView
+                                      : sceneView.sceneColorHdrView;
+  if(historyView == VK_NULL_HANDLE || sceneView.sceneDepthView == VK_NULL_HANDLE
+     || sceneView.gbufferViews[0] == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+     || m_ssrRaw.view == VK_NULL_HANDLE)
+  {
+    return BindGroupHandle{};
+  }
+
+  const uint32_t generalLayout = static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL);
+  const std::array<rhi::DescriptorImageInfo, 5> imageInfos{{
+      {0, reinterpret_cast<uint64_t>(historyView), generalLayout},
+      {0, reinterpret_cast<uint64_t>(sceneView.sceneDepthView), generalLayout},
+      {0, reinterpret_cast<uint64_t>(sceneView.gbufferViews[1]), generalLayout},
+      {0, reinterpret_cast<uint64_t>(sceneView.gbufferViews[0]), generalLayout},
+      {0, reinterpret_cast<uint64_t>(m_ssrRaw.view), generalLayout},
+  }};
+  const rhi::DescriptorBufferInfo cameraInfo{cameraBuffer, cameraOffset, sizeof(shaderio::CameraUniforms)};
+  const std::array<rhi::BindTableWrite, 6> writes{{
+      {.dstIndex = 0, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[0]},
+      {.dstIndex = 1, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[1]},
+      {.dstIndex = 2, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[2]},
+      {.dstIndex = 3, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[3]},
+      {.dstIndex = 4, .resourceType = rhi::BindlessResourceType::storageTexture, .descriptorCount = 1, .pImageInfo = &imageInfos[4]},
+      {.dstIndex = 5, .resourceType = rhi::BindlessResourceType::uniformBuffer, .descriptorCount = 1, .pBufferInfo = &cameraInfo},
+  }};
+  return m_renderer.createTemporaryBindGroup(m_ssrLayoutHandle, writes.data(), static_cast<uint32_t>(writes.size()), 6u,
+                                             BindGroupSetSlot::shaderSpecific, 0, "gpu-driven-ssr-temp");
 }
 
 void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)

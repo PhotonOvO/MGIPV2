@@ -33,39 +33,22 @@ void GPUDrivenSSRPass::execute(const PassContext& context) const
     return;
   }
 
-  const VkBuffer cameraBuffer = reinterpret_cast<VkBuffer>(context.transientAllocator->getBufferOpaque());
+  const uint64_t cameraBuffer = context.transientAllocator->getBufferOpaque();
   const uint32_t cameraOffset = context.cameraAlloc.offset;
   if(!context.params->debugOptions.enableSSR || m_renderer->getSSRTracePipelineOpaque() == 0
-     || m_renderer->getSSRRawImageOpaque() == 0 || cameraBuffer == VK_NULL_HANDLE)
+     || m_renderer->getSSRRawImageOpaque() == 0 || cameraBuffer == 0)
   {
     return;
   }
 
-  const uint32_t frameIndex = context.frameIndex;
-  const VkDescriptorSet ssrSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getSSRDescriptorSetAt(frameIndex));
-  const BindGroupHandle ssrBindGroup = m_renderer->getSSRBindGroup(frameIndex);
   const PipelineHandle ssrPipeline = m_renderer->getSSRTracePipelineHandle();
-  if(ssrSet == VK_NULL_HANDLE || ssrBindGroup.isNull() || ssrPipeline.isNull())
+  // Build this frame's SSR descriptor set (gbuffer/depth/history + ssrRaw + camera) as a
+  // temporary bind group; it is recycled automatically at frame end.
+  const BindGroupHandle ssrBindGroup = m_renderer->acquireSSRTempBindGroup(cameraBuffer, cameraOffset);
+  if(ssrBindGroup.isNull() || ssrPipeline.isNull())
   {
     return;
   }
-
-  // Host-side rebinding of the per-frame camera UBO into the adopted descriptor set.
-  // This is a descriptor write, not command recording, so it stays a direct Vulkan call.
-  const VkDescriptorBufferInfo cameraBufferInfo{
-      .buffer = cameraBuffer,
-      .offset = cameraOffset,
-      .range = sizeof(shaderio::CameraUniforms),
-  };
-  const VkWriteDescriptorSet cameraWrite{
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = ssrSet,
-      .dstBinding = 5,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .pBufferInfo = &cameraBufferInfo,
-  };
-  vkUpdateDescriptorSets(m_renderer->getNativeDeviceHandle(), 1, &cameraWrite, 0, nullptr);
 
   const VkExtent2D halfExtent = m_renderer->getPhase7HalfExtent();
   const shaderio::GPUDrivenSSRPushConstants push{

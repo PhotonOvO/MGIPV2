@@ -245,6 +245,18 @@ public:
   rhi::BindGroupHandle createBindGroup(const rhi::BindGroupDesc& desc);
   void destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle);
   void destroyBindGroup(rhi::BindGroupHandle handle);
+  // Native VkDescriptorSetLayout (as uint64) backing a BindGroupLayoutHandle, e.g. to
+  // build a VkPipelineLayout that is compatible with temporary bind groups of this layout.
+  [[nodiscard]] uint64_t getBindGroupLayoutHandleNative(rhi::BindGroupLayoutHandle handle) const;
+
+  // Frame-lifetime bind group (HypeHype createTemporaryBindGroup). Allocates a fresh
+  // descriptor set from the given layout, writes it, and returns a handle valid only
+  // for the current frame — it is destroyed automatically when this frame index is
+  // recorded again (after its fence). Callers must NOT cache the handle across frames.
+  BindGroupHandle createTemporaryBindGroup(rhi::BindGroupLayoutHandle layout,
+                                           const rhi::BindTableWrite* writes, uint32_t writeCount,
+                                           uint32_t maxLogicalEntries, BindGroupSetSlot slot,
+                                           rhi::ResourceIndex primaryLogicalIndex, const char* debugName);
 
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
@@ -548,6 +560,10 @@ private:
       std::vector<shaderio::DrawUniforms>     shadowCullingScratchDrawData;
       std::vector<VkCommandBuffer> pendingUploadCmds;
       std::vector<VkFence> pendingUploadFences;
+      // Bind groups created via createTemporaryBindGroup during this frame index's
+      // recording. Recycled (destroyed) the next time this frame index comes around,
+      // after its fence has been waited on, so the descriptor sets are safely idle.
+      std::vector<BindGroupHandle> transientBindGroups;
     };
 
     std::vector<FrameUserData> frameUserData;

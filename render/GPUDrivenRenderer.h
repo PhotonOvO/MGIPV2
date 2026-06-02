@@ -504,15 +504,11 @@ public:
   [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_ssrTracePipeline); }
   [[nodiscard]] uint64_t getSSRPipelineLayout() const { return reinterpret_cast<uint64_t>(m_ssrPipelineLayout); }
   [[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
-  [[nodiscard]] uint64_t getSSRDescriptorSetAt(uint32_t frameIndex) const
-  {
-    return frameIndex < m_ssrDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_ssrDescriptorSets[frameIndex]) : 0;
-  }
   [[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
-  [[nodiscard]] BindGroupHandle getSSRBindGroup(uint32_t frameIndex) const
-  {
-    return frameIndex < m_ssrBindGroups.size() ? m_ssrBindGroups[frameIndex] : BindGroupHandle{};
-  }
+  // Builds the SSR compute set as a per-frame temporary bind group (gbuffer/depth/history
+  // sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
+  // frame-lifetime handle; do not cache it across frames.
+  [[nodiscard]] BindGroupHandle acquireSSRTempBindGroup(uint64_t cameraBuffer, uint32_t cameraOffset);
 
   // Opaque snapshot of the per-frame bitonic visibility-sort resources, so the
   // visibility-sort pass can record without reaching into renderer internals.
@@ -1032,15 +1028,16 @@ private:
   VkPipeline                         m_ssrTracePipeline{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_aoDescriptorSets;
   std::vector<VkDescriptorSet>       m_aoDenoiseDescriptorSets;
-  std::vector<VkDescriptorSet>       m_ssrDescriptorSets;
   // Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
-  // so the AO/SSR passes record through cmd-> verbs instead of raw vkCmd*.
+  // so the AO/SSR passes record through cmd-> verbs instead of raw vkCmd*. AO uses
+  // persistent adopted sets; SSR builds a per-frame temporary bind group from
+  // m_ssrLayoutHandle (see acquireSSRTempBindGroup).
   PipelineHandle                     m_gtaoPipelineHandle{};
   PipelineHandle                     m_aoDenoisePipelineHandle{};
   PipelineHandle                     m_ssrTracePipelineHandle{};
+  rhi::BindGroupLayoutHandle         m_ssrLayoutHandle{};
   std::vector<BindGroupHandle>       m_aoBindGroups;
   std::vector<BindGroupHandle>       m_aoDenoiseBindGroups;
-  std::vector<BindGroupHandle>       m_ssrBindGroups;
   utils::ImageResource               m_aoRaw{};
   utils::ImageResource               m_aoDenoised{};
   utils::ImageResource               m_ssrRaw{};

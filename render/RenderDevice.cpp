@@ -2009,6 +2009,13 @@ bool RenderDevice::prepareFrameResources()
   {
     demo::profiling::ScopedCpuRange resetTransientRange("PrepareFrameResources.ResetTransientAllocator");
     frameUserData.transientAllocator.reset();
+    // This frame index's fence has been waited on, so last cycle's temporary bind
+    // groups are idle and safe to recycle before new ones are created this frame.
+    for(const BindGroupHandle handle : frameUserData.transientBindGroups)
+    {
+      destroyBindGroup(handle);
+    }
+    frameUserData.transientBindGroups.clear();
   }
   m_swapchainDependent.hasAcquiredImage = false;
 
@@ -7462,6 +7469,42 @@ BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
   return handle;
 }
 
+BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::BindGroupLayoutHandle layoutHandle,
+                                                       const rhi::BindTableWrite* writes, uint32_t writeCount,
+                                                       uint32_t maxLogicalEntries, BindGroupSetSlot slot,
+                                                       rhi::ResourceIndex primaryLogicalIndex, const char* debugName)
+{
+  std::unique_ptr<rhi::BindTableLayout>* layoutSlot = m_materials.bindGroupLayoutPool.tryGet(layoutHandle);
+  ASSERT(layoutSlot != nullptr && *layoutSlot != nullptr, "createTemporaryBindGroup requires a valid layout handle");
+  rhi::BindTableLayout& layout = **layoutSlot;
+
+  // Build a backend bind table from the shared layout, allocate+write its set now.
+  auto* table = new rhi::vulkan::VulkanBindTable();
+  table->init(reinterpret_cast<void*>(static_cast<uintptr_t>(m_device.device->getNativeDevice())), layout, maxLogicalEntries);
+  if(writeCount > 0)
+  {
+    table->update(writeCount, writes);
+  }
+
+  // The handle's own layout adapter is a throwaway (destroyBindGroup deletes it); the
+  // shared VulkanBindTableLayout stays owned by the layout pool for reuse next frame.
+  BindGroupDesc desc{
+      .slot                = slot,
+      .layout              = new rhi::vulkan::AdoptedBindTableLayout(layout.getNativeHandle()),
+      .table               = table,
+      .primaryLogicalIndex = primaryLogicalIndex,
+      .debugName           = debugName,
+  };
+  const BindGroupHandle handle = createBindGroup(std::move(desc));
+
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  if(frameIndex < m_perFrame.frameUserData.size())
+  {
+    m_perFrame.frameUserData[frameIndex].transientBindGroups.push_back(handle);
+  }
+  return handle;
+}
+
 void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const
 {
   if(writeCount == 0 || writes == nullptr)
@@ -7504,6 +7547,12 @@ void RenderDevice::destroyBindGroups()
 const BindGroupResource* RenderDevice::tryGetBindGroup(BindGroupHandle handle) const
 {
   return m_materials.bindGroupPool.tryGet(handle);
+}
+
+uint64_t RenderDevice::getBindGroupLayoutHandleNative(rhi::BindGroupLayoutHandle handle) const
+{
+  const std::unique_ptr<rhi::BindTableLayout>* layoutSlot = m_materials.bindGroupLayoutPool.tryGet(handle);
+  return (layoutSlot != nullptr && *layoutSlot != nullptr) ? (*layoutSlot)->getNativeHandle() : 0;
 }
 
 uint64_t RenderDevice::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const

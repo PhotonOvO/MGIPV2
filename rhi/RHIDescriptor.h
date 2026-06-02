@@ -32,6 +32,8 @@ enum class DescriptorKind : uint8_t
       return DescriptorKind::Sampler;
     case BindlessResourceType::sampledTexture:
       return DescriptorKind::CombinedImageSampler;
+    case BindlessResourceType::sampledImage:
+      return DescriptorKind::SampledImage;
     case BindlessResourceType::storageTexture:
       return DescriptorKind::StorageImage;
     case BindlessResourceType::uniformBuffer:

@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <utility>
 
 namespace demo {
 
@@ -25,6 +27,36 @@ public:
   void                     init(rhi::Device& device, VmaAllocator allocator, uint32_t bufferSize);
   [[nodiscard]] Allocation allocate(uint32_t size, uint32_t alignment);
   void                     flushAllocation(const Allocation& allocation, uint32_t size) const;
+
+  // gpu_temp_allocate-style typed helpers. allocateTyped returns a writable pointer
+  // into the mapped ring buffer plus the binding offset; the caller fills *data then
+  // calls flushAllocation (no-op when host-coherent). allocateAndWrite collapses the
+  // ubiquitous allocate + memcpy + flush into one call for plain-old-data uniforms.
+  template <typename T>
+  struct TypedAllocation
+  {
+    T*           data{nullptr};
+    BufferHandle handle{};
+    uint32_t     offset{0};
+
+    [[nodiscard]] Allocation toUntyped() const { return Allocation{data, handle, offset}; }
+  };
+
+  template <typename T>
+  [[nodiscard]] TypedAllocation<T> allocateTyped(uint32_t alignment = alignof(T))
+  {
+    const Allocation a = allocate(static_cast<uint32_t>(sizeof(T)), alignment);
+    return TypedAllocation<T>{static_cast<T*>(a.cpuPtr), a.handle, a.offset};
+  }
+
+  template <typename T>
+  [[nodiscard]] Allocation allocateAndWrite(const T& value, uint32_t alignment = alignof(T))
+  {
+    const Allocation a = allocate(static_cast<uint32_t>(sizeof(T)), alignment);
+    std::memcpy(a.cpuPtr, &value, sizeof(T));
+    flushAllocation(a, static_cast<uint32_t>(sizeof(T)));
+    return a;
+  }
   void                     markLogicalRelease(uint64_t submitTimelineValue);
   void                     reset() { m_head = 0; }
   void                     destroy();
