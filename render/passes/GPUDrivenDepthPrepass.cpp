@@ -102,13 +102,6 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
     return;
   }
 
-  const VkPipelineLayout pipelineLayout =
-      reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsScenePipelineLayout());
-  const VkDescriptorSet textureSet =
-      reinterpret_cast<VkDescriptorSet>(m_renderer->getGraphicsMaterialDescriptorSet());
-  vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                          shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
-
   if(!context.cameraAllocValid)
   {
     context.cmd->endRenderPass();
@@ -118,15 +111,6 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 
   const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-  if(!cameraBindGroupHandle.isNull())
-  {
-    VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-        m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            shaderio::LSetScene, 1, &cameraDescriptorSet, 2, dynamicOffsets);
-  }
-
   const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
   MeshPool& meshPool = m_renderer->getMeshPool();
 
@@ -148,23 +132,6 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
     const BindGroupHandle mdiDrawBindGroupHandle = m_renderer->getDepthMDIDrawBindGroup(context.frameIndex);
     if(!mdiDrawBindGroupHandle.isNull())
     {
-      const VkPipelineLayout mdiPipelineLayout =
-          reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsMDIPipelineLayout());
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, mdiPipelineLayout,
-                              shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
-      if(!cameraBindGroupHandle.isNull())
-      {
-        VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-            m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-        const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-        vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, mdiPipelineLayout,
-                                shaderio::LSetScene, 1, &cameraDescriptorSet, 2, dynamicOffsets);
-      }
-      const VkDescriptorSet mdiDrawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          m_renderer->getBindGroupDescriptorSet(mdiDrawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, mdiPipelineLayout,
-                              shaderio::LSetDraw, 1, &mdiDrawDescriptorSet, 0, nullptr);
-
       const auto pickRepresentativeMesh = [&]() -> const MeshRecord* {
         for(uint32_t drawIndex : m_renderer->getOpaqueDrawIndices())
         {
@@ -232,9 +199,14 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
                                                      opaqueMaxDrawCount,
                                                      alphaMaxDrawCount);
 
-      const VkPipeline opaquePipeline = reinterpret_cast<VkPipeline>(
-          m_renderer->getNativeGraphicsPipeline(m_renderer->getDepthPrepassOpaqueMDIPipelineHandle()));
-      rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline);
+      context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getDepthPrepassOpaqueMDIPipelineHandle());
+      context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
+      if(!cameraBindGroupHandle.isNull())
+      {
+        const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
+        context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+      }
+      context.cmd->bindBindGroup(shaderio::LSetDraw, mdiDrawBindGroupHandle, nullptr, 0);
       context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
                                             opaqueCommandOffset,
                                             countBufferHandle,
@@ -242,9 +214,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
                                             opaqueMaxDrawCount,
                                             indirectCommandStride);
 
-      const VkPipeline alphaPipeline = reinterpret_cast<VkPipeline>(
-          m_renderer->getNativeGraphicsPipeline(m_renderer->getDepthPrepassAlphaTestMDIPipelineHandle()));
-      rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline);
+      context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getDepthPrepassAlphaTestMDIPipelineHandle());
       context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
                                             alphaCommandOffset,
                                             countBufferHandle,

@@ -1,8 +1,12 @@
 #include "GPUDrivenShadowAtlasPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../../rhi/vulkan/VulkanCommandList.h"
+#include "../../shaders/shader_io.h"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace demo {
 
@@ -24,10 +28,160 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenShadowAtlasPass::getDepen
 
 void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
 {
-  if(m_renderer != nullptr && context.cmd != nullptr && context.params != nullptr && context.transientAllocator != nullptr)
+  if(m_renderer == nullptr)
   {
-    m_renderer->executeShadowAtlasPass(context);
+    return;
   }
+
+  m_renderer->setShadowAtlasAllocatedTiles(0u);
+  const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
+  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr
+     || !context.params->debugOptions.enableShadowAtlas || sceneView == nullptr || !sceneView->usePersistentCullingObjects
+     || sceneView->shadowPackedMeshes == nullptr || sceneView->shadowPackedMeshCount == 0
+     || sceneView->shadowPackedVertexBuffer == VK_NULL_HANDLE || sceneView->shadowPackedIndexBuffer == VK_NULL_HANDLE
+     || m_renderer->getShadowAtlasImageOpaque() == 0 || m_renderer->getShadowAtlasViewOpaque() == 0)
+  {
+    return;
+  }
+
+  shaderio::ShadowUniforms* shadowData = m_renderer->getShadowUniformsData();
+  if(shadowData == nullptr)
+  {
+    return;
+  }
+
+  const PipelineHandle shadowPipeline = m_renderer->getCSMShadowPipelineHandle();
+  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getCSMShadowPipelineLayout());
+  if(shadowPipeline.isNull() || pipelineLayout == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(shadowPipeline));
+  if(nativePipeline == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  CSMShadowResources& csm = m_renderer->getCSMShadowResources();
+  const VkExtent2D atlasFullExtent = m_renderer->getShadowAtlasExtent();
+  const uint32_t tileSize = std::max(1u, m_renderer->getShadowAtlasTileSize());
+  const uint32_t tilesX = atlasFullExtent.width / tileSize;
+  const uint32_t tilesY = atlasFullExtent.height / tileSize;
+  const uint32_t tileCapacity = tilesX * tilesY;
+  const uint32_t cascadeCount = std::min(csm.getCascadeCount(), tileCapacity);
+  if(cascadeCount == 0u)
+  {
+    return;
+  }
+
+  const uint32_t frameIndex = context.frameIndex;
+  const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(frameIndex);
+  const BindGroupHandle drawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(frameIndex, 0);
+  if(cameraBindGroupHandle.isNull() || drawBindGroupHandle.isNull())
+  {
+    return;
+  }
+
+  const BindGroupHandle materialBindGroupHandle = m_renderer->getGraphicsMaterialBindGroup();
+  if(materialBindGroupHandle.isNull())
+  {
+    return;
+  }
+
+  context.cmd->beginEvent("GPUDrivenShadowAtlas");
+  const rhi::DepthTargetDesc depthTarget{
+      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
+      .view = rhi::TextureViewHandle::fromNative(reinterpret_cast<VkImageView>(m_renderer->getShadowAtlasViewOpaque())),
+      .state = rhi::ResourceState::DepthStencilAttachment,
+      .loadOp = rhi::LoadOp::clear,
+      .storeOp = rhi::StoreOp::store,
+      .clearValue = {0.0f, 0},
+  };
+  const rhi::Extent2D atlasExtent{atlasFullExtent.width, atlasFullExtent.height};
+  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+      .renderArea = {{0, 0}, atlasExtent},
+      .colorTargets = nullptr,
+      .colorTargetCount = 0,
+      .depthTarget = &depthTarget,
+  });
+
+  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, shadowPipeline);
+  context.cmd->bindBindGroup(shaderio::LSetTextures, materialBindGroupHandle, nullptr, 0);
+  context.cmd->bindBindGroup(shaderio::LSetDraw, drawBindGroupHandle, nullptr, 0);
+
+  const uint64_t vertexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedVertexBuffer);
+  const uint64_t indexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedIndexBuffer);
+  constexpr uint64_t vertexOffset = 0;
+  context.cmd->bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
+  context.cmd->bindIndexBuffer(indexBuffer, 0, rhi::IndexFormat::uint32);
+
+  for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
+  {
+    const uint32_t tileX = cascadeIndex % tilesX;
+    const uint32_t tileY = cascadeIndex / tilesX;
+    const int32_t viewportX = static_cast<int32_t>(tileX * tileSize);
+    const int32_t viewportY = static_cast<int32_t>(tileY * tileSize);
+    const rhi::Extent2D tileExtent{tileSize, tileSize};
+    context.cmd->setViewport(rhi::Viewport{static_cast<float>(viewportX),
+                                           static_cast<float>(viewportY),
+                                           static_cast<float>(tileSize),
+                                           static_cast<float>(tileSize),
+                                           0.0f,
+                                           1.0f});
+    context.cmd->setScissor(rhi::Rect2D{{viewportX, viewportY}, tileExtent});
+
+    const TransientAllocator::Allocation cameraAlloc =
+        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
+    shaderio::CameraUniforms cascadeCamera{};
+    cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
+    cascadeCamera.projection = cascadeCamera.viewProjection;
+    cascadeCamera.view = glm::mat4(1.0f);
+    cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
+    cascadeCamera.prevView = cascadeCamera.view;
+    cascadeCamera.prevProjection = cascadeCamera.projection;
+    cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
+    cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
+    cascadeCamera.cameraPosition = glm::vec3(0.0f);
+    const float baseConstantBias = context.params->lightSettings.depthBias;
+    const float baseSlopeBias = context.params->lightSettings.normalBias;
+    const float biasScale = shadowData->cascadeBiasScale.z;
+    const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
+    const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
+    const glm::vec3 dirToLight = -lightTravelDir;
+    cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
+    cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
+    std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
+    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
+
+    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
+    context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+
+    for(uint32_t meshIndex = 0; meshIndex < sceneView->shadowPackedMeshCount; ++meshIndex)
+    {
+      const ShadowPackedMesh& packedMesh = sceneView->shadowPackedMeshes[meshIndex];
+      context.cmd->drawIndexed(packedMesh.indexCount, 1, packedMesh.firstIndex, packedMesh.vertexOffset, meshIndex);
+    }
+  }
+
+  context.cmd->endRenderPass();
+  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
+      .nativeImage = m_renderer->getShadowAtlasImageOpaque(),
+      .aspect = rhi::TextureAspect::depth,
+      .srcStage = rhi::PipelineStage::FragmentShader,
+      .dstStage = rhi::PipelineStage::FragmentShader,
+      .srcAccess = rhi::ResourceAccess::write,
+      .dstAccess = rhi::ResourceAccess::read,
+      .oldState = rhi::ResourceState::DepthStencilAttachment,
+      .newState = rhi::ResourceState::General,
+      .isSwapchain = false,
+  });
+  m_renderer->setShadowAtlasAllocatedTiles(cascadeCount);
+  context.cmd->endEvent();
 }
 
 }  // namespace demo

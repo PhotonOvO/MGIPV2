@@ -15,7 +15,7 @@ namespace {
 }  // namespace
 
 PipelineHandle VulkanResourceTable::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline,
-                                                     uint32_t specializationVariant, uint64_t nativeLayout)
+                                                     uint32_t specializationVariant, uint64_t nativeLayout, bool owned)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
   return m_pipelines.emplace(PipelineRecord{
@@ -23,6 +23,7 @@ PipelineHandle VulkanResourceTable::registerPipeline(uint32_t bindPoint, uint64_
       .nativePipeline        = nativePipeline,
       .specializationVariant = specializationVariant,
       .nativeLayout          = nativeLayout,
+      .owned                 = owned,
   });
 }
 

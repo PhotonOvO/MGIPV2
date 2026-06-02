@@ -427,11 +427,20 @@ public:
   {
     return m_renderer.getGPUCullingPipelineHandle();
   }
+  [[nodiscard]] BindGroupHandle getGPUCullingBindGroup(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUCullingBindGroup(frameIndex);
+  }
+  [[nodiscard]] BindGroupHandle getShadowCullingBindGroup(uint32_t frameIndex) const
+  {
+    return m_renderer.getShadowCullingBindGroup(frameIndex);
+  }
   [[nodiscard]] PipelineHandle getLightCullingPipelineHandle() const { return m_pointLightCoarseCullingPipeline; }
   [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
   [[nodiscard]] uint64_t getGraphicsScenePipelineLayout() const { return m_renderer.getGraphicsScenePipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMDIPipelineLayout() const { return m_renderer.getGraphicsMDIPipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
+  [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const { return m_renderer.getGraphicsMaterialBindGroup(); }
   [[nodiscard]] uint64_t getLightPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightPipelineLayout); }
   [[nodiscard]] uint64_t getPostProcessPipelineLayout() const { return m_renderer.getPostProcessPipelineLayout(); }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
@@ -450,6 +459,100 @@ public:
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
   [[nodiscard]] uint64_t getGPUCullingPipelineLayout() const { return m_renderer.getGPUCullingPipelineLayout(); }
   [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightCoarseCullingPipelineLayout); }
+  [[nodiscard]] uint64_t getLightCoarseCullingDescriptorSetAt(uint32_t frameIndex) const
+  {
+    return frameIndex < m_lightCoarseCullingDescriptorSets.size()
+               ? reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[frameIndex])
+               : 0;
+  }
+  [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
+  }
+  [[nodiscard]] BindGroupHandle getCurrentLightCullingBindGroup() const;
+  [[nodiscard]] PipelineHandle getClusteredLightCullingPipelineHandle() const { return m_clusteredLightCullingPipeline; }
+  [[nodiscard]] uint64_t getClusterStatsBufferOpaque(uint32_t frameIndex) const
+  {
+    return reinterpret_cast<uint64_t>(m_lightResources.getClusterStatsBuffer(frameIndex));
+  }
+  [[nodiscard]] VkExtent2D getPhase7HalfExtent() const { return m_phase7HalfExtent; }
+  [[nodiscard]] uint64_t   getSceneViewOutputImageOpaque() const { return reinterpret_cast<uint64_t>(m_sceneView.outputImage); }
+  [[nodiscard]] VkExtent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
+  [[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_gtaoPipeline); }
+  [[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoisePipeline); }
+  [[nodiscard]] uint64_t getAOPipelineLayout() const { return reinterpret_cast<uint64_t>(m_aoPipelineLayout); }
+  [[nodiscard]] uint64_t getAORawImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoRaw.image); }
+  [[nodiscard]] uint64_t getAODenoisedImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoised.image); }
+  [[nodiscard]] uint64_t getAODescriptorSetAt(uint32_t frameIndex) const
+  {
+    return frameIndex < m_aoDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_aoDescriptorSets[frameIndex]) : 0;
+  }
+  [[nodiscard]] uint64_t getAODenoiseDescriptorSetAt(uint32_t frameIndex) const
+  {
+    return frameIndex < m_aoDenoiseDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_aoDenoiseDescriptorSets[frameIndex]) : 0;
+  }
+  [[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
+  [[nodiscard]] PipelineHandle getAODenoisePipelineHandle() const { return m_aoDenoisePipelineHandle; }
+  [[nodiscard]] BindGroupHandle getAOBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_aoBindGroups.size() ? m_aoBindGroups[frameIndex] : BindGroupHandle{};
+  }
+  [[nodiscard]] BindGroupHandle getAODenoiseBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_aoDenoiseBindGroups.size() ? m_aoDenoiseBindGroups[frameIndex] : BindGroupHandle{};
+  }
+  [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_ssrTracePipeline); }
+  [[nodiscard]] uint64_t getSSRPipelineLayout() const { return reinterpret_cast<uint64_t>(m_ssrPipelineLayout); }
+  [[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
+  [[nodiscard]] uint64_t getSSRDescriptorSetAt(uint32_t frameIndex) const
+  {
+    return frameIndex < m_ssrDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_ssrDescriptorSets[frameIndex]) : 0;
+  }
+  [[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
+  [[nodiscard]] BindGroupHandle getSSRBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_ssrBindGroups.size() ? m_ssrBindGroups[frameIndex] : BindGroupHandle{};
+  }
+
+  // Opaque snapshot of the per-frame bitonic visibility-sort resources, so the
+  // visibility-sort pass can record without reaching into renderer internals.
+  struct VisibilitySortDispatch
+  {
+    PipelineHandle  pipelineHandle{};
+    BindGroupHandle bindGroup{};
+    uint64_t pipeline{0};
+    uint64_t pipelineLayout{0};
+    uint64_t descriptorSet{0};
+    uint64_t uploadKeyBuffer{0};
+    uint64_t uploadValueBuffer{0};
+    uint64_t keyBuffer{0};
+    uint64_t valueBuffer{0};
+    uint32_t paddedElementCount{0};
+    bool     valid{false};
+  };
+  [[nodiscard]] VisibilitySortDispatch getVisibilitySortDispatch(uint32_t frameIndex) const
+  {
+    VisibilitySortDispatch info{};
+    if(m_visibilitySortPipeline == VK_NULL_HANDLE || m_visibilitySortPipelineLayout == VK_NULL_HANDLE
+       || frameIndex >= m_visibilitySortFrames.size())
+    {
+      return info;
+    }
+    const VisibilitySortFrameResources& f = m_visibilitySortFrames[frameIndex];
+    info.pipelineHandle     = m_visibilitySortPipelineHandle;
+    info.bindGroup          = f.bindGroup;
+    info.pipeline           = reinterpret_cast<uint64_t>(m_visibilitySortPipeline);
+    info.pipelineLayout     = reinterpret_cast<uint64_t>(m_visibilitySortPipelineLayout);
+    info.descriptorSet      = reinterpret_cast<uint64_t>(f.descriptorSet);
+    info.uploadKeyBuffer    = reinterpret_cast<uint64_t>(f.uploadKeyBuffer.buffer);
+    info.uploadValueBuffer  = reinterpret_cast<uint64_t>(f.uploadValueBuffer.buffer);
+    info.keyBuffer          = reinterpret_cast<uint64_t>(f.keyBuffer.buffer);
+    info.valueBuffer        = reinterpret_cast<uint64_t>(f.valueBuffer.buffer);
+    info.paddedElementCount = f.paddedElementCount;
+    info.valid = f.descriptorSet != VK_NULL_HANDLE && f.paddedElementCount > 1u
+                 && f.uploadKeyBuffer.buffer != VK_NULL_HANDLE && f.uploadValueBuffer.buffer != VK_NULL_HANDLE;
+    return info;
+  }
   [[nodiscard]] uint64_t getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getShadowCullingDescriptorSetOpaque(frameIndex);
@@ -505,6 +608,12 @@ public:
   {
     return m_renderer.getShadowCullingMeshCapacity(frameIndex);
   }
+  [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
+  [[nodiscard]] uint64_t getShadowAtlasImageOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.image); }
+  [[nodiscard]] uint64_t getShadowAtlasViewOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.view); }
+  [[nodiscard]] VkExtent2D getShadowAtlasExtent() const { return m_shadowAtlasExtent; }
+  [[nodiscard]] uint32_t   getShadowAtlasTileSize() const { return m_shadowAtlasTileSize; }
+  void                     setShadowAtlasAllocatedTiles(uint32_t tiles) { m_shadowAtlasAllocatedTiles = tiles; }
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
   {
     return m_renderer.getGPUCullingObjectBufferAddress(frameIndex);
@@ -714,22 +823,11 @@ public:
     m_renderer.ensureGPUDrivenPersistentIndirectStream(frameIndex, requiredDrawCount);
   }
   void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeClusteredLightCullingPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeAOPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeSSRPass(rhi::CommandList& cmd, const RenderParams& params, VkBuffer cameraBuffer, uint32_t cameraOffset);
-  void executeCSMShadowPass(const PassContext& context);
-  void executeShadowAtlasPass(const PassContext& context);
-  void executeDebugPass(const PassContext& context);
-  void executePresentPass(const PassContext& context);
-  void executeImguiPass(const PassContext& context);
   void beginPresentPass(rhi::CommandList& cmd) { m_renderer.beginPresentPass(cmd); }
   void endPresentPass(rhi::CommandList& cmd) { m_renderer.endPresentPass(cmd); }
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params) { m_renderer.executeImGuiPass(cmd, params); }
   void bindStaticPassResources() { m_renderer.bindStaticPassResources(m_passExecutor); }
   void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }
-  void executeVisibilitySortPass(const PassContext& context) const;
   bool prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
                                          uint32_t          frameIndex,
                                          uint64_t          targetIndirectBufferHandle,
@@ -749,6 +847,7 @@ private:
     utils::Buffer keyBuffer{};
     utils::Buffer valueBuffer{};
     VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
+    BindGroupHandle bindGroup{};
     uint32_t capacity{0};
     uint32_t activeElementCount{0};
     uint32_t paddedElementCount{0};
@@ -805,7 +904,6 @@ private:
   void            uploadPersistentDrawData();
   void            refreshSceneView();
   void            updateOwnershipDiagnostics(uint32_t frameIndex, bool sceneRenderingSuspended, uint32_t safeObjectCount);
-  [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
   void            initLightingResources();
   void            shutdownLightingResources();
   void            initIBLResources();
@@ -880,6 +978,7 @@ private:
   VkDescriptorSetLayout              m_visibilitySortSetLayout{VK_NULL_HANDLE};
   VkPipelineLayout                   m_visibilitySortPipelineLayout{VK_NULL_HANDLE};
   VkPipeline                         m_visibilitySortPipeline{VK_NULL_HANDLE};
+  PipelineHandle                     m_visibilitySortPipelineHandle{};
   std::vector<VisibilitySortFrameResources> m_visibilitySortFrames;
   VkDescriptorPool                   m_transparentVisibilityPatchDescriptorPool{VK_NULL_HANDLE};
   VkDescriptorSetLayout              m_transparentVisibilityPatchSetLayout{VK_NULL_HANDLE};
@@ -891,6 +990,8 @@ private:
   std::vector<VkDescriptorSet>       m_lightingDescriptorSets;
   VkDescriptorSetLayout              m_lightCoarseCullingSetLayout{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_lightCoarseCullingDescriptorSets;
+  // Phase 6: adopted bind groups for the coarse-culling set (point/spot + clustered).
+  std::vector<BindGroupHandle>       m_lightCoarseCullingBindGroups;
   VkDescriptorSetLayout              m_lightingSceneSetLayout{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_lightingSceneDescriptorSets;
   std::vector<VkBuffer>              m_lightingSceneDescriptorTransientBuffers;
@@ -932,6 +1033,14 @@ private:
   std::vector<VkDescriptorSet>       m_aoDescriptorSets;
   std::vector<VkDescriptorSet>       m_aoDenoiseDescriptorSets;
   std::vector<VkDescriptorSet>       m_ssrDescriptorSets;
+  // Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
+  // so the AO/SSR passes record through cmd-> verbs instead of raw vkCmd*.
+  PipelineHandle                     m_gtaoPipelineHandle{};
+  PipelineHandle                     m_aoDenoisePipelineHandle{};
+  PipelineHandle                     m_ssrTracePipelineHandle{};
+  std::vector<BindGroupHandle>       m_aoBindGroups;
+  std::vector<BindGroupHandle>       m_aoDenoiseBindGroups;
+  std::vector<BindGroupHandle>       m_ssrBindGroups;
   utils::ImageResource               m_aoRaw{};
   utils::ImageResource               m_aoDenoised{};
   utils::ImageResource               m_ssrRaw{};

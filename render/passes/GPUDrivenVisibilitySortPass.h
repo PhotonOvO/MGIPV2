@@ -6,6 +6,11 @@ namespace demo {
 
 class GPUDrivenRenderer;
 
+// Records the bitonic visibility-sort compute dispatches for the current frame.
+// Shared by GPUDrivenVisibilitySortPass (and the legacy MeshletCullingPass) so the
+// recording logic lives in the pass layer rather than on the renderer.
+void recordVisibilitySort(const PassContext& context, GPUDrivenRenderer& renderer);
+
 class GPUDrivenVisibilitySortPass : public ComputePassNode
 {
 public:

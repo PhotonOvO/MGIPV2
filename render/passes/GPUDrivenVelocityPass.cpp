@@ -75,29 +75,18 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, rhiExtent});
 
   const PipelineHandle pipelineHandle = m_renderer->getVelocityPipelineHandle();
-  const VkPipeline pipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(pipelineHandle));
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
-  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
                                                context.transientAllocator->getBufferOpaque(),
                                                context.cameraAlloc.offset);
-  const VkDescriptorSet sceneDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
-  if(pipeline != VK_NULL_HANDLE && layout != VK_NULL_HANDLE && textureSet != VK_NULL_HANDLE
-     && sceneDescriptorSet != VK_NULL_HANDLE)
+  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
+  const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
+  if(!pipelineHandle.isNull() && !inputBindGroup.isNull() && !sceneBindGroup.isNull())
   {
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaderio::LSetTextures, 1, &textureSet, 0, nullptr);
+    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, pipelineHandle);
+    context.cmd->bindBindGroup(shaderio::LSetTextures, inputBindGroup, nullptr, 0);
     const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, 0u};
-    vkCmdBindDescriptorSets(vkCmd,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            layout,
-                            shaderio::LSetScene,
-                            1,
-                            &sceneDescriptorSet,
-                            static_cast<uint32_t>(dynamicOffsets.size()),
-                            dynamicOffsets.data());
+    context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
+                               static_cast<uint32_t>(dynamicOffsets.size()));
     context.cmd->draw(3, 1, 0, 0);
   }
 

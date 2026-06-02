@@ -165,22 +165,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     return;
   }
 
-  const VkPipeline nativePipeline =
-      reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(forwardPipeline));
-  rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-
-  const VkPipelineLayout pipelineLayout =
-      reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsMDIPipelineLayout());
-  const VkDescriptorSet textureSet =
-      reinterpret_cast<VkDescriptorSet>(m_renderer->getGraphicsMaterialDescriptorSet());
-  vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout,
-                          shaderio::LSetTextures,
-                          1,
-                          &textureSet,
-                          0,
-                          nullptr);
+  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, forwardPipeline);
+  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
 
   if(!context.cameraAllocValid)
   {
@@ -205,17 +191,8 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
   if(!cameraBindGroupHandle.isNull())
   {
-    VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-        m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
     const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout,
-                            shaderio::LSetScene,
-                            1,
-                            &cameraDescriptorSet,
-                            2,
-                            dynamicOffsets);
+    context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
   }
 
   const BindGroupHandle drawBindGroupHandle = m_renderer->getMDIDrawBindGroup(context.frameIndex);
@@ -300,16 +277,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(renderExtent.width), static_cast<float>(renderExtent.height), 0.0f, 1.0f});
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, renderExtent});
 
-  VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-      m_renderer->getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout,
-                          shaderio::LSetDraw,
-                          1,
-                          &drawDescriptorSet,
-                          0,
-                          nullptr);
+  context.cmd->bindBindGroup(shaderio::LSetDraw, drawBindGroupHandle, nullptr, 0);
 
   const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
   const MeshRecord* representativeMesh = nullptr;

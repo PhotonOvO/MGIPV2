@@ -107,22 +107,9 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
     return;
   }
 
-  const VkPipeline nativePipeline =
-      reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(lightPipeline));
-  rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-
-  const VkPipelineLayout pipelineLayout =
-      reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
-  const VkDescriptorSet textureSet =
-      reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
-  vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout,
-                          shaderio::LSetTextures,
-                          1,
-                          &textureSet,
-                          0,
-                          nullptr);
+  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, lightPipeline);
+  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex),
+                             nullptr, 0);
 
   if(!context.cameraAllocValid)
   {
@@ -147,19 +134,12 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
                                                context.transientAllocator->getBufferOpaque(),
                                                cameraAlloc.offset);
-  VkDescriptorSet sceneDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
-  if(sceneDescriptorSet != VK_NULL_HANDLE)
+  const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
+  if(!sceneBindGroup.isNull())
   {
     const std::array<uint32_t, 2> dynamicOffsets{cameraAlloc.offset, 0u};
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout,
-                            shaderio::LSetScene,
-                            1,
-                            &sceneDescriptorSet,
-                            static_cast<uint32_t>(dynamicOffsets.size()),
-                            dynamicOffsets.data());
+    context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
+                               static_cast<uint32_t>(dynamicOffsets.size()));
   }
 
   context.cmd->draw(3, 1, 0, 0);

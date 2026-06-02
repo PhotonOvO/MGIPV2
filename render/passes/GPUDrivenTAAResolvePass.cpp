@@ -81,14 +81,11 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, rhiExtent});
 
   const PipelineHandle pipelineHandle = m_renderer->getTAAResolvePipelineHandle();
-  const VkPipeline pipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(pipelineHandle));
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
-  const VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
-  if(pipeline != VK_NULL_HANDLE && layout != VK_NULL_HANDLE && descriptorSet != VK_NULL_HANDLE && context.cameraAllocValid)
+  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
+  if(!pipelineHandle.isNull() && !inputBindGroup.isNull() && context.cameraAllocValid)
   {
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaderio::LSetTextures, 1, &descriptorSet, 0, nullptr);
+    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, pipelineHandle);
+    context.cmd->bindBindGroup(shaderio::LSetTextures, inputBindGroup, nullptr, 0);
 
     const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
     const shaderio::PostProcessUniforms postProcessUniforms{
@@ -115,19 +112,12 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
     m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
                                                  context.transientAllocator->getBufferOpaque(),
                                                  cameraAlloc.offset);
-    const VkDescriptorSet sceneDescriptorSet =
-        reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingSceneDescriptorSet(context.frameIndex));
-    if(sceneDescriptorSet != VK_NULL_HANDLE)
+    const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
+    if(!sceneBindGroup.isNull())
     {
       const std::array<uint32_t, 2> dynamicOffsets{cameraAlloc.offset, postProcessAlloc.offset};
-      vkCmdBindDescriptorSets(vkCmd,
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              layout,
-                              shaderio::LSetScene,
-                              1,
-                              &sceneDescriptorSet,
-                              static_cast<uint32_t>(dynamicOffsets.size()),
-                              dynamicOffsets.data());
+      context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
+                                 static_cast<uint32_t>(dynamicOffsets.size()));
       context.cmd->draw(3, 1, 0, 0);
     }
   }

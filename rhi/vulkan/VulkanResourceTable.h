@@ -20,6 +20,9 @@ struct PipelineRecord
   uint64_t nativePipeline{0};
   uint32_t specializationVariant{0};
   uint64_t nativeLayout{0};
+  // When false the native pipeline is owned by another subsystem; the registry
+  // resolves it for command recording but must not destroy it.
+  bool     owned{true};
 };
 
 // Backend-owned table mapping opaque RHI handles to native Vulkan objects.
@@ -33,7 +36,7 @@ class VulkanResourceTable
 public:
   // --- Pipelines (this table owns the handle allocation) ---
   PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
-                                  uint64_t nativeLayout);
+                                  uint64_t nativeLayout, bool owned = true);
   [[nodiscard]] const PipelineRecord* tryGetPipeline(PipelineHandle handle) const;
   void                                destroyPipeline(PipelineHandle handle);
 

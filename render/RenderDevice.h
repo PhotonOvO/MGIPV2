@@ -133,6 +133,14 @@ public:
   uint64_t       getShadowCullingPipelineLayout() const;
   uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
   uint64_t       getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const;
+  [[nodiscard]] BindGroupHandle getGPUCullingBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_device.gpuCullingBindGroups.size() ? m_device.gpuCullingBindGroups[frameIndex] : BindGroupHandle{};
+  }
+  [[nodiscard]] BindGroupHandle getShadowCullingBindGroup(uint32_t frameIndex) const
+  {
+    return frameIndex < m_device.shadowCullingBindGroups.size() ? m_device.shadowCullingBindGroups[frameIndex] : BindGroupHandle{};
+  }
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const;
   PipelineHandle getLightCullingPipelineHandle() const;
@@ -179,6 +187,7 @@ public:
   uint64_t       getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const; // Per-frame GBuffer texture set
   uint32_t       getFrameResourceCount() const;           // Number of per-frame resource slots
   uint64_t       getGraphicsMaterialDescriptorSet() const;
+  [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const;
   uint64_t       getLightingInputDescriptorSet() const;
   uint64_t       getLightCullingDescriptorSet() const;
   [[nodiscard]] bool getIBLEnvironmentLoaded() const;
@@ -197,6 +206,16 @@ public:
   // VkPipeline transfers to the registry (destroyed by destroyPipelines()).
   PipelineHandle registerExternalGraphicsPipeline(VkPipeline pipeline, VkPipelineLayout layout,
                                                   uint32_t specializationVariant = 0);
+  // Compute twin of registerExternalGraphicsPipeline. Registers an externally-created
+  // compute VkPipeline together with its layout so it resolves through the registry
+  // and cmd->bindBindGroup can recover the layout. Ownership stays with the caller
+  // (these pipelines are destroyed by their owning subsystem, not destroyPipelines()).
+  PipelineHandle registerExternalComputePipeline(VkPipeline pipeline, VkPipelineLayout layout,
+                                                 uint32_t specializationVariant = 0);
+  // Drops a registry record without destroying the native pipeline. Use before a
+  // caller-owned (externally-registered) pipeline is recreated/destroyed so the
+  // table never resolves a stale handle.
+  void unregisterExternalPipeline(PipelineHandle handle);
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
 
@@ -436,9 +455,11 @@ private:
     VkPipelineLayout                           depthPyramidPipelineLayout{nullptr};
     VkDescriptorSetLayout                      gpuCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gpuCullingDescriptorSets;
+    std::vector<BindGroupHandle>               gpuCullingBindGroups;
     VkPipelineLayout                           gpuCullingPipelineLayout{nullptr};
     VkDescriptorSetLayout                      shadowCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               shadowCullingDescriptorSets;
+    std::vector<BindGroupHandle>               shadowCullingBindGroups;
     VkPipelineLayout                           shadowCullingPipelineLayout{nullptr};
     VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
@@ -774,7 +795,7 @@ private:
   void           updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const;
   // destroyBindGroup is provided by public RHI interface (line 145)
   PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
-                                  uint64_t nativeLayout = 0);
+                                  uint64_t nativeLayout = 0, bool owned = true);
   void           destroyPipelines();
   const rhi::vulkan::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;
   const BindGroupResource* tryGetBindGroup(BindGroupHandle handle) const;

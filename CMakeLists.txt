@@ -346,8 +346,6 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenImguiPass.cpp
   render/passes/GPUDrivenVisibilitySortPass.h
   render/passes/GPUDrivenVisibilitySortPass.cpp
-  render/passes/MeshletCullingPass.h
-  render/passes/MeshletCullingPass.cpp
   render/BindGroups.h
   render/Pass.h
   render/TransientAllocator.cpp

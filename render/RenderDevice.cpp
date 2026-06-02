@@ -27,6 +27,7 @@
 #include <unordered_map>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
+#include "../rhi/vulkan/VulkanAdoptedBindGroup.h"
 
 namespace demo {
 
@@ -1188,6 +1189,7 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     m_device.gpuCullingPipelineLayout = VK_NULL_HANDLE;
   }
   m_device.gpuCullingDescriptorSets.clear();
+  m_device.gpuCullingBindGroups.clear();
   if(m_device.gpuCullingSetLayout != VK_NULL_HANDLE)
   {
     vkDestroyDescriptorSetLayout(device, m_device.gpuCullingSetLayout, nullptr);
@@ -1199,6 +1201,7 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     m_device.shadowCullingPipelineLayout = VK_NULL_HANDLE;
   }
   m_device.shadowCullingDescriptorSets.clear();
+  m_device.shadowCullingBindGroups.clear();
   if(m_device.shadowCullingSetLayout != VK_NULL_HANDLE)
   {
     vkDestroyDescriptorSetLayout(device, m_device.shadowCullingSetLayout, nullptr);
@@ -3626,6 +3629,19 @@ void RenderDevice::createGPUCullingResources()
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.gpuCullingDescriptorSets.data()));
 
+  // Phase 6: adopt the GPU-culling sets so the culling pass binds via cmd->bindBindGroup.
+  m_device.gpuCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    m_device.gpuCullingBindGroups[frameIndex] = registerExternalBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_device.gpuCullingSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex])),
+        .primaryLogicalIndex = 0,
+        .debugName           = "gpu-culling",
+    });
+  }
+
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
       .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = 1,
@@ -3667,6 +3683,19 @@ void RenderDevice::createShadowCullingResources()
       .pSetLayouts        = setLayouts.data(),
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.shadowCullingDescriptorSets.data()));
+
+  // Phase 6: adopt the shadow-culling sets for the CSM shadow pass compute step.
+  m_device.shadowCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+  {
+    m_device.shadowCullingBindGroups[frameIndex] = registerExternalBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_device.shadowCullingSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex])),
+        .primaryLogicalIndex = 0,
+        .debugName           = "shadow-culling",
+    });
+  }
 
   const VkPushConstantRange pushConstantRange{
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -6372,7 +6401,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
       DBG_VK_NAME(depthMdiOpaquePipeline);
       m_depthPrepassOpaqueMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                                          reinterpret_cast<uint64_t>(depthMdiOpaquePipeline),
-                                                         depthMdiCreateInfo.key.specializationVariant);
+                                                         depthMdiCreateInfo.key.specializationVariant,
+                                                         m_device.mdiPipelineLayout->getNativeHandle());
 
       depthMdiShaderStages[1].specializationData = specDataTrue;
       depthMdiCreateInfo.key.specializationVariant = 14;
@@ -6381,7 +6411,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
       DBG_VK_NAME(depthMdiAlphaTestPipeline);
       m_depthPrepassAlphaTestMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                                             reinterpret_cast<uint64_t>(depthMdiAlphaTestPipeline),
-                                                            depthMdiCreateInfo.key.specializationVariant);
+                                                            depthMdiCreateInfo.key.specializationVariant,
+                                                            m_device.mdiPipelineLayout->getNativeHandle());
     }
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthPrepassShaderModule, nullptr);
@@ -6535,7 +6566,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
       DBG_VK_NAME(gbufferMdiOpaquePipeline);
       m_gbufferOpaqueMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                                     reinterpret_cast<uint64_t>(gbufferMdiOpaquePipeline),
-                                                    gbufferMdiCreateInfo.key.specializationVariant);
+                                                    gbufferMdiCreateInfo.key.specializationVariant,
+                                                    m_device.mdiPipelineLayout->getNativeHandle());
 
       gbufferMdiShaderStages[1].specializationData = specDataTrue;
       gbufferMdiCreateInfo.key.specializationVariant = 16;
@@ -6544,7 +6576,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
       DBG_VK_NAME(gbufferMdiAlphaTestPipeline);
       m_gbufferAlphaTestMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                                        reinterpret_cast<uint64_t>(gbufferMdiAlphaTestPipeline),
-                                                       gbufferMdiCreateInfo.key.specializationVariant);
+                                                       gbufferMdiCreateInfo.key.specializationVariant,
+                                                       m_device.mdiPipelineLayout->getNativeHandle());
     }
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferShaderModule, nullptr);
@@ -6638,7 +6671,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     DBG_VK_NAME(shadowMdiPipeline);
     m_csmShadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                            reinterpret_cast<uint64_t>(shadowMdiPipeline),
-                                           shadowMdiCreateInfo.key.specializationVariant);
+                                           shadowMdiCreateInfo.key.specializationVariant,
+                                           m_device.csmShadowMdiPipelineLayout->getNativeHandle());
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
   }
@@ -6773,7 +6807,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
       DBG_VK_NAME(forwardMdiPipeline);
       m_forwardMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                               reinterpret_cast<uint64_t>(forwardMdiPipeline),
-                                              forwardMdiCreateInfo.key.specializationVariant);
+                                              forwardMdiCreateInfo.key.specializationVariant,
+                                              m_device.mdiPipelineLayout->getNativeHandle());
     }
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
@@ -6855,7 +6890,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     DBG_VK_NAME(debugPipeline);
     m_debugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                        reinterpret_cast<uint64_t>(debugPipeline),
-                                       debugCreateInfo.key.specializationVariant);
+                                       debugCreateInfo.key.specializationVariant,
+                                       m_device.gbufferPipelineLayout->getNativeHandle());
 
     const std::array<rhi::PipelineShaderStageDesc, 2> debugCullStages{{
         {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexCullMain"},
@@ -6897,7 +6933,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     DBG_VK_NAME(debugCullPipeline);
     m_gpuCullingDebugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                                                  reinterpret_cast<uint64_t>(debugCullPipeline),
-                                                 debugCullCreateInfo.key.specializationVariant);
+                                                 debugCullCreateInfo.key.specializationVariant,
+                                                 m_device.debugPipelineLayout->getNativeHandle());
 
     vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugShaderModule, nullptr);
   }
@@ -7720,7 +7757,8 @@ void RenderDevice::createGPUCullingPipeline()
   VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
   DBG_VK_NAME(pipeline);
   m_gpuCullingPipeline =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 13);
+      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 13,
+                       reinterpret_cast<uint64_t>(m_device.gpuCullingPipelineLayout));
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
@@ -7755,16 +7793,17 @@ void RenderDevice::createShadowCullingPipeline()
   VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
   DBG_VK_NAME(pipeline);
   m_shadowCullingPipeline =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 14);
+      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 14,
+                       reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout));
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 }
 
 PipelineHandle RenderDevice::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
-                                          uint64_t nativeLayout)
+                                          uint64_t nativeLayout, bool owned)
 {
-  return m_device.resourceTable.registerPipeline(bindPoint, nativePipeline, specializationVariant, nativeLayout);
+  return m_device.resourceTable.registerPipeline(bindPoint, nativePipeline, specializationVariant, nativeLayout, owned);
 }
 
 PipelineHandle RenderDevice::registerExternalGraphicsPipeline(VkPipeline pipeline, VkPipelineLayout layout,
@@ -7773,6 +7812,22 @@ PipelineHandle RenderDevice::registerExternalGraphicsPipeline(VkPipeline pipelin
   return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
                           reinterpret_cast<uint64_t>(pipeline), specializationVariant,
                           reinterpret_cast<uint64_t>(layout));
+}
+
+PipelineHandle RenderDevice::registerExternalComputePipeline(VkPipeline pipeline, VkPipelineLayout layout,
+                                                             uint32_t specializationVariant)
+{
+  return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
+                          reinterpret_cast<uint64_t>(pipeline), specializationVariant,
+                          reinterpret_cast<uint64_t>(layout), /*owned=*/false);
+}
+
+void RenderDevice::unregisterExternalPipeline(PipelineHandle handle)
+{
+  if(!handle.isNull())
+  {
+    m_device.resourceTable.destroyPipeline(handle);
+  }
 }
 
 void RenderDevice::destroyPipelines()
@@ -7785,7 +7840,7 @@ void RenderDevice::destroyPipelines()
   for(const PipelineHandle handle : handles)
   {
     const rhi::vulkan::PipelineRecord* record = m_device.resourceTable.tryGetPipeline(handle);
-    if(record != nullptr && record->nativePipeline != 0)
+    if(record != nullptr && record->nativePipeline != 0 && record->owned)
     {
       vkDestroyPipeline(device, reinterpret_cast<VkPipeline>(record->nativePipeline), nullptr);
     }
@@ -9170,6 +9225,11 @@ uint32_t RenderDevice::getFrameResourceCount() const
 uint64_t RenderDevice::getGraphicsMaterialDescriptorSet() const
 {
   return getGBufferColorDescriptorSet();
+}
+
+BindGroupHandle RenderDevice::getGraphicsMaterialBindGroup() const
+{
+  return getCurrentMaterialBindGroupHandle();
 }
 
 uint64_t RenderDevice::getLightingInputDescriptorSet() const

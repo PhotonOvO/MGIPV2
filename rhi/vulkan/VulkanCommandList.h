@@ -33,8 +33,13 @@ public:
 
   void setResourceState(ResourceHandle resource, ResourceState state) override;
   void insertBarrier(BarrierType barrierType) override;
+  void memoryBarrier(PipelineStage srcStage, ResourceAccess srcAccess, PipelineStage dstStage, ResourceAccess dstAccess) override;
   void transitionBuffer(const BufferBarrierDesc& desc) override;
   void transitionTexture(const TextureBarrierDesc& desc) override;
+
+  void copyBuffer(uint64_t srcBuffer, uint64_t dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override;
+  void fillBuffer(uint64_t dstBuffer, uint64_t offset, uint64_t size, uint32_t data) override;
+  void blitImage(const ImageBlitDesc& desc) override;
 
   void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) override;
   void bindBindTable(PipelineBindPoint bindPoint, uint32_t slot, BindTableHandle bindTable, const uint32_t* dynamicOffsets, uint32_t dynamicOffsetCount) override;
@@ -77,6 +82,7 @@ private:
   std::vector<ResourceStateEntry> m_resourceStates;
   VulkanResourceTable*            m_resourceTable{nullptr};
   VkPipelineLayout                m_currentPipelineLayout{VK_NULL_HANDLE};
+  VkPipelineBindPoint             m_currentBindPoint{VK_PIPELINE_BIND_POINT_GRAPHICS};
 };
 
 // Inject the backend resource table used to map handles to native objects during recording.

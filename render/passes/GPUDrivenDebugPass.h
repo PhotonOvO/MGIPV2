@@ -16,6 +16,10 @@ public:
   void execute(const PassContext& context) const override;
 
 private:
+  // Relocated debug-overlay recording. Currently not invoked from execute()
+  // (the pass is disabled), matching the prior commented-out call site.
+  void renderDebugOverlay(const PassContext& context) const;
+
   GPUDrivenRenderer* m_renderer{nullptr};
 };
 

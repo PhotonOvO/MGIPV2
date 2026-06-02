@@ -71,6 +71,20 @@ struct RenderPassDesc
   const DepthTargetDesc*  depthTarget{nullptr};
 };
 
+// Image-to-image blit (e.g. scene-output → swapchain present). Images are opaque
+// native handles; the regions carry explicit source/destination offsets so callers
+// can letterbox. Sampling uses a linear filter.
+struct ImageBlitDesc
+{
+  uint64_t      srcImage{0};
+  uint64_t      dstImage{0};
+  ResourceState srcState{ResourceState::TransferSrc};
+  ResourceState dstState{ResourceState::TransferDst};
+  TextureAspect aspect{TextureAspect::color};
+  Offset3D      srcOffsets[2]{};
+  Offset3D      dstOffsets[2]{};
+};
+
 class CommandList
 {
 public:
@@ -87,8 +101,18 @@ public:
 
   virtual void setResourceState(ResourceHandle resource, ResourceState state) = 0;
   virtual void insertBarrier(BarrierType barrierType)                         = 0;
+  // Global memory barrier with explicit src/dst scopes (replaces inline VkMemoryBarrier2 usage in passes).
+  virtual void memoryBarrier(PipelineStage  srcStage,
+                             ResourceAccess srcAccess,
+                             PipelineStage  dstStage,
+                             ResourceAccess dstAccess)                         = 0;
   virtual void transitionBuffer(const BufferBarrierDesc& desc)                = 0;
   virtual void transitionTexture(const TextureBarrierDesc& desc)              = 0;
+
+  // Transfer / blit verbs. Buffers and images are opaque native handles.
+  virtual void copyBuffer(uint64_t srcBuffer, uint64_t dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) = 0;
+  virtual void fillBuffer(uint64_t dstBuffer, uint64_t offset, uint64_t size, uint32_t data)                             = 0;
+  virtual void blitImage(const ImageBlitDesc& desc)                                                                      = 0;
 
   virtual void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) = 0;
   virtual void bindBindTable(PipelineBindPoint bindPoint,

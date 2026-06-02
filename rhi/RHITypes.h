@@ -88,7 +88,9 @@ enum class PipelineStage : uint32_t
   Compute        = 1u << 3u,
   Transfer       = 1u << 4u,
   BottomOfPipe   = 1u << 5u,
-  All            = TopOfPipe | VertexShader | FragmentShader | Compute | Transfer | BottomOfPipe,
+  DrawIndirect   = 1u << 6u,
+  Host           = 1u << 7u,
+  All            = TopOfPipe | VertexShader | FragmentShader | Compute | Transfer | BottomOfPipe | DrawIndirect | Host,
 
   none           = None,
   topOfPipe      = TopOfPipe,
@@ -97,6 +99,8 @@ enum class PipelineStage : uint32_t
   compute        = Compute,
   transfer       = Transfer,
   bottomOfPipe   = BottomOfPipe,
+  drawIndirect   = DrawIndirect,
+  host           = Host,
   all            = All,
 };
 
@@ -337,6 +341,13 @@ struct Offset2D
 {
   int32_t x{0};
   int32_t y{0};
+};
+
+struct Offset3D
+{
+  int32_t x{0};
+  int32_t y{0};
+  int32_t z{0};
 };
 
 struct Rect2D

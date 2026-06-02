@@ -76,36 +76,17 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
       rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
 
-  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(skyPipeline));
-  rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-
-  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getLightPipelineLayout());
-  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(m_renderer->getLightingInputDescriptorSet());
-  vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout,
-                          shaderio::LSetTextures,
-                          1,
-                          &textureSet,
-                          0,
-                          nullptr);
+  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, skyPipeline);
+  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex),
+                             nullptr, 0);
 
   if(context.cameraAllocValid)
   {
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     if(!cameraBindGroupHandle.isNull())
     {
-      VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
       const uint32_t cameraDynamicOffset = context.cameraAlloc.offset;
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              1,
-                              &cameraDynamicOffset);
+      context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, &cameraDynamicOffset, 1);
     }
   }
 

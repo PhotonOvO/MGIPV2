@@ -1009,1054 +1009,6 @@ void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandList& cmd, const Ren
   });
 }
 
-void GPUDrivenRenderer::executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params)
-{
-  const uint32_t safeObjectCount = getSafePersistentObjectCount();
-  const bool useExternalPersistentObjects = params.gpuDrivenSceneView != nullptr
-                                            && params.gpuDrivenSceneView->usePersistentCullingObjects
-                                            && params.gpuDrivenSceneView->gpuCullObjectBuffer != VK_NULL_HANDLE
-                                            && safeObjectCount > 0u;
-
-  if(params.cameraUniforms == nullptr || getGPUCullingPipelineHandle().isNull()
-     || getGPUCullingPipelineLayout() == 0)
-  {
-    return;
-  }
-
-  const uint32_t currentFrameIndex = getCurrentFrameIndexHint();
-  const uint32_t objectCount = useExternalPersistentObjects
-                                   ? safeObjectCount
-                                   : (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
-  const VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(currentFrameIndex));
-  const VkBuffer indirectBuffer = reinterpret_cast<VkBuffer>(getGPUCullingIndirectBufferOpaque(currentFrameIndex));
-  const VkBuffer drawCountBuffer = reinterpret_cast<VkBuffer>(getGPUCullingDrawCountBufferOpaque(currentFrameIndex));
-  if(objectCount == 0u || descriptorSet == VK_NULL_HANDLE || indirectBuffer == VK_NULL_HANDLE
-     || drawCountBuffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-   
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  vkCmdBindPipeline(vkCmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    reinterpret_cast<VkPipeline>(getNativeComputePipeline(getGPUCullingPipelineHandle())));
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          reinterpret_cast<VkPipelineLayout>(getGPUCullingPipelineLayout()),
-                          0,
-                          1,
-                          &descriptorSet,
-                          0,
-                          nullptr);
-  vkCmdDispatch(vkCmd, (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount, 1u, 1u);
-
-  const std::array<VkBufferMemoryBarrier2, 2> indirectBarriers{{
-      VkBufferMemoryBarrier2{
-          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .buffer              = indirectBuffer,
-          .offset              = 0,
-          .size                = VK_WHOLE_SIZE,
-      },
-      VkBufferMemoryBarrier2{
-          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .buffer              = drawCountBuffer,
-          .offset              = 0,
-          .size                = VK_WHOLE_SIZE,
-      },
-  }};
-  const VkDependencyInfo dependencyInfo{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = static_cast<uint32_t>(indirectBarriers.size()),
-      .pBufferMemoryBarriers    = indirectBarriers.data(),
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-}
-
-void GPUDrivenRenderer::executeLightCullingPass(rhi::CommandList& cmd, const RenderParams& params)
-{
-  if(params.cameraUniforms == nullptr || getLightCullingPipelineLayout() == 0)
-  {
-    return;
-  }
-
-  const uint32_t currentFrameIndex = getCurrentFrameIndexHint();
-  const VkDescriptorSet descriptorSet = reinterpret_cast<VkDescriptorSet>(getCurrentLightCullingDescriptorSet());
-  if(descriptorSet == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const uint32_t pointLightCount = getActivePointLightCount();
-  const uint32_t spotLightCount = getActiveSpotLightCount();
-
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          reinterpret_cast<VkPipelineLayout>(getLightCullingPipelineLayout()),
-                          0,
-                          1,
-                          &descriptorSet,
-                          0,
-                          nullptr);
-
-  const auto dispatchLightKernel = [&](PipelineHandle pipelineHandle, uint32_t lightCount) {
-    if(pipelineHandle.isNull() || lightCount == 0u)
-    {
-      return;
-    }
-
-    vkCmdBindPipeline(vkCmd,
-                      VK_PIPELINE_BIND_POINT_COMPUTE,
-                      pipelineHandle.index == m_pointLightCoarseCullingPipeline.index
-                          ? m_pointLightCoarseCullingVkPipeline
-                          : m_spotLightCoarseCullingVkPipeline);
-    vkCmdDispatch(vkCmd, (lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1u, 1u);
-  };
-
-  dispatchLightKernel(getLightCullingPipelineHandle(), pointLightCount);
-  dispatchLightKernel(getSpotLightCullingPipelineHandle(), spotLightCount);
-
-  const VkMemoryBarrier2 memoryBarrier{
-      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-  };
-  const VkDependencyInfo dependencyInfo{
-      .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers    = &memoryBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-}
-
-void GPUDrivenRenderer::executeClusteredLightCullingPass(rhi::CommandList& cmd, const RenderParams& params)
-{
-  if(!params.debugOptions.enableClusteredLighting || m_clusteredLightCullingVkPipeline == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  const uint32_t frameIndex = getCurrentFrameIndexHint();
-  if(frameIndex >= m_lightCoarseCullingDescriptorSets.size())
-  {
-    return;
-  }
-  VkDescriptorSet descriptorSet = m_lightCoarseCullingDescriptorSets[frameIndex];
-  if(descriptorSet == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const VkBuffer statsBuffer = m_lightResources.getClusterStatsBuffer(frameIndex);
-  if(statsBuffer != VK_NULL_HANDLE)
-  {
-    vkCmdFillBuffer(vkCmd, statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
-    const VkMemoryBarrier2 statsResetBarrier{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-    };
-    const VkDependencyInfo statsResetDependency{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &statsResetBarrier,
-    };
-    vkCmdPipelineBarrier2(vkCmd, &statsResetDependency);
-  }
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_clusteredLightCullingVkPipeline);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_lightCoarseCullingPipelineLayout,
-                          0,
-                          1,
-                          &descriptorSet,
-                          0,
-                          nullptr);
-  vkCmdDispatch(vkCmd, (shaderio::LClusterCount + 63u) / 64u, 1u, 1u);
-
-  const VkMemoryBarrier2 memoryBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_HOST_READ_BIT,
-  };
-  const VkDependencyInfo dependencyInfo{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &memoryBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-}
-
-void GPUDrivenRenderer::executeAOPass(rhi::CommandList& cmd, const RenderParams& params)
-{
-  if(!params.debugOptions.enableAO || m_gtaoPipeline == VK_NULL_HANDLE || m_aoDenoisePipeline == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  const uint32_t frameIndex = getCurrentFrameIndexHint();
-  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size()
-     || m_aoRaw.image == VK_NULL_HANDLE || m_aoDenoised.image == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const shaderio::GPUDrivenAOPushConstants push{
-      .params0 = glm::vec4(m_phase7HalfExtent.width, m_phase7HalfExtent.height, params.debugOptions.aoRadius, params.debugOptions.aoIntensity),
-      .params1 = glm::vec4(1.0f / static_cast<float>(std::max(1u, getSceneExtent().width)),
-                           1.0f / static_cast<float>(std::max(1u, getSceneExtent().height)),
-                           64.0f,
-                           0.35f),
-  };
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_gtaoPipeline);
-  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoPipelineLayout, 0, 1, &m_aoDescriptorSets[frameIndex], 0, nullptr);
-  vkCmdPushConstants(vkCmd, m_aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
-
-  const VkMemoryBarrier2 computeBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-  };
-  const VkDependencyInfo dependencyInfo{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &computeBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoDenoisePipeline);
-  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_aoPipelineLayout, 0, 1, &m_aoDenoiseDescriptorSets[frameIndex], 0, nullptr);
-  vkCmdPushConstants(vkCmd, m_aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-}
-
-void GPUDrivenRenderer::executeSSRPass(rhi::CommandList& cmd,
-                                       const RenderParams& params,
-                                       VkBuffer cameraBuffer,
-                                       uint32_t cameraOffset)
-{
-  if(!params.debugOptions.enableSSR || m_ssrTracePipeline == VK_NULL_HANDLE || m_ssrRaw.image == VK_NULL_HANDLE
-     || cameraBuffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  const uint32_t frameIndex = getCurrentFrameIndexHint();
-  if(frameIndex >= m_ssrDescriptorSets.size())
-  {
-    return;
-  }
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const VkDescriptorBufferInfo cameraBufferInfo{
-      .buffer = cameraBuffer,
-      .offset = cameraOffset,
-      .range = sizeof(shaderio::CameraUniforms),
-  };
-  const VkWriteDescriptorSet cameraWrite{
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = m_ssrDescriptorSets[frameIndex],
-      .dstBinding = 5,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .pBufferInfo = &cameraBufferInfo,
-  };
-  vkUpdateDescriptorSets(getNativeDeviceHandle(), 1, &cameraWrite, 0, nullptr);
-
-  const shaderio::GPUDrivenSSRPushConstants push{
-      .params0 = glm::vec4(m_phase7HalfExtent.width,
-                           m_phase7HalfExtent.height,
-                           static_cast<float>(std::max(1, params.debugOptions.ssrMaxSteps)),
-                           params.debugOptions.ssrThickness),
-      .params1 = glm::vec4(0.05f, 80.0f, 1.0f, 0.0f),
-  };
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssrTracePipeline);
-  vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ssrPipelineLayout, 0, 1, &m_ssrDescriptorSets[frameIndex], 0, nullptr);
-  vkCmdPushConstants(vkCmd, m_ssrPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-  vkCmdDispatch(vkCmd, (m_phase7HalfExtent.width + 7u) / 8u, (m_phase7HalfExtent.height + 7u) / 8u, 1u);
-
-  const VkMemoryBarrier2 memoryBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-  };
-  const VkDependencyInfo dependencyInfo{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &memoryBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-}
-
-void GPUDrivenRenderer::executeCSMShadowPass(const PassContext& context)
-{
-  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr
-     || !m_sceneView.usePersistentCullingObjects || m_sceneView.shadowPackedMeshes == nullptr
-     || m_sceneView.shadowPackedMeshCount == 0 || m_sceneView.shadowPackedVertexBuffer == VK_NULL_HANDLE
-     || m_sceneView.shadowPackedIndexBuffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  shaderio::ShadowUniforms* shadowData = getShadowUniformsData();
-  if(shadowData == nullptr)
-  {
-    return;
-  }
-
-  const PipelineHandle csmPipeline = getCSMShadowPipelineHandle();
-  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(getCSMShadowPipelineLayout());
-  if(csmPipeline.isNull() || pipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(getNativeGraphicsPipeline(csmPipeline));
-  if(nativePipeline == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  context.cmd->beginEvent("GPUDrivenCSMShadow");
-
-  CSMShadowResources& csm = getCSMShadowResources();
-  const uint32_t cascadeCount = csm.getCascadeCount();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(csm.getCascadeImage()),
-      .aspect      = rhi::TextureAspect::depth,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::read,
-      .dstAccess   = rhi::ResourceAccess::write,
-      .oldState    = rhi::ResourceState::General,
-      .newState    = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
-
-  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(getGraphicsMaterialDescriptorSet());
-  const uint32_t frameIndex = context.frameIndex;
-  const bool hasShadowIndirectBuffer = getShadowCullingIndirectBufferOpaque(frameIndex) != 0;
-  const bool hasDrawBindGroups = !getCSMShadowMDIDrawBindGroup(frameIndex, 0).isNull();
-  const uint32_t shadowIndirectCapacity = getShadowCullingMeshCapacity(frameIndex);
-  if(!hasShadowIndirectBuffer || !hasDrawBindGroups || shadowIndirectCapacity < m_sceneView.shadowPackedMeshCount)
-  {
-    if(hasShadowIndirectBuffer && hasDrawBindGroups && shadowIndirectCapacity < m_sceneView.shadowPackedMeshCount)
-    {
-      LOGW("Skipping GPUDrivenCSMShadow: indirect capacity %u smaller than shadow mesh count %u",
-           shadowIndirectCapacity,
-           m_sceneView.shadowPackedMeshCount);
-    }
-    context.cmd->endEvent();
-    return;
-  }
-
-  const bool useShadowCulling = !getShadowCullingPipelineHandle().isNull()
-                                && getShadowCullingPipelineLayout() != 0
-                                && getShadowCullingDescriptorSetOpaque(frameIndex) != 0;
-  if(!useShadowCulling)
-  {
-    LOGW("Skipping GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
-    context.cmd->endEvent();
-    return;
-  }
-
-  for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
-  {
-    if(useShadowCulling)
-    {
-      const VkPipeline computePipeline =
-          reinterpret_cast<VkPipeline>(getNativeComputePipeline(getShadowCullingPipelineHandle()));
-      const VkPipelineLayout computeLayout = reinterpret_cast<VkPipelineLayout>(getShadowCullingPipelineLayout());
-      const VkDescriptorSet computeSet = reinterpret_cast<VkDescriptorSet>(getShadowCullingDescriptorSetOpaque(frameIndex));
-      const VkBuffer indirectBuffer = reinterpret_cast<VkBuffer>(getShadowCullingIndirectBufferOpaque(frameIndex));
-      if(computePipeline != VK_NULL_HANDLE && computeLayout != VK_NULL_HANDLE && computeSet != VK_NULL_HANDLE
-         && indirectBuffer != VK_NULL_HANDLE)
-      {
-        const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-        vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-        vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, computeLayout, 0, 1, &computeSet, 0, nullptr);
-
-        const shaderio::ShadowCullPushConstants pushConstants =
-            buildShadowCullPushConstants(cascadeIndex, m_sceneView.shadowPackedMeshCount);
-        const VkPushConstantsInfo pushInfo{
-            .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
-            .layout     = computeLayout,
-            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-            .offset     = 0,
-            .size       = sizeof(shaderio::ShadowCullPushConstants),
-            .pValues    = &pushConstants,
-        };
-        rhi::vulkan::cmdPushConstants(*context.cmd, pushInfo);
-        vkCmdDispatch(vkCmd,
-                      (m_sceneView.shadowPackedMeshCount + shaderio::LGPUCullingThreadCount - 1u)
-                          / shaderio::LGPUCullingThreadCount,
-                      1u,
-                      1u);
-
-        const VkBufferMemoryBarrier2 indirectBarrier{
-            .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask       = VK_ACCESS_2_SHADER_WRITE_BIT,
-            .dstStageMask        = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-            .dstAccessMask       = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .buffer              = indirectBuffer,
-            .offset              = 0,
-            .size                = VK_WHOLE_SIZE,
-        };
-        const VkDependencyInfo dependencyInfo{
-            .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .bufferMemoryBarrierCount = 1,
-            .pBufferMemoryBarriers    = &indirectBarrier,
-        };
-        vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-      }
-    }
-
-    const VkImageView layerView = csm.getCascadeLayerView(cascadeIndex);
-    const VkExtent2D cascadeExtent = csm.getCascadeExtent();
-    const rhi::Extent2D extent{cascadeExtent.width, cascadeExtent.height};
-
-    const rhi::DepthTargetDesc depthTarget{
-        .texture = {},
-        .view = rhi::TextureViewHandle::fromNative(layerView),
-        .state = rhi::ResourceState::DepthStencilAttachment,
-        .loadOp = rhi::LoadOp::clear,
-        .storeOp = rhi::StoreOp::store,
-        .clearValue = {0.0f, 0},
-    };
-
-    const rhi::RenderPassDesc passDesc{
-        .renderArea = {{0, 0}, extent},
-        .colorTargets = nullptr,
-        .colorTargetCount = 0,
-        .depthTarget = &depthTarget,
-    };
-    context.cmd->beginRenderPass(passDesc);
-    context.cmd->setViewport(
-        rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-    context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
-
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-    vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout,
-                            shaderio::LSetTextures,
-                            1,
-                            &textureSet,
-                            0,
-                            nullptr);
-
-    const TransientAllocator::Allocation cameraAlloc =
-        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
-    shaderio::CameraUniforms cascadeCamera{};
-    cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
-    cascadeCamera.projection = cascadeCamera.viewProjection;
-    cascadeCamera.view = glm::mat4(1.0f);
-    cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
-    cascadeCamera.prevView = cascadeCamera.view;
-    cascadeCamera.prevProjection = cascadeCamera.projection;
-    cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
-    cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.cameraPosition = glm::vec3(0.0f);
-    const float baseConstantBias = context.params->lightSettings.depthBias;
-    const float baseSlopeBias = context.params->lightSettings.normalBias;
-    const float biasScale = shadowData->cascadeBiasScale.z;
-    const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
-    const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
-    const glm::vec3 dirToLight = -lightTravelDir;
-    cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
-    cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
-    std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
-    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
-
-    const BindGroupHandle cameraBindGroupHandle = getCameraBindGroup(frameIndex);
-    if(!cameraBindGroupHandle.isNull())
-    {
-      VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-      vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              2,
-                              dynamicOffsets);
-    }
-
-    const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
-    if(!drawBindGroupHandle.isNull())
-    {
-      VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-          getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-      rhi::vulkan::cmdBindDescriptorSets(*context.cmd,
-                                         VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                         pipelineLayout,
-                                         shaderio::LSetDraw,
-                                         1,
-                                         &drawDescriptorSet,
-                                         0,
-                                         nullptr);
-
-      constexpr VkDeviceSize vertexOffset = 0;
-      constexpr VkDeviceSize indexOffset = 0;
-      const VkBuffer vertexBuffer = m_sceneView.shadowPackedVertexBuffer;
-      const VkBuffer indexBuffer = m_sceneView.shadowPackedIndexBuffer;
-      rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
-      rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
-      context.cmd->drawIndexedIndirect(getShadowCullingIndirectBufferOpaque(frameIndex),
-                                       0,
-                                       m_sceneView.shadowPackedMeshCount,
-                                       sizeof(VkDrawIndexedIndirectCommand));
-    }
-
-    context.cmd->endRenderPass();
-  }
-
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(csm.getCascadeImage()),
-      .aspect      = rhi::TextureAspect::depth,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::write,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::DepthStencilAttachment,
-      .newState    = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-
-  context.cmd->endEvent();
-}
-
-void GPUDrivenRenderer::executeShadowAtlasPass(const PassContext& context)
-{
-  m_shadowAtlasAllocatedTiles = 0u;
-  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr
-     || !context.params->debugOptions.enableShadowAtlas || !m_sceneView.usePersistentCullingObjects
-     || m_sceneView.shadowPackedMeshes == nullptr || m_sceneView.shadowPackedMeshCount == 0
-     || m_sceneView.shadowPackedVertexBuffer == VK_NULL_HANDLE || m_sceneView.shadowPackedIndexBuffer == VK_NULL_HANDLE
-     || m_shadowAtlas.image == VK_NULL_HANDLE || m_shadowAtlas.view == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  shaderio::ShadowUniforms* shadowData = getShadowUniformsData();
-  if(shadowData == nullptr)
-  {
-    return;
-  }
-
-  const PipelineHandle shadowPipeline = getCSMShadowPipelineHandle();
-  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(getCSMShadowPipelineLayout());
-  if(shadowPipeline.isNull() || pipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(getNativeGraphicsPipeline(shadowPipeline));
-  if(nativePipeline == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  CSMShadowResources& csm = getCSMShadowResources();
-  const uint32_t tileSize = std::max(1u, m_shadowAtlasTileSize);
-  const uint32_t tilesX = m_shadowAtlasExtent.width / tileSize;
-  const uint32_t tilesY = m_shadowAtlasExtent.height / tileSize;
-  const uint32_t tileCapacity = tilesX * tilesY;
-  const uint32_t cascadeCount = std::min(csm.getCascadeCount(), tileCapacity);
-  if(cascadeCount == 0u)
-  {
-    return;
-  }
-
-  const uint32_t frameIndex = context.frameIndex;
-  const BindGroupHandle cameraBindGroupHandle = getCameraBindGroup(frameIndex);
-  const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, 0);
-  if(cameraBindGroupHandle.isNull() || drawBindGroupHandle.isNull())
-  {
-    return;
-  }
-
-  const VkDescriptorSet textureSet = reinterpret_cast<VkDescriptorSet>(getGraphicsMaterialDescriptorSet());
-  const VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-      getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  const VkDescriptorSet drawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-      getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  if(textureSet == VK_NULL_HANDLE || cameraDescriptorSet == VK_NULL_HANDLE || drawDescriptorSet == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  context.cmd->beginEvent("GPUDrivenShadowAtlas");
-  const rhi::DepthTargetDesc depthTarget{
-      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
-      .view = rhi::TextureViewHandle::fromNative(m_shadowAtlas.view),
-      .state = rhi::ResourceState::DepthStencilAttachment,
-      .loadOp = rhi::LoadOp::clear,
-      .storeOp = rhi::StoreOp::store,
-      .clearValue = {0.0f, 0},
-  };
-  const rhi::Extent2D atlasExtent{m_shadowAtlasExtent.width, m_shadowAtlasExtent.height};
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
-      .renderArea = {{0, 0}, atlasExtent},
-      .colorTargets = nullptr,
-      .colorTargetCount = 0,
-      .depthTarget = &depthTarget,
-  });
-
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-  rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout,
-                          shaderio::LSetTextures,
-                          1,
-                          &textureSet,
-                          0,
-                          nullptr);
-  rhi::vulkan::cmdBindDescriptorSets(*context.cmd,
-                                     VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                     pipelineLayout,
-                                     shaderio::LSetDraw,
-                                     1,
-                                     &drawDescriptorSet,
-                                     0,
-                                     nullptr);
-
-  constexpr VkDeviceSize vertexOffset = 0;
-  constexpr VkDeviceSize indexOffset = 0;
-  const VkBuffer vertexBuffer = m_sceneView.shadowPackedVertexBuffer;
-  const VkBuffer indexBuffer = m_sceneView.shadowPackedIndexBuffer;
-  rhi::vulkan::cmdBindVertexBuffers(*context.cmd, 0, 1, &vertexBuffer, &vertexOffset);
-  rhi::vulkan::cmdBindIndexBuffer(*context.cmd, indexBuffer, indexOffset, VK_INDEX_TYPE_UINT32);
-
-  for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
-  {
-    const uint32_t tileX = cascadeIndex % tilesX;
-    const uint32_t tileY = cascadeIndex / tilesX;
-    const int32_t viewportX = static_cast<int32_t>(tileX * tileSize);
-    const int32_t viewportY = static_cast<int32_t>(tileY * tileSize);
-    const rhi::Extent2D tileExtent{tileSize, tileSize};
-    context.cmd->setViewport(rhi::Viewport{static_cast<float>(viewportX),
-                                           static_cast<float>(viewportY),
-                                           static_cast<float>(tileSize),
-                                           static_cast<float>(tileSize),
-                                           0.0f,
-                                           1.0f});
-    context.cmd->setScissor(rhi::Rect2D{{viewportX, viewportY}, tileExtent});
-
-    const TransientAllocator::Allocation cameraAlloc =
-        context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
-    shaderio::CameraUniforms cascadeCamera{};
-    cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
-    cascadeCamera.projection = cascadeCamera.viewProjection;
-    cascadeCamera.view = glm::mat4(1.0f);
-    cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
-    cascadeCamera.prevView = cascadeCamera.view;
-    cascadeCamera.prevProjection = cascadeCamera.projection;
-    cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
-    cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
-    cascadeCamera.cameraPosition = glm::vec3(0.0f);
-    const float baseConstantBias = context.params->lightSettings.depthBias;
-    const float baseSlopeBias = context.params->lightSettings.normalBias;
-    const float biasScale = shadowData->cascadeBiasScale.z;
-    const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
-    const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
-    const glm::vec3 dirToLight = -lightTravelDir;
-    cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
-    cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
-    std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
-    context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
-
-    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-    vkCmdBindDescriptorSets(vkCmd,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout,
-                            shaderio::LSetScene,
-                            1,
-                            &cameraDescriptorSet,
-                            2,
-                            dynamicOffsets);
-
-    for(uint32_t meshIndex = 0; meshIndex < m_sceneView.shadowPackedMeshCount; ++meshIndex)
-    {
-      const ShadowPackedMesh& packedMesh = m_sceneView.shadowPackedMeshes[meshIndex];
-      context.cmd->drawIndexed(packedMesh.indexCount, 1, packedMesh.firstIndex, packedMesh.vertexOffset, meshIndex);
-    }
-  }
-
-  context.cmd->endRenderPass();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
-      .aspect = rhi::TextureAspect::depth,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::DepthStencilAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-  m_shadowAtlasAllocatedTiles = cascadeCount;
-  context.cmd->endEvent();
-}
-
-void GPUDrivenRenderer::executeDebugPass(const PassContext& context)
-{
-  const uint32_t safeObjectCount = getSafePersistentObjectCount();
-  if(context.params == nullptr || context.transientAllocator == nullptr || !context.params->debugOptions.enabled)
-  {
-    return;
-  }
-
-  const std::vector<shaderio::DebugLineVertex>& debugVertices = getDebugLineVertices();
-  const bool hasLineDebug = !debugVertices.empty();
-  const bool hasGPUCullingDebug =
-      context.params->debugOptions.showGPUCullingOverlay && safeObjectCount > 0u
-      && !getGPUCullingDebugPipelineHandle().isNull() && getGPUCullingObjectBufferAddress(context.frameIndex) != 0
-      && getGPUCullingResultBufferAddress(context.frameIndex) != 0;
-  if(!hasLineDebug && !hasGPUCullingDebug)
-  {
-    return;
-  }
-
-  context.cmd->beginEvent("GPUDrivenDebug");
-
-  const rhi::Extent2D extent{m_sceneView.sceneDepthExtent.width, m_sceneView.sceneDepthExtent.height};
-  rhi::RenderTargetDesc colorTarget{
-      .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(m_sceneView.outputView),
-      .state = rhi::ResourceState::ColorAttachment,
-      .loadOp = rhi::LoadOp::load,
-      .storeOp = rhi::StoreOp::store,
-      .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
-  };
-
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(m_sceneView.outputImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
-
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
-      .renderArea = {{0, 0}, extent},
-      .colorTargets = &colorTarget,
-      .colorTargetCount = 1,
-      .depthTarget = nullptr,
-  });
-  context.cmd->setViewport(
-      rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
-
-  const PipelineHandle debugPipeline = getDebugPipelineHandle();
-  const PipelineHandle gpuCullingDebugPipeline = getGPUCullingDebugPipelineHandle();
-  if((hasLineDebug && debugPipeline.isNull()) || (hasGPUCullingDebug && gpuCullingDebugPipeline.isNull()))
-  {
-    context.cmd->endRenderPass();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(m_sceneView.outputImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
-    return;
-  }
-
-  if(!context.cameraAllocValid)
-  {
-    context.cmd->endRenderPass();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(m_sceneView.outputImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
-    return;
-  }
-
-  const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
-    const BindGroupHandle cameraBindGroupHandle = getCameraBindGroup(context.frameIndex);
-  VkDescriptorSet cameraDescriptorSet = VK_NULL_HANDLE;
-  if(!cameraBindGroupHandle.isNull())
-  {
-    cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-        getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  }
-  const uint32_t sceneDynamicOffsets[] = {cameraAlloc.offset, 0u};
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-
-  if(hasLineDebug)
-  {
-    const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
-        getNativeGraphicsPipeline(debugPipeline));
-    const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(getGraphicsScenePipelineLayout());
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-    if(cameraDescriptorSet != VK_NULL_HANDLE)
-    {
-      vkCmdBindDescriptorSets(vkCmd,
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              2,
-                              sceneDynamicOffsets);
-    }
-
-    const uint32_t vertexDataSize = static_cast<uint32_t>(debugVertices.size() * sizeof(shaderio::DebugLineVertex));
-    const TransientAllocator::Allocation vertexAlloc =
-        context.transientAllocator->allocate(vertexDataSize, alignof(shaderio::DebugLineVertex));
-    std::memcpy(vertexAlloc.cpuPtr, debugVertices.data(), vertexDataSize);
-    context.transientAllocator->flushAllocation(vertexAlloc, vertexDataSize);
-
-    const uint64_t vertexBuffer = context.transientAllocator->getBufferOpaque();
-    const uint64_t vertexOffset = vertexAlloc.offset;
-    context.cmd->bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
-    context.cmd->draw(static_cast<uint32_t>(debugVertices.size()), 1, 0, 0);
-  }
-
-  if(hasGPUCullingDebug)
-  {
-    const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(
-        getNativeGraphicsPipeline(gpuCullingDebugPipeline));
-    const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(getDebugPipelineLayout());
-    rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nativePipeline);
-    if(cameraDescriptorSet != VK_NULL_HANDLE)
-    {
-      vkCmdBindDescriptorSets(vkCmd,
-                              VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipelineLayout,
-                              shaderio::LSetScene,
-                              1,
-                              &cameraDescriptorSet,
-                              2,
-                              sceneDynamicOffsets);
-    }
-
-    const shaderio::PushConstantGPUCullDebug pushValues{
-        .objectBufferAddress = getGPUCullingObjectBufferAddress(context.frameIndex),
-        .resultBufferAddress = getGPUCullingResultBufferAddress(context.frameIndex),
-        .objectCount = safeObjectCount,
-        .segmentCount = kDebugCullSegmentCount,
-        ._padding0 = 0u,
-        ._padding1 = 0u,
-    };
-    const VkPushConstantsInfo pushInfo{
-        .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
-        .layout = pipelineLayout,
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-        .offset = 0,
-        .size = sizeof(pushValues),
-        .pValues = &pushValues,
-    };
-    rhi::vulkan::cmdPushConstants(*context.cmd, pushInfo);
-    context.cmd->draw(pushValues.segmentCount * 2u * 3u, pushValues.objectCount, 0, 0);
-  }
-
-  context.cmd->endRenderPass();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(m_sceneView.outputImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-  context.cmd->endEvent();
-}
-
-void GPUDrivenRenderer::executePresentPass(const PassContext& context)
-{
-  if(context.params == nullptr)
-  {
-    return;
-  }
-
-  context.cmd->beginEvent("GPUDrivenPresent");
-  const VkExtent2D srcExtent = m_sceneView.sceneDepthExtent;
-  const VkExtent2D dstExtent = getSwapchainExtent();
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-  const VkImage srcImage = m_sceneView.outputImage;
-  const VkImage dstImage = getCurrentSwapchainImage();
-  if(srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE)
-  {
-    context.cmd->endEvent();
-    return;
-  }
-
-  const float srcAspect = static_cast<float>(srcExtent.width) / static_cast<float>(srcExtent.height);
-  const float dstAspect = static_cast<float>(dstExtent.width) / static_cast<float>(dstExtent.height);
-  VkOffset3D srcOffset0 = {0, 0, 0};
-  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), static_cast<int32_t>(srcExtent.height), 1};
-  int32_t dstY0 = 0;
-  int32_t dstY1 = static_cast<int32_t>(dstExtent.height);
-  int32_t dstX0 = 0;
-  int32_t dstX1 = static_cast<int32_t>(dstExtent.width);
-
-  if(dstAspect > srcAspect)
-  {
-    const int32_t scaledWidth = static_cast<int32_t>(dstExtent.height * srcAspect);
-    const int32_t barWidth = (dstExtent.width - scaledWidth) / 2;
-    dstX0 = barWidth;
-    dstX1 = barWidth + scaledWidth;
-  }
-  else if(dstAspect < srcAspect)
-  {
-    const int32_t scaledHeight = static_cast<int32_t>(dstExtent.width / srcAspect);
-    const int32_t barHeight = (dstExtent.height - scaledHeight) / 2;
-    dstY0 = barHeight;
-    dstY1 = barHeight + scaledHeight;
-  }
-
-  VkOffset3D dstOffset0 = {dstX0, dstY0, 0};
-  VkOffset3D dstOffset1 = {dstX1, dstY1, 1};
-
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(srcImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::Transfer,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::TransferSrc,
-      .isSwapchain = false,
-  });
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(dstImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::Transfer,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::TransferDst,
-      .isSwapchain = true,
-  });
-
-  VkImageBlit blitRegion{
-      .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-      .srcOffsets = {srcOffset0, srcOffset1},
-      .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
-      .dstOffsets = {dstOffset0, dstOffset1},
-  };
-  vkCmdBlitImage(vkCmd,
-                 srcImage,
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 dstImage,
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 1,
-                 &blitRegion,
-                 VK_FILTER_LINEAR);
-
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(dstImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::Transfer,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::TransferDst,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = true,
-  });
-  context.cmd->setResourceState(
-      rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      rhi::ResourceState::General);
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(srcImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::Transfer,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::TransferSrc,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-
-  beginPresentPass(*context.cmd);
-  context.cmd->endEvent();
-}
-
-void GPUDrivenRenderer::executeImguiPass(const PassContext& context)
-{
-  if(context.params == nullptr)
-  {
-    return;
-  }
-  context.cmd->beginEvent("GPUDrivenImgui");
-  executeImGuiPass(*context.cmd, *context.params);
-  endPresentPass(*context.cmd);
-  context.cmd->endEvent();
-}
-
 GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
 {
   GltfUploadResult result = m_renderer.uploadGltfModel(model, cmd);
@@ -3380,6 +2332,20 @@ void GPUDrivenRenderer::initLightingResources()
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &cullingAlloc, m_lightCoarseCullingDescriptorSets.data()));
 
+  // Phase 6: adopt the coarse-culling sets so the point/spot + clustered light-culling
+  // passes bind via cmd->bindBindGroup. Owned by the bind-group pool (freed at shutdown).
+  m_lightCoarseCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t i = 0; i < frameCount; ++i)
+  {
+    m_lightCoarseCullingBindGroups[i] = m_renderer.registerExternalBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightCoarseCullingSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[i])),
+        .primaryLogicalIndex = 0,
+        .debugName           = "gpu-driven-light-coarse-culling",
+    });
+  }
+
   std::vector<VkDescriptorSetLayout> sceneLayouts(frameCount, m_lightingSceneSetLayout);
   m_lightingSceneDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
   const VkDescriptorSetAllocateInfo sceneAlloc{
@@ -3745,6 +2711,30 @@ void GPUDrivenRenderer::initPhase7Resources()
       .pSetLayouts = ssrLayouts.data(),
   };
   VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &ssrAlloc, m_ssrDescriptorSets.data()));
+
+  // Phase 6: adopt the AO/SSR descriptor sets as RHI bind groups so passes bind them
+  // via cmd->bindBindGroup. Sets are allocated once here (resize only recreates the
+  // images / rewrites contents), so a single adoption per frame is stable for the
+  // app lifetime; the bind-group pool frees the adapters at device shutdown.
+  const auto adoptComputeSet = [&](VkDescriptorSet set, VkDescriptorSetLayout setLayout, const char* name) {
+    return m_renderer.registerExternalBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(setLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(set)),
+        .primaryLogicalIndex = 0,
+        .debugName           = name,
+    });
+  };
+  m_aoBindGroups.assign(frameCount, BindGroupHandle{});
+  m_aoDenoiseBindGroups.assign(frameCount, BindGroupHandle{});
+  m_ssrBindGroups.assign(frameCount, BindGroupHandle{});
+  for(uint32_t i = 0; i < frameCount; ++i)
+  {
+    m_aoBindGroups[i]        = adoptComputeSet(m_aoDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao");
+    m_aoDenoiseBindGroups[i] = adoptComputeSet(m_aoDenoiseDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao-denoise");
+    m_ssrBindGroups[i]       = adoptComputeSet(m_ssrDescriptorSets[i], m_ssrSetLayout, "gpu-driven-ssr");
+  }
+
   resizePhase7Resources();
 }
 
@@ -3799,6 +2789,11 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
   m_aoDescriptorSets.clear();
   m_aoDenoiseDescriptorSets.clear();
   m_ssrDescriptorSets.clear();
+  // Adapter objects are freed by RenderDevice::destroyBindGroups at device shutdown;
+  // just drop our handle references here.
+  m_aoBindGroups.clear();
+  m_aoDenoiseBindGroups.clear();
+  m_ssrBindGroups.clear();
   m_phase7HalfExtent = {};
   m_shadowAtlasAllocatedTiles = 0u;
 }
@@ -3927,6 +2922,13 @@ void GPUDrivenRenderer::initPhase7Pipelines()
   createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO", m_aoPipelineLayout, m_gtaoPipeline);
   createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise", m_aoPipelineLayout, m_aoDenoisePipeline);
   createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace", m_ssrPipelineLayout, m_ssrTracePipeline);
+
+  // Phase 6: register the raw compute pipelines (with their layouts) so the AO/SSR
+  // passes bind them through cmd->bindPipeline + cmd->bindBindGroup. Ownership stays
+  // here (unregistered + vkDestroyed in shutdownPhase7Pipelines).
+  m_gtaoPipelineHandle      = m_renderer.registerExternalComputePipeline(m_gtaoPipeline, m_aoPipelineLayout, 100u);
+  m_aoDenoisePipelineHandle = m_renderer.registerExternalComputePipeline(m_aoDenoisePipeline, m_aoPipelineLayout, 101u);
+  m_ssrTracePipelineHandle  = m_renderer.registerExternalComputePipeline(m_ssrTracePipeline, m_ssrPipelineLayout, 102u);
 #endif
 }
 
@@ -3937,6 +2939,12 @@ void GPUDrivenRenderer::shutdownPhase7Pipelines()
   {
     return;
   }
+  m_renderer.unregisterExternalPipeline(m_gtaoPipelineHandle);
+  m_renderer.unregisterExternalPipeline(m_aoDenoisePipelineHandle);
+  m_renderer.unregisterExternalPipeline(m_ssrTracePipelineHandle);
+  m_gtaoPipelineHandle      = {};
+  m_aoDenoisePipelineHandle = {};
+  m_ssrTracePipelineHandle  = {};
   if(m_gtaoPipeline != VK_NULL_HANDLE)
   {
     vkDestroyPipeline(nativeDevice, m_gtaoPipeline, nullptr);
@@ -4161,6 +3169,12 @@ uint64_t GPUDrivenRenderer::getCurrentLightCullingDescriptorSet() const
   return frameIndex < m_lightCoarseCullingDescriptorSets.size()
              ? reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[frameIndex])
              : 0;
+}
+
+BindGroupHandle GPUDrivenRenderer::getCurrentLightCullingBindGroup() const
+{
+  const uint32_t frameIndex = getCurrentFrameIndexHint();
+  return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
 }
 
 void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t)
@@ -4488,7 +3502,10 @@ void GPUDrivenRenderer::initLightingPipelines()
           .layout = m_lightCoarseCullingPipelineLayout,
       };
       VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
-      return PipelineHandle{variant, 1u};
+      // Phase 6: register as a real registry handle (with layout) so passes bind via
+      // cmd->bindPipeline/bindBindGroup. Ownership stays here (unregistered + destroyed
+      // in shutdownLightingPipelines).
+      return m_renderer.registerExternalComputePipeline(outPipeline, m_lightCoarseCullingPipelineLayout, variant);
     };
     m_pointLightCoarseCullingPipeline =
         createComputePipeline("kernelPointLightCoarseCulling", 0x6201u, m_pointLightCoarseCullingVkPipeline);
@@ -4515,7 +3532,8 @@ void GPUDrivenRenderer::initLightingPipelines()
                                       &clusteredPipelineInfo,
                                       nullptr,
                                       &m_clusteredLightCullingVkPipeline));
-    m_clusteredLightCullingPipeline = PipelineHandle{0x6203u, 1u};
+    m_clusteredLightCullingPipeline =
+        m_renderer.registerExternalComputePipeline(m_clusteredLightCullingVkPipeline, m_lightCoarseCullingPipelineLayout, 0x6203u);
     vkDestroyShaderModule(nativeDevice, clusteredShaderModule, nullptr);
   }
   vkDestroyShaderModule(nativeDevice, lightShaderModule, nullptr);
@@ -4538,6 +3556,12 @@ void GPUDrivenRenderer::shutdownLightingPipelines()
   // The 8 fullscreen graphics pipelines now live in the device pipeline registry
   // (registered via registerExternalGraphicsPipeline) and are destroyed by
   // RenderDevice::destroyPipelines(), so they are not freed here.
+  m_renderer.unregisterExternalPipeline(m_pointLightCoarseCullingPipeline);
+  m_renderer.unregisterExternalPipeline(m_spotLightCoarseCullingPipeline);
+  m_renderer.unregisterExternalPipeline(m_clusteredLightCullingPipeline);
+  m_pointLightCoarseCullingPipeline = {};
+  m_spotLightCoarseCullingPipeline  = {};
+  m_clusteredLightCullingPipeline   = {};
   if(m_pointLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
   {
     vkDestroyPipeline(nativeDevice, m_pointLightCoarseCullingVkPipeline, nullptr);
@@ -4793,6 +3817,9 @@ void GPUDrivenRenderer::initVisibilitySortResources()
   };
   VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_visibilitySortPipeline));
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+  // Phase 6: register the bitonic-sort pipeline (with layout) for cmd->bindPipeline.
+  m_visibilitySortPipelineHandle =
+      m_renderer.registerExternalComputePipeline(m_visibilitySortPipeline, m_visibilitySortPipelineLayout, 110u);
 #endif
 
   std::vector<VkDescriptorSetLayout> layouts(frameCount, m_visibilitySortSetLayout);
@@ -4809,6 +3836,14 @@ void GPUDrivenRenderer::initVisibilitySortResources()
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
     m_visibilitySortFrames[frameIndex].descriptorSet = descriptorSets[frameIndex];
+    // Phase 6: adopt the sort set so the visibility-sort pass binds via cmd->bindBindGroup.
+    m_visibilitySortFrames[frameIndex].bindGroup = m_renderer.registerExternalBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_visibilitySortSetLayout)),
+        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(descriptorSets[frameIndex])),
+        .primaryLogicalIndex = 0,
+        .debugName           = "gpu-driven-visibility-sort",
+    });
   }
 }
 
@@ -4826,6 +3861,8 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
   }
   m_visibilitySortFrames.clear();
 
+  m_renderer.unregisterExternalPipeline(m_visibilitySortPipelineHandle);
+  m_visibilitySortPipelineHandle = {};
   if(nativeDevice != VK_NULL_HANDLE)
   {
     if(m_visibilitySortPipeline != VK_NULL_HANDLE)
@@ -5361,112 +4398,6 @@ void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
 
   frameResources.activeElementCount = activeCount;
   frameResources.paddedElementCount = paddedCount;
-}
-
-void GPUDrivenRenderer::executeVisibilitySortPass(const PassContext& context) const
-{
-  if(!kEnableShippingVisibilitySort)
-  {
-    return;
-  }
-
-  if(context.cmd == nullptr || context.frameIndex >= m_visibilitySortFrames.size()
-     || m_visibilitySortPipeline == VK_NULL_HANDLE || m_visibilitySortPipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[context.frameIndex];
-  if(frameResources.descriptorSet == VK_NULL_HANDLE || frameResources.paddedElementCount <= 1u
-     || frameResources.uploadKeyBuffer.buffer == VK_NULL_HANDLE || frameResources.uploadValueBuffer.buffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(*context.cmd);
-  const VkBufferCopy copyRegion{.srcOffset = 0, .dstOffset = 0, .size = static_cast<VkDeviceSize>(frameResources.paddedElementCount) * sizeof(uint32_t)};
-  vkCmdCopyBuffer(vkCmd, frameResources.uploadKeyBuffer.buffer, frameResources.keyBuffer.buffer, 1, &copyRegion);
-  vkCmdCopyBuffer(vkCmd, frameResources.uploadValueBuffer.buffer, frameResources.valueBuffer.buffer, 1, &copyRegion);
-
-  const std::array<VkBufferMemoryBarrier2, 2> transferToComputeBarriers{{
-      VkBufferMemoryBarrier2{
-          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-          .dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .buffer              = frameResources.keyBuffer.buffer,
-          .offset              = 0,
-          .size                = VK_WHOLE_SIZE,
-      },
-      VkBufferMemoryBarrier2{
-          .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-          .dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .buffer              = frameResources.valueBuffer.buffer,
-          .offset              = 0,
-          .size                = VK_WHOLE_SIZE,
-      },
-  }};
-  const VkDependencyInfo transferToComputeDependency{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = static_cast<uint32_t>(transferToComputeBarriers.size()),
-      .pBufferMemoryBarriers    = transferToComputeBarriers.data(),
-  };
-  vkCmdPipelineBarrier2(vkCmd, &transferToComputeDependency);
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_visibilitySortPipeline);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_visibilitySortPipelineLayout,
-                          0,
-                          1,
-                          &frameResources.descriptorSet,
-                          0,
-                          nullptr);
-
-  const auto issueBarrier = [&]() {
-    const VkMemoryBarrier2 memoryBarrier{
-        .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-    };
-    const VkDependencyInfo dependencyInfo{
-        .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers    = &memoryBarrier,
-    };
-    vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
-  };
-
-  for(uint32_t level = 2u; level <= frameResources.paddedElementCount; level <<= 1u)
-  {
-    for(uint32_t levelMask = level >> 1u; levelMask > 0u; levelMask >>= 1u)
-    {
-      const shaderio::BitonicSortPushConstants pushConstants{
-          .elementCount = frameResources.paddedElementCount,
-          .level = level,
-          .levelMask = levelMask,
-          .descending = 1u,
-      };
-      vkCmdPushConstants(vkCmd,
-                         m_visibilitySortPipelineLayout,
-                         VK_SHADER_STAGE_COMPUTE_BIT,
-                         0,
-                         sizeof(pushConstants),
-                         &pushConstants);
-      vkCmdDispatch(vkCmd, (frameResources.paddedElementCount + 63u) / 64u, 1u, 1u);
-      issueBarrier();
-    }
-  }
 }
 
 }  // namespace demo

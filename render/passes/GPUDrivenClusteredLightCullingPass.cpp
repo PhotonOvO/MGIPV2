@@ -1,6 +1,8 @@
 #include "GPUDrivenClusteredLightCullingPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../../rhi/vulkan/VulkanCommandList.h"
+#include "../../shaders/shader_io.h"
 
 #include <array>
 
@@ -31,8 +33,32 @@ void GPUDrivenClusteredLightCullingPass::execute(const PassContext& context) con
   {
     return;
   }
+
   context.cmd->beginEvent("GPUDrivenClusteredLightCulling");
-  m_renderer->executeClusteredLightCullingPass(*context.cmd, *context.params);
+
+  const PipelineHandle pipeline = m_renderer->getClusteredLightCullingPipelineHandle();
+  const BindGroupHandle bindGroup = m_renderer->getLightCoarseCullingBindGroup(context.frameIndex);
+  if(context.params->debugOptions.enableClusteredLighting && !pipeline.isNull() && !bindGroup.isNull())
+  {
+    const uint64_t statsBuffer = m_renderer->getClusterStatsBufferOpaque(context.frameIndex);
+    if(statsBuffer != 0)
+    {
+      context.cmd->fillBuffer(statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
+      // Stats reset (transfer) must complete before the culling shader accumulates into it.
+      context.cmd->memoryBarrier(rhi::PipelineStage::Transfer, rhi::ResourceAccess::write,
+                                 rhi::PipelineStage::Compute, rhi::ResourceAccess::write);
+    }
+
+    context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, pipeline);
+    context.cmd->bindBindGroup(0, bindGroup, nullptr, 0);
+    context.cmd->dispatch((shaderio::LClusterCount + 63u) / 64u, 1u, 1u);
+
+    // Cluster light lists feed the lighting fragment stage; stats are read back on the host.
+    context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
+                               rhi::PipelineStage::FragmentShader | rhi::PipelineStage::Host,
+                               rhi::ResourceAccess::read);
+  }
+
   context.cmd->endEvent();
 }
 

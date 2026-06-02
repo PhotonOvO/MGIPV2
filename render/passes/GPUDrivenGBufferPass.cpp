@@ -197,43 +197,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex).isNull();
       if(useMdi)
       {
-        const VkPipelineLayout pipelineLayout =
-            reinterpret_cast<VkPipelineLayout>(m_renderer->getGraphicsMDIPipelineLayout());
-        const VkDescriptorSet textureSet =
-            reinterpret_cast<VkDescriptorSet>(m_renderer->getGraphicsMaterialDescriptorSet());
-        vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout,
-                                shaderio::LSetTextures,
-                                1,
-                                &textureSet,
-                                0,
-                                nullptr);
-        if(!cameraBindGroupHandle.isNull())
-        {
-          VkDescriptorSet cameraDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-              m_renderer->getBindGroupDescriptorSet(cameraBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-          const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-          vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                                  VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  pipelineLayout,
-                                  shaderio::LSetScene,
-                                  1,
-                                  &cameraDescriptorSet,
-                                  2,
-                                  dynamicOffsets);
-        }
         const BindGroupHandle mdiDrawBindGroupHandle = m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex);
-        const VkDescriptorSet mdiDrawDescriptorSet = reinterpret_cast<VkDescriptorSet>(
-            m_renderer->getBindGroupDescriptorSet(mdiDrawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-        vkCmdBindDescriptorSets(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout,
-                                shaderio::LSetDraw,
-                                1,
-                                &mdiDrawDescriptorSet,
-                                0,
-                                nullptr);
 
         const auto pickRepresentativeMesh = [&]() -> const MeshRecord* {
           for(uint32_t drawIndex : m_renderer->getOpaqueDrawIndices())
@@ -295,9 +259,14 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         const uint32_t opaqueMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedOpaqueCapacity : currentIndirectObjectCount;
         const uint32_t alphaMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedAlphaCapacity : currentIndirectObjectCount;
 
-        const VkPipeline opaquePipeline = reinterpret_cast<VkPipeline>(
-            m_renderer->getNativeGraphicsPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle()));
-        rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline);
+        context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getGBufferOpaqueMDIPipelineHandle());
+        context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
+        if(!cameraBindGroupHandle.isNull())
+        {
+          const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
+          context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+        }
+        context.cmd->bindBindGroup(shaderio::LSetDraw, mdiDrawBindGroupHandle, nullptr, 0);
         context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
                                               opaqueCommandOffset,
                                               countBufferHandle,
@@ -305,9 +274,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
                                               opaqueMaxDrawCount,
                                               indirectCommandStride);
 
-        const VkPipeline alphaPipeline = reinterpret_cast<VkPipeline>(
-            m_renderer->getNativeGraphicsPipeline(m_renderer->getGBufferAlphaTestMDIPipelineHandle()));
-        rhi::vulkan::cmdBindPipeline(*context.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline);
+        context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getGBufferAlphaTestMDIPipelineHandle());
         context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
                                               alphaCommandOffset,
                                               countBufferHandle,

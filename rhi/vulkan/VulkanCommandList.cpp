@@ -36,6 +36,14 @@ VkPipelineStageFlags2 toVkStageMask(PipelineStage stage)
   {
     result |= VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
   }
+  if((mask & static_cast<uint32_t>(PipelineStage::DrawIndirect)) != 0)
+  {
+    result |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+  }
+  if((mask & static_cast<uint32_t>(PipelineStage::Host)) != 0)
+  {
+    result |= VK_PIPELINE_STAGE_2_HOST_BIT;
+  }
   return result == 0 ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : result;
 }
 
@@ -47,6 +55,8 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
                     static_cast<uint32_t>(PipelineStage::FragmentShader) |
                     static_cast<uint32_t>(PipelineStage::Compute))) != 0;
   const bool transferStage = (stageMask & static_cast<uint32_t>(PipelineStage::Transfer)) != 0;
+  const bool indirectStage = (stageMask & static_cast<uint32_t>(PipelineStage::DrawIndirect)) != 0;
+  const bool hostStage     = (stageMask & static_cast<uint32_t>(PipelineStage::Host)) != 0;
 
   VkAccessFlags2 result = VK_ACCESS_2_NONE;
   switch(access)
@@ -60,6 +70,14 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
       {
         result |= VK_ACCESS_2_TRANSFER_READ_BIT;
       }
+      if(indirectStage)
+      {
+        result |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+      }
+      if(hostStage)
+      {
+        result |= VK_ACCESS_2_HOST_READ_BIT;
+      }
       return result;
     case ResourceAccess::write:
       if(shaderStage)
@@ -70,6 +88,10 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
       {
         result |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
       }
+      if(hostStage)
+      {
+        result |= VK_ACCESS_2_HOST_WRITE_BIT;
+      }
       return result;
     case ResourceAccess::readWrite:
       if(shaderStage)
@@ -79,6 +101,14 @@ VkAccessFlags2 toVkAccessMask(ResourceAccess access, PipelineStage stage)
       if(transferStage)
       {
         result |= VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      }
+      if(indirectStage)
+      {
+        result |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+      }
+      if(hostStage)
+      {
+        result |= VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT;
       }
       return result;
     default:
@@ -349,6 +379,27 @@ void VulkanCommandList::insertBarrier(BarrierType barrierType)
   vkCmdPipelineBarrier2(m_commandBuffer, &dependencyInfo);
 }
 
+void VulkanCommandList::memoryBarrier(PipelineStage  srcStage,
+                                      ResourceAccess srcAccess,
+                                      PipelineStage  dstStage,
+                                      ResourceAccess dstAccess)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkMemoryBarrier2 barrier{
+      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask  = toVkStageMask(srcStage),
+      .srcAccessMask = toVkAccessMask(srcAccess, srcStage),
+      .dstStageMask  = toVkStageMask(dstStage),
+      .dstAccessMask = toVkAccessMask(dstAccess, dstStage),
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers    = &barrier,
+  };
+  vkCmdPipelineBarrier2(m_commandBuffer, &dependencyInfo);
+}
+
 void VulkanCommandList::transitionBuffer(const BufferBarrierDesc& desc)
 {
   ensureCommandBuffer(m_commandBuffer);
@@ -447,9 +498,10 @@ void VulkanCommandList::bindPipeline(PipelineBindPoint bindPoint, PipelineHandle
   }
   vkCmdBindPipeline(m_commandBuffer, vkBindPoint, nativePipeline);
 
-  // Remember the layout so subsequent bindBindGroup calls can bind descriptor
-  // sets compatibly without the caller having to pass the layout explicitly.
+  // Remember the layout and bind point so subsequent bindBindGroup/pushConstants
+  // calls can target the bound pipeline without the caller passing them explicitly.
   m_currentPipelineLayout = reinterpret_cast<VkPipelineLayout>(m_resourceTable->resolvePipelineLayout(pipeline));
+  m_currentBindPoint      = vkBindPoint;
 }
 
 void VulkanCommandList::bindBindTable(PipelineBindPoint, uint32_t, BindTableHandle, const uint32_t*, uint32_t)
@@ -476,7 +528,7 @@ void VulkanCommandList::bindBindGroup(uint32_t        slot,
   }
 
   vkCmdBindDescriptorSets(m_commandBuffer,
-                          VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_currentBindPoint,
                           m_currentPipelineLayout,
                           slot,
                           1,
@@ -519,9 +571,45 @@ void VulkanCommandList::bindIndexBuffer(uint64_t bufferHandle, uint64_t offset, 
   vkCmdBindIndexBuffer(m_commandBuffer, nativeBuffer, offset, indexType);
 }
 
-void VulkanCommandList::pushConstants(ShaderStage, uint32_t, uint32_t, const void*)
+VkShaderStageFlags toVkShaderStageFlags(ShaderStage stages)
+{
+  const uint32_t      mask = static_cast<uint32_t>(stages);
+  VkShaderStageFlags  result{0};
+  if((mask & static_cast<uint32_t>(ShaderStage::vertex)) != 0)
+  {
+    result |= VK_SHADER_STAGE_VERTEX_BIT;
+  }
+  if((mask & static_cast<uint32_t>(ShaderStage::fragment)) != 0)
+  {
+    result |= VK_SHADER_STAGE_FRAGMENT_BIT;
+  }
+  if((mask & static_cast<uint32_t>(ShaderStage::compute)) != 0)
+  {
+    result |= VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  if((mask & static_cast<uint32_t>(ShaderStage::geometry)) != 0)
+  {
+    result |= VK_SHADER_STAGE_GEOMETRY_BIT;
+  }
+  if((mask & static_cast<uint32_t>(ShaderStage::tessControl)) != 0)
+  {
+    result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+  }
+  if((mask & static_cast<uint32_t>(ShaderStage::tessEval)) != 0)
+  {
+    result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+  }
+  return result;
+}
+
+void VulkanCommandList::pushConstants(ShaderStage stages, uint32_t offset, uint32_t size, const void* data)
 {
   ensureCommandBuffer(m_commandBuffer);
+  if(m_currentPipelineLayout == VK_NULL_HANDLE || size == 0 || data == nullptr)
+  {
+    return;
+  }
+  vkCmdPushConstants(m_commandBuffer, m_currentPipelineLayout, toVkShaderStageFlags(stages), offset, size, data);
 }
 
 void VulkanCommandList::draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)
@@ -568,6 +656,53 @@ void VulkanCommandList::dispatch(uint32_t groupCountX, uint32_t groupCountY, uin
 {
   ensureCommandBuffer(m_commandBuffer);
   vkCmdDispatch(m_commandBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
+void VulkanCommandList::copyBuffer(uint64_t srcBuffer, uint64_t dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkBufferCopy region{
+      .srcOffset = static_cast<VkDeviceSize>(srcOffset),
+      .dstOffset = static_cast<VkDeviceSize>(dstOffset),
+      .size      = static_cast<VkDeviceSize>(size),
+  };
+  vkCmdCopyBuffer(m_commandBuffer,
+                  reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(srcBuffer)),
+                  reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(dstBuffer)),
+                  1,
+                  &region);
+}
+
+void VulkanCommandList::fillBuffer(uint64_t dstBuffer, uint64_t offset, uint64_t size, uint32_t data)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  vkCmdFillBuffer(m_commandBuffer,
+                  reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(dstBuffer)),
+                  static_cast<VkDeviceSize>(offset),
+                  static_cast<VkDeviceSize>(size),
+                  data);
+}
+
+void VulkanCommandList::blitImage(const ImageBlitDesc& desc)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkImageAspectFlags aspectMask = toVkAspectMask(desc.aspect);
+  const VkImageBlit region{
+      .srcSubresource = {.aspectMask = aspectMask, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+      .srcOffsets     = {{desc.srcOffsets[0].x, desc.srcOffsets[0].y, desc.srcOffsets[0].z},
+                         {desc.srcOffsets[1].x, desc.srcOffsets[1].y, desc.srcOffsets[1].z}},
+      .dstSubresource = {.aspectMask = aspectMask, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+      .dstOffsets     = {{desc.dstOffsets[0].x, desc.dstOffsets[0].y, desc.dstOffsets[0].z},
+                         {desc.dstOffsets[1].x, desc.dstOffsets[1].y, desc.dstOffsets[1].z}},
+  };
+  vkCmdBlitImage(m_commandBuffer,
+                 reinterpret_cast<VkImage>(static_cast<uintptr_t>(desc.srcImage)),
+                 toVkImageLayout(desc.srcState),
+                 reinterpret_cast<VkImage>(static_cast<uintptr_t>(desc.dstImage)),
+                 toVkImageLayout(desc.dstState),
+                 1,
+                 &region,
+                 VK_FILTER_LINEAR);
 }
 
 void VulkanCommandList::beginEvent(const char* name)
