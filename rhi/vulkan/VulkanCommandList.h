@@ -5,11 +5,9 @@
 
 #include <vector>
 
-namespace demo::rhi {
-class BindingResolver;
-}
-
 namespace demo::rhi::vulkan {
+
+class VulkanResourceTable;
 
 class VulkanCommandList final : public demo::rhi::CommandList
 {
@@ -18,7 +16,7 @@ public:
 
   void setCommandBuffer(VkCommandBuffer commandBuffer) { m_commandBuffer = commandBuffer; }
 
-  void setBindingResolver(demo::rhi::BindingResolver* resolver) { m_resolver = resolver; }
+  void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
 
   void clearResourceStates() { m_resourceStates.clear(); }
 
@@ -77,12 +75,12 @@ private:
 
   VkCommandBuffer                 m_commandBuffer{VK_NULL_HANDLE};
   std::vector<ResourceStateEntry> m_resourceStates;
-  demo::rhi::BindingResolver*     m_resolver{nullptr};
+  VulkanResourceTable*            m_resourceTable{nullptr};
   VkPipelineLayout                m_currentPipelineLayout{VK_NULL_HANDLE};
 };
 
-// Inject the resolver used to map handles to native objects during recording.
-void setBindingResolver(demo::rhi::CommandList& commandList, demo::rhi::BindingResolver* resolver);
+// Inject the backend resource table used to map handles to native objects during recording.
+void setResourceTable(demo::rhi::CommandList& commandList, VulkanResourceTable* table);
 
 VkCommandBuffer getNativeCommandBuffer(demo::rhi::CommandList& commandList);
 VkCommandBuffer getNativeCommandBuffer(const demo::rhi::CommandList& commandList);

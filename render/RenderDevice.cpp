@@ -4239,8 +4239,7 @@ rhi::CommandList& RenderDevice::beginCommandRecording()
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
   rhi::FrameData& frame = m_perFrame.frameContext->getCurrentFrame();
   ASSERT(frame.commandList != nullptr, "Current frame command list must be valid");
-  rhi::vulkan::setBindingResolver(*frame.commandList,
-                                  m_bindingResolverOverride != nullptr ? m_bindingResolverOverride : this);
+  rhi::vulkan::setResourceTable(*frame.commandList, &m_device.resourceTable);
   return *frame.commandList;
 }
 
@@ -7404,6 +7403,7 @@ void RenderDevice::destroyBindGroup(rhi::BindGroupHandle handle)
     return;
   }
 
+  m_device.resourceTable.unregisterBindGroup(handle);
   delete bindGroup->desc.table;
   bindGroup->desc.table = nullptr;
   delete bindGroup->desc.layout;
@@ -7419,7 +7419,10 @@ BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
   ASSERT(desc.table != nullptr, "BindGroupDesc table must be valid");
   ASSERT(rhi::isValidResourceIndex(desc.primaryLogicalIndex), "BindGroupDesc primaryLogicalIndex must be valid");
 
-  return m_materials.bindGroupPool.emplace(BindGroupResource{.desc = std::move(desc)});
+  rhi::BindTable* table = desc.table;
+  const BindGroupHandle handle = m_materials.bindGroupPool.emplace(BindGroupResource{.desc = std::move(desc)});
+  m_device.resourceTable.registerBindGroup(handle, table);
+  return handle;
 }
 
 void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const
@@ -7761,55 +7764,32 @@ void RenderDevice::createShadowCullingPipeline()
 PipelineHandle RenderDevice::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
                                           uint64_t nativeLayout)
 {
-  ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
-  return m_device.pipelineRegistry.emplace(DeviceLifetimeResources::PipelineRecord{
-      .bindPoint             = bindPoint,
-      .nativePipeline        = nativePipeline,
-      .specializationVariant = specializationVariant,
-      .nativeLayout          = nativeLayout,
-  });
+  return m_device.resourceTable.registerPipeline(bindPoint, nativePipeline, specializationVariant, nativeLayout);
 }
 
-uint64_t RenderDevice::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
+PipelineHandle RenderDevice::registerExternalGraphicsPipeline(VkPipeline pipeline, VkPipelineLayout layout,
+                                                              uint32_t specializationVariant)
 {
-  const uint32_t vkBindPoint = bindPoint == rhi::PipelineBindPoint::compute
-                                   ? static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE)
-                                   : static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS);
-  return getPipelineOpaque(handle, vkBindPoint);
-}
-
-uint64_t RenderDevice::resolvePipelineLayout(PipelineHandle handle) const
-{
-  const DeviceLifetimeResources::PipelineRecord* record = tryGetPipelineRecord(handle);
-  return record != nullptr ? record->nativeLayout : 0;
-}
-
-uint64_t RenderDevice::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
-{
-  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
-  if(bindGroup == nullptr || bindGroup->desc.table == nullptr)
-  {
-    return 0;
-  }
-  return bindGroup->desc.table->getNativeHandle();
+  return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                          reinterpret_cast<uint64_t>(pipeline), specializationVariant,
+                          reinterpret_cast<uint64_t>(layout));
 }
 
 void RenderDevice::destroyPipelines()
 {
   std::vector<PipelineHandle> handles;
-  m_device.pipelineRegistry.forEachActive(
-      [&](PipelineHandle handle, const DeviceLifetimeResources::PipelineRecord&) { handles.push_back(handle); });
+  m_device.resourceTable.forEachPipeline(
+      [&](PipelineHandle handle, const rhi::vulkan::PipelineRecord&) { handles.push_back(handle); });
 
   VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   for(const PipelineHandle handle : handles)
   {
-    DeviceLifetimeResources::PipelineRecord* record = m_device.pipelineRegistry.tryGet(handle);
+    const rhi::vulkan::PipelineRecord* record = m_device.resourceTable.tryGetPipeline(handle);
     if(record != nullptr && record->nativePipeline != 0)
     {
       vkDestroyPipeline(device, reinterpret_cast<VkPipeline>(record->nativePipeline), nullptr);
-      record->nativePipeline = 0;
     }
-    m_device.pipelineRegistry.destroy(handle);
+    m_device.resourceTable.destroyPipeline(handle);
   }
 
   m_device.prebuiltPipelines.compute             = kNullPipelineHandle;
@@ -7843,18 +7823,14 @@ void RenderDevice::destroyPipelines()
   m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
 
-const RenderDevice::DeviceLifetimeResources::PipelineRecord* RenderDevice::tryGetPipelineRecord(PipelineHandle handle) const
+const rhi::vulkan::PipelineRecord* RenderDevice::tryGetPipelineRecord(PipelineHandle handle) const
 {
-  return m_device.pipelineRegistry.tryGet(handle);
+  return m_device.resourceTable.tryGetPipeline(handle);
 }
 
 uint64_t RenderDevice::getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const
 {
-  const DeviceLifetimeResources::PipelineRecord* record = tryGetPipelineRecord(handle);
-  ASSERT(record != nullptr, "PipelineHandle must resolve to an active pipeline record");
-  ASSERT(record->bindPoint == expectedBindPoint, "PipelineHandle bind-point mismatch");
-  ASSERT(record->nativePipeline != 0, "Pipeline record must own a valid native pipeline");
-  return record->nativePipeline;
+  return m_device.resourceTable.resolvePipeline(handle, expectedBindPoint);
 }
 
 const RenderDevice::MaterialResources::TextureHotData* RenderDevice::tryGetTextureHot(TextureHandle handle) const

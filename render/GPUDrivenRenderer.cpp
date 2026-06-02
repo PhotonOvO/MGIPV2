@@ -344,7 +344,6 @@ constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
 void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_renderer.init(window, surface, vSync);
-  m_renderer.setBindingResolverOverride(this);
   m_sceneRegistry.init(getNativeDeviceHandle(), getAllocatorHandle());
   initLightingResources();
   initIBLResources();
@@ -4149,26 +4148,6 @@ uint64_t GPUDrivenRenderer::getLightingInputDescriptorSet() const
              : 0;
 }
 
-uint64_t GPUDrivenRenderer::resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const
-{
-  return bindPoint == rhi::PipelineBindPoint::compute ? getNativeComputePipeline(handle)
-                                                      : getNativeGraphicsPipeline(handle);
-}
-
-uint64_t GPUDrivenRenderer::resolvePipelineLayout(PipelineHandle handle) const
-{
-  if(isGpuDrivenFullscreenPipeline(handle))
-  {
-    return reinterpret_cast<uint64_t>(m_lightPipelineLayout);
-  }
-  return m_renderer.resolvePipelineLayout(handle);
-}
-
-uint64_t GPUDrivenRenderer::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
-{
-  return m_renderer.resolveBindGroupDescriptorSet(handle);
-}
-
 uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) const
 {
   return frameIndex < m_lightingSceneDescriptorSets.size()
@@ -4480,39 +4459,7 @@ void GPUDrivenRenderer::initLightingPipelines()
     };
     VkPipeline pipeline = VK_NULL_HANDLE;
     VK_CHECK(vkCreateGraphicsPipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-    if(variant == 0x6101u)
-    {
-      m_gpuDrivenLightHdrVkPipeline = pipeline;
-    }
-    else if(variant == 0x6102u)
-    {
-      m_gpuDrivenSkyboxVkPipeline = pipeline;
-    }
-    else if(variant == 0x6103u)
-    {
-      m_gpuDrivenTAAResolveVkPipeline = pipeline;
-    }
-    else if(variant == 0x6104u)
-    {
-      m_gpuDrivenBloomPrefilterVkPipeline = pipeline;
-    }
-    else if(variant == 0x6105u)
-    {
-      m_gpuDrivenBloomDownsampleVkPipeline = pipeline;
-    }
-    else if(variant == 0x6106u)
-    {
-      m_gpuDrivenFinalColorVkPipeline = pipeline;
-    }
-    else if(variant == 0x6107u)
-    {
-      m_gpuDrivenVelocityVkPipeline = pipeline;
-    }
-    else if(variant == 0x6108u)
-    {
-      m_gpuDrivenBloomUpsampleVkPipeline = pipeline;
-    }
-    return PipelineHandle{variant, 1u};
+    return m_renderer.registerExternalGraphicsPipeline(pipeline, m_lightPipelineLayout, variant);
   };
 
   m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain", getSceneColorHdrFormat(), false, 0x6101u);
@@ -4588,46 +4535,9 @@ void GPUDrivenRenderer::shutdownLightingPipelines()
       handle = {};
     }
   };
-  if(m_gpuDrivenLightHdrVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenLightHdrVkPipeline, nullptr);
-    m_gpuDrivenLightHdrVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenSkyboxVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenSkyboxVkPipeline, nullptr);
-    m_gpuDrivenSkyboxVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenTAAResolveVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenTAAResolveVkPipeline, nullptr);
-    m_gpuDrivenTAAResolveVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenBloomPrefilterVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomPrefilterVkPipeline, nullptr);
-    m_gpuDrivenBloomPrefilterVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenBloomDownsampleVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomDownsampleVkPipeline, nullptr);
-    m_gpuDrivenBloomDownsampleVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenBloomUpsampleVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenBloomUpsampleVkPipeline, nullptr);
-    m_gpuDrivenBloomUpsampleVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenFinalColorVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenFinalColorVkPipeline, nullptr);
-    m_gpuDrivenFinalColorVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_gpuDrivenVelocityVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gpuDrivenVelocityVkPipeline, nullptr);
-    m_gpuDrivenVelocityVkPipeline = VK_NULL_HANDLE;
-  }
+  // The 8 fullscreen graphics pipelines now live in the device pipeline registry
+  // (registered via registerExternalGraphicsPipeline) and are destroyed by
+  // RenderDevice::destroyPipelines(), so they are not freed here.
   if(m_pointLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
   {
     vkDestroyPipeline(nativeDevice, m_pointLightCoarseCullingVkPipeline, nullptr);

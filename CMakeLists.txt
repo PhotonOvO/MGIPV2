@@ -265,6 +265,8 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanFrameContext.cpp
   rhi/vulkan/VulkanCommandList.h
   rhi/vulkan/VulkanCommandList.cpp
+  rhi/vulkan/VulkanResourceTable.h
+  rhi/vulkan/VulkanResourceTable.cpp
   rhi/vulkan/VulkanCommandPool.h
   rhi/vulkan/VulkanCommandPool.cpp
   rhi/vulkan/VulkanSynchronization.h
@@ -279,6 +281,7 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanSwapchain.cpp
   render/RenderDevice.cpp
   render/RenderDevice.h
+  render/RenderTypes.h
   render/RendererFacade.h
   render/RendererFacade.cpp
   render/AsyncLoadingCoordinator.h  

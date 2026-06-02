@@ -268,17 +268,9 @@ struct GPUDrivenRuntimeStats
   std::vector<GPUDrivenPassDiagnostic> passDiagnostics;
 };
 
-class GPUDrivenRenderer : public rhi::BindingResolver
+class GPUDrivenRenderer
 {
 public:
-  // rhi::BindingResolver — resolves both this renderer's own pipelines/sets and,
-  // by delegation, the inner RenderDevice's. Injected into the frame command list so
-  // GPUDriven passes can bind through handles even though these pipelines live
-  // outside the inner RenderDevice's registry.
-  [[nodiscard]] uint64_t resolvePipeline(PipelineHandle handle, rhi::PipelineBindPoint bindPoint) const override;
-  [[nodiscard]] uint64_t resolvePipelineLayout(PipelineHandle handle) const override;
-  [[nodiscard]] uint64_t resolveBindGroupDescriptorSet(BindGroupHandle handle) const override;
-
   void init(void* window, rhi::Surface& surface, bool vSync);
   void shutdown(rhi::Surface& surface);
   void setVSync(bool enabled) { m_renderer.setVSync(enabled); }
@@ -647,55 +639,7 @@ public:
   }
   [[nodiscard]] uint64_t getNativeGraphicsPipeline(PipelineHandle pipelineHandle) const
   {
-    if(pipelineHandle.index == m_gpuDrivenLightHdrPipeline.index && pipelineHandle.generation == m_gpuDrivenLightHdrPipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenLightHdrVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenSkyboxPipeline.index && pipelineHandle.generation == m_gpuDrivenSkyboxPipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenSkyboxVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenTAAResolvePipeline.index
-       && pipelineHandle.generation == m_gpuDrivenTAAResolvePipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenTAAResolveVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenBloomPrefilterPipeline.index
-       && pipelineHandle.generation == m_gpuDrivenBloomPrefilterPipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomPrefilterVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenBloomDownsamplePipeline.index
-       && pipelineHandle.generation == m_gpuDrivenBloomDownsamplePipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomDownsampleVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenBloomUpsamplePipeline.index
-       && pipelineHandle.generation == m_gpuDrivenBloomUpsamplePipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenBloomUpsampleVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenFinalColorPipeline.index
-       && pipelineHandle.generation == m_gpuDrivenFinalColorPipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenFinalColorVkPipeline);
-    }
-    if(pipelineHandle.index == m_gpuDrivenVelocityPipeline.index
-       && pipelineHandle.generation == m_gpuDrivenVelocityPipeline.generation)
-    {
-      return reinterpret_cast<uint64_t>(m_gpuDrivenVelocityVkPipeline);
-    }
     return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS));
-  }
-  // True for the fullscreen pipelines this renderer owns directly. They all share
-  // m_lightPipelineLayout, so the resolver can report their layout generically.
-  [[nodiscard]] bool isGpuDrivenFullscreenPipeline(PipelineHandle h) const
-  {
-    const auto eq = [&](PipelineHandle p) { return h.index == p.index && h.generation == p.generation; };
-    return eq(m_gpuDrivenLightHdrPipeline) || eq(m_gpuDrivenSkyboxPipeline) || eq(m_gpuDrivenTAAResolvePipeline)
-           || eq(m_gpuDrivenBloomPrefilterPipeline) || eq(m_gpuDrivenBloomDownsamplePipeline)
-           || eq(m_gpuDrivenBloomUpsamplePipeline) || eq(m_gpuDrivenFinalColorPipeline)
-           || eq(m_gpuDrivenVelocityPipeline);
   }
   // BindGroup wrapping the per-frame lighting-scene descriptor set (set LSetScene),
   // so GPUDriven fullscreen passes can bind it through cmd->bindBindGroup.
@@ -963,22 +907,16 @@ private:
   VkPipelineLayout                   m_lightPipelineLayout{VK_NULL_HANDLE};
   PipelineHandle                     m_pointLightCoarseCullingPipeline{};
   PipelineHandle                     m_spotLightCoarseCullingPipeline{};
+  // Fullscreen graphics pipelines now live in the device pipeline registry; only
+  // their handles are tracked here. The native VkPipeline is owned by the registry.
   PipelineHandle                     m_gpuDrivenLightHdrPipeline{};
   PipelineHandle                     m_gpuDrivenSkyboxPipeline{};
-  VkPipeline                         m_gpuDrivenLightHdrVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_gpuDrivenSkyboxVkPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_gpuDrivenTAAResolvePipeline{};
-  VkPipeline                         m_gpuDrivenTAAResolveVkPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_gpuDrivenBloomPrefilterPipeline{};
   PipelineHandle                     m_gpuDrivenBloomDownsamplePipeline{};
   PipelineHandle                     m_gpuDrivenBloomUpsamplePipeline{};
   PipelineHandle                     m_gpuDrivenFinalColorPipeline{};
   PipelineHandle                     m_gpuDrivenVelocityPipeline{};
-  VkPipeline                         m_gpuDrivenBloomPrefilterVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_gpuDrivenBloomDownsampleVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_gpuDrivenBloomUpsampleVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_gpuDrivenFinalColorVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_gpuDrivenVelocityVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_pointLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_spotLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_clusteredLightCullingVkPipeline{VK_NULL_HANDLE};
