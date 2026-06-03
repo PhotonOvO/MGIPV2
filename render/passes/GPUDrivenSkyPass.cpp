@@ -30,7 +30,7 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
   }
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->outputImage == VK_NULL_HANDLE || sceneView->outputView == VK_NULL_HANDLE
+  if(sceneView == nullptr || sceneView->outputImage == VK_NULL_HANDLE || sceneView->outputView.isNull()
      || sceneView->sceneDepthExtent.width == 0 || sceneView->sceneDepthExtent.height == 0)
   {
     return;
@@ -59,7 +59,7 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
 
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->outputView),
+      .view = sceneView->outputView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::load,
       .storeOp = rhi::StoreOp::store,

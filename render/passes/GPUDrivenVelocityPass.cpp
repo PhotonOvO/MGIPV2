@@ -31,7 +31,7 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   }
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->velocityImage == VK_NULL_HANDLE || sceneView->velocityView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->velocityImage == VK_NULL_HANDLE || sceneView->velocityView.isNull())
   {
     return;
   }
@@ -58,7 +58,7 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
 
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->velocityView),
+      .view = sceneView->velocityView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,

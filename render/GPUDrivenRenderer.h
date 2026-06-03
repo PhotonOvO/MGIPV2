@@ -325,6 +325,10 @@ public:
   }
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return m_renderer.getShadowUniformsData(); }
   [[nodiscard]] CSMShadowResources& getCSMShadowResources() { return m_renderer.getCSMShadowResources(); }
+  [[nodiscard]] rhi::TextureViewHandle getCSMCascadeViewHandle(uint32_t cascadeIndex) const
+  {
+    return m_renderer.getCSMCascadeViewHandle(cascadeIndex);
+  }
   [[nodiscard]] uint32_t             getPersistentObjectCount() const { return m_sceneView.objectCount; }
   [[nodiscard]] bool                 isExperimentalMeshletPathEnabled() const { return m_enableExperimentalMeshletPath; }
   [[nodiscard]] bool                 isMeshletRenderingActive() const
@@ -664,59 +668,59 @@ public:
   [[nodiscard]] VkExtent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }
   [[nodiscard]] VkFormat getSceneDepthFormat() const { return m_renderer.getSceneDepthFormat(); }
   [[nodiscard]] VkImage getSceneDepthImage() const { return m_renderer.getSceneDepthImage(); }
-  [[nodiscard]] VkImageView getSceneDepthImageView() const { return m_renderer.getSceneDepthImageView(); }
+  [[nodiscard]] rhi::TextureViewHandle getSceneDepthImageView() const { return m_renderer.getSceneDepthImageView(); }
   [[nodiscard]] VkImage getSceneGBufferImage(uint32_t index) const { return m_renderer.getSceneGBufferImage(index); }
-  [[nodiscard]] VkImageView getSceneGBufferImageView(uint32_t index) const
+  [[nodiscard]] rhi::TextureViewHandle getSceneGBufferImageView(uint32_t index) const
   {
     return m_renderer.getSceneGBufferImageView(index);
   }
   [[nodiscard]] VkImage getOutputTextureImage() const { return m_renderer.getOutputTextureImage(); }
-  [[nodiscard]] VkImageView getOutputTextureView() const { return m_renderer.getOutputTextureView(); }
+  [[nodiscard]] rhi::TextureViewHandle getOutputTextureView() const { return m_renderer.getOutputTextureView(); }
   [[nodiscard]] VkFormat getOutputTextureFormat() const { return m_renderer.getOutputTextureFormat(); }
   [[nodiscard]] uint64_t getOutputTextureEstimatedBytes() const
   {
     return m_renderer.getOutputTextureEstimatedBytes();
   }
   [[nodiscard]] VkImage getSceneColorHdrImage() const { return m_renderer.getSceneColorHdrImage(); }
-  [[nodiscard]] VkImageView getSceneColorHdrView() const { return m_renderer.getSceneColorHdrView(); }
+  [[nodiscard]] rhi::TextureViewHandle getSceneColorHdrView() const { return m_renderer.getSceneColorHdrView(); }
   [[nodiscard]] VkFormat getSceneColorHdrFormat() const { return m_renderer.getSceneColorHdrFormat(); }
   [[nodiscard]] uint64_t getSceneColorHdrEstimatedBytes() const
   {
     return m_renderer.getSceneColorHdrEstimatedBytes();
   }
   [[nodiscard]] VkImage getBloomHalfImage() const { return m_renderer.getBloomHalfImage(); }
-  [[nodiscard]] VkImageView getBloomHalfView() const { return m_renderer.getBloomHalfView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomHalfView() const { return m_renderer.getBloomHalfView(); }
   [[nodiscard]] VkExtent2D getBloomHalfExtent() const { return m_renderer.getBloomHalfExtent(); }
   [[nodiscard]] VkImage getBloomQuarterImage() const { return m_renderer.getBloomQuarterImage(); }
-  [[nodiscard]] VkImageView getBloomQuarterView() const { return m_renderer.getBloomQuarterView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomQuarterView() const { return m_renderer.getBloomQuarterView(); }
   [[nodiscard]] VkExtent2D getBloomQuarterExtent() const { return m_renderer.getBloomQuarterExtent(); }
   [[nodiscard]] VkImage getBloomEighthImage() const { return m_renderer.getBloomEighthImage(); }
-  [[nodiscard]] VkImageView getBloomEighthView() const { return m_renderer.getBloomEighthView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomEighthView() const { return m_renderer.getBloomEighthView(); }
   [[nodiscard]] VkExtent2D getBloomEighthExtent() const { return m_renderer.getBloomEighthExtent(); }
   [[nodiscard]] VkImage getBloomSixteenthImage() const { return m_renderer.getBloomSixteenthImage(); }
-  [[nodiscard]] VkImageView getBloomSixteenthView() const { return m_renderer.getBloomSixteenthView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomSixteenthView() const { return m_renderer.getBloomSixteenthView(); }
   [[nodiscard]] VkExtent2D getBloomSixteenthExtent() const { return m_renderer.getBloomSixteenthExtent(); }
   [[nodiscard]] VkImage getBloomThirtySecondImage() const { return m_renderer.getBloomThirtySecondImage(); }
-  [[nodiscard]] VkImageView getBloomThirtySecondView() const { return m_renderer.getBloomThirtySecondView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomThirtySecondView() const { return m_renderer.getBloomThirtySecondView(); }
   [[nodiscard]] VkExtent2D getBloomThirtySecondExtent() const { return m_renderer.getBloomThirtySecondExtent(); }
   [[nodiscard]] VkImage getBloomUpsampleSixteenthImage() const { return m_renderer.getBloomUpsampleSixteenthImage(); }
-  [[nodiscard]] VkImageView getBloomUpsampleSixteenthView() const { return m_renderer.getBloomUpsampleSixteenthView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleSixteenthView() const { return m_renderer.getBloomUpsampleSixteenthView(); }
   [[nodiscard]] VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_renderer.getBloomUpsampleSixteenthExtent(); }
   [[nodiscard]] VkImage getBloomUpsampleEighthImage() const { return m_renderer.getBloomUpsampleEighthImage(); }
-  [[nodiscard]] VkImageView getBloomUpsampleEighthView() const { return m_renderer.getBloomUpsampleEighthView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleEighthView() const { return m_renderer.getBloomUpsampleEighthView(); }
   [[nodiscard]] VkExtent2D getBloomUpsampleEighthExtent() const { return m_renderer.getBloomUpsampleEighthExtent(); }
   [[nodiscard]] VkImage getBloomUpsampleQuarterImage() const { return m_renderer.getBloomUpsampleQuarterImage(); }
-  [[nodiscard]] VkImageView getBloomUpsampleQuarterView() const { return m_renderer.getBloomUpsampleQuarterView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleQuarterView() const { return m_renderer.getBloomUpsampleQuarterView(); }
   [[nodiscard]] VkExtent2D getBloomUpsampleQuarterExtent() const { return m_renderer.getBloomUpsampleQuarterExtent(); }
   [[nodiscard]] VkImage getBloomOutputImage() const { return m_renderer.getBloomOutputImage(); }
-  [[nodiscard]] VkImageView getBloomOutputView() const { return m_renderer.getBloomOutputView(); }
+  [[nodiscard]] rhi::TextureViewHandle getBloomOutputView() const { return m_renderer.getBloomOutputView(); }
   [[nodiscard]] VkExtent2D getBloomOutputExtent() const { return m_renderer.getBloomOutputExtent(); }
   [[nodiscard]] VkImage getColorGradingLutImage() const { return m_renderer.getColorGradingLutImage(); }
-  [[nodiscard]] VkImageView getColorGradingLutView() const { return m_renderer.getColorGradingLutView(); }
+  [[nodiscard]] rhi::TextureViewHandle getColorGradingLutView() const { return m_renderer.getColorGradingLutView(); }
   [[nodiscard]] VkExtent2D getColorGradingLutExtent() const { return m_renderer.getColorGradingLutExtent(); }
   [[nodiscard]] uint64_t getBloomEstimatedBytes() const { return m_renderer.getBloomEstimatedBytes(); }
   [[nodiscard]] VkImage getVelocityImage() const { return m_renderer.getVelocityImage(); }
-  [[nodiscard]] VkImageView getVelocityView() const { return m_renderer.getVelocityView(); }
+  [[nodiscard]] rhi::TextureViewHandle getVelocityView() const { return m_renderer.getVelocityView(); }
   [[nodiscard]] VkFormat getVelocityFormat() const { return m_renderer.getVelocityFormat(); }
   [[nodiscard]] uint64_t getVelocityEstimatedBytes() const { return m_renderer.getVelocityEstimatedBytes(); }
   [[nodiscard]] glm::vec2 getCurrentTAAJitterUv() const { return m_currentTAAJitterUv; }
@@ -725,7 +729,7 @@ public:
   {
     return m_renderer.getSceneColorHistoryImage(index);
   }
-  [[nodiscard]] VkImageView getSceneColorHistoryView(uint32_t index) const
+  [[nodiscard]] rhi::TextureViewHandle getSceneColorHistoryView(uint32_t index) const
   {
     return m_renderer.getSceneColorHistoryView(index);
   }
@@ -737,6 +741,7 @@ public:
   [[nodiscard]] VkImage getCurrentSwapchainImage() const { return m_renderer.getCurrentSwapchainImage(); }
   [[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
   [[nodiscard]] VkDevice getNativeDeviceHandle() const { return m_renderer.getNativeDeviceHandle(); }
+  [[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }
   [[nodiscard]] VmaAllocator getAllocatorHandle() const { return m_renderer.getAllocatorHandle(); }
   [[nodiscard]] uint64_t getNativeComputePipeline(PipelineHandle pipelineHandle) const
   {
@@ -773,17 +778,17 @@ public:
   [[nodiscard]] ScreenPassTargets getScreenColorDepthTargets() const
   {
     ScreenPassTargets targets{};
-    const bool ready = m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE && m_sceneView.sceneColorHdrView != VK_NULL_HANDLE
-                       && m_sceneView.sceneDepthImage != VK_NULL_HANDLE && m_sceneView.sceneDepthView != VK_NULL_HANDLE
+    const bool ready = m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE && !m_sceneView.sceneColorHdrView.isNull()
+                       && m_sceneView.sceneDepthImage != VK_NULL_HANDLE && !m_sceneView.sceneDepthView.isNull()
                        && m_sceneView.sceneDepthExtent.width != 0u && m_sceneView.sceneDepthExtent.height != 0u;
     if(!ready)
     {
       return targets;
     }
     targets.colorImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHdrImage);
-    targets.colorView   = rhi::TextureViewHandle::fromNative(m_sceneView.sceneColorHdrView);
+    targets.colorView   = m_sceneView.sceneColorHdrView;
     targets.depthImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneDepthImage);
-    targets.depthView   = rhi::TextureViewHandle::fromNative(m_sceneView.sceneDepthView);
+    targets.depthView   = m_sceneView.sceneDepthView;
     targets.depthAspect = depthAspectForFormat(m_sceneView.sceneDepthFormat);
     targets.extent      = {m_sceneView.sceneDepthExtent.width, m_sceneView.sceneDepthExtent.height};
     targets.valid       = true;

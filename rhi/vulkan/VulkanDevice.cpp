@@ -1,5 +1,6 @@
 #include "VulkanDevice.h"
 #include "../../common/Common.h"
+#include "VulkanResourceTable.h"
 
 #include <algorithm>
 #include <cstring>
@@ -726,6 +727,182 @@ VkBool32 VulkanDevice::debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT seve
 #endif
   }
   return VK_FALSE;
+}
+
+namespace {
+[[nodiscard]] VkImageViewType toVkImageViewType(ImageViewType type)
+{
+  switch(type)
+  {
+    case ImageViewType::e2DArray:
+      return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    case ImageViewType::eCube:
+      return VK_IMAGE_VIEW_TYPE_CUBE;
+    case ImageViewType::e3D:
+      return VK_IMAGE_VIEW_TYPE_3D;
+    default:
+      return VK_IMAGE_VIEW_TYPE_2D;
+  }
+}
+
+[[nodiscard]] VkImageAspectFlags toVkImageAspect(TextureAspect aspect)
+{
+  switch(aspect)
+  {
+    case TextureAspect::depth:
+      return VK_IMAGE_ASPECT_DEPTH_BIT;
+    case TextureAspect::depthStencil:
+      return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    default:
+      return VK_IMAGE_ASPECT_COLOR_BIT;
+  }
+}
+
+[[nodiscard]] VkComponentSwizzle toVkSwizzle(ComponentSwizzle s)
+{
+  switch(s)
+  {
+    case ComponentSwizzle::zero:
+      return VK_COMPONENT_SWIZZLE_ZERO;
+    case ComponentSwizzle::one:
+      return VK_COMPONENT_SWIZZLE_ONE;
+    case ComponentSwizzle::r:
+      return VK_COMPONENT_SWIZZLE_R;
+    case ComponentSwizzle::g:
+      return VK_COMPONENT_SWIZZLE_G;
+    case ComponentSwizzle::b:
+      return VK_COMPONENT_SWIZZLE_B;
+    case ComponentSwizzle::a:
+      return VK_COMPONENT_SWIZZLE_A;
+    default:
+      return VK_COMPONENT_SWIZZLE_IDENTITY;
+  }
+}
+}  // namespace
+
+TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTextureView");
+  // Prefer the RHI image handle (business layer holds no VkImage); fall back to the legacy
+  // nativeImage seam for call sites that still pass a raw VkImage.
+  const uint64_t nativeImage = !desc.image.isNull() ? resolveImageNative(desc.image) : desc.nativeImage;
+  const VkImageViewCreateInfo info{
+      .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image      = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),
+      .viewType   = toVkImageViewType(desc.viewType),
+      .format     = static_cast<VkFormat>(desc.nativeFormat),
+      .components = {toVkSwizzle(desc.components.r), toVkSwizzle(desc.components.g), toVkSwizzle(desc.components.b),
+                     toVkSwizzle(desc.components.a)},
+      .subresourceRange = {.aspectMask     = toVkImageAspect(desc.aspect),
+                           .baseMipLevel   = desc.baseMipLevel,
+                           .levelCount     = desc.levelCount,
+                           .baseArrayLayer = desc.baseArrayLayer,
+                           .layerCount     = desc.layerCount},
+  };
+  VkImageView view = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateImageView(m_device, &info, nullptr, &view));
+  return m_resourceTable->registerTextureView(reinterpret_cast<uint64_t>(view), /*owned=*/true);
+}
+
+TextureViewHandle VulkanDevice::registerExternalTextureView(uint64_t nativeView)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalTextureView");
+  return m_resourceTable->registerTextureView(nativeView, /*owned=*/false);
+}
+
+void VulkanDevice::destroyTextureView(TextureViewHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const TextureViewRecord record = m_resourceTable->removeTextureView(handle);
+  if(record.owned && record.nativeView != 0)
+  {
+    vkDestroyImageView(m_device, reinterpret_cast<VkImageView>(static_cast<uintptr_t>(record.nativeView)), nullptr);
+  }
+}
+
+uint64_t VulkanDevice::resolveTextureViewNative(TextureViewHandle handle) const
+{
+  return m_resourceTable != nullptr ? m_resourceTable->resolveTextureView(handle) : 0;
+}
+
+namespace {
+[[nodiscard]] VkImageType toVkImageType(TextureDimension dim)
+{
+  return dim == TextureDimension::e3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+}
+
+[[nodiscard]] VkSampleCountFlagBits toVkSamples(SampleCount count)
+{
+  switch(count)
+  {
+    case SampleCount::count2:
+      return VK_SAMPLE_COUNT_2_BIT;
+    case SampleCount::count4:
+      return VK_SAMPLE_COUNT_4_BIT;
+    case SampleCount::count8:
+      return VK_SAMPLE_COUNT_8_BIT;
+    default:
+      return VK_SAMPLE_COUNT_1_BIT;
+  }
+}
+}  // namespace
+
+TextureHandle VulkanDevice::createImage(const TextureCreateDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createImage");
+  assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createImage");
+  const VkImageCreateInfo info{
+      .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .flags       = desc.cubeCompatible ? static_cast<VkImageCreateFlags>(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) : 0u,
+      .imageType   = toVkImageType(desc.dimension),
+      .format      = static_cast<VkFormat>(desc.nativeFormat),
+      .extent      = {desc.width, desc.height, desc.depth},
+      .mipLevels   = desc.mipLevels,
+      .arrayLayers = desc.arrayLayers,
+      .samples     = toVkSamples(desc.sampleCount),
+      .tiling      = VK_IMAGE_TILING_OPTIMAL,
+      .usage       = static_cast<VkImageUsageFlags>(desc.nativeUsage),
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+  const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
+  VkImage       image      = VK_NULL_HANDLE;
+  VmaAllocation allocation = nullptr;
+  VK_CHECK(vmaCreateImage(m_allocator, &info, &allocInfo, &image, &allocation, nullptr));
+  if(desc.debugName != nullptr)
+  {
+    utils::DebugUtil::getInstance().setObjectName(image, desc.debugName);
+  }
+  return m_resourceTable->registerTexture(reinterpret_cast<uint64_t>(image),
+                                          reinterpret_cast<uint64_t>(allocation), /*owned=*/true);
+}
+
+TextureHandle VulkanDevice::registerExternalTexture(uint64_t nativeImage)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalTexture");
+  return m_resourceTable->registerTexture(nativeImage, /*nativeAllocation=*/0, /*owned=*/false);
+}
+
+void VulkanDevice::destroyImage(TextureHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const TextureRecord record = m_resourceTable->removeTexture(handle);
+  if(record.owned && record.nativeImage != 0)
+  {
+    vmaDestroyImage(m_allocator, reinterpret_cast<VkImage>(static_cast<uintptr_t>(record.nativeImage)),
+                    reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(record.nativeAllocation)));
+  }
+}
+
+uint64_t VulkanDevice::resolveImageNative(TextureHandle handle) const
+{
+  return m_resourceTable != nullptr ? m_resourceTable->resolveTexture(handle) : 0;
 }
 
 }  // namespace demo::rhi::vulkan

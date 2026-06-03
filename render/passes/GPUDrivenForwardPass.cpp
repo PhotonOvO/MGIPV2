@@ -57,7 +57,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenForwardPass");
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->sceneDepthView == VK_NULL_HANDLE || sceneView->sceneColorHdrView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->sceneDepthView.isNull() || sceneView->sceneColorHdrView.isNull())
   {
     context.cmd->endEvent();
     return;
@@ -83,10 +83,10 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     depthInAttachmentLayout = false;
   };
 
-  const VkImageView outputImageView = sceneView->sceneColorHdrView;
+  const rhi::TextureViewHandle outputImageView = sceneView->sceneColorHdrView;
   const VkExtent2D vkExtent = sceneView->sceneDepthExtent;
   const rhi::Extent2D renderExtent = {vkExtent.width, vkExtent.height};
-  if(outputImageView == VK_NULL_HANDLE || renderExtent.width == 0 || renderExtent.height == 0)
+  if(outputImageView.isNull() || renderExtent.width == 0 || renderExtent.height == 0)
   {
     context.cmd->endEvent();
     return;
@@ -117,14 +117,14 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
 
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(outputImageView),
+      .view = outputImageView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::load,
       .storeOp = rhi::StoreOp::store,
   };
   const rhi::DepthTargetDesc depthTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->sceneDepthView),
+      .view = sceneView->sceneDepthView,
       .state = rhi::ResourceState::DepthStencilAttachment,
       .loadOp = rhi::LoadOp::load,
       .storeOp = rhi::StoreOp::store,

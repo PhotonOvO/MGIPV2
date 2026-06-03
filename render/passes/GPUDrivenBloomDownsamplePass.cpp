@@ -51,7 +51,7 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
   struct BloomStep
   {
     VkImage image{VK_NULL_HANDLE};
-    VkImageView view{VK_NULL_HANDLE};
+    rhi::TextureViewHandle view{};
     VkExtent2D extent{};
     VkExtent2D sourceExtent{};
     TextureHandle handle{};
@@ -70,7 +70,7 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
 
   context.cmd->beginEvent("GPUDrivenBloomDownsample");
   const auto renderStep = [&](const BloomStep& step) {
-    if(step.image == VK_NULL_HANDLE || step.view == VK_NULL_HANDLE || step.extent.width == 0u || step.extent.height == 0u)
+    if(step.image == VK_NULL_HANDLE || step.view.isNull() || step.extent.width == 0u || step.extent.height == 0u)
     {
       return;
     }
@@ -88,10 +88,9 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
         .isSwapchain = false,
     });
 
-    rhi::TextureViewHandle bloomViewHandle = rhi::TextureViewHandle::fromNative(step.view);
     rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = bloomViewHandle,
+      .view = step.view,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,

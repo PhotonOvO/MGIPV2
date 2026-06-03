@@ -1,7 +1,9 @@
 #pragma once
 
 #include "RHICapabilities.h"
+#include "RHIHandles.h"
 #include "RHIQueue.h"
+#include "RHITypes.h"
 
 #include <cstdint>
 #include <string>
@@ -91,6 +93,26 @@ public:
   virtual bool isDeviceExtensionSupported(const char* name) const   = 0;
 
   virtual void waitIdle() = 0;
+
+  // --- Texture views ---
+  // createTextureView builds a native view from the desc and registers an owned handle.
+  // registerExternalTextureView adopts an externally-owned native view (e.g. swapchain)
+  // without taking ownership. destroyTextureView frees owned views. resolveTextureViewNative
+  // returns the backing native handle (as uint64) for descriptor-write / ImGui seams.
+  virtual TextureViewHandle createTextureView(const TextureViewCreateDesc& desc)     = 0;
+  virtual TextureViewHandle registerExternalTextureView(uint64_t nativeView)         = 0;
+  virtual void              destroyTextureView(TextureViewHandle handle)             = 0;
+  virtual uint64_t          resolveTextureViewNative(TextureViewHandle handle) const = 0;
+
+  // --- Textures (images) ---
+  // createImage builds a native image (vmaCreateImage) from the desc and registers an
+  // owned handle. registerExternalTexture adopts an externally-owned native image (e.g.
+  // swapchain) without taking ownership. destroyImage frees owned images. resolveImageNative
+  // returns the backing native VkImage (as uint64) for command/seam paths.
+  virtual TextureHandle createImage(const TextureCreateDesc& desc)              = 0;
+  virtual TextureHandle registerExternalTexture(uint64_t nativeImage)           = 0;
+  virtual void          destroyImage(TextureHandle handle)                      = 0;
+  virtual uint64_t      resolveImageNative(TextureHandle handle) const          = 0;
 };
 
 }  // namespace demo::rhi

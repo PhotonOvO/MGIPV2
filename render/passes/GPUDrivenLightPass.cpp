@@ -40,13 +40,13 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenLightPass");
 
   const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
-  if(sceneView == nullptr || sceneView->sceneColorHdrView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->sceneColorHdrView.isNull())
   {
     context.cmd->endEvent();
     return;
   }
 
-  rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(sceneView->sceneColorHdrView);
+  rhi::TextureViewHandle outputViewHandle = sceneView->sceneColorHdrView;
   const VkExtent2D outputExtent = sceneView->sceneDepthExtent;
   const rhi::Extent2D extent = {outputExtent.width, outputExtent.height};
   if(outputViewHandle.isNull())

@@ -50,10 +50,11 @@ VkImageSubresourceRange colorRange(uint32_t mipCount, uint32_t layerCount)
 
 }  // namespace
 
-void IBLResources::init(VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo)
+void IBLResources::init(rhi::Device& device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo)
 {
   deinit();
-  m_device = device;
+  m_rhiDevice = &device;
+  m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getNativeDevice()));
   m_allocator = allocator;
   m_cubeMapSize = createInfo.cubeMapSize;
   m_dfgLUTSize = createInfo.dfgLUTSize;
@@ -94,6 +95,21 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
   utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
   m_maxMipLevel = static_cast<uint32_t>(std::floor(std::log2(std::max(createInfo.cubeMapSize, 1u))));
 
+  const auto makeView = [&](VkImage image, VkFormat format, rhi::ImageViewType viewType, uint32_t levelCount,
+                            uint32_t layerCount, const char* name) -> rhi::TextureViewHandle {
+    rhi::TextureViewCreateDesc desc{};
+    desc.nativeImage  = reinterpret_cast<uint64_t>(image);
+    desc.nativeFormat = static_cast<uint64_t>(format);
+    desc.viewType     = viewType;
+    desc.aspect       = rhi::TextureAspect::color;
+    desc.levelCount   = levelCount;
+    desc.layerCount   = layerCount;
+    const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
+    dutil.setObjectName(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle))),
+                        name);
+    return handle;
+  };
+
   const VmaAllocationCreateInfo imageAllocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
   const VkImageCreateInfo cubeInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -110,15 +126,8 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
   VK_CHECK(vmaCreateImage(m_allocator, &cubeInfo, &imageAllocInfo, &m_prefilteredMap.image, &m_prefilteredMap.allocation, nullptr));
   dutil.setObjectName(m_prefilteredMap.image, "IBL_PrefilteredMap");
 
-  const VkImageViewCreateInfo cubeViewInfo{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = m_prefilteredMap.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
-      .format = createInfo.cubeMapFormat,
-      .subresourceRange = colorRange(m_maxMipLevel + 1, 6),
-  };
-  VK_CHECK(vkCreateImageView(m_device, &cubeViewInfo, nullptr, &m_prefilteredMapView));
-  dutil.setObjectName(m_prefilteredMapView, "IBL_PrefilteredMapView");
+  m_prefilteredMapView = makeView(m_prefilteredMap.image, createInfo.cubeMapFormat, rhi::ImageViewType::eCube,
+                                  m_maxMipLevel + 1, 6, "IBL_PrefilteredMapView");
 
   const VkImageCreateInfo irradianceInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -134,25 +143,11 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
   VK_CHECK(vmaCreateImage(m_allocator, &irradianceInfo, &imageAllocInfo, &m_irradianceMap.image, &m_irradianceMap.allocation, nullptr));
   dutil.setObjectName(m_irradianceMap.image, "IBL_IrradianceMap");
 
-  const VkImageViewCreateInfo irradianceViewInfo{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = m_irradianceMap.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
-      .format = createInfo.cubeMapFormat,
-      .subresourceRange = colorRange(1, 6),
-  };
-  VK_CHECK(vkCreateImageView(m_device, &irradianceViewInfo, nullptr, &m_irradianceMapView));
-  dutil.setObjectName(m_irradianceMapView, "IBL_IrradianceMapView");
+  m_irradianceMapView = makeView(m_irradianceMap.image, createInfo.cubeMapFormat, rhi::ImageViewType::eCube, 1, 6,
+                                 "IBL_IrradianceMapView");
 
-  const VkImageViewCreateInfo irradianceStorageViewInfo{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = m_irradianceMap.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-      .format = createInfo.cubeMapFormat,
-      .subresourceRange = colorRange(1, 6),
-  };
-  VK_CHECK(vkCreateImageView(m_device, &irradianceStorageViewInfo, nullptr, &m_irradianceStorageView));
-  dutil.setObjectName(m_irradianceStorageView, "IBL_IrradianceStorageView");
+  m_irradianceStorageView = makeView(m_irradianceMap.image, createInfo.cubeMapFormat, rhi::ImageViewType::e2DArray, 1, 6,
+                                     "IBL_IrradianceStorageView");
 
   const VkImageCreateInfo lutInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -167,15 +162,7 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
   VK_CHECK(vmaCreateImage(m_allocator, &lutInfo, &imageAllocInfo, &m_dfgLUT.image, &m_dfgLUT.allocation, nullptr));
   dutil.setObjectName(m_dfgLUT.image, "IBL_DFGLUT");
 
-  const VkImageViewCreateInfo lutViewInfo{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = m_dfgLUT.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = createInfo.dfgLUTFormat,
-      .subresourceRange = colorRange(1, 1),
-  };
-  VK_CHECK(vkCreateImageView(m_device, &lutViewInfo, nullptr, &m_dfgLUTView));
-  dutil.setObjectName(m_dfgLUTView, "IBL_DFGLUTView");
+  m_dfgLUTView = makeView(m_dfgLUT.image, createInfo.dfgLUTFormat, rhi::ImageViewType::e2D, 1, 1, "IBL_DFGLUTView");
 
   utils::cmdInitImageLayout(cmd, m_prefilteredMap.image);
   utils::cmdInitImageLayout(cmd, m_irradianceMap.image);
@@ -183,9 +170,12 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
 
   const VkClearColorValue black = {{0.0f, 0.0f, 0.0f, 1.0f}};
   const VkClearColorValue neutralLut = {{0.5f, 0.5f, 0.0f, 1.0f}};
-  vkCmdClearColorImage(cmd, m_prefilteredMap.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cubeViewInfo.subresourceRange);
-  vkCmdClearColorImage(cmd, m_irradianceMap.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &irradianceViewInfo.subresourceRange);
-  vkCmdClearColorImage(cmd, m_dfgLUT.image, VK_IMAGE_LAYOUT_GENERAL, &neutralLut, 1, &lutViewInfo.subresourceRange);
+  const VkImageSubresourceRange cubeRange = colorRange(m_maxMipLevel + 1, 6);
+  const VkImageSubresourceRange irradianceRange = colorRange(1, 6);
+  const VkImageSubresourceRange lutRange = colorRange(1, 1);
+  vkCmdClearColorImage(cmd, m_prefilteredMap.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cubeRange);
+  vkCmdClearColorImage(cmd, m_irradianceMap.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &irradianceRange);
+  vkCmdClearColorImage(cmd, m_dfgLUT.image, VK_IMAGE_LAYOUT_GENERAL, &neutralLut, 1, &lutRange);
 }
 
 void IBLResources::createGenerationPipeline(VkShaderModule shaderModule,
@@ -210,6 +200,9 @@ void IBLResources::createGenerationPipeline(VkShaderModule shaderModule,
 void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& createInfo)
 {
 #ifdef USE_SLANG
+  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
+  };
   const uint32_t prefilterMipCount = m_maxMipLevel + 1u;
   const VkDescriptorPoolSize poolSizes[] = {
       VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, prefilterMipCount + 1u},
@@ -278,7 +271,7 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
       .pSetLayouts = &m_lutGenerationSetLayout,
   };
   VK_CHECK(vkAllocateDescriptorSets(m_device, &dfgAlloc, &dfgSet));
-  const VkDescriptorImageInfo dfgImageInfo{VK_NULL_HANDLE, m_dfgLUTView, VK_IMAGE_LAYOUT_GENERAL};
+  const VkDescriptorImageInfo dfgImageInfo{VK_NULL_HANDLE, nativeOf(m_dfgLUTView), VK_IMAGE_LAYOUT_GENERAL};
   const VkWriteDescriptorSet dfgWrite{
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet = dfgSet,
@@ -303,7 +296,7 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
   VkShaderModule prefilterModule = VK_NULL_HANDLE;
   VkDescriptorSet irradianceSet = VK_NULL_HANDLE;
 
-  if(createInfo.sourceEnvironmentView != VK_NULL_HANDLE)
+  if(!createInfo.sourceEnvironmentView.isNull())
   {
     std::vector<VkDescriptorSetLayout> layouts(prefilterMipCount + 1u, m_envGenerationSetLayout);
     const VkDescriptorSetAllocateInfo alloc{
@@ -322,8 +315,8 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
     createGenerationPipeline(irradianceModule, "irradianceConvolutionMain", m_envGenerationPipelineLayout, m_irradianceGenerationPipeline);
     createGenerationPipeline(prefilterModule, "prefilterGGXMain", m_envGenerationPipelineLayout, m_prefilterGenerationPipeline);
 
-    const VkDescriptorImageInfo sourceInfo{m_cubeMapSampler, createInfo.sourceEnvironmentView, VK_IMAGE_LAYOUT_GENERAL};
-    const VkDescriptorImageInfo irradianceInfo{VK_NULL_HANDLE, m_irradianceStorageView, VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo sourceInfo{m_cubeMapSampler, nativeOf(createInfo.sourceEnvironmentView), VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo irradianceInfo{VK_NULL_HANDLE, nativeOf(m_irradianceStorageView), VK_IMAGE_LAYOUT_GENERAL};
     std::array<VkWriteDescriptorSet, 2> writes{{
         VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = irradianceSet, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &sourceInfo},
         VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = irradianceSet, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &irradianceInfo},
@@ -355,23 +348,18 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
     {
       const uint32_t mipSize = std::max(1u, createInfo.cubeMapSize >> mip);
       const VkDescriptorSet prefilterSet = prefilterSets[mip];
-      const VkImageViewCreateInfo mipViewInfo{
-          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-          .image = m_prefilteredMap.image,
-          .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-          .format = createInfo.cubeMapFormat,
-          .subresourceRange = {
-              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-              .baseMipLevel = mip,
-              .levelCount = 1,
-              .baseArrayLayer = 0,
-              .layerCount = 6,
-          },
-      };
-      VkImageView mipView = VK_NULL_HANDLE;
-      VK_CHECK(vkCreateImageView(m_device, &mipViewInfo, nullptr, &mipView));
+      rhi::TextureViewCreateDesc mipViewDesc{};
+      mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_prefilteredMap.image);
+      mipViewDesc.nativeFormat  = static_cast<uint64_t>(createInfo.cubeMapFormat);
+      mipViewDesc.viewType      = rhi::ImageViewType::e2DArray;
+      mipViewDesc.aspect        = rhi::TextureAspect::color;
+      mipViewDesc.baseMipLevel  = mip;
+      mipViewDesc.levelCount    = 1;
+      mipViewDesc.baseArrayLayer = 0;
+      mipViewDesc.layerCount    = 6;
+      const rhi::TextureViewHandle mipView = m_rhiDevice->createTextureView(mipViewDesc);
       m_generationMipViews.push_back(mipView);
-      const VkDescriptorImageInfo prefilterOutputInfo{VK_NULL_HANDLE, mipView, VK_IMAGE_LAYOUT_GENERAL};
+      const VkDescriptorImageInfo prefilterOutputInfo{VK_NULL_HANDLE, nativeOf(mipView), VK_IMAGE_LAYOUT_GENERAL};
       writes = {{
           VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = prefilterSet, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &sourceInfo},
           VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = prefilterSet, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &prefilterOutputInfo},
@@ -438,10 +426,9 @@ void IBLResources::deinit()
     return;
   }
 
-  for(VkImageView view : m_generationMipViews)
+  for(rhi::TextureViewHandle view : m_generationMipViews)
   {
-    if(view != VK_NULL_HANDLE)
-      vkDestroyImageView(m_device, view, nullptr);
+    m_rhiDevice->destroyTextureView(view);
   }
   if(m_prefilterGenerationPipeline != VK_NULL_HANDLE)
     vkDestroyPipeline(m_device, m_prefilterGenerationPipeline, nullptr);
@@ -460,14 +447,10 @@ void IBLResources::deinit()
   if(m_generationDescriptorPool != VK_NULL_HANDLE)
     vkDestroyDescriptorPool(m_device, m_generationDescriptorPool, nullptr);
 
-  if(m_prefilteredMapView != VK_NULL_HANDLE)
-    vkDestroyImageView(m_device, m_prefilteredMapView, nullptr);
-  if(m_irradianceMapView != VK_NULL_HANDLE)
-    vkDestroyImageView(m_device, m_irradianceMapView, nullptr);
-  if(m_irradianceStorageView != VK_NULL_HANDLE)
-    vkDestroyImageView(m_device, m_irradianceStorageView, nullptr);
-  if(m_dfgLUTView != VK_NULL_HANDLE)
-    vkDestroyImageView(m_device, m_dfgLUTView, nullptr);
+  m_rhiDevice->destroyTextureView(m_prefilteredMapView);
+  m_rhiDevice->destroyTextureView(m_irradianceMapView);
+  m_rhiDevice->destroyTextureView(m_irradianceStorageView);
+  m_rhiDevice->destroyTextureView(m_dfgLUTView);
   if(m_cubeMapSampler != VK_NULL_HANDLE)
     vkDestroySampler(m_device, m_cubeMapSampler, nullptr);
   if(m_lutSampler != VK_NULL_HANDLE)

@@ -37,6 +37,56 @@ void VulkanResourceTable::destroyPipeline(PipelineHandle handle)
   m_pipelines.destroy(handle);
 }
 
+TextureViewHandle VulkanResourceTable::registerTextureView(uint64_t nativeView, bool owned)
+{
+  ASSERT(nativeView != 0, "Texture view registry entries require a valid native image view");
+  return m_textureViews.emplace(TextureViewRecord{.nativeView = nativeView, .owned = owned});
+}
+
+uint64_t VulkanResourceTable::resolveTextureView(TextureViewHandle handle) const
+{
+  const TextureViewRecord* record = m_textureViews.tryGet(handle);
+  return record != nullptr ? record->nativeView : 0;
+}
+
+const TextureViewRecord* VulkanResourceTable::tryGetTextureView(TextureViewHandle handle) const
+{
+  return m_textureViews.tryGet(handle);
+}
+
+TextureViewRecord VulkanResourceTable::removeTextureView(TextureViewHandle handle)
+{
+  const TextureViewRecord* record = m_textureViews.tryGet(handle);
+  const TextureViewRecord  copy   = record != nullptr ? *record : TextureViewRecord{};
+  m_textureViews.destroy(handle);
+  return copy;
+}
+
+TextureHandle VulkanResourceTable::registerTexture(uint64_t nativeImage, uint64_t nativeAllocation, bool owned)
+{
+  ASSERT(nativeImage != 0, "Texture registry entries require a valid native image");
+  return m_textures.emplace(TextureRecord{.nativeImage = nativeImage, .nativeAllocation = nativeAllocation, .owned = owned});
+}
+
+uint64_t VulkanResourceTable::resolveTexture(TextureHandle handle) const
+{
+  const TextureRecord* record = m_textures.tryGet(handle);
+  return record != nullptr ? record->nativeImage : 0;
+}
+
+const TextureRecord* VulkanResourceTable::tryGetTexture(TextureHandle handle) const
+{
+  return m_textures.tryGet(handle);
+}
+
+TextureRecord VulkanResourceTable::removeTexture(TextureHandle handle)
+{
+  const TextureRecord* record = m_textures.tryGet(handle);
+  const TextureRecord  copy   = record != nullptr ? *record : TextureRecord{};
+  m_textures.destroy(handle);
+  return copy;
+}
+
 uint64_t VulkanResourceTable::resolvePipeline(PipelineHandle handle, uint32_t expectedBindPoint) const
 {
   const PipelineRecord* record = m_pipelines.tryGet(handle);

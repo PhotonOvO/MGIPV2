@@ -75,11 +75,12 @@ utils::Buffer createUniformBuffer(VmaAllocator allocator)
 
 }  // namespace
 
-void HiZDepthPyramid::init(VkDevice device, VmaAllocator allocator, uint32_t frameCount, VkExtent2D sourceSize)
+void HiZDepthPyramid::init(rhi::Device& device, VmaAllocator allocator, uint32_t frameCount, VkExtent2D sourceSize)
 {
   shutdown();
 
-  m_device = device;
+  m_rhiDevice = &device;
+  m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getNativeDevice()));
   m_allocator = allocator;
   m_frameCount = std::max(frameCount, 1u);
   m_mobilePolicy = MobilePolicy{
@@ -220,6 +221,7 @@ void HiZDepthPyramid::shutdown()
   m_size = {};
   m_sourceSize = {};
   m_device = VK_NULL_HANDLE;
+  m_rhiDevice = nullptr;
   m_allocator = VK_NULL_HANDLE;
 }
 
@@ -277,7 +279,7 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
                                VkCommandBuffer cmd,
                                VkExtent2D sourceSize,
                                VkImage sourceDepthImage,
-                               VkImageView sourceDepthView,
+                               rhi::TextureViewHandle sourceDepthView,
                                TextureHandle sourceDepth)
 {
   m_sourceDepth = sourceDepth;
@@ -287,7 +289,7 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
     return;
   }
   const PerFrameResources& frameResources = m_perFrame[frameIndex];
-  if(cmd == VK_NULL_HANDLE || sourceDepthImage == VK_NULL_HANDLE || sourceDepthView == VK_NULL_HANDLE
+  if(cmd == VK_NULL_HANDLE || sourceDepthImage == VK_NULL_HANDLE || sourceDepthView.isNull()
      || m_pipeline == VK_NULL_HANDLE || m_pipelineLayout == VK_NULL_HANDLE || frameResources.descriptorSet == VK_NULL_HANDLE)
   {
     m_valid = false;
@@ -409,12 +411,15 @@ void HiZDepthPyramid::bindForCulling(VkDescriptorSet set, uint32_t binding)
     return;
   }
 
+  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
+  };
   std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
   for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
   {
     pyramidMipInfos[i] = VkDescriptorImageInfo{
         .sampler = VK_NULL_HANDLE,
-        .imageView = m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))],
+        .imageView = nativeOf(m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))]),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
@@ -431,18 +436,18 @@ void HiZDepthPyramid::bindForCulling(VkDescriptorSet set, uint32_t binding)
   vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
-VkImageView HiZDepthPyramid::getMipView(uint32_t mipLevel) const
+rhi::TextureViewHandle HiZDepthPyramid::getMipView(uint32_t mipLevel) const
 {
   if(mipLevel >= m_mipViews.size())
   {
-    return VK_NULL_HANDLE;
+    return {};
   }
   return m_mipViews[mipLevel];
 }
 
-void HiZDepthPyramid::updateDescriptorSet(uint32_t frameIndex, VkImageView sourceDepthView)
+void HiZDepthPyramid::updateDescriptorSet(uint32_t frameIndex, rhi::TextureViewHandle sourceDepthView)
 {
-  if(frameIndex >= m_perFrame.size() || sourceDepthView == VK_NULL_HANDLE || m_mipViews.empty())
+  if(frameIndex >= m_perFrame.size() || sourceDepthView.isNull() || m_mipViews.empty())
   {
     return;
   }
@@ -452,9 +457,13 @@ void HiZDepthPyramid::updateDescriptorSet(uint32_t frameIndex, VkImageView sourc
     return;
   }
 
+  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
+  };
+
   const VkDescriptorImageInfo sourceDepthInfo{
       .sampler = VK_NULL_HANDLE,
-      .imageView = sourceDepthView,
+      .imageView = nativeOf(sourceDepthView),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -463,7 +472,7 @@ void HiZDepthPyramid::updateDescriptorSet(uint32_t frameIndex, VkImageView sourc
   {
     pyramidMipInfos[i] = VkDescriptorImageInfo{
         .sampler = VK_NULL_HANDLE,
-        .imageView = m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))],
+        .imageView = nativeOf(m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))]),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
@@ -535,23 +544,17 @@ void HiZDepthPyramid::recreateResources()
   allocationInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
   VK_CHECK(vmaCreateImage(m_allocator, &imageInfo, &allocationInfo, &m_image, &m_imageAllocation, nullptr));
 
-  m_mipViews.resize(m_mipCount, VK_NULL_HANDLE);
+  m_mipViews.resize(m_mipCount);
   for(uint32_t mipLevel = 0; mipLevel < m_mipCount; ++mipLevel)
   {
-    const VkImageViewCreateInfo mipViewInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = m_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = VK_FORMAT_R32_SFLOAT,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = mipLevel,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-    VK_CHECK(vkCreateImageView(m_device, &mipViewInfo, nullptr, &m_mipViews[mipLevel]));
+    rhi::TextureViewCreateDesc mipViewDesc{};
+    mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_image);
+    mipViewDesc.nativeFormat  = static_cast<uint64_t>(VK_FORMAT_R32_SFLOAT);
+    mipViewDesc.viewType      = rhi::ImageViewType::e2D;
+    mipViewDesc.aspect        = rhi::TextureAspect::color;
+    mipViewDesc.baseMipLevel  = mipLevel;
+    mipViewDesc.levelCount    = 1;
+    m_mipViews[mipLevel] = m_rhiDevice->createTextureView(mipViewDesc);
   }
 
   m_valid = true;
@@ -559,11 +562,11 @@ void HiZDepthPyramid::recreateResources()
 
 void HiZDepthPyramid::destroyImageResources()
 {
-  for(VkImageView mipView : m_mipViews)
+  for(rhi::TextureViewHandle mipView : m_mipViews)
   {
-    if(mipView != VK_NULL_HANDLE)
+    if(m_rhiDevice != nullptr)
     {
-      vkDestroyImageView(m_device, mipView, nullptr);
+      m_rhiDevice->destroyTextureView(mipView);
     }
   }
   m_mipViews.clear();

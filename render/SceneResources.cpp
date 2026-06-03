@@ -86,6 +86,7 @@ void SceneResources::init(rhi::Device& device, VmaAllocator allocator, VkCommand
 {
   ASSERT(m_createInfo.color.empty(), "Missing deinit()");
   m_device     = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getNativeDevice()));
+  m_rhiDevice  = &device;
   m_allocator  = allocator;
   m_createInfo = createInfo;
   create(cmd);
@@ -129,9 +130,9 @@ VkImage SceneResources::getDepthImage() const
   return m_resources.depthImage.image;
 }
 
-VkImageView SceneResources::getColorImageView(uint32_t i) const
+rhi::TextureViewHandle SceneResources::getColorImageView(uint32_t i) const
 {
-  return m_resources.descriptors[i].imageView;
+  return m_resources.colorViews[i];
 }
 
 const VkDescriptorImageInfo& SceneResources::getDescriptorImageInfo(uint32_t i) const
@@ -139,7 +140,7 @@ const VkDescriptorImageInfo& SceneResources::getDescriptorImageInfo(uint32_t i) 
   return m_resources.descriptors[i];
 }
 
-VkImageView SceneResources::getDepthImageView() const
+rhi::TextureViewHandle SceneResources::getDepthImageView() const
 {
   return m_resources.depthView;
 }
@@ -170,8 +171,31 @@ void SceneResources::create(VkCommandBuffer cmd)
   const VkImageLayout layout   = VK_IMAGE_LAYOUT_GENERAL;
   const auto          numColor = static_cast<uint32_t>(m_createInfo.color.size());
 
+  // Centralizes RHI view creation + native-handle debug naming. levelCount/baseMip/swizzle
+  // default to the common single-mip color-view case.
+  const auto createView = [&](VkImage image, VkFormat format, rhi::TextureAspect aspect, const std::string& name,
+                              rhi::ComponentMapping swizzle = {}, uint32_t baseMip = 0,
+                              uint32_t levelCount = 1) -> rhi::TextureViewHandle {
+    rhi::TextureViewCreateDesc desc{};
+    desc.nativeImage   = reinterpret_cast<uint64_t>(image);
+    desc.nativeFormat  = static_cast<uint64_t>(format);
+    desc.viewType      = rhi::ImageViewType::e2D;
+    desc.aspect        = aspect;
+    desc.baseMipLevel  = baseMip;
+    desc.levelCount    = levelCount;
+    desc.components    = swizzle;
+    const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
+    dutil.setObjectName(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle))),
+                        name);
+    return handle;
+  };
+  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
+  };
+
   m_resources.colorImages.resize(numColor);
   m_resources.descriptors.resize(numColor);
+  m_resources.colorViews.resize(numColor);
   m_resources.uiImageViews.resize(numColor);
   m_imguiTextureIds.resize(numColor);
 
@@ -191,19 +215,13 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.colorImages[c] = createImage(imageInfo);
     dutil.setObjectName(m_resources.colorImages[c].image, "SceneColor" + std::to_string(c));
 
-    VkImageViewCreateInfo viewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.colorImages[c].image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = m_createInfo.color[c],
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_resources.descriptors[c].imageView));
-    dutil.setObjectName(m_resources.descriptors[c].imageView, "SceneColorView" + std::to_string(c));
+    m_resources.colorViews[c] = createView(m_resources.colorImages[c].image, m_createInfo.color[c],
+                                           rhi::TextureAspect::color, "SceneColorView" + std::to_string(c));
+    m_resources.descriptors[c].imageView = nativeOf(m_resources.colorViews[c]);
 
-    viewInfo.components.a = VK_COMPONENT_SWIZZLE_ONE;
-    VK_CHECK(vkCreateImageView(m_device, &viewInfo, nullptr, &m_resources.uiImageViews[c]));
-    dutil.setObjectName(m_resources.uiImageViews[c], "SceneColorUIView" + std::to_string(c));
+    m_resources.uiImageViews[c] = createView(m_resources.colorImages[c].image, m_createInfo.color[c],
+                                             rhi::TextureAspect::color, "SceneColorUIView" + std::to_string(c),
+                                             rhi::ComponentMapping{.a = rhi::ComponentSwizzle::one});
 
     m_resources.descriptors[c].sampler     = m_createInfo.linearSampler;
     m_resources.descriptors[c].imageLayout = layout;
@@ -225,15 +243,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.outputTextureImage = createImage(outputInfo);
     dutil.setObjectName(m_resources.outputTextureImage.image, "OutputTexture");
 
-    const VkImageViewCreateInfo outputViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.outputTextureImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = kOutputTextureFormat,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &outputViewInfo, nullptr, &m_resources.outputTextureView));
-    dutil.setObjectName(m_resources.outputTextureView, "OutputTextureView");
+    m_resources.outputTextureView = createView(m_resources.outputTextureImage.image, kOutputTextureFormat,
+                                               rhi::TextureAspect::color, "OutputTextureView");
   }
 
   // Create HDR scene color and mobile bloom targets for the GPU-driven post chain.
@@ -252,15 +263,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.sceneColorHdrImage = createImage(hdrInfo);
     dutil.setObjectName(m_resources.sceneColorHdrImage.image, "GPUDrivenSceneColorHDR");
 
-    const VkImageViewCreateInfo hdrViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.sceneColorHdrImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = kSceneColorHdrFormat,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &hdrViewInfo, nullptr, &m_resources.sceneColorHdrView));
-    dutil.setObjectName(m_resources.sceneColorHdrView, "GPUDrivenSceneColorHDRView");
+    m_resources.sceneColorHdrView = createView(m_resources.sceneColorHdrImage.image, kSceneColorHdrFormat,
+                                               rhi::TextureAspect::color, "GPUDrivenSceneColorHDRView");
 
     m_resources.bloomHalfExtent = {
         std::max(1u, (m_createInfo.size.width + 1u) / 2u),
@@ -285,7 +289,7 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.bloomOutputExtent = m_resources.bloomHalfExtent;
 
     const auto createBloomTarget = [&](VkExtent2D extent, const char* imageName, const char* viewName,
-                                       utils::Image& image, VkImageView& view) {
+                                       utils::Image& image, rhi::TextureViewHandle& view) {
       const VkImageCreateInfo bloomInfo{
           .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
           .imageType   = VK_IMAGE_TYPE_2D,
@@ -300,15 +304,7 @@ void SceneResources::create(VkCommandBuffer cmd)
       image = createImage(bloomInfo);
       dutil.setObjectName(image.image, imageName);
 
-      const VkImageViewCreateInfo bloomViewInfo{
-          .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-          .image            = image.image,
-          .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-          .format           = kBloomFormat,
-          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-      };
-      VK_CHECK(vkCreateImageView(m_device, &bloomViewInfo, nullptr, &view));
-      dutil.setObjectName(view, viewName);
+      view = createView(image.image, kBloomFormat, rhi::TextureAspect::color, viewName);
     };
 
     createBloomTarget(m_resources.bloomHalfExtent,
@@ -371,15 +367,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.velocityImage = createImage(velocityInfo);
     dutil.setObjectName(m_resources.velocityImage.image, "GPUDrivenVelocity");
 
-    const VkImageViewCreateInfo velocityViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.velocityImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = kVelocityFormat,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &velocityViewInfo, nullptr, &m_resources.velocityView));
-    dutil.setObjectName(m_resources.velocityView, "GPUDrivenVelocityView");
+    m_resources.velocityView = createView(m_resources.velocityImage.image, kVelocityFormat,
+                                          rhi::TextureAspect::color, "GPUDrivenVelocityView");
 
     for(uint32_t historyIndex = 0; historyIndex < static_cast<uint32_t>(m_resources.sceneColorHistoryImages.size());
         ++historyIndex)
@@ -399,19 +388,9 @@ void SceneResources::create(VkCommandBuffer cmd)
       dutil.setObjectName(m_resources.sceneColorHistoryImages[historyIndex].image,
                           "GPUDrivenSceneColorHistory" + std::to_string(historyIndex));
 
-      const VkImageViewCreateInfo historyViewInfo{
-          .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-          .image            = m_resources.sceneColorHistoryImages[historyIndex].image,
-          .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-          .format           = kSceneColorHdrFormat,
-          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-      };
-      VK_CHECK(vkCreateImageView(m_device,
-                                 &historyViewInfo,
-                                 nullptr,
-                                 &m_resources.sceneColorHistoryViews[historyIndex]));
-      dutil.setObjectName(m_resources.sceneColorHistoryViews[historyIndex],
-                          "GPUDrivenSceneColorHistoryView" + std::to_string(historyIndex));
+      m_resources.sceneColorHistoryViews[historyIndex] =
+          createView(m_resources.sceneColorHistoryImages[historyIndex].image, kSceneColorHdrFormat,
+                     rhi::TextureAspect::color, "GPUDrivenSceneColorHistoryView" + std::to_string(historyIndex));
     }
 
     m_resources.colorGradingLutExtent = {kColorGradingLutSize * kColorGradingLutSize, kColorGradingLutSize};
@@ -428,15 +407,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.colorGradingLutImage = createImage(lutInfo);
     dutil.setObjectName(m_resources.colorGradingLutImage.image, "BuiltInColorGradingLUT");
 
-    const VkImageViewCreateInfo lutViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.colorGradingLutImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = kColorGradingLutFormat,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &lutViewInfo, nullptr, &m_resources.colorGradingLutView));
-    dutil.setObjectName(m_resources.colorGradingLutView, "BuiltInColorGradingLUTView");
+    m_resources.colorGradingLutView = createView(m_resources.colorGradingLutImage.image, kColorGradingLutFormat,
+                                                 rhi::TextureAspect::color, "BuiltInColorGradingLUTView");
 
     const std::vector<uint8_t> lutPixels = generateBuiltInColorGradingLut();
     utils::cmdInitImageLayout(cmd, m_resources.colorGradingLutImage.image);
@@ -469,15 +441,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.shadowMapImage = createImage(shadowInfo);
     dutil.setObjectName(m_resources.shadowMapImage.image, "ShadowMap");
 
-    const VkImageViewCreateInfo shadowViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.shadowMapImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = m_createInfo.depth,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &shadowViewInfo, nullptr, &m_resources.shadowMapView));
-    dutil.setObjectName(m_resources.shadowMapView, "ShadowMapView");
+    m_resources.shadowMapView = createView(m_resources.shadowMapImage.image, m_createInfo.depth,
+                                           rhi::TextureAspect::depth, "ShadowMapView");
   }
 
   if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
@@ -495,15 +460,8 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.depthImage = createImage(depthInfo);
     dutil.setObjectName(m_resources.depthImage.image, "SceneDepth");
 
-    const VkImageViewCreateInfo depthViewInfo{
-        .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image            = m_resources.depthImage.image,
-        .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-        .format           = m_createInfo.depth,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1},
-    };
-    VK_CHECK(vkCreateImageView(m_device, &depthViewInfo, nullptr, &m_resources.depthView));
-    dutil.setObjectName(m_resources.depthView, "SceneDepthView");
+    m_resources.depthView = createView(m_resources.depthImage.image, m_createInfo.depth,
+                                       rhi::TextureAspect::depth, "SceneDepthView");
 
     m_resources.depthPyramidExtent = {
         std::max(1u, (m_createInfo.size.width + 1u) / 2u),
@@ -524,21 +482,12 @@ void SceneResources::create(VkCommandBuffer cmd)
     m_resources.depthPyramidImage = createImage(depthPyramidInfo);
     dutil.setObjectName(m_resources.depthPyramidImage.image, "DepthPyramid");
 
-    m_resources.depthPyramidMipViews.resize(m_resources.depthPyramidMipCount, VK_NULL_HANDLE);
+    m_resources.depthPyramidMipViews.resize(m_resources.depthPyramidMipCount);
     for(uint32_t mipLevel = 0; mipLevel < m_resources.depthPyramidMipCount; ++mipLevel)
     {
-      const VkImageViewCreateInfo mipViewInfo{
-          .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-          .image            = m_resources.depthPyramidImage.image,
-          .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-          .format           = VK_FORMAT_R32_SFLOAT,
-          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                               .baseMipLevel = mipLevel,
-                               .levelCount = 1,
-                               .layerCount = 1},
-      };
-      VK_CHECK(vkCreateImageView(m_device, &mipViewInfo, nullptr, &m_resources.depthPyramidMipViews[mipLevel]));
-      dutil.setObjectName(m_resources.depthPyramidMipViews[mipLevel], "DepthPyramidMipView" + std::to_string(mipLevel));
+      m_resources.depthPyramidMipViews[mipLevel] =
+          createView(m_resources.depthPyramidImage.image, VK_FORMAT_R32_SFLOAT, rhi::TextureAspect::color,
+                     "DepthPyramidMipView" + std::to_string(mipLevel), rhi::ComponentMapping{}, mipLevel, 1);
     }
   }
 
@@ -610,7 +559,7 @@ void SceneResources::create(VkCommandBuffer cmd)
     for(size_t d = 0; d < m_resources.descriptors.size(); ++d)
     {
       m_imguiTextureIds[d] = reinterpret_cast<ImTextureID>(
-          ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, m_resources.uiImageViews[d], layout));
+          ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, nativeOf(m_resources.uiImageViews[d]), layout));
     }
   }
 
@@ -618,7 +567,7 @@ void SceneResources::create(VkCommandBuffer cmd)
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
   {
     m_resources.outputTextureImID = reinterpret_cast<ImTextureID>(
-        ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, m_resources.outputTextureView,
+        ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, nativeOf(m_resources.outputTextureView),
                                     VK_IMAGE_LAYOUT_GENERAL));
   }
 }
@@ -632,78 +581,36 @@ void SceneResources::destroy()
   }
   m_resources.outputTextureImID = {};
 
-  if(m_resources.outputTextureView != VK_NULL_HANDLE)
+  m_rhiDevice->destroyTextureView(m_resources.outputTextureView);
+  m_resources.outputTextureView = {};
+  m_rhiDevice->destroyTextureView(m_resources.sceneColorHdrView);
+  m_resources.sceneColorHdrView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomHalfView);
+  m_resources.bloomHalfView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomQuarterView);
+  m_resources.bloomQuarterView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomEighthView);
+  m_resources.bloomEighthView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomSixteenthView);
+  m_resources.bloomSixteenthView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomThirtySecondView);
+  m_resources.bloomThirtySecondView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomUpsampleSixteenthView);
+  m_resources.bloomUpsampleSixteenthView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomUpsampleEighthView);
+  m_resources.bloomUpsampleEighthView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomUpsampleQuarterView);
+  m_resources.bloomUpsampleQuarterView = {};
+  m_rhiDevice->destroyTextureView(m_resources.bloomOutputView);
+  m_resources.bloomOutputView = {};
+  m_rhiDevice->destroyTextureView(m_resources.colorGradingLutView);
+  m_resources.colorGradingLutView = {};
+  m_rhiDevice->destroyTextureView(m_resources.velocityView);
+  m_resources.velocityView = {};
+  for(rhi::TextureViewHandle& historyView : m_resources.sceneColorHistoryViews)
   {
-    vkDestroyImageView(m_device, m_resources.outputTextureView, nullptr);
-    m_resources.outputTextureView = VK_NULL_HANDLE;
-  }
-  if(m_resources.sceneColorHdrView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.sceneColorHdrView, nullptr);
-    m_resources.sceneColorHdrView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomHalfView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomHalfView, nullptr);
-    m_resources.bloomHalfView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomQuarterView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomQuarterView, nullptr);
-    m_resources.bloomQuarterView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomEighthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomEighthView, nullptr);
-    m_resources.bloomEighthView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomSixteenthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomSixteenthView, nullptr);
-    m_resources.bloomSixteenthView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomThirtySecondView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomThirtySecondView, nullptr);
-    m_resources.bloomThirtySecondView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomUpsampleSixteenthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomUpsampleSixteenthView, nullptr);
-    m_resources.bloomUpsampleSixteenthView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomUpsampleEighthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomUpsampleEighthView, nullptr);
-    m_resources.bloomUpsampleEighthView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomUpsampleQuarterView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomUpsampleQuarterView, nullptr);
-    m_resources.bloomUpsampleQuarterView = VK_NULL_HANDLE;
-  }
-  if(m_resources.bloomOutputView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.bloomOutputView, nullptr);
-    m_resources.bloomOutputView = VK_NULL_HANDLE;
-  }
-  if(m_resources.colorGradingLutView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.colorGradingLutView, nullptr);
-    m_resources.colorGradingLutView = VK_NULL_HANDLE;
-  }
-  if(m_resources.velocityView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.velocityView, nullptr);
-    m_resources.velocityView = VK_NULL_HANDLE;
-  }
-  for(VkImageView& historyView : m_resources.sceneColorHistoryViews)
-  {
-    if(historyView != VK_NULL_HANDLE)
-    {
-      vkDestroyImageView(m_device, historyView, nullptr);
-      historyView = VK_NULL_HANDLE;
-    }
+    m_rhiDevice->destroyTextureView(historyView);
+    historyView = {};
   }
 
   if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
@@ -716,40 +623,30 @@ void SceneResources::destroy()
   }
   m_imguiTextureIds.clear();
 
-  for(VkImageView view : m_resources.depthPyramidMipViews)
+  for(rhi::TextureViewHandle view : m_resources.depthPyramidMipViews)
   {
-    if(view != VK_NULL_HANDLE)
-    {
-      vkDestroyImageView(m_device, view, nullptr);
-    }
+    m_rhiDevice->destroyTextureView(view);
   }
   m_resources.depthPyramidMipViews.clear();
 
-  for(const VkDescriptorImageInfo& descriptor : m_resources.descriptors)
+  // descriptors[].imageView holds a resolved native copy of colorViews[]; destroy the
+  // owning handle (not the descriptor) to avoid a double-free.
+  for(rhi::TextureViewHandle view : m_resources.colorViews)
   {
-    if(descriptor.imageView != VK_NULL_HANDLE)
-    {
-      vkDestroyImageView(m_device, descriptor.imageView, nullptr);
-    }
+    m_rhiDevice->destroyTextureView(view);
+  }
+  m_resources.colorViews.clear();
+
+  for(rhi::TextureViewHandle view : m_resources.uiImageViews)
+  {
+    m_rhiDevice->destroyTextureView(view);
   }
 
-  for(const VkImageView view : m_resources.uiImageViews)
-  {
-    if(view != VK_NULL_HANDLE)
-    {
-      vkDestroyImageView(m_device, view, nullptr);
-    }
-  }
+  m_rhiDevice->destroyTextureView(m_resources.depthView);
+  m_resources.depthView = {};
 
-  if(m_resources.depthView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.depthView, nullptr);
-  }
-
-  if(m_resources.shadowMapView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_resources.shadowMapView, nullptr);
-  }
+  m_rhiDevice->destroyTextureView(m_resources.shadowMapView);
+  m_resources.shadowMapView = {};
 
   if(m_resources.outputTextureImage.image != VK_NULL_HANDLE)
   {
@@ -851,7 +748,7 @@ utils::Image SceneResources::createImage(const VkImageCreateInfo& imageInfo) con
   return image;
 }
 
-VkImageView SceneResources::getOutputTextureView() const
+rhi::TextureViewHandle SceneResources::getOutputTextureView() const
 {
   return m_resources.outputTextureView;
 }
@@ -876,7 +773,7 @@ VkImage SceneResources::getSceneColorHdrImage() const
   return m_resources.sceneColorHdrImage.image;
 }
 
-VkImageView SceneResources::getSceneColorHdrView() const
+rhi::TextureViewHandle SceneResources::getSceneColorHdrView() const
 {
   return m_resources.sceneColorHdrView;
 }
@@ -891,7 +788,7 @@ VkImage SceneResources::getBloomHalfImage() const
   return m_resources.bloomHalfImage.image;
 }
 
-VkImageView SceneResources::getBloomHalfView() const
+rhi::TextureViewHandle SceneResources::getBloomHalfView() const
 {
   return m_resources.bloomHalfView;
 }
@@ -906,7 +803,7 @@ VkImage SceneResources::getBloomQuarterImage() const
   return m_resources.bloomQuarterImage.image;
 }
 
-VkImageView SceneResources::getBloomQuarterView() const
+rhi::TextureViewHandle SceneResources::getBloomQuarterView() const
 {
   return m_resources.bloomQuarterView;
 }
@@ -921,7 +818,7 @@ VkImage SceneResources::getBloomEighthImage() const
   return m_resources.bloomEighthImage.image;
 }
 
-VkImageView SceneResources::getBloomEighthView() const
+rhi::TextureViewHandle SceneResources::getBloomEighthView() const
 {
   return m_resources.bloomEighthView;
 }
@@ -936,7 +833,7 @@ VkImage SceneResources::getBloomSixteenthImage() const
   return m_resources.bloomSixteenthImage.image;
 }
 
-VkImageView SceneResources::getBloomSixteenthView() const
+rhi::TextureViewHandle SceneResources::getBloomSixteenthView() const
 {
   return m_resources.bloomSixteenthView;
 }
@@ -951,7 +848,7 @@ VkImage SceneResources::getBloomThirtySecondImage() const
   return m_resources.bloomThirtySecondImage.image;
 }
 
-VkImageView SceneResources::getBloomThirtySecondView() const
+rhi::TextureViewHandle SceneResources::getBloomThirtySecondView() const
 {
   return m_resources.bloomThirtySecondView;
 }
@@ -966,7 +863,7 @@ VkImage SceneResources::getBloomUpsampleSixteenthImage() const
   return m_resources.bloomUpsampleSixteenthImage.image;
 }
 
-VkImageView SceneResources::getBloomUpsampleSixteenthView() const
+rhi::TextureViewHandle SceneResources::getBloomUpsampleSixteenthView() const
 {
   return m_resources.bloomUpsampleSixteenthView;
 }
@@ -981,7 +878,7 @@ VkImage SceneResources::getBloomUpsampleEighthImage() const
   return m_resources.bloomUpsampleEighthImage.image;
 }
 
-VkImageView SceneResources::getBloomUpsampleEighthView() const
+rhi::TextureViewHandle SceneResources::getBloomUpsampleEighthView() const
 {
   return m_resources.bloomUpsampleEighthView;
 }
@@ -996,7 +893,7 @@ VkImage SceneResources::getBloomUpsampleQuarterImage() const
   return m_resources.bloomUpsampleQuarterImage.image;
 }
 
-VkImageView SceneResources::getBloomUpsampleQuarterView() const
+rhi::TextureViewHandle SceneResources::getBloomUpsampleQuarterView() const
 {
   return m_resources.bloomUpsampleQuarterView;
 }
@@ -1011,7 +908,7 @@ VkImage SceneResources::getBloomOutputImage() const
   return m_resources.bloomOutputImage.image;
 }
 
-VkImageView SceneResources::getBloomOutputView() const
+rhi::TextureViewHandle SceneResources::getBloomOutputView() const
 {
   return m_resources.bloomOutputView;
 }
@@ -1026,7 +923,7 @@ VkImage SceneResources::getColorGradingLutImage() const
   return m_resources.colorGradingLutImage.image;
 }
 
-VkImageView SceneResources::getColorGradingLutView() const
+rhi::TextureViewHandle SceneResources::getColorGradingLutView() const
 {
   return m_resources.colorGradingLutView;
 }
@@ -1057,7 +954,7 @@ VkImage SceneResources::getVelocityImage() const
   return m_resources.velocityImage.image;
 }
 
-VkImageView SceneResources::getVelocityView() const
+rhi::TextureViewHandle SceneResources::getVelocityView() const
 {
   return m_resources.velocityView;
 }
@@ -1072,7 +969,7 @@ VkImage SceneResources::getSceneColorHistoryImage(uint32_t index) const
   return m_resources.sceneColorHistoryImages[index % static_cast<uint32_t>(m_resources.sceneColorHistoryImages.size())].image;
 }
 
-VkImageView SceneResources::getSceneColorHistoryView(uint32_t index) const
+rhi::TextureViewHandle SceneResources::getSceneColorHistoryView(uint32_t index) const
 {
   return m_resources.sceneColorHistoryViews[index % static_cast<uint32_t>(m_resources.sceneColorHistoryViews.size())];
 }
@@ -1088,7 +985,7 @@ VkImage SceneResources::getShadowMapImage() const
   return m_resources.shadowMapImage.image;
 }
 
-VkImageView SceneResources::getShadowMapView() const
+rhi::TextureViewHandle SceneResources::getShadowMapView() const
 {
   return m_resources.shadowMapView;
 }
@@ -1103,11 +1000,11 @@ VkImage SceneResources::getDepthPyramidImage() const
   return m_resources.depthPyramidImage.image;
 }
 
-VkImageView SceneResources::getDepthPyramidMipView(uint32_t mipLevel) const
+rhi::TextureViewHandle SceneResources::getDepthPyramidMipView(uint32_t mipLevel) const
 {
   if(m_resources.depthPyramidMipViews.empty())
   {
-    return VK_NULL_HANDLE;
+    return {};
   }
   return m_resources.depthPyramidMipViews[std::min<uint32_t>(mipLevel, static_cast<uint32_t>(m_resources.depthPyramidMipViews.size() - 1))];
 }

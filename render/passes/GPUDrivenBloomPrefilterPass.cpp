@@ -35,9 +35,9 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
   }
 
   const VkImage bloomImage = m_renderer->getBloomHalfImage();
-  const VkImageView bloomView = m_renderer->getBloomHalfView();
+  const rhi::TextureViewHandle bloomView = m_renderer->getBloomHalfView();
   const VkExtent2D bloomExtent = m_renderer->getBloomHalfExtent();
-  if(bloomImage == VK_NULL_HANDLE || bloomView == VK_NULL_HANDLE || bloomExtent.width == 0u || bloomExtent.height == 0u)
+  if(bloomImage == VK_NULL_HANDLE || bloomView.isNull() || bloomExtent.width == 0u || bloomExtent.height == 0u)
   {
     return;
   }
@@ -57,10 +57,9 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
         .isSwapchain = false,
     });
   };
-  rhi::TextureViewHandle bloomViewHandle = rhi::TextureViewHandle::fromNative(bloomView);
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = bloomViewHandle,
+      .view = bloomView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,

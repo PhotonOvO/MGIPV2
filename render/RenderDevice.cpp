@@ -857,6 +857,10 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
   m_device.device->init(deviceCreateInfo);
 
+  // The device backs its texture-view/image handles with the render-layer-owned resource
+  // table (the VMA allocator is injected later, once it is created).
+  static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setResourceTable(&m_device.resourceTable);
+
   const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
   ASSERT(m_device.device->supports(rhi::CapabilityTier::Core), "RenderDevice::init requires RHI Core capability tier");
   ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
@@ -872,6 +876,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   surface.init(static_cast<void*>(nativeInstance), static_cast<void*>(nativePhysicalDevice), windowHandle);
 
   m_device.allocator = createAllocator(nativePhysicalDevice, nativeDevice, nativeInstance, m_device.device->getApiVersion());
+  static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setAllocator(m_device.allocator);
   m_device.staticBufferUploadPolicy =
       upload::buildStaticBufferUploadPolicy(m_device.device->getPhysicalMemoryProperties());
   if(m_device.staticBufferUploadPolicy.allowDirectHostVisibleDeviceLocalUpload)
@@ -947,6 +952,32 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
         .shadowFormat      = VK_FORMAT_D32_SFLOAT,
     };
     m_csmShadowResources.init(nativeDevice, m_device.allocator, cmd, csmInfo);
+
+    // Create the per-cascade depth render-target views through the RHI texture-view
+    // registry (a single 2D layer of the cascade array image each). CSMShadowResources
+    // no longer owns these; the CSM pass binds them by handle.
+    for(uint32_t cascadeIndex = 0; cascadeIndex < m_csmShadowResources.getCascadeCount(); ++cascadeIndex)
+    {
+      m_csmCascadeViewHandles[cascadeIndex] = createTextureView(rhi::TextureViewCreateDesc{
+          .nativeImage    = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+          .nativeFormat   = static_cast<uint64_t>(m_csmShadowResources.getShadowFormat()),
+          .viewType       = rhi::ImageViewType::e2D,
+          .aspect         = rhi::TextureAspect::depth,
+          .baseArrayLayer = cascadeIndex,
+          .layerCount     = 1,
+          .debugName      = "CSM_CascadeLayerView",
+      });
+    }
+    // Full-array sampling view (all cascades), used by the lighting GBuffer descriptor set.
+    m_csmCascadeArrayViewHandle = createTextureView(rhi::TextureViewCreateDesc{
+        .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+        .nativeFormat = static_cast<uint64_t>(m_csmShadowResources.getShadowFormat()),
+        .viewType     = rhi::ImageViewType::e2DArray,
+        .aspect       = rhi::TextureAspect::depth,
+        .baseArrayLayer = 0,
+        .layerCount     = m_csmShadowResources.getCascadeCount(),
+        .debugName      = "CSM_CascadeArrayView",
+    });
 
     // Create per-frame GBuffer descriptor sets for LightPass.
     {
@@ -1255,6 +1286,21 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   }
 
   destroyPipelines();
+  // Destroy any owned texture views still registered (adopted/external ones are left to
+  // their owners). At shutdown the table is otherwise dropped without freeing the natives.
+  {
+    std::vector<VkImageView> ownedViews;
+    m_device.resourceTable.forEachTextureView([&](rhi::TextureViewHandle, const rhi::vulkan::TextureViewRecord& record) {
+      if(record.owned && record.nativeView != 0)
+      {
+        ownedViews.push_back(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(record.nativeView)));
+      }
+    });
+    for(VkImageView view : ownedViews)
+    {
+      vkDestroyImageView(device, view, nullptr);
+    }
+  }
   if(m_device.graphicPipelineLayout)
   {
     m_device.graphicPipelineLayout->deinit();
@@ -1643,14 +1689,16 @@ VkImage RenderDevice::getCurrentSwapchainImage() const
       m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex));
 }
 
-VkImageView RenderDevice::getOutputTextureView() const
+rhi::TextureViewHandle RenderDevice::getOutputTextureView() const
 {
   return m_swapchainDependent.sceneResources.getOutputTextureView();
 }
 
 VkImageView RenderDevice::getShadowMapView() const
 {
-  return m_csmShadowResources.getCascadeView();
+  // Resolve the registry handle to the native view (RHI-adjacent seam; the descriptor-write
+  // path that consumes this is still native and migrates separately).
+  return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(m_csmCascadeArrayViewHandle)));
 }
 
 VkImage RenderDevice::getShadowMapImage() const
@@ -2184,6 +2232,10 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   SceneResources& sceneResources = m_swapchainDependent.sceneResources;
 
+  const auto nativeOf = [&](rhi::TextureViewHandle h) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
+  };
+
   // Verify the SceneResources has valid image views
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
@@ -2194,23 +2246,23 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
       return;
     }
   }
-  if(sceneResources.getDepthImageView() == VK_NULL_HANDLE)
+  if(sceneResources.getDepthImageView().isNull())
   {
     LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
     return;
   }
-  if(sceneResources.getSceneColorHdrView() == VK_NULL_HANDLE
-      || sceneResources.getBloomHalfView() == VK_NULL_HANDLE
-      || sceneResources.getBloomQuarterView() == VK_NULL_HANDLE
-      || sceneResources.getColorGradingLutView() == VK_NULL_HANDLE
-      || sceneResources.getVelocityView() == VK_NULL_HANDLE
-      || sceneResources.getSceneColorHistoryView(0) == VK_NULL_HANDLE
-      || sceneResources.getSceneColorHistoryView(1) == VK_NULL_HANDLE)
+  if(sceneResources.getSceneColorHdrView().isNull()
+      || sceneResources.getBloomHalfView().isNull()
+      || sceneResources.getBloomQuarterView().isNull()
+      || sceneResources.getColorGradingLutView().isNull()
+      || sceneResources.getVelocityView().isNull()
+      || sceneResources.getSceneColorHistoryView(0).isNull()
+      || sceneResources.getSceneColorHistoryView(1).isNull())
   {
     LOGW("GPU-driven post-process image view is null, skipping GBuffer descriptor update");
     return;
   }
-  if(m_csmShadowResources.getCascadeView() == VK_NULL_HANDLE)
+  if(m_csmCascadeArrayViewHandle.isNull())
   {
     LOGW("CSM cascade shadow view is null, skipping GBuffer descriptor update");
     return;
@@ -2239,67 +2291,67 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
   }
   imageInfos[kLightPassDepthTextureIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getDepthImageView(),
+      .imageView   = nativeOf(sceneResources.getDepthImageView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getSceneColorHdrView(),
+      .imageView   = nativeOf(sceneResources.getSceneColorHdrView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomHalfIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomHalfView(),
+      .imageView   = nativeOf(sceneResources.getBloomHalfView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomQuarterIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomQuarterView(),
+      .imageView   = nativeOf(sceneResources.getBloomQuarterView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomEighthIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomEighthView(),
+      .imageView   = nativeOf(sceneResources.getBloomEighthView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomSixteenthView(),
+      .imageView   = nativeOf(sceneResources.getBloomSixteenthView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomThirtySecondView(),
+      .imageView   = nativeOf(sceneResources.getBloomThirtySecondView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomUpsampleSixteenthView(),
+      .imageView   = nativeOf(sceneResources.getBloomUpsampleSixteenthView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomUpsampleEighthView(),
+      .imageView   = nativeOf(sceneResources.getBloomUpsampleEighthView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomUpsampleQuarterView(),
+      .imageView   = nativeOf(sceneResources.getBloomUpsampleQuarterView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassBloomOutputIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getBloomOutputView(),
+      .imageView   = nativeOf(sceneResources.getBloomOutputView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassColorGradingLutIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getColorGradingLutView(),
+      .imageView   = nativeOf(sceneResources.getColorGradingLutView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassVelocityIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getVelocityView(),
+      .imageView   = nativeOf(sceneResources.getVelocityView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassIBLEnvironmentIndex] = VkDescriptorImageInfo{
@@ -2311,7 +2363,7 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
   };
   imageInfos[kLightPassAOIndex] = VkDescriptorImageInfo{
       .sampler     = linearSampler,
-      .imageView   = sceneResources.getDepthImageView(),
+      .imageView   = nativeOf(sceneResources.getDepthImageView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   imageInfos[kLightPassSSRIndex] = VkDescriptorImageInfo{
@@ -2321,7 +2373,7 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
   };
   const VkDescriptorImageInfo shadowMapInfo{
       .sampler     = linearSampler,
-      .imageView   = m_csmShadowResources.getCascadeView(),
+      .imageView   = getShadowMapView(),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -2331,12 +2383,12 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
   {
     imageInfos[kLightPassHistoryReadIndex] = VkDescriptorImageInfo{
         .sampler     = linearSampler,
-        .imageView   = sceneResources.getSceneColorHistoryView((frameIndex + 1u) & 1u),
+        .imageView   = nativeOf(sceneResources.getSceneColorHistoryView((frameIndex + 1u) & 1u)),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
     imageInfos[kLightPassHistoryWriteIndex] = VkDescriptorImageInfo{
         .sampler     = linearSampler,
-        .imageView   = sceneResources.getSceneColorHistoryView(frameIndex & 1u),
+        .imageView   = nativeOf(sceneResources.getSceneColorHistoryView(frameIndex & 1u)),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
 
@@ -3761,6 +3813,9 @@ void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
     return;
   }
 
+  const auto nativeOf = [&](rhi::TextureViewHandle h) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
+  };
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const std::array<VkDescriptorBufferInfo, 8> bufferInfos{{
       VkDescriptorBufferInfo{objectBuffer, 0, VK_WHOLE_SIZE},
@@ -3778,7 +3833,7 @@ void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
   {
     pyramidMipInfos[i] = VkDescriptorImageInfo{
         .sampler     = VK_NULL_HANDLE,
-        .imageView   = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
+        .imageView   = nativeOf(sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u))),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
@@ -3990,14 +4045,17 @@ void RenderDevice::updateDepthPyramidDescriptorSet()
   }
 
   SceneResources& sceneResources = m_swapchainDependent.sceneResources;
-  if(sceneResources.getDepthImageView() == VK_NULL_HANDLE || sceneResources.getDepthPyramidMipCount() == 0)
+  if(sceneResources.getDepthImageView().isNull() || sceneResources.getDepthPyramidMipCount() == 0)
   {
     return;
   }
 
+  const auto nativeOf = [&](rhi::TextureViewHandle h) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
+  };
   const VkDescriptorImageInfo sourceDepthInfo{
       .sampler     = VK_NULL_HANDLE,
-      .imageView   = sceneResources.getDepthImageView(),
+      .imageView   = nativeOf(sceneResources.getDepthImageView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -4007,7 +4065,7 @@ void RenderDevice::updateDepthPyramidDescriptorSet()
   {
     pyramidMipInfos[i] = VkDescriptorImageInfo{
         .sampler     = VK_NULL_HANDLE,
-        .imageView   = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
+        .imageView   = nativeOf(sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u))),
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
   }
@@ -7877,6 +7935,28 @@ void RenderDevice::unregisterExternalPipeline(PipelineHandle handle)
   {
     m_device.resourceTable.destroyPipeline(handle);
   }
+}
+
+// Texture-view lifetime now lives on rhi::Device (VulkanDevice). These remain as thin
+// forwards so existing RenderDevice-based callers (CSM, swapchain) keep working.
+rhi::TextureViewHandle RenderDevice::createTextureView(const rhi::TextureViewCreateDesc& desc)
+{
+  return m_device.device->createTextureView(desc);
+}
+
+rhi::TextureViewHandle RenderDevice::registerExternalTextureView(uint64_t nativeView)
+{
+  return m_device.device->registerExternalTextureView(nativeView);
+}
+
+void RenderDevice::destroyTextureView(rhi::TextureViewHandle handle)
+{
+  m_device.device->destroyTextureView(handle);
+}
+
+uint64_t RenderDevice::resolveTextureViewNative(rhi::TextureViewHandle handle) const
+{
+  return m_device.device->resolveTextureViewNative(handle);
 }
 
 void RenderDevice::destroyPipelines()

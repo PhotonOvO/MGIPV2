@@ -72,16 +72,12 @@ public:
                              const glm::vec3& casterBoundsMax,
                              bool casterBoundsValid);
 
-  // Texture2DArray access (all cascades)
+  // Texture2DArray image access (all cascades). The sampling array view + per-cascade
+  // render-target views are owned by the RHI texture-view registry (RenderDevice), not here.
   [[nodiscard]] VkImage getCascadeImage() const { return m_cascadeArray.image; }
-  [[nodiscard]] VkImageView getCascadeView() const { return m_cascadeArrayView; }
 
-  // Per-layer access (for rendering each cascade)
-  [[nodiscard]] VkImageView getCascadeLayerView(uint32_t index) const
-  {
-    assert(index < m_cascadeCount);
-    return m_cascadeLayerViews[index];
-  }
+  // Per-cascade render-target views are owned by the RHI texture-view registry
+  // (RenderDevice::getCSMCascadeViewHandle), not by this subsystem.
 
   [[nodiscard]] uint32_t getCascadeCount() const { return m_cascadeCount; }
   [[nodiscard]] uint32_t getCascadeResolution() const { return m_cascadeResolution; }
@@ -109,8 +105,6 @@ private:
       clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan)};
 
   utils::Image             m_cascadeArray{};  // Texture2DArray (arrayLayers = cascadeCount)
-  VkImageView              m_cascadeArrayView{VK_NULL_HANDLE};  // Full array view for sampling
-  VkImageView              m_cascadeLayerViews[shaderio::LCascadeCount];  // Per-layer views for rendering
 
   utils::Buffer            m_shadowUniformBuffer{};
   shaderio::ShadowUniforms m_shadowUniformsData{};

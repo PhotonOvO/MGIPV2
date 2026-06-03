@@ -34,9 +34,9 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
   }
 
   const VkImage outputImage = m_renderer->getOutputTextureImage();
-  const VkImageView outputView = m_renderer->getOutputTextureView();
+  const rhi::TextureViewHandle outputView = m_renderer->getOutputTextureView();
   const VkExtent2D outputExtent = m_renderer->getSceneExtent();
-  if(outputImage == VK_NULL_HANDLE || outputView == VK_NULL_HANDLE || outputExtent.width == 0u || outputExtent.height == 0u)
+  if(outputImage == VK_NULL_HANDLE || outputView.isNull() || outputExtent.width == 0u || outputExtent.height == 0u)
   {
     return;
   }
@@ -56,10 +56,9 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
         .isSwapchain = false,
     });
   };
-  rhi::TextureViewHandle outputViewHandle = rhi::TextureViewHandle::fromNative(outputView);
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = outputViewHandle,
+      .view = outputView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,

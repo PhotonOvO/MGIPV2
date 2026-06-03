@@ -85,6 +85,36 @@ struct ImageBlitDesc
   Offset3D      dstOffsets[2]{};
 };
 
+// Clear a color image (RHI handle). `state` is the image's current layout at clear time.
+struct ClearColorImageDesc
+{
+  TextureHandle   image{};
+  ClearColorValue color{};
+  ResourceState   state{ResourceState::general};
+  TextureAspect   aspect{TextureAspect::color};
+  uint32_t        baseMipLevel{0};
+  uint32_t        levelCount{1};
+  uint32_t        baseArrayLayer{0};
+  uint32_t        layerCount{1};
+};
+
+// Upload a buffer region into an image (RHI handle). The caller transitions the image to
+// `dstState` (transfer-dst) beforehand; this verb only records the copy.
+struct BufferImageCopyDesc
+{
+  uint64_t      srcBuffer{0};
+  TextureHandle dstImage{};
+  ResourceState dstState{ResourceState::TransferDst};
+  uint64_t      bufferOffset{0};
+  TextureAspect aspect{TextureAspect::color};
+  uint32_t      mipLevel{0};
+  uint32_t      baseArrayLayer{0};
+  uint32_t      layerCount{1};
+  uint32_t      width{0};
+  uint32_t      height{0};
+  uint32_t      depth{1};
+};
+
 class CommandList
 {
 public:
@@ -113,6 +143,8 @@ public:
   virtual void copyBuffer(uint64_t srcBuffer, uint64_t dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) = 0;
   virtual void fillBuffer(uint64_t dstBuffer, uint64_t offset, uint64_t size, uint32_t data)                             = 0;
   virtual void blitImage(const ImageBlitDesc& desc)                                                                      = 0;
+  virtual void clearColorImage(const ClearColorImageDesc& desc)                                                          = 0;
+  virtual void copyBufferToImage(const BufferImageCopyDesc& desc)                                                        = 0;
 
   virtual void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) = 0;
   virtual void bindBindTable(PipelineBindPoint bindPoint,

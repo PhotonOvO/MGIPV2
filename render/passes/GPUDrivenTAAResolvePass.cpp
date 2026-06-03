@@ -37,7 +37,7 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
   const bool taaEnabled = context.params->debugOptions.enablePostProcessing && context.params->debugOptions.enableTAA;
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || !taaEnabled || sceneView->sceneColorHistoryWriteImage == VK_NULL_HANDLE
-     || sceneView->sceneColorHistoryWriteView == VK_NULL_HANDLE)
+     || sceneView->sceneColorHistoryWriteView.isNull())
   {
     return;
   }
@@ -64,7 +64,7 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
 
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->sceneColorHistoryWriteView),
+      .view = sceneView->sceneColorHistoryWriteView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,

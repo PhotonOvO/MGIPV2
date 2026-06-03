@@ -5,7 +5,13 @@
 #include <vector>
 #include <vulkan/vulkan.h>
 
+// Forward declaration of the VMA allocator handle (typedef-compatible with vk_mem_alloc.h's
+// `typedef struct VmaAllocator_T* VmaAllocator;`).
+using VmaAllocator = struct VmaAllocator_T*;
+
 namespace demo::rhi::vulkan {
+
+class VulkanResourceTable;
 
 class VulkanDevice final : public demo::rhi::Device
 {
@@ -37,6 +43,24 @@ public:
   bool isDeviceExtensionSupported(const char* name) const override;
 
   void waitIdle() override;
+
+  TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) override;
+  TextureViewHandle registerExternalTextureView(uint64_t nativeView) override;
+  void              destroyTextureView(TextureViewHandle handle) override;
+  uint64_t          resolveTextureViewNative(TextureViewHandle handle) const override;
+
+  TextureHandle createImage(const TextureCreateDesc& desc) override;
+  TextureHandle registerExternalTexture(uint64_t nativeImage) override;
+  void          destroyImage(TextureHandle handle) override;
+  uint64_t      resolveImageNative(TextureHandle handle) const override;
+
+  // The render layer owns the resource table and injects it here so the device can
+  // back its texture-view handles. Must be called before any createTextureView call.
+  void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
+
+  // The render layer owns the VMA allocator and injects it here so the device can create
+  // images. Must be called before any createImage call.
+  void setAllocator(VmaAllocator allocator) { m_allocator = allocator; }
 
   VkInstance       instance() const { return m_instance; }
   VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
@@ -116,6 +140,9 @@ private:
   std::vector<VkExtensionProperties> m_availableDeviceExtensions;
   std::vector<const char*>           m_enabledDeviceExtensions;
   bool                               m_initialized{false};
+
+  VulkanResourceTable* m_resourceTable{nullptr};
+  VmaAllocator         m_allocator{nullptr};
 };
 
 }  // namespace demo::rhi::vulkan

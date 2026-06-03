@@ -40,6 +40,8 @@ public:
   void copyBuffer(uint64_t srcBuffer, uint64_t dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) override;
   void fillBuffer(uint64_t dstBuffer, uint64_t offset, uint64_t size, uint32_t data) override;
   void blitImage(const ImageBlitDesc& desc) override;
+  void clearColorImage(const ClearColorImageDesc& desc) override;
+  void copyBufferToImage(const BufferImageCopyDesc& desc) override;
 
   void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) override;
   void bindBindTable(PipelineBindPoint bindPoint, uint32_t slot, BindTableHandle bindTable, const uint32_t* dynamicOffsets, uint32_t dynamicOffsetCount) override;

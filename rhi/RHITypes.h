@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RHIHandles.h"
+
 #include <cstdint>
 
 namespace demo::rhi {
@@ -127,6 +129,63 @@ enum class TextureAspect : uint8_t
   depthStencil,
 };
 
+enum class ImageViewType : uint8_t
+{
+  e2D = 0,
+  e2DArray,
+  eCube,
+  e3D,
+};
+
+enum class ComponentSwizzle : uint8_t
+{
+  identity = 0,
+  zero,
+  one,
+  r,
+  g,
+  b,
+  a,
+};
+
+struct ComponentMapping
+{
+  ComponentSwizzle r{ComponentSwizzle::identity};
+  ComponentSwizzle g{ComponentSwizzle::identity};
+  ComponentSwizzle b{ComponentSwizzle::identity};
+  ComponentSwizzle a{ComponentSwizzle::identity};
+};
+
+// Describes a texture view to create through the RHI. The handle returned by
+// RenderDevice::createTextureView is the only thing business/pass code should hold.
+// NOTE (transitional): nativeImage/nativeFormat are native Vulkan values because images
+// are not yet RHI handles and the RHI format enum does not cover every format — this is
+// the deliberate "creation seam"; everything downstream of creation is handle-only.
+struct TextureViewCreateDesc
+{
+  // Prefer `image` (an RHI handle). `nativeImage` is the legacy seam for call sites that
+  // still hold a raw VkImage; createTextureView resolves `image` first when it is set.
+  TextureHandle    image{};
+  uint64_t         nativeImage{0};
+  uint64_t         nativeFormat{0};
+  ImageViewType    viewType{ImageViewType::e2D};
+  TextureAspect    aspect{TextureAspect::color};
+  uint32_t         baseMipLevel{0};
+  uint32_t         levelCount{1};
+  uint32_t         baseArrayLayer{0};
+  uint32_t         layerCount{1};
+  ComponentMapping components{};
+  const char*      debugName{nullptr};
+};
+
+enum class TextureDimension : uint8_t
+{
+  e2D = 0,
+  e2DArray,
+  eCube,
+  e3D,
+};
+
 enum class PipelineBindPoint : uint8_t
 {
   graphics = 0,
@@ -238,6 +297,24 @@ enum class SampleCount : uint8_t
   count2 = 2,
   count4 = 4,
   count8 = 8,
+};
+
+// Describes a texture (image) to create through the RHI. The handle returned by
+// createImage is the only thing business code holds. nativeFormat/nativeUsage are native
+// Vulkan values (the deliberate "creation seam"); everything downstream is handle-only.
+struct TextureCreateDesc
+{
+  uint64_t         nativeFormat{0};  // VkFormat
+  uint64_t         nativeUsage{0};   // VkImageUsageFlags
+  uint32_t         width{0};
+  uint32_t         height{0};
+  uint32_t         depth{1};
+  uint32_t         mipLevels{1};
+  uint32_t         arrayLayers{1};
+  SampleCount      sampleCount{SampleCount::count1};
+  TextureDimension dimension{TextureDimension::e2D};
+  bool             cubeCompatible{false};
+  const char*      debugName{nullptr};
 };
 
 enum class VertexInputRate : uint8_t

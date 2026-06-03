@@ -56,7 +56,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenDepthPrepass");
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->sceneDepthView == VK_NULL_HANDLE)
+  if(sceneView == nullptr || sceneView->sceneDepthView.isNull())
   {
     context.cmd->endEvent();
     return;
@@ -66,7 +66,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
 
   const rhi::DepthTargetDesc depthTarget{
       .texture    = {},
-      .view       = rhi::TextureViewHandle::fromNative(sceneView->sceneDepthView),
+      .view       = sceneView->sceneDepthView,
       .state      = rhi::ResourceState::DepthStencilAttachment,
       .loadOp     = rhi::LoadOp::clear,
       .storeOp    = rhi::StoreOp::store,

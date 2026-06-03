@@ -132,13 +132,12 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
       }
     }
 
-    const VkImageView layerView = csm.getCascadeLayerView(cascadeIndex);
     const VkExtent2D cascadeExtent = csm.getCascadeExtent();
     const rhi::Extent2D extent{cascadeExtent.width, cascadeExtent.height};
 
     const rhi::DepthTargetDesc depthTarget{
         .texture = {},
-        .view = rhi::TextureViewHandle::fromNative(layerView),
+        .view = m_renderer->getCSMCascadeViewHandle(cascadeIndex),
         .state = rhi::ResourceState::DepthStencilAttachment,
         .loadOp = rhi::LoadOp::clear,
         .storeOp = rhi::StoreOp::store,

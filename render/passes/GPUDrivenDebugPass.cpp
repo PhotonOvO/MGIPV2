@@ -74,7 +74,7 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
   const rhi::Extent2D extent{sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
-      .view = rhi::TextureViewHandle::fromNative(sceneView->outputView),
+      .view = sceneView->outputView,
       .state = rhi::ResourceState::ColorAttachment,
       .loadOp = rhi::LoadOp::load,
       .storeOp = rhi::StoreOp::store,

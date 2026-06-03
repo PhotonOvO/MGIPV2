@@ -249,9 +249,18 @@ void VulkanCommandList::end()
 
 VkImageView VulkanCommandList::getVkImageViewFromHandle(TextureViewHandle view) const
 {
-  // TextureViewHandle::fromNativePtr() encodes the 64-bit pointer in index+generation
-  // Use toNativePtr() to correctly reconstruct the full pointer value
-  // VkImageView is a non-dispatchable handle, reinterpret from void*
+  // Prefer the backend view registry (real handles created via RenderDevice::createTextureView).
+  // Fall back to the legacy pointer-encoded handle (TextureViewHandle::fromNativePtr) for
+  // call sites not yet migrated to the registry. A registry handle is always found here;
+  // a legacy pointer-encoded handle is never registered, so it falls through cleanly.
+  if(m_resourceTable != nullptr)
+  {
+    const uint64_t nativeView = m_resourceTable->resolveTextureView(view);
+    if(nativeView != 0)
+    {
+      return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(nativeView));
+    }
+  }
   return reinterpret_cast<VkImageView>(view.toNativePtr());
 }
 
@@ -467,7 +476,10 @@ void VulkanCommandList::transitionTexture(const TextureBarrierDesc& desc)
       .newLayout           = toVkImageLayout(desc.newState),
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .image               = reinterpret_cast<VkImage>(desc.nativeImage),
+      // Prefer the registry-backed image handle; fall back to the legacy nativeImage seam.
+      .image               = reinterpret_cast<VkImage>(static_cast<uintptr_t>(
+          desc.nativeImage != 0 ? desc.nativeImage
+                                : (m_resourceTable != nullptr ? m_resourceTable->resolveTexture(desc.texture) : 0))),
       .subresourceRange    = {toVkAspectMask(desc.aspect), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS},
   };
   const VkDependencyInfo dependencyInfo{
@@ -703,6 +715,43 @@ void VulkanCommandList::blitImage(const ImageBlitDesc& desc)
                  1,
                  &region,
                  VK_FILTER_LINEAR);
+}
+
+void VulkanCommandList::clearColorImage(const ClearColorImageDesc& desc)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkImage image = reinterpret_cast<VkImage>(static_cast<uintptr_t>(
+      m_resourceTable != nullptr ? m_resourceTable->resolveTexture(desc.image) : 0));
+  const VkClearColorValue clearColor{{desc.color.r, desc.color.g, desc.color.b, desc.color.a}};
+  const VkImageSubresourceRange range{
+      .aspectMask     = toVkAspectMask(desc.aspect),
+      .baseMipLevel   = desc.baseMipLevel,
+      .levelCount     = desc.levelCount,
+      .baseArrayLayer = desc.baseArrayLayer,
+      .layerCount     = desc.layerCount,
+  };
+  vkCmdClearColorImage(m_commandBuffer, image, toVkImageLayout(desc.state), &clearColor, 1, &range);
+}
+
+void VulkanCommandList::copyBufferToImage(const BufferImageCopyDesc& desc)
+{
+  ensureCommandBuffer(m_commandBuffer);
+  const VkImage image = reinterpret_cast<VkImage>(static_cast<uintptr_t>(
+      m_resourceTable != nullptr ? m_resourceTable->resolveTexture(desc.dstImage) : 0));
+  const VkBufferImageCopy region{
+      .bufferOffset      = desc.bufferOffset,
+      .imageSubresource  = {.aspectMask     = toVkAspectMask(desc.aspect),
+                            .mipLevel       = desc.mipLevel,
+                            .baseArrayLayer = desc.baseArrayLayer,
+                            .layerCount     = desc.layerCount},
+      .imageExtent       = {desc.width, desc.height, desc.depth},
+  };
+  vkCmdCopyBufferToImage(m_commandBuffer,
+                         reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(desc.srcBuffer)),
+                         image,
+                         toVkImageLayout(desc.dstState),
+                         1,
+                         &region);
 }
 
 void VulkanCommandList::beginEvent(const char* name)

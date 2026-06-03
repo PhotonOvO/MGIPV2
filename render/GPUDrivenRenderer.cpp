@@ -352,7 +352,7 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   {
     m_meshletBuffer.init(getNativeDeviceHandle(), getAllocatorHandle());
   }
-  m_hiZDepthPyramid.init(getNativeDeviceHandle(), getAllocatorHandle(), getSwapchainImageCount(), getSceneExtent());
+  m_hiZDepthPyramid.init(getRHIDevice(), getAllocatorHandle(), getSwapchainImageCount(), getSceneExtent());
 
   m_depthPrepass = std::make_unique<GPUDrivenDepthPrepass>(this);
   m_depthPyramidPass = std::make_unique<GPUDrivenDepthPyramidPass>(this);
@@ -867,7 +867,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .colorGradingLutActive = gpuParams.debugOptions.enablePostProcessing
                                  && gpuParams.debugOptions.enableColorGrading
                                  && gpuParams.debugOptions.colorLutStrength > 0.0f
-                                 && m_sceneView.colorGradingLutView != VK_NULL_HANDLE,
+                                 && !m_sceneView.colorGradingLutView.isNull(),
         .lensEffectsActive = gpuParams.debugOptions.enablePostProcessing
                              && gpuParams.debugOptions.enableLensEffects,
     };
@@ -986,7 +986,7 @@ void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandList& cmd, const Ren
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   const VkImage sourceDepthImage = m_sceneView.sceneDepthImage;
-  const VkImageView sourceDepthView = m_sceneView.sceneDepthView;
+  const rhi::TextureViewHandle sourceDepthView = m_sceneView.sceneDepthView;
   const VkExtent2D sourceDepthExtent = m_sceneView.sceneDepthExtent;
   m_hiZDepthPyramid.generate(frameIndex,
                              rhi::vulkan::getNativeCommandBuffer(cmd),
@@ -2456,7 +2456,7 @@ void GPUDrivenRenderer::initIBLResources()
         .cubeMapSize = 128,
         .dfgLUTSize = 256,
     };
-    executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(nativeDevice, getAllocatorHandle(), cmd, fallbackInfo); });
+    executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(getRHIDevice(), getAllocatorHandle(), cmd, fallbackInfo); });
   };
 
   Ktx2Loader loader;
@@ -2552,15 +2552,20 @@ void GPUDrivenRenderer::initIBLResources()
   m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
   m_iblEnvironmentLoaded = true;
   m_iblUsingFallback = false;
+  // The environment view stays a native, GPUDrivenRenderer-owned view (utils::ImageResource).
+  // Wrap it as a transient non-owned RHI handle just for IBL generation, then unregister.
+  const rhi::TextureViewHandle envViewHandle =
+      getRHIDevice().registerExternalTextureView(reinterpret_cast<uint64_t>(view));
   IBLResources::CreateInfo iblCreateInfo{
       .cubeMapSize = 128,
       .dfgLUTSize = 256,
-      .sourceEnvironmentView = view,
+      .sourceEnvironmentView = envViewHandle,
       .sourceWidth = texture.width,
       .sourceHeight = texture.height,
       .sourceMipCount = std::max(1u, texture.mipLevels),
   };
-  executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(nativeDevice, getAllocatorHandle(), cmd, iblCreateInfo); });
+  executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(getRHIDevice(), getAllocatorHandle(), cmd, iblCreateInfo); });
+  getRHIDevice().destroyTextureView(envViewHandle);
 
   m_iblEnvironmentStatus = m_iblResources.isSplitSumReady()
                                 ? "Loaded GPUDriven equirect HDR KTX2 with split-sum IBL"
@@ -2955,22 +2960,25 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
     return;
   }
   const GPUDrivenSceneView& sceneView = m_sceneView;
-  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+  if(sceneView.sceneDepthView.isNull() || sceneView.gbufferViews[1].isNull()
      || m_aoRaw.view == VK_NULL_HANDLE || m_aoDenoised.view == VK_NULL_HANDLE)
   {
     return;
   }
 
+  const auto nativeOf = [&](rhi::TextureViewHandle h) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_renderer.resolveTextureViewNative(h)));
+  };
   // SSR is bound via a per-frame temporary bind group (acquireSSRTempBindGroup); only
   // the persistent AO/denoise sets are rewritten here.
   const std::array<VkDescriptorImageInfo, 3> aoInfos{{
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.gbufferViews[1], VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.gbufferViews[1]), VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
   }};
   const std::array<VkDescriptorImageInfo, 3> denoiseInfos{{
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL},
+      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL},
       VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoDenoised.view, VK_IMAGE_LAYOUT_GENERAL},
   }};
 
@@ -3006,11 +3014,11 @@ BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer
     return BindGroupHandle{};
   }
   const GPUDrivenSceneView& sceneView = m_sceneView;
-  const VkImageView historyView = sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE
+  const rhi::TextureViewHandle historyView = !sceneView.sceneColorHistoryReadView.isNull()
                                       ? sceneView.sceneColorHistoryReadView
                                       : sceneView.sceneColorHdrView;
-  if(historyView == VK_NULL_HANDLE || sceneView.sceneDepthView == VK_NULL_HANDLE
-     || sceneView.gbufferViews[0] == VK_NULL_HANDLE || sceneView.gbufferViews[1] == VK_NULL_HANDLE
+  if(historyView.isNull() || sceneView.sceneDepthView.isNull()
+     || sceneView.gbufferViews[0].isNull() || sceneView.gbufferViews[1].isNull()
      || m_ssrRaw.view == VK_NULL_HANDLE)
   {
     return BindGroupHandle{};
@@ -3018,10 +3026,10 @@ BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer
 
   const uint32_t generalLayout = static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL);
   const std::array<rhi::DescriptorImageInfo, 5> imageInfos{{
-      {0, reinterpret_cast<uint64_t>(historyView), generalLayout},
-      {0, reinterpret_cast<uint64_t>(sceneView.sceneDepthView), generalLayout},
-      {0, reinterpret_cast<uint64_t>(sceneView.gbufferViews[1]), generalLayout},
-      {0, reinterpret_cast<uint64_t>(sceneView.gbufferViews[0]), generalLayout},
+      {0, m_renderer.resolveTextureViewNative(historyView), generalLayout},
+      {0, m_renderer.resolveTextureViewNative(sceneView.sceneDepthView), generalLayout},
+      {0, m_renderer.resolveTextureViewNative(sceneView.gbufferViews[1]), generalLayout},
+      {0, m_renderer.resolveTextureViewNative(sceneView.gbufferViews[0]), generalLayout},
       {0, reinterpret_cast<uint64_t>(m_ssrRaw.view), generalLayout},
   }};
   const rhi::DescriptorBufferInfo cameraInfo{cameraBuffer, cameraOffset, sizeof(shaderio::CameraUniforms)};
@@ -3266,13 +3274,13 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
   }
 
   const GPUDrivenSceneView& sceneView = m_sceneView;
-  if(sceneView.sceneDepthView == VK_NULL_HANDLE || sceneView.sceneColorHdrView == VK_NULL_HANDLE)
+  if(sceneView.sceneDepthView.isNull() || sceneView.sceneColorHdrView.isNull())
   {
     return;
   }
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    if(sceneView.gbufferViews[i] == VK_NULL_HANDLE)
+    if(sceneView.gbufferViews[i].isNull())
     {
       return;
     }
@@ -3283,28 +3291,31 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
   {
     return;
   }
+  const auto nativeOf = [&](rhi::TextureViewHandle h) {
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_renderer.resolveTextureViewNative(h)));
+  };
   std::array<VkDescriptorImageInfo, kGPUDrivenLightPassTextureCount> imageInfos{};
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    imageInfos[i] = VkDescriptorImageInfo{sampler, sceneView.gbufferViews[i], VK_IMAGE_LAYOUT_GENERAL};
+    imageInfos[i] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.gbufferViews[i]), VK_IMAGE_LAYOUT_GENERAL};
   }
-  imageInfos[kGPUDrivenLightPassDepthTextureIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneDepthView, VK_IMAGE_LAYOUT_GENERAL};
-  const VkImageView safeColorFallback = sceneView.gbufferViews[0];
-  const VkImageView safeDepthFallback = sceneView.sceneDepthView;
-  imageInfos[kGPUDrivenLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHdrView, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomHalfIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomHalfView != VK_NULL_HANDLE ? sceneView.bloomHalfView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomQuarterIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomQuarterView != VK_NULL_HANDLE ? sceneView.bloomQuarterView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomEighthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomEighthView != VK_NULL_HANDLE ? sceneView.bloomEighthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomSixteenthView != VK_NULL_HANDLE ? sceneView.bloomSixteenthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomThirtySecondView != VK_NULL_HANDLE ? sceneView.bloomThirtySecondView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleSixteenthView != VK_NULL_HANDLE ? sceneView.bloomUpsampleSixteenthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleEighthView != VK_NULL_HANDLE ? sceneView.bloomUpsampleEighthView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomUpsampleQuarterView != VK_NULL_HANDLE ? sceneView.bloomUpsampleQuarterView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomOutputIndex] = VkDescriptorImageInfo{sampler, sceneView.bloomOutputView != VK_NULL_HANDLE ? sceneView.bloomOutputView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassColorGradingLutIndex] = VkDescriptorImageInfo{sampler, sceneView.colorGradingLutView != VK_NULL_HANDLE ? sceneView.colorGradingLutView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassVelocityIndex] = VkDescriptorImageInfo{sampler, sceneView.velocityView != VK_NULL_HANDLE ? sceneView.velocityView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassHistoryReadIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryReadView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryReadView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassHistoryWriteIndex] = VkDescriptorImageInfo{sampler, sceneView.sceneColorHistoryWriteView != VK_NULL_HANDLE ? sceneView.sceneColorHistoryWriteView : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassDepthTextureIndex] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL};
+  const VkImageView safeColorFallback = nativeOf(sceneView.gbufferViews[0]);
+  const VkImageView safeDepthFallback = nativeOf(sceneView.sceneDepthView);
+  imageInfos[kGPUDrivenLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.sceneColorHdrView), VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomHalfIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomHalfView.isNull() ? nativeOf(sceneView.bloomHalfView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomQuarterIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomQuarterView.isNull() ? nativeOf(sceneView.bloomQuarterView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomEighthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomEighthView.isNull() ? nativeOf(sceneView.bloomEighthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomSixteenthView.isNull() ? nativeOf(sceneView.bloomSixteenthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomThirtySecondView.isNull() ? nativeOf(sceneView.bloomThirtySecondView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleSixteenthView.isNull() ? nativeOf(sceneView.bloomUpsampleSixteenthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleEighthView.isNull() ? nativeOf(sceneView.bloomUpsampleEighthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleQuarterView.isNull() ? nativeOf(sceneView.bloomUpsampleQuarterView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassBloomOutputIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomOutputView.isNull() ? nativeOf(sceneView.bloomOutputView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassColorGradingLutIndex] = VkDescriptorImageInfo{sampler, !sceneView.colorGradingLutView.isNull() ? nativeOf(sceneView.colorGradingLutView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassVelocityIndex] = VkDescriptorImageInfo{sampler, !sceneView.velocityView.isNull() ? nativeOf(sceneView.velocityView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassHistoryReadIndex] = VkDescriptorImageInfo{sampler, !sceneView.sceneColorHistoryReadView.isNull() ? nativeOf(sceneView.sceneColorHistoryReadView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
+  imageInfos[kGPUDrivenLightPassHistoryWriteIndex] = VkDescriptorImageInfo{sampler, !sceneView.sceneColorHistoryWriteView.isNull() ? nativeOf(sceneView.sceneColorHistoryWriteView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
   imageInfos[kGPUDrivenLightPassIBLEnvironmentIndex] =
       VkDescriptorImageInfo{sampler,
                             m_iblEnvironment.view != VK_NULL_HANDLE ? m_iblEnvironment.view : safeColorFallback,
@@ -3317,24 +3328,25 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
       VkDescriptorImageInfo{sampler,
                             m_ssrRaw.view != VK_NULL_HANDLE ? m_ssrRaw.view : safeColorFallback,
                             VK_IMAGE_LAYOUT_GENERAL};
+  const VkImageView shadowMapNative = m_renderer.getShadowMapView();
   const VkDescriptorImageInfo shadowInfo{
       .sampler = sampler,
-      .imageView = getCSMShadowResources().getCascadeView() != VK_NULL_HANDLE ? getCSMShadowResources().getCascadeView() : sceneView.sceneDepthView,
+      .imageView = shadowMapNative != VK_NULL_HANDLE ? shadowMapNative : safeDepthFallback,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   const VkDescriptorImageInfo iblIrradianceInfo{
       .sampler = m_iblResources.getCubeMapSampler(),
-      .imageView = m_iblResources.getIrradianceMapView(),
+      .imageView = nativeOf(m_iblResources.getIrradianceMapView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   const VkDescriptorImageInfo iblPrefilteredInfo{
       .sampler = m_iblResources.getCubeMapSampler(),
-      .imageView = m_iblResources.getPrefilteredMapView(),
+      .imageView = nativeOf(m_iblResources.getPrefilteredMapView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
   const VkDescriptorImageInfo iblBrdfLutInfo{
       .sampler = m_iblResources.getLUTSampler(),
-      .imageView = m_iblResources.getDFGLUTView(),
+      .imageView = nativeOf(m_iblResources.getDFGLUTView()),
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
 
@@ -3602,13 +3614,13 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                                                    uint32_t safeObjectCount)
 {
   const bool hasSceneAttachments = m_sceneView.sceneDepthImage != VK_NULL_HANDLE
-                                   && m_sceneView.sceneDepthView != VK_NULL_HANDLE
+                                   && !m_sceneView.sceneDepthView.isNull()
                                    && m_sceneView.outputImage != VK_NULL_HANDLE
-                                   && m_sceneView.outputView != VK_NULL_HANDLE
+                                   && !m_sceneView.outputView.isNull()
                                    && m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE
-                                   && m_sceneView.sceneColorHdrView != VK_NULL_HANDLE
+                                   && !m_sceneView.sceneColorHdrView.isNull()
                                    && m_sceneView.gbufferImages[0] != VK_NULL_HANDLE
-                                   && m_sceneView.gbufferViews[0] != VK_NULL_HANDLE;
+                                   && !m_sceneView.gbufferViews[0].isNull();
   const bool hasLightingResources = !getGPUDrivenLightHdrPipelineHandle().isNull()
                                     && getLightPipelineLayout() != 0
                                     && getLightingInputDescriptorSet() != 0;

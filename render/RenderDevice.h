@@ -168,6 +168,12 @@ public:
   }
   [[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
   CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
+  // Per-cascade depth render-target view as an RHI handle (created via the texture-view
+  // registry in init). Replaces the raw per-layer VkImageView CSMShadowResources used to own.
+  [[nodiscard]] rhi::TextureViewHandle getCSMCascadeViewHandle(uint32_t cascadeIndex) const
+  {
+    return cascadeIndex < m_csmCascadeViewHandles.size() ? m_csmCascadeViewHandles[cascadeIndex] : rhi::TextureViewHandle{};
+  }
   const shaderio::CameraUniforms& getShadowCameraUniforms() const { return m_frameLightingState.shadowCamera; }
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
@@ -249,6 +255,16 @@ public:
   // build a VkPipelineLayout that is compatible with temporary bind groups of this layout.
   [[nodiscard]] uint64_t getBindGroupLayoutHandleNative(rhi::BindGroupLayoutHandle handle) const;
 
+  // --- Texture views as RHI handles (the only thing business/pass code should hold) ---
+  // createTextureView does vkCreateImageView from the desc and registers an owned view;
+  // registerExternalTextureView adopts a caller-owned native view (e.g. per-frame swapchain
+  // view) without taking ownership; destroyTextureView frees owned views. resolveTextureViewNative
+  // returns the native VkImageView (as uint64) for backend resource-binding paths.
+  rhi::TextureViewHandle           createTextureView(const rhi::TextureViewCreateDesc& desc);
+  rhi::TextureViewHandle           registerExternalTextureView(uint64_t nativeView);
+  void                             destroyTextureView(rhi::TextureViewHandle handle);
+  [[nodiscard]] uint64_t           resolveTextureViewNative(rhi::TextureViewHandle handle) const;
+
   // Frame-lifetime bind group (HypeHype createTemporaryBindGroup). Allocates a fresh
   // descriptor set from the given layout, writes it, and returns a handle valid only
   // for the current frame — it is destroyed automatically when this frame index is
@@ -293,63 +309,63 @@ public:
   VkImage getCurrentSwapchainImage() const;
   VkFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
   VkImage getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
-  VkImageView getSceneDepthImageView() const { return m_swapchainDependent.sceneResources.getDepthImageView(); }
+  rhi::TextureViewHandle getSceneDepthImageView() const { return m_swapchainDependent.sceneResources.getDepthImageView(); }
   VkImage getSceneGBufferImage(uint32_t index) const { return m_swapchainDependent.sceneResources.getColorImage(index); }
-  VkImageView getSceneGBufferImageView(uint32_t index) const { return m_swapchainDependent.sceneResources.getGBufferImageView(index); }
+  rhi::TextureViewHandle getSceneGBufferImageView(uint32_t index) const { return m_swapchainDependent.sceneResources.getGBufferImageView(index); }
   VkImage getOutputTextureImage() const { return m_swapchainDependent.sceneResources.getOutputTextureImage(); }
-  VkImageView getOutputTextureView() const;
+  rhi::TextureViewHandle getOutputTextureView() const;
   VkFormat getOutputTextureFormat() const { return m_swapchainDependent.sceneResources.getOutputTextureFormat(); }
   uint64_t getOutputTextureEstimatedBytes() const
   {
     return m_swapchainDependent.sceneResources.getOutputTextureEstimatedBytes();
   }
   VkImage getSceneColorHdrImage() const { return m_swapchainDependent.sceneResources.getSceneColorHdrImage(); }
-  VkImageView getSceneColorHdrView() const { return m_swapchainDependent.sceneResources.getSceneColorHdrView(); }
+  rhi::TextureViewHandle getSceneColorHdrView() const { return m_swapchainDependent.sceneResources.getSceneColorHdrView(); }
   VkFormat getSceneColorHdrFormat() const { return m_swapchainDependent.sceneResources.getSceneColorHdrFormat(); }
   uint64_t getSceneColorHdrEstimatedBytes() const
   {
     return m_swapchainDependent.sceneResources.getSceneColorHdrEstimatedBytes();
   }
   VkImage getBloomHalfImage() const { return m_swapchainDependent.sceneResources.getBloomHalfImage(); }
-  VkImageView getBloomHalfView() const { return m_swapchainDependent.sceneResources.getBloomHalfView(); }
+  rhi::TextureViewHandle getBloomHalfView() const { return m_swapchainDependent.sceneResources.getBloomHalfView(); }
   VkExtent2D getBloomHalfExtent() const { return m_swapchainDependent.sceneResources.getBloomHalfExtent(); }
   VkImage getBloomQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomQuarterImage(); }
-  VkImageView getBloomQuarterView() const { return m_swapchainDependent.sceneResources.getBloomQuarterView(); }
+  rhi::TextureViewHandle getBloomQuarterView() const { return m_swapchainDependent.sceneResources.getBloomQuarterView(); }
   VkExtent2D getBloomQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomQuarterExtent(); }
   VkImage getBloomEighthImage() const { return m_swapchainDependent.sceneResources.getBloomEighthImage(); }
-  VkImageView getBloomEighthView() const { return m_swapchainDependent.sceneResources.getBloomEighthView(); }
+  rhi::TextureViewHandle getBloomEighthView() const { return m_swapchainDependent.sceneResources.getBloomEighthView(); }
   VkExtent2D getBloomEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomEighthExtent(); }
   VkImage getBloomSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomSixteenthImage(); }
-  VkImageView getBloomSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomSixteenthView(); }
+  rhi::TextureViewHandle getBloomSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomSixteenthView(); }
   VkExtent2D getBloomSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomSixteenthExtent(); }
   VkImage getBloomThirtySecondImage() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondImage(); }
-  VkImageView getBloomThirtySecondView() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondView(); }
+  rhi::TextureViewHandle getBloomThirtySecondView() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondView(); }
   VkExtent2D getBloomThirtySecondExtent() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondExtent(); }
   VkImage getBloomUpsampleSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage(); }
-  VkImageView getBloomUpsampleSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthView(); }
+  rhi::TextureViewHandle getBloomUpsampleSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthView(); }
   VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthExtent(); }
   VkImage getBloomUpsampleEighthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage(); }
-  VkImageView getBloomUpsampleEighthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthView(); }
+  rhi::TextureViewHandle getBloomUpsampleEighthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthView(); }
   VkExtent2D getBloomUpsampleEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthExtent(); }
   VkImage getBloomUpsampleQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage(); }
-  VkImageView getBloomUpsampleQuarterView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterView(); }
+  rhi::TextureViewHandle getBloomUpsampleQuarterView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterView(); }
   VkExtent2D getBloomUpsampleQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterExtent(); }
   VkImage getBloomOutputImage() const { return m_swapchainDependent.sceneResources.getBloomOutputImage(); }
-  VkImageView getBloomOutputView() const { return m_swapchainDependent.sceneResources.getBloomOutputView(); }
+  rhi::TextureViewHandle getBloomOutputView() const { return m_swapchainDependent.sceneResources.getBloomOutputView(); }
   VkExtent2D getBloomOutputExtent() const { return m_swapchainDependent.sceneResources.getBloomOutputExtent(); }
   VkImage getColorGradingLutImage() const { return m_swapchainDependent.sceneResources.getColorGradingLutImage(); }
-  VkImageView getColorGradingLutView() const { return m_swapchainDependent.sceneResources.getColorGradingLutView(); }
+  rhi::TextureViewHandle getColorGradingLutView() const { return m_swapchainDependent.sceneResources.getColorGradingLutView(); }
   VkExtent2D getColorGradingLutExtent() const { return m_swapchainDependent.sceneResources.getColorGradingLutExtent(); }
   uint64_t getBloomEstimatedBytes() const { return m_swapchainDependent.sceneResources.getBloomEstimatedBytes(); }
   VkImage getVelocityImage() const { return m_swapchainDependent.sceneResources.getVelocityImage(); }
-  VkImageView getVelocityView() const { return m_swapchainDependent.sceneResources.getVelocityView(); }
+  rhi::TextureViewHandle getVelocityView() const { return m_swapchainDependent.sceneResources.getVelocityView(); }
   VkFormat getVelocityFormat() const { return m_swapchainDependent.sceneResources.getVelocityFormat(); }
   uint64_t getVelocityEstimatedBytes() const { return m_swapchainDependent.sceneResources.getVelocityEstimatedBytes(); }
   VkImage getSceneColorHistoryImage(uint32_t index) const
   {
     return m_swapchainDependent.sceneResources.getSceneColorHistoryImage(index);
   }
-  VkImageView getSceneColorHistoryView(uint32_t index) const
+  rhi::TextureViewHandle getSceneColorHistoryView(uint32_t index) const
   {
     return m_swapchainDependent.sceneResources.getSceneColorHistoryView(index);
   }
@@ -361,6 +377,7 @@ public:
   VkImage getShadowMapImage() const;
   shaderio::ShadowUniforms* getShadowUniformsData();
   uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
+  [[nodiscard]] rhi::Device& getRHIDevice() const { return *m_device.device; }
   uint64_t    getPhysicalDeviceOpaque() const { return m_device.device ? m_device.device->getNativePhysicalDevice() : 0; }
 
 private:
@@ -605,6 +622,8 @@ private:
   PipelineHandle m_shadowPipeline{};             // Directional shadow depth pass
   PipelineHandle m_csmShadowPipeline{};          // CSM cascade MDI depth pass
   CSMShadowResources m_csmShadowResources{};   // CSM cascade texture and uniform buffer
+  std::array<rhi::TextureViewHandle, shaderio::LCascadeCount> m_csmCascadeViewHandles{};  // per-cascade render-target views
+  rhi::TextureViewHandle m_csmCascadeArrayViewHandle{};  // full-array sampling view
   PipelineHandle m_forwardPipeline{};            // Forward pass for transparent
   PipelineHandle m_forwardMDIPipeline{};         // Forward MDI pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass

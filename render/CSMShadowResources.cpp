@@ -250,47 +250,11 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
       m_allocator, &cascadeArrayInfo, &imageAllocInfo, &m_cascadeArray.image, &m_cascadeArray.allocation, nullptr));
   dutil.setObjectName(m_cascadeArray.image, "CSM_CascadeArray");
 
-  // Create full array view (for sampling in shaders)
-  const VkImageViewCreateInfo arrayViewInfo{
-      .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image      = m_cascadeArray.image,
-      .viewType   = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-      .format     = m_shadowFormat,
-      .subresourceRange =
-          {
-              .aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT,
-              .baseMipLevel   = 0,
-              .levelCount     = 1,
-              .baseArrayLayer = 0,
-              .layerCount     = m_cascadeCount,
-          },
-  };
-  VK_CHECK(vkCreateImageView(m_device, &arrayViewInfo, nullptr, &m_cascadeArrayView));
-  dutil.setObjectName(m_cascadeArrayView, "CSM_CascadeArrayView");
+  // The full-array sampling view + per-cascade render-target views are created through the
+  // RHI texture-view registry by RenderDevice; this subsystem owns only the array image.
 
-  // Create per-layer views (for rendering each cascade)
-  for(uint32_t i = 0; i < m_cascadeCount; ++i)
-  {
-    const VkImageViewCreateInfo layerViewInfo{
-        .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image      = m_cascadeArray.image,
-        .viewType   = VK_IMAGE_VIEW_TYPE_2D,
-        .format     = m_shadowFormat,
-        .subresourceRange =
-            {
-                .aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel   = 0,
-                .levelCount     = 1,
-                .baseArrayLayer = i,
-                .layerCount     = 1,
-            },
-    };
-    VK_CHECK(vkCreateImageView(m_device, &layerViewInfo, nullptr, &m_cascadeLayerViews[i]));
-
-    char name[32];
-    std::snprintf(name, sizeof(name), "CSM_CascadeLayerView_%u", i);
-    dutil.setObjectName(m_cascadeLayerViews[i], name);
-  }
+  // Per-cascade render-target views are created through the RHI texture-view registry
+  // by RenderDevice (see getCSMCascadeViewHandle), so this subsystem no longer owns them.
 
   // Create uniform buffer for shadow data
   const VkBufferCreateInfo uniformInfo{
@@ -367,19 +331,6 @@ void CSMShadowResources::deinit()
   if(m_shadowUniformBuffer.buffer != VK_NULL_HANDLE)
   {
     vmaDestroyBuffer(m_allocator, m_shadowUniformBuffer.buffer, m_shadowUniformBuffer.allocation);
-  }
-
-  for(uint32_t i = 0; i < m_cascadeCount; ++i)
-  {
-    if(m_cascadeLayerViews[i] != VK_NULL_HANDLE)
-    {
-      vkDestroyImageView(m_device, m_cascadeLayerViews[i], nullptr);
-    }
-  }
-
-  if(m_cascadeArrayView != VK_NULL_HANDLE)
-  {
-    vkDestroyImageView(m_device, m_cascadeArrayView, nullptr);
   }
 
   if(m_cascadeArray.image != VK_NULL_HANDLE)
