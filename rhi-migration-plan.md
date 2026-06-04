@@ -473,7 +473,7 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 
 ---
 
-## 8. Wave 5：Render Pass 迁移 — 🔁 进行中（全屏 pass 已迁，几何 MDI pass 待 buffer 桥接）
+## 8. Wave 5：Render Pass 迁移 — ✅ 完成（全部可迁 render pass 已转 RenderEncoder，Imgui/Debug 为例外）
 
 **目标**：12 个 Render Pass 全部转 `RenderEncoder`。
 **前置依赖**：Wave 4。
@@ -507,8 +507,11 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
   - [x] **`GPUDrivenForwardPass`** 迁移：透明几何 MDI；`bindPipeline`/`bindBindGroup` 原在 `beginRenderPass` 前，**重排**到 encoder 之后；args=当前帧 persistent stream RHI handle，count=当前帧 culling drawCount RHI handle；`prepareAndDispatchVisibilityPatch` 仍走 `context.cmd`（render pass 外 compute）。编译通过。
   - [x] **`GPUDrivenGBufferPass`**（Tier3）迁移：MDI opaque+alphaTest 两 pipeline；args=sorted persistent / culling indirect RHI handle，count=culling drawCount RHI handle；保留 uint64 变量做有效性判断与 offset 选择。编译通过（`[2/2] Linking demo_core.lib`）。
   - GPUDrivenRenderer 补委托当前帧 RHI getter（culling indirect/drawCount/persistent stream）。
-  - [ ] **剩余（未做）**：`GPUDrivenCSMShadowPass`（shadow culling indirect 已句柄化，cascade array）/ `GPUDrivenShadowAtlasPass`（atlas tiles）/ `GPUDrivenImguiPass`（ImGui 动态顶点/索引缓冲，需先句柄化 transient ring buffer）/ `GPUDrivenDebugPass`（dead code + transient）。
-  - [ ] **全部 pass 迁移后需运行 + RenderDoc 验证**（深度/GBuffer/透明/阴影画面一致、MDI draw 序列、validation layer 零报错）——本环境仅验证编译。
+  - [x] **`GPUDrivenCSMShadowPass`** 迁移：句柄化 scene shadow packed vertex/index buffer（`GPUDrivenRenderer` 在 `updateSceneView` rebind 稳定 handle，owned=false）；per-cascade render 走 RenderEncoder，vertex/index 用 shadow packed RHI handle，`drawIndexedIndirect` 用 shadow culling indirect RHI handle；**per-cascade culling compute dispatch + transitionBuffer 保留 `context.cmd`**（render pass 外，留待后续 ComputeEncoder/Wave 7）。
+  - [x] **`GPUDrivenShadowAtlasPass`** 迁移：单 render pass，per-tile viewport/scissor + per-mesh `drawIndexed(DrawIndexedDesc)`；vertex/index 用 shadow packed RHI handle。编译通过（`[4/4] Linking demo_core.lib`）。
+  - [~] **`GPUDrivenImguiPass`（例外，保留 native）**：委托 `RenderDevice::executeImGuiPass`，内部走 ImGui Vulkan backend（`ImGui_ImplVulkan_RenderDrawData` 强制 native `VkCommandBuffer`，接口固定无法用 Encoder 抽象）+ present blit（属 Wave 6）。作为合理例外保留，Wave 9 评估。
+  - [~] **`GPUDrivenDebugPass`（例外，dead code）**：`execute` 不调用 `renderDebugOverlay`（已注释禁用），且依赖 transient ring buffer 的 native 顶点缓冲。功能恢复时再迁移。
+  - [ ] **全部 pass 迁移后需运行 + RenderDoc 验证**（深度/GBuffer/透明/阴影/CSM/atlas 画面一致、MDI draw 序列、validation layer 零报错）——本环境仅验证编译。
 - [ ] **Tier 3（最复杂）**：`GPUDrivenGBufferPass` —— 先迁 non-MDI 路径，再迁 MDI（`drawIndexedIndirect`/`drawIndexedIndirectCount`），最后处理 alpha test 分支
 - 每个文件：`beginRenderPass({colorTargets,…,depthTarget})`→`setPipeline`→`setArgumentTable(0/1/2,…)`→`setDynamicBuffer`/`setRootPointer`→`drawIndexed`/`drawIndexedIndirect`→`endEncoding`
 - [ ] 替换 native accessor：`getSceneDepthImage()`/`getCurrentSwapchainImageView()`→`TextureViewHandle`；`getSceneExtent()`→`rhi::Extent2D`；`getSceneDepthFormat()`→`rhi::TextureFormat`

@@ -150,13 +150,15 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
         .colorTargetCount = 0,
         .depthTarget = &depthTarget,
     };
-    context.cmd->beginRenderPass(passDesc);
-    context.cmd->setViewport(
+    rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+    enc->setViewport(
         rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-    context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+    enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, csmPipeline);
-    context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
+    enc->setPipeline(csmPipeline);
+    const BindGroupHandle materialBindGroup = m_renderer->getGraphicsMaterialBindGroup();
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                          rhi::ArgumentTableHandle{materialBindGroup.index, materialBindGroup.generation});  // bridge (Wave 8)
 
     shaderio::CameraUniforms cascadeCamera{};
     cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
@@ -184,27 +186,32 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(frameIndex);
     if(!cameraBindGroupHandle.isNull())
     {
-      const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-      context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                            rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
     }
 
     const BindGroupHandle drawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
     if(!drawBindGroupHandle.isNull())
     {
-      context.cmd->bindBindGroup(shaderio::LSetDraw, drawBindGroupHandle, nullptr, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
+                            rhi::ArgumentTableHandle{drawBindGroupHandle.index, drawBindGroupHandle.generation});  // bridge
 
-      const uint64_t vertexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedVertexBuffer);
-      const uint64_t indexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedIndexBuffer);
+      const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
+      const rhi::BufferHandle indexBufferRHI  = m_renderer->getShadowPackedIndexBufferRHIHandle();
       constexpr uint64_t vertexOffset = 0;
-      context.cmd->bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
-      context.cmd->bindIndexBuffer(indexBuffer, 0, rhi::IndexFormat::uint32);
-      context.cmd->drawIndexedIndirect(m_renderer->getShadowCullingIndirectBufferOpaque(frameIndex),
-                                       0,
-                                       sceneView->shadowPackedMeshCount,
-                                       sizeof(VkDrawIndexedIndirectCommand));
+      enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+      enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
+      enc->drawIndexedIndirect(rhi::DrawIndirectDesc{
+          .argsBuffer = m_renderer->getShadowCullingIndirectBufferRHIHandle(frameIndex),
+          .offset     = 0,
+          .drawCount  = sceneView->shadowPackedMeshCount,
+          .stride     = sizeof(VkDrawIndexedIndirectCommand),
+      });
     }
 
-    context.cmd->endRenderPass();
+    context.cmdBuffer->endEncoding();
   }
 
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{

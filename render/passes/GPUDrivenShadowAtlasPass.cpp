@@ -99,22 +99,24 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
       .clearValue = {0.0f, 0},
   };
   const rhi::Extent2D atlasExtent{atlasFullExtent.width, atlasFullExtent.height};
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, atlasExtent},
       .colorTargets = nullptr,
       .colorTargetCount = 0,
       .depthTarget = &depthTarget,
   });
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, shadowPipeline);
-  context.cmd->bindBindGroup(shaderio::LSetTextures, materialBindGroupHandle, nullptr, 0);
-  context.cmd->bindBindGroup(shaderio::LSetDraw, drawBindGroupHandle, nullptr, 0);
+  enc->setPipeline(shadowPipeline);
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                        rhi::ArgumentTableHandle{materialBindGroupHandle.index, materialBindGroupHandle.generation});  // bridge (Wave 8)
+  enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
+                        rhi::ArgumentTableHandle{drawBindGroupHandle.index, drawBindGroupHandle.generation});  // bridge
 
-  const uint64_t vertexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedVertexBuffer);
-  const uint64_t indexBuffer = reinterpret_cast<uint64_t>(sceneView->shadowPackedIndexBuffer);
+  const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
+  const rhi::BufferHandle indexBufferRHI  = m_renderer->getShadowPackedIndexBufferRHIHandle();
   constexpr uint64_t vertexOffset = 0;
-  context.cmd->bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
-  context.cmd->bindIndexBuffer(indexBuffer, 0, rhi::IndexFormat::uint32);
+  enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+  enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
@@ -123,13 +125,13 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
     const int32_t viewportX = static_cast<int32_t>(tileX * tileSize);
     const int32_t viewportY = static_cast<int32_t>(tileY * tileSize);
     const rhi::Extent2D tileExtent{tileSize, tileSize};
-    context.cmd->setViewport(rhi::Viewport{static_cast<float>(viewportX),
-                                           static_cast<float>(viewportY),
-                                           static_cast<float>(tileSize),
-                                           static_cast<float>(tileSize),
-                                           0.0f,
-                                           1.0f});
-    context.cmd->setScissor(rhi::Rect2D{{viewportX, viewportY}, tileExtent});
+    enc->setViewport(rhi::Viewport{static_cast<float>(viewportX),
+                                   static_cast<float>(viewportY),
+                                   static_cast<float>(tileSize),
+                                   static_cast<float>(tileSize),
+                                   0.0f,
+                                   1.0f});
+    enc->setScissor(rhi::Rect2D{{viewportX, viewportY}, tileExtent});
 
     const TransientAllocator::Allocation cameraAlloc =
         context.transientAllocator->allocate(sizeof(shaderio::CameraUniforms), 256);
@@ -157,17 +159,25 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
     std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
     context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
 
-    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-    context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+    enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                          rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
 
     for(uint32_t meshIndex = 0; meshIndex < sceneView->shadowPackedMeshCount; ++meshIndex)
     {
       const ShadowPackedMesh& packedMesh = sceneView->shadowPackedMeshes[meshIndex];
-      context.cmd->drawIndexed(packedMesh.indexCount, 1, packedMesh.firstIndex, packedMesh.vertexOffset, meshIndex);
+      enc->drawIndexed(rhi::DrawIndexedDesc{
+          .indexCount    = packedMesh.indexCount,
+          .instanceCount = 1,
+          .firstIndex    = packedMesh.firstIndex,
+          .vertexOffset  = packedMesh.vertexOffset,
+          .firstInstance = meshIndex,
+      });
     }
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
       .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
       .nativeImage = m_renderer->getShadowAtlasImageOpaque(),

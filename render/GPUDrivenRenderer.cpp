@@ -2004,6 +2004,36 @@ void GPUDrivenRenderer::refreshSceneView()
       m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedVertexBuffer.buffer : VK_NULL_HANDLE;
   m_sceneView.shadowPackedIndexBuffer =
       m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedIndexBuffer.buffer : VK_NULL_HANDLE;
+  // Keep stable RHI handles bound to the scene's shadow packed buffers (owned=false:
+  // the upload result owns the VMA lifetime, the registry only mirrors the native buffer).
+  {
+    rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+    const auto rebindShadowPacked = [resourceTable](rhi::BufferHandle& handle, VkBuffer buffer) {
+      if(buffer == VK_NULL_HANDLE)
+      {
+        if(!handle.isNull())
+        {
+          resourceTable->removeBuffer(handle);
+          handle = {};
+        }
+        return;
+      }
+      const uint64_t native = reinterpret_cast<uint64_t>(buffer);
+      if(handle.isNull())
+      {
+        rhi::vulkan::BufferRecord rec{};
+        rec.nativeBuffer = native;
+        rec.owned        = false;
+        handle           = resourceTable->registerBuffer(rec);
+      }
+      else
+      {
+        resourceTable->updateBuffer(handle, native);
+      }
+    };
+    rebindShadowPacked(m_shadowPackedVertexBufferRHI, m_sceneView.shadowPackedVertexBuffer);
+    rebindShadowPacked(m_shadowPackedIndexBufferRHI, m_sceneView.shadowPackedIndexBuffer);
+  }
   m_sceneView.shadowPackedMeshes =
       m_activeUploadResult != nullptr && !m_activeUploadResult->shadowPackedMeshes.empty()
           ? m_activeUploadResult->shadowPackedMeshes.data()

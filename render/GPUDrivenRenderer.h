@@ -344,6 +344,10 @@ public:
   {
     return m_meshletBuffer.getMeshletIndexBufferRHIHandle();
   }
+  // Stable RHI handles for the scene's shadow packed vertex/index buffers (rebound
+  // when the active upload result changes). Consumed by CSM / shadow-atlas passes.
+  [[nodiscard]] rhi::BufferHandle    getShadowPackedVertexBufferRHIHandle() const { return m_shadowPackedVertexBufferRHI; }
+  [[nodiscard]] rhi::BufferHandle    getShadowPackedIndexBufferRHIHandle() const { return m_shadowPackedIndexBufferRHI; }
   [[nodiscard]] VkBuffer             getMeshletDataBuffer() const
   {
     return m_meshletBuffer.getMeshletDataBuffer();
@@ -623,6 +627,10 @@ public:
   [[nodiscard]] uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getShadowCullingIndirectBufferOpaque(frameIndex);
+  }
+  [[nodiscard]] rhi::BufferHandle getShadowCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getShadowCullingIndirectBufferRHIHandle(frameIndex);
   }
   [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const
   {
@@ -955,6 +963,8 @@ private:
   HiZDepthPyramid                    m_hiZDepthPyramid;
   GPUDrivenLightResources            m_lightResources;
   GPUMeshletBuffer                   m_meshletBuffer;
+  rhi::BufferHandle                  m_shadowPackedVertexBufferRHI{};
+  rhi::BufferHandle                  m_shadowPackedIndexBufferRHI{};
   std::vector<shaderio::Meshlet>     m_meshletDataCpu;
   std::vector<uint32_t>              m_meshletIndicesCpu;
   std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
