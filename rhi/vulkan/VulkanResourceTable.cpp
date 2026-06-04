@@ -122,4 +122,134 @@ void VulkanResourceTable::unregisterBindGroup(BindGroupHandle handle)
   m_bindGroupTables.erase(packHandle(handle));
 }
 
+BufferHandle VulkanResourceTable::registerBuffer(const BufferRecord& record)
+{
+  ASSERT(record.nativeBuffer != 0, "Buffer registry entries require a valid native buffer");
+  return m_buffers.emplace(record);
+}
+
+uint64_t VulkanResourceTable::resolveBuffer(BufferHandle handle) const
+{
+  const BufferRecord* record = m_buffers.tryGet(handle);
+  return record != nullptr ? record->nativeBuffer : 0;
+}
+
+void VulkanResourceTable::updateBuffer(BufferHandle handle, uint64_t nativeBuffer, uint64_t gpuAddress)
+{
+  // Option B: per-frame / arena buffers keep a stable handle across native
+  // reallocation; only the record's native pointer (and optional address) updates.
+  BufferRecord* record = m_buffers.tryGet(handle);
+  if(record != nullptr)
+  {
+    record->nativeBuffer = nativeBuffer;
+    record->gpuAddress   = gpuAddress;
+  }
+}
+
+const BufferRecord* VulkanResourceTable::tryGetBuffer(BufferHandle handle) const
+{
+  return m_buffers.tryGet(handle);
+}
+
+BufferRecord VulkanResourceTable::removeBuffer(BufferHandle handle)
+{
+  const BufferRecord* record = m_buffers.tryGet(handle);
+  const BufferRecord  copy   = record != nullptr ? *record : BufferRecord{};
+  m_buffers.destroy(handle);
+  return copy;
+}
+
+SamplerHandle VulkanResourceTable::registerSampler(uint64_t nativeSampler)
+{
+  ASSERT(nativeSampler != 0, "Sampler registry entries require a valid native sampler");
+  return m_samplers.emplace(SamplerRecord{.nativeSampler = nativeSampler});
+}
+
+uint64_t VulkanResourceTable::resolveSampler(SamplerHandle handle) const
+{
+  const SamplerRecord* record = m_samplers.tryGet(handle);
+  return record != nullptr ? record->nativeSampler : 0;
+}
+
+SamplerRecord VulkanResourceTable::removeSampler(SamplerHandle handle)
+{
+  const SamplerRecord* record = m_samplers.tryGet(handle);
+  const SamplerRecord  copy   = record != nullptr ? *record : SamplerRecord{};
+  m_samplers.destroy(handle);
+  return copy;
+}
+
+QueryPoolHandle VulkanResourceTable::registerQueryPool(uint64_t nativePool, uint32_t count)
+{
+  ASSERT(nativePool != 0, "Query pool registry entries require a valid native pool");
+  return m_queryPools.emplace(QueryPoolRecord{.nativePool = nativePool, .count = count});
+}
+
+uint64_t VulkanResourceTable::resolveQueryPool(QueryPoolHandle handle) const
+{
+  const QueryPoolRecord* record = m_queryPools.tryGet(handle);
+  return record != nullptr ? record->nativePool : 0;
+}
+
+QueryPoolRecord VulkanResourceTable::removeQueryPool(QueryPoolHandle handle)
+{
+  const QueryPoolRecord* record = m_queryPools.tryGet(handle);
+  const QueryPoolRecord  copy   = record != nullptr ? *record : QueryPoolRecord{};
+  m_queryPools.destroy(handle);
+  return copy;
+}
+
+ArgumentLayoutHandle VulkanResourceTable::registerArgumentLayout(uint64_t nativeLayout)
+{
+  ASSERT(nativeLayout != 0, "Argument layout registry entries require a valid native layout");
+  return m_argumentLayouts.emplace(ArgumentLayoutRecord{.nativeLayout = nativeLayout});
+}
+
+uint64_t VulkanResourceTable::resolveArgumentLayout(ArgumentLayoutHandle handle) const
+{
+  const ArgumentLayoutRecord* record = m_argumentLayouts.tryGet(handle);
+  return record != nullptr ? record->nativeLayout : 0;
+}
+
+ArgumentLayoutRecord VulkanResourceTable::removeArgumentLayout(ArgumentLayoutHandle handle)
+{
+  const ArgumentLayoutRecord* record = m_argumentLayouts.tryGet(handle);
+  const ArgumentLayoutRecord  copy   = record != nullptr ? *record : ArgumentLayoutRecord{};
+  m_argumentLayouts.destroy(handle);
+  return copy;
+}
+
+ArgumentTableHandle VulkanResourceTable::registerArgumentTable(uint64_t nativeSet)
+{
+  ASSERT(nativeSet != 0, "Argument table registry entries require a valid native descriptor set");
+  return m_argumentTables.emplace(ArgumentTableRecord{.nativeSet = nativeSet});
+}
+
+uint64_t VulkanResourceTable::resolveArgumentTable(ArgumentTableHandle handle) const
+{
+  const ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
+  if(record != nullptr)
+  {
+    return record->nativeSet;
+  }
+  // Transitional bridge (removed in Wave 8): migrated passes may pass a legacy
+  // BindGroupHandle's bits as an ArgumentTableHandle; resolve via the bind-group
+  // mirror so pass migration can precede the full ArgumentTable replacement.
+  const uint64_t key = (static_cast<uint64_t>(handle.index) << 32) | static_cast<uint64_t>(handle.generation);
+  const auto     it  = m_bindGroupTables.find(key);
+  if(it != m_bindGroupTables.end() && it->second != nullptr)
+  {
+    return it->second->getNativeHandle();
+  }
+  return 0;
+}
+
+ArgumentTableRecord VulkanResourceTable::removeArgumentTable(ArgumentTableHandle handle)
+{
+  const ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
+  const ArgumentTableRecord  copy   = record != nullptr ? *record : ArgumentTableRecord{};
+  m_argumentTables.destroy(handle);
+  return copy;
+}
+
 }  // namespace demo::rhi::vulkan

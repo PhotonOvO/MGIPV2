@@ -165,9 +165,9 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       .colorTargetCount = static_cast<uint32_t>(colorTargets.size()),
       .depthTarget      = &depthTarget,
   };
-  context.cmd->beginRenderPass(passDesc);
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   if(context.drawStream != nullptr)
   {
@@ -183,7 +183,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
 
     if(!context.cameraAllocValid)
     {
-      context.cmd->endRenderPass();
+      context.cmdBuffer->endEncoding();
       context.cmd->endEvent();
       return;
     }
@@ -228,24 +228,24 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         const MeshRecord* representativeMesh = pickRepresentativeMesh();
         if(representativeMesh == nullptr)
         {
-          context.cmd->endRenderPass();
+          context.cmdBuffer->endEncoding();
           context.cmd->endEvent();
           return;
         }
 
-        const uint64_t sharedVertexHandle = representativeMesh->vertexBufferHandle;
-        const uint64_t sharedIndexHandle = m_renderer->isMeshletRenderingActive()
-                                               ? m_renderer->getMeshletIndexBufferHandle()
-                                               : representativeMesh->indexBufferHandle;
-        if(sharedIndexHandle == 0)
+        const rhi::BufferHandle vertexBufferRHI = meshPool.getSharedVertexBufferRHIHandle();
+        const rhi::BufferHandle indexBufferRHI  = m_renderer->isMeshletRenderingActive()
+                                                      ? m_renderer->getMeshletIndexBufferRHIHandle()
+                                                      : meshPool.getSharedIndexBufferRHIHandle();
+        if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
         {
-          context.cmd->endRenderPass();
+          context.cmdBuffer->endEncoding();
           context.cmd->endEvent();
           return;
         }
         const uint64_t vertexOffset = 0;
-        context.cmd->bindVertexBuffers(0, &sharedVertexHandle, &vertexOffset, 1);
-        context.cmd->bindIndexBuffer(sharedIndexHandle, 0, rhi::IndexFormat::uint32);
+        enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+        enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
         TRACY_ZONE_SCOPED("GPUDrivenGBufferPass::drawLoopMDI");
         const uint64_t opaqueCommandOffset = sortedIndirectBufferHandle != 0
@@ -259,33 +259,49 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         const uint32_t opaqueMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedOpaqueCapacity : currentIndirectObjectCount;
         const uint32_t alphaMaxDrawCount = sortedIndirectBufferHandle != 0 ? sortedAlphaCapacity : currentIndirectObjectCount;
 
-        context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getGBufferOpaqueMDIPipelineHandle());
-        context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
+        // args = sorted persistent stream (when bootstrapped) else culling output; count is the culling draw-count buffer.
+        const rhi::BufferHandle indirectBufferRHI =
+            sortedIndirectBufferHandle != 0
+                ? m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex)
+                : m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex);
+        const rhi::BufferHandle countBufferRHI = m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex);
+
+        enc->setPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle());
+        const BindGroupHandle materialBindGroup = m_renderer->getGraphicsMaterialBindGroup();
+        enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                              rhi::ArgumentTableHandle{materialBindGroup.index, materialBindGroup.generation});  // bridge (Wave 8)
         if(!cameraBindGroupHandle.isNull())
         {
-          const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-          context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
+          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
+          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+          enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                                rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
         }
-        context.cmd->bindBindGroup(shaderio::LSetDraw, mdiDrawBindGroupHandle, nullptr, 0);
-        context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
-                                              opaqueCommandOffset,
-                                              countBufferHandle,
-                                              opaqueCountOffset,
-                                              opaqueMaxDrawCount,
-                                              indirectCommandStride);
+        enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
+                              rhi::ArgumentTableHandle{mdiDrawBindGroupHandle.index, mdiDrawBindGroupHandle.generation});  // bridge
+        enc->drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
+            .argsBuffer        = indirectBufferRHI,
+            .argsOffset        = opaqueCommandOffset,
+            .countBuffer       = countBufferRHI,
+            .countBufferOffset = opaqueCountOffset,
+            .maxDrawCount      = opaqueMaxDrawCount,
+            .stride            = indirectCommandStride,
+        });
 
-        context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, m_renderer->getGBufferAlphaTestMDIPipelineHandle());
-        context.cmd->drawIndexedIndirectCount(indirectBufferHandle,
-                                              alphaCommandOffset,
-                                              countBufferHandle,
-                                              alphaCountOffset,
-                                              alphaMaxDrawCount,
-                                              indirectCommandStride);
+        enc->setPipeline(m_renderer->getGBufferAlphaTestMDIPipelineHandle());
+        enc->drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
+            .argsBuffer        = indirectBufferRHI,
+            .argsOffset        = alphaCommandOffset,
+            .countBuffer       = countBufferRHI,
+            .countBufferOffset = alphaCountOffset,
+            .maxDrawCount      = alphaMaxDrawCount,
+            .stride            = indirectCommandStride,
+        });
       }
     }
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
 
   const std::array<std::pair<TextureHandle, VkImage>, kPackedGBufferTargetCount> colorImages{{
       {kPassGBuffer0Handle, sceneView->gbufferImages[0]},

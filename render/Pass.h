@@ -4,6 +4,7 @@
 #include "DrawStream.h"
 #include "TransientAllocator.h"
 #include "../rhi/RHICommandList.h"
+#include "../rhi/RHICommandBuffer.h"
 
 #include <cstdint>
 #include <vector>
@@ -32,6 +33,9 @@ struct PassContext
   // Shared camera uniform allocation (set once per frame by RenderDevice)
   TransientAllocator::Allocation cameraAlloc{};
   bool cameraAllocValid{false};
+  // NEW (Wave 3+): one-shot recording facade over the same per-frame VkCommandBuffer as `cmd`.
+  // Migrated passes record through this; un-migrated passes keep using `cmd`.
+  rhi::CommandBuffer* cmdBuffer{nullptr};
 };
 
 enum class ResourceAccess : uint8_t

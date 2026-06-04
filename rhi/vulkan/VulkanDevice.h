@@ -54,6 +54,26 @@ public:
   void          destroyImage(TextureHandle handle) override;
   uint64_t      resolveImageNative(TextureHandle handle) const override;
 
+  // --- Modern GPU interface (Wave 1: buffers / samplers / query pools) ---
+  BufferHandle createBuffer(const BufferDesc& desc) override;
+  void         destroyBuffer(BufferHandle handle) override;
+  GpuPtr       getBufferGpuAddress(BufferHandle handle) const override;
+  void*        mapBuffer(BufferHandle handle) override;
+  void         unmapBuffer(BufferHandle handle) override;
+
+  SamplerHandle createSampler(const SamplerDesc& desc) override;
+  void          destroySampler(SamplerHandle handle) override;
+
+  QueryPoolHandle createQueryPool(uint32_t queryCount) override;
+  void            destroyQueryPool(QueryPoolHandle handle) override;
+  uint64_t        getQueryPoolResult(QueryPoolHandle handle, uint32_t queryIndex) override;
+
+  ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc& desc) override;
+  void                 destroyArgumentLayout(ArgumentLayoutHandle handle) override;
+  ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle layout) override;
+  void                 destroyArgumentTable(ArgumentTableHandle handle) override;
+  void                 updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes) override;
+
   // The render layer owns the resource table and injects it here so the device can
   // back its texture-view handles. Must be called before any createTextureView call.
   void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
@@ -143,6 +163,7 @@ private:
 
   VulkanResourceTable* m_resourceTable{nullptr};
   VmaAllocator         m_allocator{nullptr};
+  VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // lazily created for argument tables
 };
 
 }  // namespace demo::rhi::vulkan

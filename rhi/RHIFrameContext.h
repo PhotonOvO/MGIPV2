@@ -1,10 +1,12 @@
 #pragma once
 
+#include "RHICommandBuffer.h"
 #include "RHICommandList.h"
 #include "RHIResourceLifetime.h"
 #include "RHISwapchain.h"
 #include "RHISynchronization.h"
 
+#include <cassert>
 #include <cstdint>
 
 namespace demo {
@@ -47,6 +49,10 @@ public:
 
   virtual DeferredDestructionQueue&       getDestructionQueue()       = 0;
   virtual const DeferredDestructionQueue& getDestructionQueue() const = 0;
+
+  // One-shot recording facade for the current frame's native command buffer
+  // (Wave 0 contract). Default asserts; Vulkan implements it in Wave 1.
+  virtual CommandBuffer* getCommandBuffer() { assert(false && "getCommandBuffer not implemented"); return nullptr; }
 };
 
 }  // namespace rhi

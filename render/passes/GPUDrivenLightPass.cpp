@@ -83,14 +83,14 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   };
-  context.cmd->beginRenderPass(passDesc);
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   const PipelineHandle lightPipeline = m_renderer->getGPUDrivenLightHdrPipelineHandle();
   if(lightPipeline.isNull())
   {
-    context.cmd->endRenderPass();
+    context.cmdBuffer->endEncoding();
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
         .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
@@ -107,13 +107,14 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, lightPipeline);
-  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex),
-                             nullptr, 0);
+  enc->setPipeline(lightPipeline);
+  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                        rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
 
   if(!context.cameraAllocValid)
   {
-    context.cmd->endRenderPass();
+    context.cmdBuffer->endEncoding();
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
         .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
@@ -137,13 +138,14 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
   if(!sceneBindGroup.isNull())
   {
-    const std::array<uint32_t, 2> dynamicOffsets{cameraAlloc.offset, 0u};
-    context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
-                               static_cast<uint32_t>(dynamicOffsets.size()));
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+    enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                          rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
   }
 
-  context.cmd->draw(3, 1, 0, 0);
-  context.cmd->endRenderPass();
+  enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
+  context.cmdBuffer->endEncoding();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
       .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
       .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),

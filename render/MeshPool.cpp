@@ -2,6 +2,7 @@
 #include "BatchUploadContext.h"
 #include "../loader/GltfLoader.h"
 #include "../scene/SceneAsset.h"
+#include "../rhi/vulkan/VulkanResourceTable.h"
 
 #include <array>
 #include <cstring>
@@ -105,9 +106,11 @@ void updateLocalBoundsFromInterleavedVertices(MeshRecord& record, std::span<cons
 
 }  // namespace
 
-void MeshPool::init(VkDevice device, VmaAllocator allocator, upload::StaticBufferUploadPolicy staticUploadPolicy) {
+void MeshPool::init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable,
+                    upload::StaticBufferUploadPolicy staticUploadPolicy) {
     m_device = device;
     m_allocator = allocator;
+    m_resourceTable = resourceTable;
     m_staticUploadPolicy = staticUploadPolicy;
 }
 
@@ -181,6 +184,29 @@ void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
                 record.setNativeIndexBuffer(newBuffer.buffer);
             }
         });
+
+        // Keep the stable RHI handle bound to the rebuilt arena (Option B: handle is
+        // allocated once, its native buffer is rebound on each realloc). owned=false:
+        // MeshPool owns the VMA lifetime, the registry only mirrors the native buffer.
+        if(m_resourceTable != nullptr)
+        {
+            const uint64_t native = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(newBuffer.buffer));
+            const auto     bind   = [&](rhi::BufferHandle& rhiHandle) {
+                if(rhiHandle.isNull())
+                {
+                    rhi::vulkan::BufferRecord rec{};
+                    rec.nativeBuffer = native;
+                    rec.owned        = false;
+                    rhiHandle        = m_resourceTable->registerBuffer(rec);
+                }
+                else
+                {
+                    m_resourceTable->updateBuffer(rhiHandle, native);
+                }
+            };
+            if(replacingVertexArena) bind(m_sharedVertexBufferRHI);
+            if(replacingIndexArena)  bind(m_sharedIndexBufferRHI);
+        }
     }
 }
 
@@ -466,6 +492,14 @@ void MeshPool::resetSharedBuffers()
     }
     m_sharedVertexBuffer = {};
     m_sharedIndexBuffer = {};
+
+    if(m_resourceTable != nullptr)
+    {
+        if(!m_sharedVertexBufferRHI.isNull()) m_resourceTable->removeBuffer(m_sharedVertexBufferRHI);
+        if(!m_sharedIndexBufferRHI.isNull())  m_resourceTable->removeBuffer(m_sharedIndexBufferRHI);
+    }
+    m_sharedVertexBufferRHI = {};
+    m_sharedIndexBufferRHI = {};
 }
 
 void MeshPool::freeStagingBuffers() {

@@ -1,7 +1,6 @@
 #include "GPUDrivenCullingPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -28,12 +27,13 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenCullingPass::getDependenc
 
 void GPUDrivenCullingPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenCulling");
+  rhi::CommandBuffer* cmdBuffer = context.cmdBuffer;
+  cmdBuffer->beginEvent("GPUDrivenCulling");
 
   const RenderParams& params = *context.params;
   const uint32_t safeObjectCount = m_renderer->getSafePersistentObjectCount();
@@ -42,8 +42,7 @@ void GPUDrivenCullingPass::execute(const PassContext& context) const
                                             && params.gpuDrivenSceneView->gpuCullObjectBuffer != VK_NULL_HANDLE
                                             && safeObjectCount > 0u;
 
-  if(params.cameraUniforms != nullptr && !m_renderer->getGPUCullingPipelineHandle().isNull()
-     && m_renderer->getGPUCullingPipelineLayout() != 0)
+  if(params.cameraUniforms != nullptr && !m_renderer->getGPUCullingPipelineHandle().isNull())
   {
     const uint32_t currentFrameIndex = context.frameIndex;
     const uint32_t objectCount =
@@ -55,26 +54,24 @@ void GPUDrivenCullingPass::execute(const PassContext& context) const
     const uint64_t drawCountBuffer = m_renderer->getGPUCullingDrawCountBufferOpaque(currentFrameIndex);
     if(objectCount != 0u && !bindGroup.isNull() && indirectBuffer != 0 && drawCountBuffer != 0)
     {
-      context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, m_renderer->getGPUCullingPipelineHandle());
-      context.cmd->bindBindGroup(0, bindGroup, nullptr, 0);
-      context.cmd->dispatch((objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount, 1u, 1u);
+      rhi::ComputeEncoder* enc = cmdBuffer->beginComputePass();
+      enc->setPipeline(m_renderer->getGPUCullingPipelineHandle());
+      // Transitional: pass the legacy bind group's bits as an ArgumentTableHandle (resolved
+      // via the bind-group bridge in VulkanResourceTable; replaced by real ArgumentTable in Wave 8).
+      enc->setArgumentTable(0, rhi::ArgumentTableHandle{bindGroup.index, bindGroup.generation});
+      enc->dispatch(rhi::DispatchDesc{
+          .groupCountX = (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount,
+          .groupCountY = 1u,
+          .groupCountZ = 1u});
+      cmdBuffer->endEncoding();
 
       // Culling output (indirect args + draw count) is consumed by drawIndexedIndirectCount.
-      const auto barrierToIndirect = [&](uint64_t buffer) {
-        context.cmd->transitionBuffer(rhi::BufferBarrierDesc{
-            .nativeBuffer = buffer,
-            .srcStage     = rhi::PipelineStage::Compute,
-            .dstStage     = rhi::PipelineStage::DrawIndirect,
-            .srcAccess    = rhi::ResourceAccess::write,
-            .dstAccess    = rhi::ResourceAccess::read,
-        });
-      };
-      barrierToIndirect(indirectBuffer);
-      barrierToIndirect(drawCountBuffer);
+      cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
+                         rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
     }
   }
 
-  context.cmd->endEvent();
+  cmdBuffer->endEvent();
 }
 
 }  // namespace demo

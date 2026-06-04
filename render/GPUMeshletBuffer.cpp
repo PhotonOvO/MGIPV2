@@ -1,5 +1,7 @@
 #include "GPUMeshletBuffer.h"
 
+#include "../rhi/vulkan/VulkanResourceTable.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
@@ -44,10 +46,11 @@ utils::Buffer createBuffer(VkDevice device,
 
 }  // namespace
 
-void GPUMeshletBuffer::init(VkDevice device, VmaAllocator allocator)
+void GPUMeshletBuffer::init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable)
 {
   m_device = device;
   m_allocator = allocator;
+  m_resourceTable = resourceTable;
 }
 
 void GPUMeshletBuffer::deinit()
@@ -55,6 +58,11 @@ void GPUMeshletBuffer::deinit()
   destroyBuffer(m_meshletDataBuffer);
   destroyBuffer(m_meshletCullObjectBuffer);
   destroyBuffer(m_meshletIndexBuffer);
+  if(m_resourceTable != nullptr && !m_meshletIndexBufferRHI.isNull())
+  {
+    m_resourceTable->removeBuffer(m_meshletIndexBufferRHI);
+  }
+  m_meshletIndexBufferRHI = {};
   m_meshletCount = 0;
   m_meshletIndexCount = 0;
   m_meshletCapacity = 0;
@@ -178,6 +186,24 @@ void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t 
                                         VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
                                         VMA_MEMORY_USAGE_CPU_TO_GPU,
                                         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+
+    // Rebind the stable RHI handle to the reallocated index buffer (owned=false:
+    // GPUMeshletBuffer owns the VMA lifetime).
+    if(m_resourceTable != nullptr)
+    {
+      const uint64_t native = reinterpret_cast<uint64_t>(m_meshletIndexBuffer.buffer);
+      if(m_meshletIndexBufferRHI.isNull())
+      {
+        rhi::vulkan::BufferRecord rec{};
+        rec.nativeBuffer = native;
+        rec.owned        = false;
+        m_meshletIndexBufferRHI = m_resourceTable->registerBuffer(rec);
+      }
+      else
+      {
+        m_resourceTable->updateBuffer(m_meshletIndexBufferRHI, native);
+      }
+    }
   }
 }
 

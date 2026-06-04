@@ -891,7 +891,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 
   m_device.samplerPool.init(nativeDevice);
 
-  m_meshPool.init(nativeDevice, m_device.allocator, m_device.staticBufferUploadPolicy);
+  m_meshPool.init(nativeDevice, m_device.allocator, &m_device.resourceTable, m_device.staticBufferUploadPolicy);
 
   const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
   ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
@@ -1941,6 +1941,8 @@ void RenderDevice::createFrameSubmission(uint32_t numFrames)
   m_perFrame.frameContext = std::make_unique<rhi::vulkan::VulkanFrameContext>();
   m_perFrame.frameContext->init(static_cast<void*>(device), graphicsQueueInfo.familyIndex, numFrames);
   m_perFrame.frameContext->setSwapchain(m_swapchainDependent.swapchain.get());
+  // Inject the resource table so the new CommandBuffer facade (getCommandBuffer) can resolve RHI handles.
+  static_cast<rhi::vulkan::VulkanFrameContext&>(*m_perFrame.frameContext).setResourceTable(&m_device.resourceTable);
 
   m_perFrame.frameUserData.resize(numFrames);
   for(auto& frameUserData : m_perFrame.frameUserData)
@@ -2608,6 +2610,9 @@ void RenderDevice::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& fra
   frameUserData.gpuCullingMeshCapacity = requiredCapacity;
   frameUserData.gpuCullingResults.resize(requiredCapacity, shaderio::LGPUCullResultVisible);
   frameUserData.gpuCullingScratchObjects.resize(requiredCapacity);
+
+  rebindFrameBufferHandle(frameUserData.gpuCullingIndirectBufferRHI, frameUserData.gpuCullingIndirectBuffer);
+  rebindFrameBufferHandle(frameUserData.gpuCullingDrawCountBufferRHI, frameUserData.gpuCullingDrawCountBuffer);
 }
 
 void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
@@ -2756,6 +2761,7 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
   frameUserData.shadowCullingMeshCapacity = requiredCapacity;
   frameUserData.shadowCullingScratchObjects.resize(requiredCapacity);
   frameUserData.shadowCullingScratchDrawData.resize(requiredCapacity);
+  rebindFrameBufferHandle(frameUserData.shadowCullingIndirectBufferRHI, frameUserData.shadowCullingIndirectBuffer);
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
   updateShadowCullingDescriptorSet(frameIndex);
   updateShadowCullingDrawDataDescriptorSet(frameIndex);
@@ -2957,6 +2963,8 @@ void RenderDevice::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResourc
                    VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
                    VMA_MEMORY_USAGE_GPU_ONLY);
   frameUserData.gpuDrivenPersistentIndirectStreamCapacity = requiredCapacity;
+  rebindFrameBufferHandle(frameUserData.gpuDrivenPersistentIndirectStreamBufferRHI,
+                          frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
 }
 
 void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
@@ -4465,7 +4473,7 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
 
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
-      getCurrentMaterialBindGroupHandle(), cameraAlloc, true};
+      getCurrentMaterialBindGroupHandle(), cameraAlloc, true, m_perFrame.frameContext->getCommandBuffer()};
   resetPassGpuProfileQueries(cmd, currentFrameIndex);
 
 #ifdef TRACY_ENABLE
@@ -9513,6 +9521,79 @@ uint64_t RenderDevice::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frame
     return 0;
   }
   return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer.buffer);
+}
+
+void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer)
+{
+  if(buffer.buffer == VK_NULL_HANDLE)
+  {
+    if(!handle.isNull())
+    {
+      m_device.resourceTable.removeBuffer(handle);
+      handle = {};
+    }
+    return;
+  }
+  const uint64_t native = reinterpret_cast<uint64_t>(buffer.buffer);
+  if(handle.isNull())
+  {
+    rhi::vulkan::BufferRecord rec{};
+    rec.nativeBuffer = native;
+    rec.owned        = false;  // FrameUserData owns the VMA lifetime; registry mirrors only.
+    handle = m_device.resourceTable.registerBuffer(rec);
+  }
+  else
+  {
+    m_device.resourceTable.updateBuffer(handle, native);
+  }
+}
+
+rhi::BufferHandle RenderDevice::getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size()) return {};
+  return m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size()) return {};
+  return m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t currentFrameIndex) const
+{
+  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1) return {};
+  const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
+  return m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getPreviousGPUCullingDrawCountBufferRHIHandle(uint32_t currentFrameIndex) const
+{
+  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1) return {};
+  const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
+  return m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size()) return {};
+  return m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t currentFrameIndex) const
+{
+  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
+  if(frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1) return {};
+  const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
+  return m_perFrame.frameUserData[previousFrameIndex].gpuDrivenPersistentIndirectStreamBufferRHI;
+}
+
+rhi::BufferHandle RenderDevice::getShadowCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size()) return {};
+  return m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBufferRHI;
 }
 
 uint32_t RenderDevice::getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex, const GltfUploadResult* gltfModel) const

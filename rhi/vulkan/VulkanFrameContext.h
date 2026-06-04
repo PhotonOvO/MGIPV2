@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../RHIFrameContext.h"
+#include "VulkanCommandBuffer.h"
 #include "VulkanCommandPool.h"
 #include "VulkanSynchronization.h"
 
@@ -50,6 +51,12 @@ public:
   DeferredDestructionQueue&       getDestructionQueue() override;
   const DeferredDestructionQueue& getDestructionQueue() const override;
 
+  CommandBuffer* getCommandBuffer() override;
+
+  // Injected by the render layer so the one-shot CommandBuffer facade can
+  // resolve RHI handles to native objects during recording.
+  void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
+
   VkSemaphore     nativeTimelineSemaphore() const;
   VkCommandBuffer nativeCommandBuffer(uint32_t frameIndex) const;
 
@@ -71,6 +78,8 @@ private:
   std::vector<FrameData>                   m_frameData;
   Swapchain*                               m_swapchain{nullptr};
   InlineDeferredDestructionQueue           m_deferredDestructionQueue;
+  VulkanResourceTable*                     m_resourceTable{nullptr};
+  VulkanCommandBuffer                      m_commandBufferFacade;
   uint32_t                                 m_currentFrameIndex{0};
   uint64_t                                 m_frameCounter{0};
 };

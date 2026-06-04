@@ -260,6 +260,13 @@ const DeferredDestructionQueue& VulkanFrameContext::getDestructionQueue() const
   return m_deferredDestructionQueue;
 }
 
+CommandBuffer* VulkanFrameContext::getCommandBuffer()
+{
+  const VkCommandBuffer commandBuffer = nativeCommandBuffer(m_currentFrameIndex);
+  m_commandBufferFacade.setTarget(commandBuffer, m_resourceTable);
+  return &m_commandBufferFacade;
+}
+
 VkSemaphore VulkanFrameContext::nativeTimelineSemaphore() const
 {
   if(m_timelineSemaphore == nullptr)

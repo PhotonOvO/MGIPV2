@@ -65,14 +65,14 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 0.0f},
   };
   const rhi::Extent2D rhiExtent{extent.width, extent.height};
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, rhiExtent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, rhiExtent});
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, rhiExtent});
 
   const PipelineHandle pipelineHandle = m_renderer->getVelocityPipelineHandle();
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
@@ -82,15 +82,18 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
   if(!pipelineHandle.isNull() && !inputBindGroup.isNull() && !sceneBindGroup.isNull())
   {
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, pipelineHandle);
-    context.cmd->bindBindGroup(shaderio::LSetTextures, inputBindGroup, nullptr, 0);
-    const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, 0u};
-    context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
-                               static_cast<uint32_t>(dynamicOffsets.size()));
-    context.cmd->draw(3, 1, 0, 0);
+    enc->setPipeline(pipelineHandle);
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                          rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
+    // LSetScene carries 2 dynamic UBOs (camera + scene); offsets flush in this order.
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+    enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                          rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+    enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
       .texture = rhi::TextureHandle{kPassVelocityHandle.index, kPassVelocityHandle.generation},
       .nativeImage = reinterpret_cast<uint64_t>(sceneView->velocityImage),

@@ -79,19 +79,19 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
   });
 
   const rhi::Extent2D extent{outputExtent.width, outputExtent.height};
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   const PipelineHandle pipelineHandle = m_renderer->getFinalColorPipelineHandle();
   if(pipelineHandle.isNull())
   {
-    context.cmd->endRenderPass();
+    context.cmdBuffer->endEncoding();
     restoreOutputState();
     context.cmd->endEvent();
     return;
@@ -99,8 +99,9 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
   const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
   if(!pipelineHandle.isNull() && !inputBindGroup.isNull())
   {
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, pipelineHandle);
-    context.cmd->bindBindGroup(shaderio::LSetTextures, inputBindGroup, nullptr, 0);
+    enc->setPipeline(pipelineHandle);
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                          rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
 
     const float exposure = context.params->debugOptions.enablePostProcessing
                                ? std::max(context.params->debugOptions.postExposure, 0.01f)
@@ -161,14 +162,15 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
     const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
     if(!sceneBindGroup.isNull())
     {
-      const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, postProcessAlloc.offset};
-      context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
-                                 static_cast<uint32_t>(dynamicOffsets.size()));
-      context.cmd->draw(3, 1, 0, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, postProcessAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                            rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+      enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
     }
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
   restoreOutputState();
   context.cmd->endEvent();
 }

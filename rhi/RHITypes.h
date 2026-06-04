@@ -462,4 +462,164 @@ struct TimelinePoint
   uint64_t value{0};
 };
 
+// ---------------------------------------------------------------------------
+// Modern GPU interface additions (Wave 0). Semantic usage flags (NOT
+// bit-transparent to any backend), GpuPtr (typed buffer device address),
+// buffer/sampler descs, and the render-pass descs relocated from
+// RHICommandList.h so the new Encoder/CommandBuffer headers do not depend on
+// the (to-be-removed) CommandList header.
+// ---------------------------------------------------------------------------
+
+// Typed wrapper over a buffer GPU address. Only represents addressable buffer
+// memory; textures/samplers use view handles / descriptor indices, never GpuPtr.
+struct GpuPtr
+{
+  uint64_t value{0};
+
+  [[nodiscard]] constexpr bool isValid() const noexcept { return value != 0; }
+};
+
+enum class MemoryUsage : uint8_t
+{
+  gpuOnly = 0,
+  cpuToGpu,
+  gpuToCpu,
+  transientAttachment,
+};
+
+enum class BufferUsageFlags : uint32_t
+{
+  none                = 0,
+  vertex              = 1u << 0u,
+  index               = 1u << 1u,
+  uniform             = 1u << 2u,
+  storage             = 1u << 3u,
+  indirect            = 1u << 4u,
+  transferSrc         = 1u << 5u,
+  transferDst         = 1u << 6u,
+  shaderDeviceAddress = 1u << 7u,
+};
+
+constexpr BufferUsageFlags operator|(BufferUsageFlags a, BufferUsageFlags b)
+{
+  return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+constexpr BufferUsageFlags operator&(BufferUsageFlags a, BufferUsageFlags b)
+{
+  return static_cast<BufferUsageFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+enum class TextureUsageFlags : uint32_t
+{
+  none            = 0,
+  sampled         = 1u << 0u,
+  storage         = 1u << 1u,
+  colorAttachment = 1u << 2u,
+  depthAttachment = 1u << 3u,
+  transferSrc     = 1u << 4u,
+  transferDst     = 1u << 5u,
+  inputAttachment = 1u << 6u,
+};
+
+constexpr TextureUsageFlags operator|(TextureUsageFlags a, TextureUsageFlags b)
+{
+  return static_cast<TextureUsageFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+constexpr TextureUsageFlags operator&(TextureUsageFlags a, TextureUsageFlags b)
+{
+  return static_cast<TextureUsageFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+struct BufferDesc
+{
+  uint64_t         size{0};
+  BufferUsageFlags usage{BufferUsageFlags::none};
+  MemoryUsage      memoryUsage{MemoryUsage::gpuOnly};
+  bool             allowGpuAddress{false};
+  bool             allowIndirectArgument{false};
+  bool             allowArgumentTableBinding{false};
+  const char*      debugName{nullptr};
+};
+
+enum class Filter : uint8_t
+{
+  nearest = 0,
+  linear,
+};
+
+enum class MipmapMode : uint8_t
+{
+  nearest = 0,
+  linear,
+};
+
+enum class AddressMode : uint8_t
+{
+  repeat = 0,
+  clampToEdge,
+  clampToBorder,
+  mirroredRepeat,
+};
+
+struct SamplerDesc
+{
+  Filter      magFilter{Filter::linear};
+  Filter      minFilter{Filter::linear};
+  MipmapMode  mipmapMode{MipmapMode::linear};
+  AddressMode addressModeU{AddressMode::repeat};
+  AddressMode addressModeV{AddressMode::repeat};
+  AddressMode addressModeW{AddressMode::repeat};
+  float       mipLodBias{0.0f};
+  bool        anisotropyEnable{false};
+  float       maxAnisotropy{1.0f};
+  bool        compareEnable{false};
+  CompareOp   compareOp{CompareOp::never};
+  float       minLod{0.0f};
+  float       maxLod{1000.0f};
+  const char* debugName{nullptr};
+};
+
+// --- Render-pass descs (relocated from RHICommandList.h) ---
+
+struct RenderTargetDesc
+{
+  TextureHandle     texture{};
+  TextureViewHandle view{};  // Texture view for rendering
+  ResourceState     state{ResourceState::general};
+  LoadOp            loadOp{LoadOp::load};
+  StoreOp           storeOp{StoreOp::store};
+  ClearColorValue   clearColor{};
+};
+
+struct DepthTargetDesc
+{
+  TextureHandle          texture{};
+  TextureViewHandle      view{};  // Texture view for rendering
+  ResourceState          state{ResourceState::general};
+  LoadOp                 loadOp{LoadOp::load};
+  StoreOp                storeOp{StoreOp::store};
+  ClearDepthStencilValue clearValue{};
+};
+
+// Reserved for tile-resident deferred (input attachment / local read). The
+// Vulkan backend maps this to VK_KHR_dynamic_rendering_local_read when
+// available and falls back to separate-pass sampling otherwise.
+struct InputAttachmentDesc
+{
+  TextureViewHandle view{};
+  ResourceState     state{ResourceState::ShaderRead};
+};
+
+struct RenderPassDesc
+{
+  Rect2D                  renderArea{};
+  const RenderTargetDesc* colorTargets{nullptr};
+  uint32_t                colorTargetCount{0};
+  const DepthTargetDesc*  depthTarget{nullptr};
+  // --- reserved: tile-resident deferred (see InputAttachmentDesc) ---
+  const InputAttachmentDesc* inputAttachments{nullptr};
+  uint32_t                   inputAttachmentCount{0};
+  bool                       enableLocalRead{false};
+};
+
 }  // namespace demo::rhi

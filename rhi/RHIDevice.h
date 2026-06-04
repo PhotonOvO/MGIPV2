@@ -1,10 +1,12 @@
 #pragma once
 
+#include "RHIArgumentTable.h"
 #include "RHICapabilities.h"
 #include "RHIHandles.h"
 #include "RHIQueue.h"
 #include "RHITypes.h"
 
+#include <cassert>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -113,6 +115,34 @@ public:
   virtual TextureHandle registerExternalTexture(uint64_t nativeImage)           = 0;
   virtual void          destroyImage(TextureHandle handle)                      = 0;
   virtual uint64_t      resolveImageNative(TextureHandle handle) const          = 0;
+
+  // ----- Modern GPU interface (Wave 0 contract) ----------------------------
+  // Default bodies assert: backends opt in by overriding. Vulkan implements
+  // these in Wave 1; D3D12/Metal stay asserting stubs until later milestones.
+  // destroy* must route through FrameContext's deferred-destruction queue.
+
+  // --- Buffer (wraps the existing device-address path) ---
+  virtual BufferHandle createBuffer(const BufferDesc&) { assert(false && "createBuffer not implemented"); return {}; }
+  virtual void         destroyBuffer(BufferHandle) { assert(false && "destroyBuffer not implemented"); }
+  virtual GpuPtr       getBufferGpuAddress(BufferHandle) const { assert(false && "getBufferGpuAddress not implemented"); return {}; }
+  virtual void*        mapBuffer(BufferHandle) { assert(false && "mapBuffer not implemented"); return nullptr; }
+  virtual void         unmapBuffer(BufferHandle) { assert(false && "unmapBuffer not implemented"); }
+
+  // --- Sampler ---
+  virtual SamplerHandle createSampler(const SamplerDesc&) { assert(false && "createSampler not implemented"); return {}; }
+  virtual void          destroySampler(SamplerHandle) { assert(false && "destroySampler not implemented"); }
+
+  // --- Argument layout / table ---
+  virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc&) { assert(false && "createArgumentLayout not implemented"); return {}; }
+  virtual void                 destroyArgumentLayout(ArgumentLayoutHandle) { assert(false && "destroyArgumentLayout not implemented"); }
+  virtual ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle) { assert(false && "createArgumentTable not implemented"); return {}; }
+  virtual void                 destroyArgumentTable(ArgumentTableHandle) { assert(false && "destroyArgumentTable not implemented"); }
+  virtual void                 updateArgumentTable(ArgumentTableHandle, uint32_t /*writeCount*/, const ArgumentWrite*) { assert(false && "updateArgumentTable not implemented"); }
+
+  // --- Query pool ---
+  virtual QueryPoolHandle createQueryPool(uint32_t /*queryCount*/) { assert(false && "createQueryPool not implemented"); return {}; }
+  virtual void            destroyQueryPool(QueryPoolHandle) { assert(false && "destroyQueryPool not implemented"); }
+  virtual uint64_t        getQueryPoolResult(QueryPoolHandle, uint32_t /*queryIndex*/) { assert(false && "getQueryPoolResult not implemented"); return 0; }
 };
 
 }  // namespace demo::rhi

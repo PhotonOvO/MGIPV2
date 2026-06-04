@@ -93,6 +93,7 @@ public:
 
   MeshPool& getMeshPool() { return m_meshPool; }
   const MeshPool& getMeshPool() const { return m_meshPool; }
+  rhi::vulkan::VulkanResourceTable* getResourceTable() { return &m_device.resourceTable; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
   void            bindStaticPassResources(PassExecutor& passExecutor) const;
   void      waitForIdle();
@@ -150,6 +151,16 @@ public:
   [[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const;
   [[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const;
   [[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const;
+  // RHI handle variants of the per-frame culling buffers (Option B). Consumed by
+  // RenderEncoder-based geometry passes; previous-frame variants index the same
+  // stable handle ring at (frameIndex + frameCount - 1) % frameCount.
+  [[nodiscard]] rhi::BufferHandle getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t currentFrameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUCullingDrawCountBufferRHIHandle(uint32_t currentFrameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t currentFrameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getShadowCullingIndirectBufferRHIHandle(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t currentFrameIndex,
                                                           const SceneUploadResult* gltfModel) const;
   [[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
@@ -568,6 +579,13 @@ private:
       utils::Buffer      gbufferMdiDrawDataBuffer{};
       utils::Buffer      depthMdiDrawDataBuffer{};
       utils::Buffer      gpuDrivenPersistentIndirectStreamBuffer{};
+      // Stable RHI handles mirroring the per-frame native buffers above (Option B:
+      // allocated once, rebound to the native buffer on each realloc). Consumed by
+      // RenderEncoder-based passes via getXxxBufferRHIHandle().
+      rhi::BufferHandle  gpuCullingIndirectBufferRHI{};
+      rhi::BufferHandle  gpuCullingDrawCountBufferRHI{};
+      rhi::BufferHandle  shadowCullingIndirectBufferRHI{};
+      rhi::BufferHandle  gpuDrivenPersistentIndirectStreamBufferRHI{};
       uint32_t           shadowCullingMeshCapacity{0};
       uint32_t           mdiDrawCapacity{0};
       uint32_t           gbufferMdiDrawCapacity{0};
@@ -785,6 +803,9 @@ private:
   void                 createGPUCullingPipeline();
   void                 waitForAllFrameSlots();
   void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
+  // Registers (first call) or rebinds (subsequent) a stable RHI BufferHandle to a
+  // per-frame native buffer; clears the handle when the buffer is null.
+  void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 createShadowCullingResources();
   void                 updateShadowCullingDescriptorSet(uint32_t frameIndex);

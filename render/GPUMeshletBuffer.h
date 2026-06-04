@@ -1,15 +1,20 @@
 #pragma once
 
 #include "../common/Common.h"
+#include "../common/Handles.h"
 
 #include <vector>
+
+namespace demo::rhi::vulkan {
+class VulkanResourceTable;
+}
 
 namespace demo {
 
 class GPUMeshletBuffer
 {
 public:
-  void init(VkDevice device, VmaAllocator allocator);
+  void init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable);
   void deinit();
   void clear();
 
@@ -26,6 +31,9 @@ public:
   {
     return reinterpret_cast<uint64_t>(m_meshletIndexBuffer.buffer);
   }
+  // Stable RHI handle for the meshlet index buffer (rebound across realloc via
+  // VulkanResourceTable::updateBuffer). Consumed by RenderEncoder-based passes.
+  [[nodiscard]] rhi::BufferHandle getMeshletIndexBufferRHIHandle() const { return m_meshletIndexBufferRHI; }
   [[nodiscard]] uint32_t getMeshletCount() const { return m_meshletCount; }
   [[nodiscard]] uint32_t getMeshletIndexCount() const { return m_meshletIndexCount; }
 
@@ -35,6 +43,8 @@ private:
 
   VkDevice      m_device{VK_NULL_HANDLE};
   VmaAllocator  m_allocator{nullptr};
+  rhi::vulkan::VulkanResourceTable* m_resourceTable{nullptr};
+  rhi::BufferHandle m_meshletIndexBufferRHI{};
   utils::Buffer m_meshletDataBuffer{};
   utils::Buffer m_meshletCullObjectBuffer{};
   utils::Buffer m_meshletIndexBuffer{};

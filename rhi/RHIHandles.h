@@ -31,6 +31,10 @@ struct BindGroupTag;
 struct SwapchainTag;
 struct TimelineTag;
 struct FenceTag;
+struct ArgumentLayoutTag;
+struct ArgumentTableTag;
+struct QueryPoolTag;
+struct ResidencySetTag;
 
 using BufferHandle       = Handle<BufferTag>;
 using TextureHandle      = Handle<TextureTag>;
@@ -80,5 +84,9 @@ using BindGroupHandle    = Handle<BindGroupTag>;
 using SwapchainHandle    = Handle<SwapchainTag>;
 using TimelineHandle     = Handle<TimelineTag>;
 using FenceHandle        = Handle<FenceTag>;
+using ArgumentLayoutHandle = Handle<ArgumentLayoutTag>;
+using ArgumentTableHandle  = Handle<ArgumentTableTag>;
+using QueryPoolHandle      = Handle<QueryPoolTag>;
+using ResidencySetHandle   = Handle<ResidencySetTag>;
 
 }  // namespace demo::rhi

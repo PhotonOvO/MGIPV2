@@ -80,33 +80,37 @@ void GPUDrivenSkyboxPass::execute(const PassContext& context) const
       .clearValue = {0.0f, 0},
   };
 
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea       = {{0, 0}, targets.extent},
       .colorTargets     = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget      = &depthTarget,
   });
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(targets.extent.width),
-                                         static_cast<float>(targets.extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, targets.extent});
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(targets.extent.width),
+                                 static_cast<float>(targets.extent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, targets.extent});
 
   // Pipeline + both descriptor sets bind purely through the RHI: the resolver maps
   // the GPUDriven-owned pipeline handle to its native pipeline and tracks the layout,
-  // and the texture/scene sets flow through BindGroup handles.
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, skyboxPipeline);
-  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex), nullptr, 0);
+  // and the texture/scene sets flow through ArgumentTable handles (BindGroup bridge).
+  enc->setPipeline(skyboxPipeline);
+  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                        rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
 
   // Point the lighting-scene set at this frame's transient camera allocation, then
-  // bind it (with its 2 dynamic UBOs) through the RHI bind group path.
+  // bind it (with its 2 dynamic UBOs, flushed in binding order) through the RHI.
   m_renderer->updateLightingSceneDescriptorSet(context.frameIndex, context.transientAllocator->getBufferOpaque(),
                                                context.cameraAlloc.offset);
-  const uint32_t sceneDynamicOffsets[] = {context.cameraAlloc.offset, 0u};
-  context.cmd->bindBindGroup(shaderio::LSetScene, m_renderer->getLightingSceneBindGroup(context.frameIndex),
-                             sceneDynamicOffsets, 2);
+  const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
+  enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
+  enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+  enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                        rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
 
-  context.cmd->draw(3, 1, 0, 0);
+  enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
 
   transition(kPassSceneColorHdrHandle, targets.colorImage, rhi::TextureAspect::color, rhi::ResourceAccess::write,
              rhi::ResourceAccess::read, rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);

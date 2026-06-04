@@ -244,6 +244,10 @@ add_library(demo_core STATIC
   rhi/RHITypes.h
   rhi/RHIHandles.h
   rhi/RHIBindlessTypes.h
+  rhi/RHIStageBarrier.h
+  rhi/RHIArgumentTable.h
+  rhi/RHIEncoder.h
+  rhi/RHICommandBuffer.h
   rhi/RHICommandList.h
   rhi/RHICommandPool.h
   rhi/RHISynchronization.h
@@ -265,6 +269,8 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanFrameContext.cpp
   rhi/vulkan/VulkanCommandList.h
   rhi/vulkan/VulkanCommandList.cpp
+  rhi/vulkan/VulkanCommandBuffer.h
+  rhi/vulkan/VulkanCommandBuffer.cpp
   rhi/vulkan/VulkanResourceTable.h
   rhi/vulkan/VulkanResourceTable.cpp
   rhi/vulkan/VulkanCommandPool.h

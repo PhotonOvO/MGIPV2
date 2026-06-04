@@ -340,6 +340,10 @@ public:
   {
     return m_meshletBuffer.getMeshletIndexBufferHandle();
   }
+  [[nodiscard]] rhi::BufferHandle    getMeshletIndexBufferRHIHandle() const
+  {
+    return m_meshletBuffer.getMeshletIndexBufferRHIHandle();
+  }
   [[nodiscard]] VkBuffer             getMeshletDataBuffer() const
   {
     return m_meshletBuffer.getMeshletDataBuffer();
@@ -588,6 +592,14 @@ public:
   {
     return m_renderer.getPreviousGPUCullingDrawCountBufferOpaque(frameIndex);
   }
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getPreviousGPUCullingIndirectBufferRHIHandle(frameIndex);
+  }
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getPreviousGPUCullingDrawCountBufferRHIHandle(frameIndex);
+  }
   [[nodiscard]] uint32_t getPreviousGPUCullingObjectCount(uint32_t frameIndex) const
   {
     return m_renderer.getPreviousGPUCullingObjectCount(frameIndex, nullptr);
@@ -599,6 +611,14 @@ public:
   [[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
   {
     return m_renderer.getGPUCullingDrawCountBufferOpaque(frameIndex);
+  }
+  [[nodiscard]] rhi::BufferHandle getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUCullingIndirectBufferRHIHandle(frameIndex);
+  }
+  [[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUCullingDrawCountBufferRHIHandle(frameIndex);
   }
   [[nodiscard]] uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
@@ -639,9 +659,17 @@ public:
   {
     return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
   }
+  [[nodiscard]] rhi::BufferHandle getGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUDrivenPersistentIndirectStreamBufferRHIHandle(frameIndex);
+  }
   [[nodiscard]] uint64_t getPreviousGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
   {
     return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(getPreviousFrameIndex(frameIndex));
+  }
+  [[nodiscard]] rhi::BufferHandle getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getGPUDrivenPersistentIndirectStreamBufferRHIHandle(getPreviousFrameIndex(frameIndex));
   }
   [[nodiscard]] bool getPreviousSortedBootstrapState(uint32_t frameIndex,
                                                      uint32_t& outOpaqueCapacity,

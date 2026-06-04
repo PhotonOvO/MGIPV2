@@ -1,7 +1,6 @@
 #include "GPUDrivenSSRPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -27,7 +26,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSSRPass::getDependencies(
 
 void GPUDrivenSSRPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr || context.transientAllocator == nullptr
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
      || !context.cameraAllocValid)
   {
     return;
@@ -59,14 +58,15 @@ void GPUDrivenSSRPass::execute(const PassContext& context) const
       .params1 = glm::vec4(0.05f, 80.0f, 1.0f, 0.0f),
   };
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, ssrPipeline);
-  context.cmd->bindBindGroup(0, ssrBindGroup, nullptr, 0);
-  context.cmd->pushConstants(rhi::ShaderStage::compute, 0, sizeof(push), &push);
-  context.cmd->dispatch((halfExtent.width + 7u) / 8u, (halfExtent.height + 7u) / 8u, 1u);
+  rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
+  enc->setPipeline(ssrPipeline);
+  enc->setArgumentTable(0, rhi::ArgumentTableHandle{ssrBindGroup.index, ssrBindGroup.generation});  // bridge (Wave 8)
+  enc->setRootConstants(0, &push, sizeof(push));
+  enc->dispatch(rhi::DispatchDesc{(halfExtent.width + 7u) / 8u, (halfExtent.height + 7u) / 8u, 1u});
+  context.cmdBuffer->endEncoding();
 
   // SSR raw output is sampled by the lighting/composite fragment stage.
-  context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
-                             rhi::PipelineStage::FragmentShader, rhi::ResourceAccess::read);
+  context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader, rhi::HazardFlags::textureWrites);
 }
 
 }  // namespace demo

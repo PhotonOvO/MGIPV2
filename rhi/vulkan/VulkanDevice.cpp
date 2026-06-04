@@ -3,6 +3,7 @@
 #include "VulkanResourceTable.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <stdexcept>
 #if defined(_MSC_VER)
@@ -92,6 +93,11 @@ void VulkanDevice::deinit()
   if(m_device != VK_NULL_HANDLE)
   {
     vkDeviceWaitIdle(m_device);
+    if(m_argumentPool != VK_NULL_HANDLE)
+    {
+      vkDestroyDescriptorPool(m_device, m_argumentPool, nullptr);
+      m_argumentPool = VK_NULL_HANDLE;
+    }
     vkDestroyDevice(m_device, nullptr);
     m_device = VK_NULL_HANDLE;
   }
@@ -903,6 +909,392 @@ void VulkanDevice::destroyImage(TextureHandle handle)
 uint64_t VulkanDevice::resolveImageNative(TextureHandle handle) const
 {
   return m_resourceTable != nullptr ? m_resourceTable->resolveTexture(handle) : 0;
+}
+
+namespace {
+[[nodiscard]] VkBufferUsageFlags toVkBufferUsage(BufferUsageFlags flags, bool allowGpuAddress, bool allowIndirect)
+{
+  VkBufferUsageFlags usage = 0;
+  const auto         has   = [&](BufferUsageFlags bit) { return static_cast<uint32_t>(flags & bit) != 0; };
+  if(has(BufferUsageFlags::vertex))      usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  if(has(BufferUsageFlags::index))       usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  if(has(BufferUsageFlags::uniform))     usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+  if(has(BufferUsageFlags::storage))     usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  if(has(BufferUsageFlags::indirect))    usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+  if(has(BufferUsageFlags::transferSrc)) usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  if(has(BufferUsageFlags::transferDst)) usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if(has(BufferUsageFlags::shaderDeviceAddress) || allowGpuAddress) usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  if(allowIndirect) usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+  return usage;
+}
+
+[[nodiscard]] VmaMemoryUsage toVmaMemoryUsage(MemoryUsage usage)
+{
+  switch(usage)
+  {
+    case MemoryUsage::cpuToGpu:            return VMA_MEMORY_USAGE_CPU_TO_GPU;
+    case MemoryUsage::gpuToCpu:            return VMA_MEMORY_USAGE_GPU_TO_CPU;
+    case MemoryUsage::transientAttachment: return VMA_MEMORY_USAGE_GPU_ONLY;
+    default:                               return VMA_MEMORY_USAGE_GPU_ONLY;
+  }
+}
+
+[[nodiscard]] bool isCpuVisible(MemoryUsage usage)
+{
+  return usage == MemoryUsage::cpuToGpu || usage == MemoryUsage::gpuToCpu;
+}
+
+[[nodiscard]] VkSamplerAddressMode toVkAddressMode(AddressMode mode)
+{
+  switch(mode)
+  {
+    case AddressMode::clampToEdge:    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case AddressMode::clampToBorder:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    case AddressMode::mirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    default:                          return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  }
+}
+}  // namespace
+
+BufferHandle VulkanDevice::createBuffer(const BufferDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createBuffer");
+  assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createBuffer");
+
+  const VkBufferCreateInfo info{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size  = desc.size,
+      .usage = toVkBufferUsage(desc.usage, desc.allowGpuAddress, desc.allowIndirectArgument),
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+
+  VmaAllocationCreateInfo allocInfo{.usage = toVmaMemoryUsage(desc.memoryUsage)};
+  if(isCpuVisible(desc.memoryUsage))
+  {
+    allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  }
+
+  VkBuffer          buffer     = VK_NULL_HANDLE;
+  VmaAllocation     allocation = nullptr;
+  VmaAllocationInfo allocResult{};
+  VK_CHECK(vmaCreateBuffer(m_allocator, &info, &allocInfo, &buffer, &allocation, &allocResult));
+  if(desc.debugName != nullptr)
+  {
+    utils::DebugUtil::getInstance().setObjectName(buffer, desc.debugName);
+  }
+
+  uint64_t gpuAddress = 0;
+  if(desc.allowGpuAddress || static_cast<uint32_t>(desc.usage & BufferUsageFlags::shaderDeviceAddress) != 0)
+  {
+    const VkBufferDeviceAddressInfo addressInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buffer};
+    gpuAddress = vkGetBufferDeviceAddress(m_device, &addressInfo);
+  }
+
+  return m_resourceTable->registerBuffer(BufferRecord{
+      .nativeBuffer     = reinterpret_cast<uint64_t>(buffer),
+      .nativeAllocation = reinterpret_cast<uint64_t>(allocation),
+      .gpuAddress       = gpuAddress,
+      .mapped           = allocResult.pMappedData,
+      .owned            = true,
+  });
+}
+
+void VulkanDevice::destroyBuffer(BufferHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const BufferRecord record = m_resourceTable->removeBuffer(handle);
+  if(record.owned && record.nativeBuffer != 0)
+  {
+    vmaDestroyBuffer(m_allocator, reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(record.nativeBuffer)),
+                     reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(record.nativeAllocation)));
+  }
+}
+
+GpuPtr VulkanDevice::getBufferGpuAddress(BufferHandle handle) const
+{
+  if(m_resourceTable == nullptr)
+  {
+    return {};
+  }
+  const BufferRecord* record = m_resourceTable->tryGetBuffer(handle);
+  return record != nullptr ? GpuPtr{record->gpuAddress} : GpuPtr{};
+}
+
+void* VulkanDevice::mapBuffer(BufferHandle handle)
+{
+  if(m_resourceTable == nullptr)
+  {
+    return nullptr;
+  }
+  const BufferRecord* record = m_resourceTable->tryGetBuffer(handle);
+  return record != nullptr ? record->mapped : nullptr;
+}
+
+void VulkanDevice::unmapBuffer(BufferHandle)
+{
+  // Buffers use persistent mapping (VMA_ALLOCATION_CREATE_MAPPED_BIT); nothing to unmap.
+}
+
+SamplerHandle VulkanDevice::createSampler(const SamplerDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createSampler");
+  const VkSamplerCreateInfo info{
+      .sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter        = static_cast<VkFilter>(desc.magFilter),
+      .minFilter        = static_cast<VkFilter>(desc.minFilter),
+      .mipmapMode       = static_cast<VkSamplerMipmapMode>(desc.mipmapMode),
+      .addressModeU     = toVkAddressMode(desc.addressModeU),
+      .addressModeV     = toVkAddressMode(desc.addressModeV),
+      .addressModeW     = toVkAddressMode(desc.addressModeW),
+      .mipLodBias       = desc.mipLodBias,
+      .anisotropyEnable = desc.anisotropyEnable ? VK_TRUE : VK_FALSE,
+      .maxAnisotropy    = desc.maxAnisotropy,
+      .compareEnable    = desc.compareEnable ? VK_TRUE : VK_FALSE,
+      .compareOp        = static_cast<VkCompareOp>(desc.compareOp),
+      .minLod           = desc.minLod,
+      .maxLod           = desc.maxLod,
+  };
+  VkSampler sampler = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateSampler(m_device, &info, nullptr, &sampler));
+  if(desc.debugName != nullptr)
+  {
+    utils::DebugUtil::getInstance().setObjectName(sampler, desc.debugName);
+  }
+  return m_resourceTable->registerSampler(reinterpret_cast<uint64_t>(sampler));
+}
+
+void VulkanDevice::destroySampler(SamplerHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const SamplerRecord record = m_resourceTable->removeSampler(handle);
+  if(record.nativeSampler != 0)
+  {
+    vkDestroySampler(m_device, reinterpret_cast<VkSampler>(static_cast<uintptr_t>(record.nativeSampler)), nullptr);
+  }
+}
+
+QueryPoolHandle VulkanDevice::createQueryPool(uint32_t queryCount)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createQueryPool");
+  const VkQueryPoolCreateInfo info{
+      .sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType  = VK_QUERY_TYPE_TIMESTAMP,
+      .queryCount = queryCount,
+  };
+  VkQueryPool pool = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateQueryPool(m_device, &info, nullptr, &pool));
+  return m_resourceTable->registerQueryPool(reinterpret_cast<uint64_t>(pool), queryCount);
+}
+
+void VulkanDevice::destroyQueryPool(QueryPoolHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const QueryPoolRecord record = m_resourceTable->removeQueryPool(handle);
+  if(record.nativePool != 0)
+  {
+    vkDestroyQueryPool(m_device, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(record.nativePool)), nullptr);
+  }
+}
+
+uint64_t VulkanDevice::getQueryPoolResult(QueryPoolHandle handle, uint32_t queryIndex)
+{
+  if(m_resourceTable == nullptr)
+  {
+    return 0;
+  }
+  const uint64_t nativePool = m_resourceTable->resolveQueryPool(handle);
+  if(nativePool == 0)
+  {
+    return 0;
+  }
+  uint64_t result = 0;
+  vkGetQueryPoolResults(m_device, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(nativePool)), queryIndex, 1,
+                        sizeof(result), &result, sizeof(result), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+  return result;
+}
+
+namespace {
+[[nodiscard]] VkShaderStageFlags toVkShaderStageFlags(ShaderStage stages)
+{
+  VkShaderStageFlags flags = 0;
+  const auto         has   = [&](ShaderStage bit) { return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(bit)) != 0; };
+  if(has(ShaderStage::vertex))      flags |= VK_SHADER_STAGE_VERTEX_BIT;
+  if(has(ShaderStage::fragment))    flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
+  if(has(ShaderStage::compute))     flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+  if(has(ShaderStage::geometry))    flags |= VK_SHADER_STAGE_GEOMETRY_BIT;
+  if(has(ShaderStage::tessControl)) flags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+  if(has(ShaderStage::tessEval))    flags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+  if(flags == 0) flags = VK_SHADER_STAGE_ALL;
+  return flags;
+}
+
+[[nodiscard]] VkDescriptorType toVkDescriptorType(ArgumentType type, bool dynamicOffset)
+{
+  switch(type)
+  {
+    case ArgumentType::uniformBuffer:         return dynamicOffset ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    case ArgumentType::storageBuffer:         return dynamicOffset ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    case ArgumentType::sampledTexture:        return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    case ArgumentType::storageTexture:        return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    case ArgumentType::sampler:               return VK_DESCRIPTOR_TYPE_SAMPLER;
+    case ArgumentType::accelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    default:                                  return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  }
+}
+}  // namespace
+
+ArgumentLayoutHandle VulkanDevice::createArgumentLayout(const ArgumentLayoutDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentLayout");
+  std::vector<VkDescriptorSetLayoutBinding> bindings(desc.bindingCount);
+  for(uint32_t i = 0; i < desc.bindingCount; ++i)
+  {
+    const ArgumentBinding& b = desc.bindings[i];
+    bindings[i]              = VkDescriptorSetLayoutBinding{
+                     .binding         = b.binding,
+                     .descriptorType  = toVkDescriptorType(b.type, b.dynamicOffset),
+                     .descriptorCount = b.arrayCount,
+                     .stageFlags      = toVkShaderStageFlags(b.visibility),
+    };
+  }
+  const VkDescriptorSetLayoutCreateInfo info{
+      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .pBindings    = bindings.empty() ? nullptr : bindings.data(),
+  };
+  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateDescriptorSetLayout(m_device, &info, nullptr, &layout));
+  return m_resourceTable->registerArgumentLayout(reinterpret_cast<uint64_t>(layout));
+}
+
+void VulkanDevice::destroyArgumentLayout(ArgumentLayoutHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const ArgumentLayoutRecord record = m_resourceTable->removeArgumentLayout(handle);
+  if(record.nativeLayout != 0)
+  {
+    vkDestroyDescriptorSetLayout(m_device, reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(record.nativeLayout)), nullptr);
+  }
+}
+
+ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layout)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentTable");
+  if(m_argumentPool == VK_NULL_HANDLE)
+  {
+    const std::array<VkDescriptorPoolSize, 7> sizes{{
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1024},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+    }};
+    const VkDescriptorPoolCreateInfo poolInfo{
+        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets       = 4096,
+        .poolSizeCount = static_cast<uint32_t>(sizes.size()),
+        .pPoolSizes    = sizes.data(),
+    };
+    VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_argumentPool));
+  }
+
+  const uint64_t nativeLayout = m_resourceTable->resolveArgumentLayout(layout);
+  assert(nativeLayout != 0 && "createArgumentTable requires a valid argument layout");
+  VkDescriptorSetLayout       setLayout = reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(nativeLayout));
+  const VkDescriptorSetAllocateInfo allocInfo{
+      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool     = m_argumentPool,
+      .descriptorSetCount = 1,
+      .pSetLayouts        = &setLayout,
+  };
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  VK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &set));
+  return m_resourceTable->registerArgumentTable(reinterpret_cast<uint64_t>(set));
+}
+
+void VulkanDevice::destroyArgumentTable(ArgumentTableHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const ArgumentTableRecord record = m_resourceTable->removeArgumentTable(handle);
+  if(record.nativeSet != 0 && m_argumentPool != VK_NULL_HANDLE)
+  {
+    VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(record.nativeSet));
+    vkFreeDescriptorSets(m_device, m_argumentPool, 1, &set);
+  }
+}
+
+void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes)
+{
+  if(m_resourceTable == nullptr || writeCount == 0 || writes == nullptr)
+  {
+    return;
+  }
+  const uint64_t nativeSet = m_resourceTable->resolveArgumentTable(table);
+  if(nativeSet == 0)
+  {
+    return;
+  }
+  VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(nativeSet));
+
+  std::vector<VkDescriptorBufferInfo> bufferInfos(writeCount);
+  std::vector<VkDescriptorImageInfo>  imageInfos(writeCount);
+  std::vector<VkWriteDescriptorSet>   vkWrites(writeCount);
+  for(uint32_t i = 0; i < writeCount; ++i)
+  {
+    const ArgumentWrite& w    = writes[i];
+    const VkDescriptorType type = toVkDescriptorType(w.type, /*dynamicOffset=*/false);
+    VkWriteDescriptorSet&  out  = vkWrites[i];
+    out = VkWriteDescriptorSet{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = set,
+        .dstBinding      = w.binding,
+        .dstArrayElement = w.arrayElement,
+        .descriptorCount = 1,
+        .descriptorType  = type,
+    };
+    switch(w.type)
+    {
+      case ArgumentType::sampledTexture:
+      case ArgumentType::storageTexture:
+        imageInfos[i] = VkDescriptorImageInfo{
+            .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
+            .imageLayout = w.type == ArgumentType::storageTexture ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        out.pImageInfo = &imageInfos[i];
+        break;
+      case ArgumentType::sampler:
+        imageInfos[i]  = VkDescriptorImageInfo{.sampler = reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_resourceTable->resolveSampler(w.sampler)))};
+        out.pImageInfo = &imageInfos[i];
+        break;
+      default:  // buffer types
+        bufferInfos[i] = VkDescriptorBufferInfo{
+            .buffer = reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(m_resourceTable->resolveBuffer(w.buffer))),
+            .offset = w.offset,
+            .range  = w.size == 0 ? VK_WHOLE_SIZE : w.size,
+        };
+        out.pBufferInfo = &bufferInfos[i];
+        break;
+    }
+  }
+  vkUpdateDescriptorSets(m_device, writeCount, vkWrites.data(), 0, nullptr);
 }
 
 }  // namespace demo::rhi::vulkan

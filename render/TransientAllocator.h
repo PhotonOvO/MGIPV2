@@ -22,6 +22,7 @@ public:
     void*        cpuPtr{nullptr};
     BufferHandle handle{};
     uint32_t     offset{0};
+    rhi::GpuPtr  gpu{};  // FrameGpuAllocator: GPU address of this region (0 if buffer has no device address)
   };
 
   void                     init(rhi::Device& device, VmaAllocator allocator, uint32_t bufferSize);
@@ -38,15 +39,16 @@ public:
     T*           data{nullptr};
     BufferHandle handle{};
     uint32_t     offset{0};
+    rhi::GpuPtr  gpu{};
 
-    [[nodiscard]] Allocation toUntyped() const { return Allocation{data, handle, offset}; }
+    [[nodiscard]] Allocation toUntyped() const { return Allocation{data, handle, offset, gpu}; }
   };
 
   template <typename T>
   [[nodiscard]] TypedAllocation<T> allocateTyped(uint32_t alignment = alignof(T))
   {
     const Allocation a = allocate(static_cast<uint32_t>(sizeof(T)), alignment);
-    return TypedAllocation<T>{static_cast<T*>(a.cpuPtr), a.handle, a.offset};
+    return TypedAllocation<T>{static_cast<T*>(a.cpuPtr), a.handle, a.offset, a.gpu};
   }
 
   template <typename T>

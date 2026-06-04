@@ -66,32 +66,34 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
   };
 
   const rhi::Extent2D extent{sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
-  context.cmd->setViewport(
+  enc->setViewport(
       rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, skyPipeline);
-  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getLightingInputBindGroup(context.frameIndex),
-                             nullptr, 0);
+  enc->setPipeline(skyPipeline);
+  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                        rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
 
   if(context.cameraAllocValid)
   {
     const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
     if(!cameraBindGroupHandle.isNull())
     {
-      const uint32_t cameraDynamicOffset = context.cameraAlloc.offset;
-      context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, &cameraDynamicOffset, 1);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                            rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge (Wave 8)
     }
   }
 
-  context.cmd->draw(3, 1, 0, 0);
-  context.cmd->endRenderPass();
+  enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
+  context.cmdBuffer->endEncoding();
 
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
       .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},

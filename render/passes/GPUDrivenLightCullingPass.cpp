@@ -1,7 +1,6 @@
 #include "GPUDrivenLightCullingPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 
 #include <array>
 
@@ -32,36 +31,38 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightCullingPass::getDepe
 
 void GPUDrivenLightCullingPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenLightCulling");
+  context.cmdBuffer->beginEvent("GPUDrivenLightCulling");
 
   const BindGroupHandle bindGroup = m_renderer->getCurrentLightCullingBindGroup();
   if(context.params->cameraUniforms != nullptr && !bindGroup.isNull())
   {
+    rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
+    const rhi::ArgumentTableHandle argTable{bindGroup.index, bindGroup.generation};  // bridge (Wave 8)
     const auto dispatchLightKernel = [&](PipelineHandle handle, uint32_t lightCount) {
       if(handle.isNull() || lightCount == 0u)
       {
         return;
       }
-      context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, handle);
-      context.cmd->bindBindGroup(0, bindGroup, nullptr, 0);
-      context.cmd->dispatch((lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1u, 1u);
+      enc->setPipeline(handle);
+      enc->setArgumentTable(0, argTable);
+      enc->dispatch(rhi::DispatchDesc{(lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1u, 1u});
     };
 
     dispatchLightKernel(m_renderer->getLightCullingPipelineHandle(), m_renderer->getActivePointLightCount());
     dispatchLightKernel(m_renderer->getSpotLightCullingPipelineHandle(), m_renderer->getActiveSpotLightCount());
+    context.cmdBuffer->endEncoding();
 
     // Coarse bounds are consumed by the clustered-culling compute pass and the lighting fragment stage.
-    context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
-                               rhi::PipelineStage::Compute | rhi::PipelineStage::FragmentShader,
-                               rhi::ResourceAccess::read);
+    context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
+                               rhi::HazardFlags::bufferWrites);
   }
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

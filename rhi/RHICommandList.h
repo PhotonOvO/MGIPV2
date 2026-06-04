@@ -43,33 +43,8 @@ struct TextureViewDesc
   uint32_t       arrayLayerCount{1};
 };
 
-struct RenderTargetDesc
-{
-  TextureHandle     texture{};
-  TextureViewHandle view{};            // Texture view for rendering
-  ResourceState     state{ResourceState::general};
-  LoadOp            loadOp{LoadOp::load};
-  StoreOp           storeOp{StoreOp::store};
-  ClearColorValue   clearColor{};
-};
-
-struct DepthTargetDesc
-{
-  TextureHandle          texture{};
-  TextureViewHandle      view{};            // Texture view for rendering
-  ResourceState          state{ResourceState::general};
-  LoadOp                 loadOp{LoadOp::load};
-  StoreOp                storeOp{StoreOp::store};
-  ClearDepthStencilValue clearValue{};
-};
-
-struct RenderPassDesc
-{
-  Rect2D                  renderArea{};
-  const RenderTargetDesc* colorTargets{nullptr};
-  uint32_t                colorTargetCount{0};
-  const DepthTargetDesc*  depthTarget{nullptr};
-};
+// RenderTargetDesc / DepthTargetDesc / RenderPassDesc moved to RHITypes.h
+// (so the new Encoder/CommandBuffer headers need not depend on this header).
 
 // Image-to-image blit (e.g. scene-output → swapchain present). Images are opaque
 // native handles; the regions carry explicit source/destination offsets so callers

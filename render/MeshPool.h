@@ -8,6 +8,10 @@
 #include <cstdint>
 #include <cassert>
 
+namespace demo::rhi::vulkan {
+class VulkanResourceTable;
+}
+
 namespace demo {
 
 class BatchUploadContext;
@@ -78,7 +82,8 @@ public:
     MeshPool() = default;
     ~MeshPool() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
 
-    void init(VkDevice device, VmaAllocator allocator, upload::StaticBufferUploadPolicy staticUploadPolicy = {});
+    void init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable,
+              upload::StaticBufferUploadPolicy staticUploadPolicy = {});
     void deinit();
 
     MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
@@ -104,6 +109,10 @@ public:
     void reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd);
     [[nodiscard]] uint64_t getSharedVertexBufferHandle() const;
     [[nodiscard]] uint64_t getSharedIndexBufferHandle() const;
+    // Stable RHI handles for the shared arenas (rebinds across arena realloc via
+    // VulkanResourceTable::updateBuffer). Consumed by RenderEncoder-based passes.
+    [[nodiscard]] rhi::BufferHandle getSharedVertexBufferRHIHandle() const { return m_sharedVertexBufferRHI; }
+    [[nodiscard]] rhi::BufferHandle getSharedIndexBufferRHIHandle() const { return m_sharedIndexBufferRHI; }
     [[nodiscard]] size_t getDeferredStagingBufferCount() const;
     [[nodiscard]] VkDeviceSize getDeferredStagingBufferBytes() const;
 
@@ -131,6 +140,9 @@ private:
 
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
+    rhi::vulkan::VulkanResourceTable* m_resourceTable = nullptr;
+    rhi::BufferHandle m_sharedVertexBufferRHI{};
+    rhi::BufferHandle m_sharedIndexBufferRHI{};
     upload::StaticBufferUploadPolicy m_staticUploadPolicy{};
     HandlePool<MeshHandle, MeshRecord> m_pool;
     SharedBufferArena m_sharedVertexBuffer{};

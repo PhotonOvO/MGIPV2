@@ -69,6 +69,7 @@ TransientAllocator::Allocation TransientAllocator::allocate(uint32_t size, uint3
   allocation.cpuPtr = static_cast<std::byte*>(m_mappedData) + alignedOffset;
   allocation.handle = kTransientAllocatorBufferHandle;
   allocation.offset = alignedOffset;
+  allocation.gpu    = rhi::GpuPtr{m_buffer.address != 0 ? static_cast<uint64_t>(m_buffer.address) + alignedOffset : 0};
 
   m_head = alignedOffset + size;
   return allocation;

@@ -1,1302 +1,666 @@
-# RHI 迁移实施计划：Vulkan → 现代 GPU 接口（Encoder + StageBarrier + GpuPtr）
+# RHI 重构实施计划（Vulkan-first）：现代 GPU 接口
 
-> 基于 `future-rhi-design-review.md` 制定的可执行文件级计划。
-> 策略：先验证 Vulkan，保留兼容层，逐 Wave 迁移，每 Wave 可编译运行。
+> 设计愿景以 `future-rhi-design-review.md` 为准：
+> **GpuPtr + ArgumentTable + StageBarrier + One-shot CommandBuffer + DrawStream**。
+> 本文件是落地到代码的可执行任务计划。执行策略：**Vulkan-first**——只实现 Vulkan 后端，
+> D3D12 / Metal 提供 stub；但所有 RHI 公共接口必须保持**三后端可映射、无 native 泄漏**。
+> 每个 Wave 结束都能编译运行，可独立提交与回滚。
 
 ---
 
-## 0. 前置确认
+## 0. 起点认知与核心原则
 
-### 0.1 StageBarrier 手写：完全可行
+### 0.1 现状盘点：本引擎已是 ~80% 现代 GPU-Driven
 
-**结论**：不实现 RenderGraph，在 Pass 中手写 `barrier(producer, consumer, hazard)` 是当前最务实的方案。
+经代码核实，许多"现代特性"**已经存在并在用**。本计划的任务是**用干净的 RHI 接口包装它们 + 去除 native 泄漏**，
+而不是从零引入。
 
-**理由**：
-- 当前 `PassExecutor` 已控制 pass 执行顺序（`std::vector<const PassNode*> m_passes`）
-- 每个 Pass 的 `execute()` 方法天然是 barrier 插入点
-- 与 HypeHype / No Graphics API 的实践一致
-- 后端将 `barrier(StageFlags, StageFlags, HazardFlags)` 转换为 `vkCmdPipelineBarrier2`
+| 现代要素 | 现状 | 证据 |
+|---------|------|------|
+| dynamic rendering（无 subpass） | 已用 | `rhi/vulkan/VulkanCommandList.cpp:307` `vkCmdBeginRendering` |
+| buffer device address / GpuPtr | 已用 | `render/GPUMeshletBuffer.cpp:41`、`render/GPUSceneRegistry.cpp:43` + shader `buffer_reference` |
+| GPUScene（buffer-first 数据模型） | 已用 | `render/GPUSceneRegistry`（打包 `GPUSceneObject/GPUCullObject`，per-draw 走 device address 索引） |
+| 持久 bind group + dynamic offset | 已用 | per-frame 持久数组；`render/passes/GPUDrivenLightPass.cpp:140` `dynamicOffsets` |
+| pass-level 自动 barrier | 已用 | `render/PassExecutor.cpp:239` 从声明式依赖生成（`render/Pass.h:50-80,137`） |
+| timeline semaphore + per-frame pool | 已用 | `rhi/vulkan/VulkanFrameContext.h`（`FrameSlot` + `VulkanTimelineSemaphore`） |
+| 延迟删除队列 | 已用 | `rhi/RHIResourceLifetime.h`（`InlineDeferredDestructionQueue` + `RetirementPolicy`） |
+| `BufferHandle` 句柄类型 | 已存在 | `rhi/RHIHandles.h` |
+| Indirect draw / indirect count | 已用 | `RHICommandList::drawIndexedIndirect/Count` |
 
-**手写示例**：
+**待重构（本计划的真正目标）**：
+1. unified `CommandList` → `CommandBuffer + Encoder`（接近 Metal4 / 现代 pass 模型）。
+2. `BindGroup`/`BindTable`（裸指针，偏 Vulkan DescriptorSet）→ `ArgumentLayout`/`ArgumentTable`（句柄）。
+3. per-resource `transitionTexture`（携带 old/new layout）→ `barrier(Stage, Stage, Hazard)`（后端推断 layout）。
+4. `GpuPtr` 从裸 `uint64_t address` → 类型化 RHI 一等公民（包装既有 device address）。
+5. 去除 `getNativeCommandBuffer()` / `VkImage`/`VkDescriptorSet`/`VkPipelineLayout` 等 native escape hatch。
+6. `common/Common.h` 与 `RenderDevice.h` 的 Vulkan 类型泄漏下沉。
+7. DrawStream → Encoder 的 decode 路径（`PassContext::drawStream` 已存在，缺 decode）。
+
+### 0.2 核心原则
+
+1. **包装既有，不重造**：凡现状已有的现代行为（device address、GPUScene、dynamic rendering），
+   重构只改"接口形状"，**保持运行时行为不变**。禁止借迁移之名重写已工作的数据路径。
+2. **先建新、不删旧**：保留 `CommandList`/`BindGroup` 为 `[[deprecated]]` 兼容层，逐 Pass 迁移，最后统一删除。
+3. **Vulkan-first，接口干净**：只实现 Vulkan；D3D12/Metal 用 `assert(false)` stub 保持可编译。
+   但公共接口**不得**出现 Vulkan-only 字段（语义化 `TextureUsageFlags`/`BufferUsageFlags`，不 bit-transparent）。
+4. **每 Wave 可编译运行**，单独 git commit，验证失败即回滚到上一 Wave。
+
+### 0.3 Barrier 模型：PassExecutor 即 "RenderGraph-lite"
+
+设计文档 §3.4 / Phase 6 要求 **pass-level 生成 barrier，禁止 per-draw resource state tracking**。
+现状 `PassExecutor` 已满足：它读取每个 Pass 的 `getDependencies()`（`PassResourceDependency`：
+`access` / `stageMask` / `requiredState` / handle），集中插入 barrier。
+
+**决策（双 barrier 模型，对齐设计文档 §7）**：保留这套声明式依赖为 barrier 的唯一真相来源，
+`PassExecutor` 把依赖翻译为两类正式 verb：
+- **`barrier(Stage, Stage, Hazard)`（主路径）**：表达阶段依赖 + hazard 类型。大多数 producer→consumer 用它。
+- **`resourceBarrier(TextureBarrier[], BufferBarrier[])`（特殊路径，正式保留）**：表达 image layout / queue ownership /
+  present / aliasing。**这不是 deprecated fallback，而是设计文档 §7.2 的一等 verb**。
+
+实现层面：`transitionTexture/transitionBuffer`（携带 per-resource old/new layout）**重塑**为 `resourceBarrier`，
+而非废弃删除。常规同步优先用 `barrier`；只有真正需要显式 layout/queue 的边界（如 present、blit）才发 `resourceBarrier`。
+Vulkan 后端维护 per-texture layout tracker，在 `beginRenderPass`/`blitTexture`/present 时据依赖的 `requiredState` 自动补 layout 转换。
+
+> 不采用"在每个 Pass 内手写 barrier"。手写仅作为声明式模型无法表达的 **intrapass hazard** 的显式 override
+> （例如同一 compute pass 内先写 indirect args、本 pass 后续指令立即消费）。
+
+**翻译映射**（Wave 7 在 PassExecutor 内实现）：
+- `ShaderStage::compute`→`StageFlags::compute`；`fragment`→`fragmentShader`；color/depth 写→`rasterColorOut`/`rasterDepthOut`；indirect 消费→`commandInput`。
+- texture write→read=`textureWrites`；buffer write→read=`bufferWrites`；depth=`depthStencil`；indirect args=`drawArguments`；descriptor=`descriptors`。
+- 需要显式 layout/queue 的边界 → `resourceBarrier`；其余 → `barrier`。
+- 现有去重逻辑 `requiresBarrier(prev,next)`（read→read 不插）原样保留。
+
+### 0.4 CommandBuffer 与 FrameContext 的衔接
+
+提交与同步由 `FrameContext` 负责（per-frame `FrameSlot` + timeline semaphore），**不得绕过或重造**。
+
+**决策**：
+1. `CommandBuffer` 是当前帧 `FrameSlot` 内 `VkCommandBuffer` 的录制门面，由 `FrameContext` 拥有/复用（one-shot，每帧重置）。
+2. `FrameContext` 新增 `CommandBuffer* getCommandBuffer()`（取当前帧门面）。**不**在 `Device` 上加 `createCommandBuffer/destroyCommandBuffer`（lifetime 自管理会与 per-frame pool 冲突）。
+3. 提交路径不变：`endFrame()` 接受当前帧录制对象并 signal timeline。过渡期 `endFrame` 同时接受旧 `CommandList*` 与新 `CommandBuffer*`（内部同一 `VkCommandBuffer`）。
+
+### 0.5 资源销毁走延迟删除队列
+
+所有新增 `destroy*`（buffer/sampler/argumentTable/argumentLayout/queryPool）**一律走延迟删除**，禁止即时销毁在飞资源：
 
 ```cpp
-// GPUDrivenCullingPass.cpp（Compute Pass）
-void GPUDrivenCullingPass::execute(const PassContext& context) const
-{
-    // 前一个 DepthPyramidPass（compute）写了 depth pyramid
-    // 当前 pass（compute）读取 depth pyramid 并写 indirect buffer
-    context.cmdBuffer->barrier(
-        rhi::StageFlags::compute,           // producer: depth pyramid compute write
-        rhi::StageFlags::compute,           // consumer: culling compute read
-        rhi::HazardFlags::textureWrites     // hazard: UAV/storage texture write -> read
-    );
-
-    auto* enc = context.cmdBuffer->beginComputePass();
-    enc->setPipeline(m_renderer->getGPUCullingPipelineHandle());
-    enc->setArgumentTable(0, m_renderer->getGPUCullingBindGroup(context.frameIndex));
-    enc->dispatch((objectCount + 255) / 256, 1, 1);
-    context.cmdBuffer->endEncoding();
-
-    // Culling pass 产生 indirect draw args，后续 graphics pass 消费
-    context.cmdBuffer->barrier(
-        rhi::StageFlags::compute,
-        rhi::StageFlags::commandInput,      // consumer: indirect draw args
-        rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites
-    );
+void VulkanDevice::destroyBuffer(BufferHandle h) {
+    const uint64_t retireAt = calculateRetirementTimelineValue(
+        frameCtx.getCurrentFrameValue(),
+        RetirementPolicy::frameCount(frameCtx.getFrameCount()));
+    frameCtx.enqueueRetirement({ResourceKind::Buffer, h.index, h.generation}, retireAt);
 }
 ```
+物理释放发生在 `processRetirements()`（每帧 `beginFrame` 按当前 timeline 值排空）。
+Tier 归属：几何/meshlet/indirect buffer→`Device`/`Swapchain`；per-frame uniform→`PerFrame`；ArgumentTable→`Device`（句柄稳定、内容每帧重写）；QueryPool→`Device`。
 
-```cpp
-// GPUDrivenLightPass.cpp（Render Pass）
-void GPUDrivenLightPass::execute(const PassContext& context) const
-{
-    // GBuffer passes 写了 color/depth attachments
-    // Light pass 读取 GBuffer textures
-    context.cmdBuffer->barrier(
-        rhi::StageFlags::rasterColorOut | rhi::StageFlags::rasterDepthOut,
-        rhi::StageFlags::fragmentShader,
-        rhi::HazardFlags::textureWrites | rhi::HazardFlags::depthStencil
-    );
+### 0.6 ArgumentTable 句柄化所有权
 
-    auto* enc = context.cmdBuffer->beginRenderPass({
-        .colorTargets = &colorTarget,
-        .colorTargetCount = 1,
-        .depthTarget = nullptr,  // Light pass 通常只写 color，depth 只读
-    });
-    enc->setPipeline(m_renderer->getLightPipelineHandle());
-    enc->setArgumentTable(0, m_renderer->getLightingInputBindGroup(context.frameIndex));
-    enc->drawIndexed({...});
-    context.cmdBuffer->endEncoding();
-}
-```
+现状 `BindGroupDesc`（`render/BindGroups.h:34-41`）持**裸指针** `BindTableLayout*`/`BindTable*`；
+后端 `VulkanResourceTable::m_bindGroupTables` 是 `std::unordered_map<uint64_t, BindTable*>`。
 
-**注意事项**：
-- 当前 `PassContext` 中的 `cmd` 是 `rhi::CommandList*`（unified）
-- 改为 Encoder 模型后，`PassContext` 将持有 `rhi::CommandBuffer*`
-- `beginEvent`/`endEvent` 保留在 `CommandBuffer` 级别（跨 Encoder）
-- `barrier()` 在 `CommandBuffer` 级别调用（Vulkan 下 barrier 可以在 command buffer 的任何位置，但在 render pass 内需要 synchronization2 的 subpass dependency 或 pipeline barrier）
+**决策**：`ArgumentLayout`/`ArgumentTable` 改为**句柄 + 后端 HandlePool**：
+1. `BindGroupDesc` 的两个指针字段 → `ArgumentLayoutHandle`/`ArgumentTableHandle`（**字段替换，不能用 alias 掩盖**）。
+2. 后端 `m_bindGroupTables` 从 `unordered_map` → `HandlePool` / 数组索引，解析 O(1)。
+3. 寿命走 §0.5 延迟删除。
+4. 兼容期可加 `using BindGroupHandle = ArgumentTableHandle;`（仅句柄层别名，不替代字段替换）。
+5. 沿用现状的"持久 table + dynamic offset"模式（HypeHype §2.5），per-frame 数据用 dynamic buffer offset，不每帧重建 table。
 
----
+### 0.7 接口形状的两项前瞻预留
 
-## 1. 当前 23 个 Pass 的详尽分类与 Encoder 替换映射
+即使本次不实现，接口形状现在就要预留，避免将来二次破坏 API：
 
-| # | Pass 文件 | 当前类型 | 使用的主要 RHI API | 目标 Encoder | 复杂度 | 依赖 |
-|---|----------|---------|-------------------|-------------|--------|------|
-| 1 | `GPUDrivenCullingPass.cpp` | Compute | `bindPipeline`, `bindBindGroup`, `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 2 | `GPUDrivenDepthPyramidPass.cpp` | Compute | `executeDepthPyramidPass`（内部 dispatch） | `ComputeEncoder` | 低 | 无 |
-| 3 | `GPUDrivenLightCullingPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 4 | `GPUDrivenClusteredLightCullingPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 5 | `GPUDrivenVisibilitySortPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 6 | `GPUDrivenAOPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 中 | 需要 Texture/Buffer R/W |
-| 7 | `GPUDrivenSSRPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 中 | 需要 Texture/Buffer R/W |
-| 8 | `GPUDrivenBloomPrefilterPass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 9 | `GPUDrivenBloomDownsamplePass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 低 | 无 |
-| 10 | `GPUDrivenTAAResolvePass.cpp` | Compute | `dispatch` | `ComputeEncoder` | 中 | 需要 history texture |
-| 11 | `GPUDrivenDepthPrepass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | 需要 depth attachment |
-| 12 | `GPUDrivenGBufferPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 高 | MRT，MDI 路径 |
-| 13 | `GPUDrivenForwardPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | transparent draws |
-| 14 | `GPUDrivenLightPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | fullscreen quad |
-| 15 | `GPUDrivenSkyboxPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 低 | fullscreen/cube draw |
-| 16 | `GPUDrivenSkyPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 低 | fullscreen quad |
-| 17 | `GPUDrivenCSMShadowPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | cascade array |
-| 18 | `GPUDrivenShadowAtlasPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | atlas tiles |
-| 19 | `GPUDrivenDebugPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 低 | line overlay |
-| 20 | `GPUDrivenImguiPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | ImGui draw data |
-| 21 | `GPUDrivenVelocityPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 低 | motion vectors |
-| 22 | `GPUDrivenFinalColorPass.cpp` | Render | `beginRenderPass`, `bindPipeline`, `drawIndexed` | `RenderEncoder` | 中 | tone mapping |
-| 23 | `GPUDrivenPresentPass.cpp` | Copy/Blit | `transitionTexture`, `blitImage` | `CopyEncoder` + `CommandBuffer::barrier` | 低 | swapchain blit |
+- **多线程录制**（设计文档 Phase 7）：`CommandBuffer` 可由非主线程获取与录制；`Encoder` 不持有全局可变状态；
+  `FrameContext` 接口允许 vend 多个 CommandBuffer / 未来支持 secondary command buffer。本次实现仍单线程，但 API 不假设单一全局 recorder。
+- **移动端 tile-resident deferred**（input attachment / local read）：现状 GBuffer 与 Lighting 是分离 render pass，
+  GBuffer 写出再采样（tiler 上一次全 GBuffer 显存往返）。`RenderPassDesc` 现在就要预留 **input attachment 与 local-read** 表达能力，
+  Vulkan 后端在支持 `VK_KHR_dynamic_rendering_local_read` 时可映射、否则回退现有分离采样行为。实际 tile 驻留优化为后续里程碑。
 
-**迁移顺序建议**：
-1. 先从 **纯 Compute Pass**（#1-5）开始，因为它们不涉 `beginRenderPass`，替换最简单
-2. 然后是 **纯 Copy Pass**（#23）
-3. 然后是 **简单 Render Pass**（#15,16,19,21）
-4. 然后是 **中等 Render Pass**（#11,13,14,17,18,22）
-5. 最后是 **复杂 Render Pass**（#12 GBuffer）和 **Compute Pass with complex R/W**（#6,7,10）
+### 0.8 范围边界
+
+**本次做**：接口形状重构（Encoder/ArgumentTable/StageBarrier/ResourceBarrier/GpuPtr 类型化）、native 泄漏清理、DrawStream decode、QueryPool。
+**本次不做（标记为后续里程碑，但接口预留不冲突）**：async compute / 多队列（compute/transfer queue 已枚举未用）、
+多线程录制实现、`VK_EXT_descriptor_buffer` bindless 主路径、ResidencySet 实体（Vulkan 下 no-op）、tile-resident deferred 实现。
+
+### 0.9 多后端公共不变量（验收门）
+
+源自 `future-rhi-design-review.md` §1。每个 Wave 完成前按相关条目自查；标 ⛔ 的为强制门，违反不可合并。
+
+1. ⛔ public RHI 头不含 `Vk*`/`ID3D12*`/`MTL*`/`Vma*` 等 native 类型。
+2. ⛔ 业务层（`render/` 等）禁 include `rhi/vulkan/*`、`rhi/d3d12/*`、`rhi/metal/*`（Wave 9 加 grep 守卫）。
+3. ⛔ 热路径（bind/draw/dispatch 录制）**禁 hashmap**（消灭 `resolveBindGroupDescriptorSet` 的 `unordered_map`，`VulkanResourceTable.cpp:107`）。
+4. ⛔ 热路径禁堆分配。
+5. ⛔ 热路径禁创建 backend object。
+6. ⛔ 所有 handle resolve 为 O(1) 数组索引（`HandlePool`）。
+7. `GpuPtr` 只表示 buffer GPU address（texture/sampler 用 descriptor index / view handle，不塞进 GpuPtr）。
+8. descriptor / argument write 只接受 RHI handle，不接受 native descriptor。
+9. pipeline layout / root signature 不暴露给业务层。
+10. RenderGraph(=PassExecutor) 负责 pass-level barrier；RHI 不做 per-draw state tracking。
+11. native escape hatch 仅 backend tests / debug 工具可用，renderer 不可用（含 TRACY 路径 `PassExecutor.cpp:236`，Wave 9 清理）。
+12. renderer 主路径禁 `#ifdef VULKAN/D3D12/METAL`，backend 差异走 `DeviceCapabilities`。
+
+> **Wave 1/Wave 2 额外验收**：grep 确认 `VulkanCommandList`/`VulkanResourceTable`/`render/` 的解析路径无 `unordered_map`，
+> 所有 handle→native 仅经 `HandlePool` O(1)（落实第 3/6 条）。
+
+### 0.10 与 future-rhi-design-review.md 目标态的对齐（本次范围外，接口不冲突）
+
+设计文档的下列目标态**本次不实现**，但接口设计须保证未来可无破坏接入：
+
+| 设计文档 | 目标态 | 本次处置 |
+|---------|--------|---------|
+| §3 Capability Tier 矩阵 | `DeviceCapabilities` 细分 tier + renderer 选路 | 现有 `CapabilityReport`/`supports()` 够用；tier 矩阵留后续 |
+| §4.2 GpuResourceRef | texture/sampler/AS 独立 GPU 引用 | 本次 texture 走 `TextureViewHandle`；预留命名空间不与 GpuPtr 冲突 |
+| §5 DescriptorHeap | `VK_EXT_descriptor_buffer` bindless 主路径 | 现状 descriptor set / ArgumentTable 承载 bindless；descriptor heap 留后续 |
+| §6.1 RootBindingSchema | 跨后端 binding contract 对象 | 本次用 `setRoot*(ShaderStage,…)` 显式表达 visibility，等价且可平滑升级 |
+| §9 PipelineCompiler/ShaderLibrary | `ShaderIR` 多后端编译 + pipeline cache | 现状 Slang→SPIR-V 直建 `VulkanPipelines`；编译抽象留后续 |
+| §13 移动端 tier 回退 | Android A/B/C 选路 | 本次仅预留 input-attachment/local-read（§0.7）；tier 选路留后续 |
 
 ---
 
-## 2. 总体迁移策略：渐进式接口替换
+## 1. 23 个 Pass 分类与 Encoder 映射
 
-**核心原则**：
-1. **不删除旧代码，先建新的**：保留现有 `rhi::CommandList` / `BindGroup` / `BindTable` 作为兼容层
-2. **新接口在现有文件上扩展**：新增头文件或扩展现有头文件
-3. **Vulkan 后端先实现**：确保每 Wave 可编译运行
-4. **Pass 逐个迁移**：选择一个试点 Pass 完全迁移后，再推广到其他 Pass
-5. **兼容层最后删除**：所有业务层迁移完成后，一次性删除旧接口
+| # | Pass | 类型 | 目标 Encoder | 复杂度 | 备注 |
+|---|------|------|-------------|--------|------|
+| 1 | `GPUDrivenCullingPass` | Compute | ComputeEncoder | 低 | 试点 |
+| 2 | `GPUDrivenDepthPyramidPass` | Compute | ComputeEncoder | 低 | 试点 |
+| 3 | `GPUDrivenLightCullingPass` | Compute | ComputeEncoder | 低 | |
+| 4 | `GPUDrivenClusteredLightCullingPass` | Compute | ComputeEncoder | 低 | |
+| 5 | `GPUDrivenVisibilitySortPass` | Compute | ComputeEncoder | 低 | |
+| 6 | `GPUDrivenAOPass` | Compute | ComputeEncoder | 中 | texture R/W |
+| 7 | `GPUDrivenSSRPass` | Compute | ComputeEncoder | 中 | texture R/W |
+| 8 | `GPUDrivenBloomPrefilterPass` | Compute | ComputeEncoder | 低 | |
+| 9 | `GPUDrivenBloomDownsamplePass` | Compute | ComputeEncoder | 低 | |
+| 10 | `GPUDrivenTAAResolvePass` | Compute | ComputeEncoder | 中 | history texture |
+| 11 | `GPUDrivenDepthPrepass` | Render | RenderEncoder | 中 | depth only |
+| 12 | `GPUDrivenGBufferPass` | Render | RenderEncoder | 高 | MRT + MDI + alpha test，最后迁 |
+| 13 | `GPUDrivenForwardPass` | Render | RenderEncoder | 中 | transparent，用 DrawStream |
+| 14 | `GPUDrivenLightPass` | Render | RenderEncoder | 中 | 采样 GBuffer，input-attachment 候选 |
+| 15 | `GPUDrivenSkyboxPass` | Render | RenderEncoder | 低 | |
+| 16 | `GPUDrivenSkyPass` | Render | RenderEncoder | 低 | |
+| 17 | `GPUDrivenCSMShadowPass` | Render | RenderEncoder | 中 | cascade array |
+| 18 | `GPUDrivenShadowAtlasPass` | Render | RenderEncoder | 中 | atlas tiles |
+| 19 | `GPUDrivenDebugPass` | Render | RenderEncoder | 低 | |
+| 20 | `GPUDrivenImguiPass` | Render | RenderEncoder | 中 | ImGui draw data + 动态顶点缓冲 |
+| 21 | `GPUDrivenVelocityPass` | Render | RenderEncoder | 低 | |
+| 22 | `GPUDrivenFinalColorPass` | Render | RenderEncoder | 中 | tone mapping |
+| 23 | `GPUDrivenPresentPass` | Copy/Blit | ComputeEncoder（copy 子集） | 低 | swapchain blit |
 
-**兼容层策略**：
-```cpp
-// rhi/RHICommandList.h 中保留旧接口为 deprecated
-class CommandList {
-public:
-    [[deprecated("Use CommandBuffer + Encoder instead")]]
-    virtual void drawIndexed(...) = 0;
-    // ...
-};
-
-// 新增 rhi/RHICommandBuffer.h
-class CommandBuffer {
-public:
-    virtual RenderEncoder* beginRenderPass(const RenderPassDesc&) = 0;
-    virtual ComputeEncoder* beginComputePass() = 0;
-    virtual CopyEncoder* beginCopyPass() = 0;
-    virtual void barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards) = 0;
-    virtual void endEncoding() = 0;
-    virtual void beginEvent(const char* name) = 0;
-    virtual void endEvent() = 0;
-};
-```
+**迁移顺序**：纯 Compute（1-5）→ Copy（23）→ 简单 Render（15,16,19,21）→ 中等 Render（11,13,14,17,18,20,22）→ 复杂（12 GBuffer）+ 复杂 Compute（6,7,10）。
 
 ---
 
-## 3. Wave 0：新 RHI Core 公共接口定义（不破坏现有代码）
+## 2. RHI Core 接口契约（Wave 0 落地）
 
-**目标**：定义新的 RHI 接口，让 Vulkan 后端可以开始实现，同时现有业务层代码继续编译。
-
-**验证标准**：项目编译通过，现有功能不受影响。
-
-### 3.1 新建/修改的文件清单
-
-#### File: `rhi/RHIStageBarrier.h` （新建）
+### 2.1 `rhi/RHIStageBarrier.h`（新建）
 
 ```cpp
-#pragma once
-#include <cstdint>
-
-namespace demo::rhi {
-
 enum class StageFlags : uint64_t {
-    none           = 0,
-    transfer       = 1ull << 0,
-    compute        = 1ull << 1,
-    vertexShader   = 1ull << 2,
-    fragmentShader = 1ull << 3,
-    rasterColorOut = 1ull << 4,
-    rasterDepthOut = 1ull << 5,
-    commandInput   = 1ull << 6,  // Indirect draw/dispatch args
-    all            = ~0ull,
+    none=0, transfer=1ull<<0, compute=1ull<<1, vertexShader=1ull<<2, fragmentShader=1ull<<3,
+    rasterColorOut=1ull<<4, rasterDepthOut=1ull<<5, commandInput=1ull<<6, all=~0ull,
 };
-
-constexpr StageFlags operator|(StageFlags a, StageFlags b) {
-    return static_cast<StageFlags>(static_cast<uint64_t>(a) | static_cast<uint64_t>(b));
-}
-constexpr StageFlags operator&(StageFlags a, StageFlags b) {
-    return static_cast<StageFlags>(static_cast<uint64_t>(a) & static_cast<uint64_t>(b));
-}
-
 enum class HazardFlags : uint32_t {
-    none          = 0,
-    descriptors   = 1u << 0,
-    drawArguments = 1u << 1,
-    depthStencil  = 1u << 2,
-    textureWrites = 1u << 3,
-    bufferWrites  = 1u << 4,
+    none=0, descriptors=1u<<0, drawArguments=1u<<1, depthStencil=1u<<2, textureWrites=1u<<3, bufferWrites=1u<<4,
 };
-
-constexpr HazardFlags operator|(HazardFlags a, HazardFlags b) {
-    return static_cast<HazardFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-}
-
-} // namespace demo::rhi
+// + operator| / operator&
 ```
 
-#### File: `rhi/RHIHandles.h` （扩展）
+### 2.2 `rhi/RHIHandles.h`（扩展）
 
-在现有 `Handle<Tag>` 基础上新增：
+新增：`ArgumentLayoutHandle`、`ArgumentTableHandle`、`QueryPoolHandle`、`ResidencySetHandle`（后两者可 capability-gated）。
+（`BufferHandle` 已存在，复用。）`ShaderModule`/`PipelineLayout` 由后端内部管理，**不**暴露句柄给业务层。
+`TextureViewHandle::fromNativePtr/toNativePtr` 标 `[[deprecated]]`，Wave 9 删除。
 
-```cpp
-struct BufferTag;
-struct ShaderModuleTag;
-struct PipelineLayoutTag;
-struct QueryPoolTag;
-struct ArgumentLayoutTag;
-struct ArgumentTableTag;
-struct ResidencySetTag;
-
-using BufferHandle         = Handle<BufferTag>;
-using ShaderModuleHandle   = Handle<ShaderModuleTag>;
-using PipelineLayoutHandle = Handle<PipelineLayoutTag>;
-using QueryPoolHandle      = Handle<QueryPoolTag>;
-using ArgumentLayoutHandle = Handle<ArgumentLayoutTag>;
-using ArgumentTableHandle  = Handle<ArgumentTableTag>;
-using ResidencySetHandle   = Handle<ResidencySetTag>;
-```
-
-**注意**：保留现有 `TextureViewHandle` 的 `fromNativePtr`/`toNativePtr`，但标记 `[[deprecated]]`。
-
-#### File: `rhi/RHITypes.h` （扩展）
-
-新增/替换结构：
+### 2.3 `rhi/RHITypes.h`（扩展）
 
 ```cpp
-// 替换 TextureCreateDesc（移除 native 字段）
-struct TextureCreateDesc {
-    TextureFormat    format{TextureFormat::undefined};
-    TextureUsageFlags usage{TextureUsageFlags::none};  // 新增 flags 类型
-    uint32_t         width{0}, height{0}, depth{1};
-    uint32_t         mipLevels{1}, arrayLayers{1};
-    SampleCount      sampleCount{SampleCount::count1};
-    TextureDimension dimension{TextureDimension::e2D};
-    bool             cubeCompatible{false};
-    const char*      debugName{nullptr};
-};
-
-// 替换 TextureViewCreateDesc
-struct TextureViewCreateDesc {
-    TextureHandle    image{};
-    TextureFormat    format{TextureFormat::undefined};
-    ImageViewType    viewType{ImageViewType::e2D};
-    TextureAspect    aspect{TextureAspect::color};
-    uint32_t         baseMipLevel{0}, levelCount{1};
-    uint32_t         baseArrayLayer{0}, layerCount{1};
-    ComponentMapping components{};
-    const char*      debugName{nullptr};
-};
-
-// 新增 BufferDesc
+struct GpuPtr { uint64_t value{0}; bool isValid() const { return value!=0; } };  // 包装既有 device address
 struct BufferDesc {
-    uint64_t         size{0};
-    BufferUsageFlags usage{BufferUsageFlags::none};
-    MemoryUsage      memoryUsage{MemoryUsage::gpuOnly};
-    bool             allowGpuAddress{false};
-    bool             allowIndirectArgument{false};
-    const char*      debugName{nullptr};
+    uint64_t size{0}; BufferUsageFlags usage{}; MemoryUsage memoryUsage{MemoryUsage::gpuOnly};
+    bool allowGpuAddress{false}, allowIndirectArgument{false}, allowArgumentTableBinding{false};
+    const char* debugName{nullptr};
 };
-
-// 新增 GpuPtr
-struct GpuPtr {
-    uint64_t value{0};
-    [[nodiscard]] bool isValid() const { return value != 0; }
-};
-
-// 新增 SamplerDesc（基础版）
-enum class Filter : uint8_t { nearest = 0, linear };
-enum class MipmapMode : uint8_t { nearest = 0, linear };
-enum class AddressMode : uint8_t { repeat = 0, clampToEdge, clampToBorder, mirroredRepeat };
-
-struct SamplerDesc {
-    Filter      magFilter{Filter::linear};
-    Filter      minFilter{Filter::linear};
-    MipmapMode  mipmapMode{MipmapMode::linear};
-    AddressMode addressModeU{AddressMode::repeat};
-    AddressMode addressModeV{AddressMode::repeat};
-    AddressMode addressModeW{AddressMode::repeat};
-    float       mipLodBias{0.0f};
-    bool        anisotropyEnable{false};
-    float       maxAnisotropy{1.0f};
-    // ... 其他字段
-};
+// SamplerDesc；语义化 TextureUsageFlags / BufferUsageFlags（不 bit-transparent 对应 Vulkan）
+// TextureCreateDesc / TextureViewCreateDesc 移除 native 字段
 ```
 
-**注意**：`TextureUsageFlags` 和 `BufferUsageFlags` 需要新建为 bit-flag 类型，但不 bit-transparent 对应 Vulkan（按 `future-rhi-design-review.md` 的建议，用语义 flags）。
+### 2.4 `rhi/RHIArgumentTable.h`（新建）
 
-#### File: `rhi/RHIArgumentTable.h` （新建）
+`ArgumentType` / `ArgumentBinding`（含 `bindless`、`dynamicOffset`）/ `ArgumentLayoutDesc` / `ArgumentWrite`
+（只接受 RHI handle：`BufferHandle`/`TextureViewHandle`/`SamplerHandle`，**不**接受 native descriptor）。
 
-```cpp
-#pragma once
-#include "RHIHandles.h"
-#include "RHITypes.h"
-#include "RHIStageBarrier.h"
-
-namespace demo::rhi {
-
-enum class ArgumentType : uint8_t {
-    uniformBuffer,
-    storageBuffer,
-    sampledTexture,
-    storageTexture,
-    sampler,
-    accelerationStructure,
-};
-
-struct ArgumentBinding {
-    uint32_t     binding{0};
-    ArgumentType type{ArgumentType::uniformBuffer};
-    ShaderStage  visibility{ShaderStage::none};
-    uint32_t     arrayCount{1};
-    bool         bindless{false};
-};
-
-struct ArgumentLayoutDesc {
-    const ArgumentBinding* bindings{nullptr};
-    uint32_t               bindingCount{0};
-};
-
-struct ArgumentWrite {
-    uint32_t          binding{0};
-    uint32_t          arrayElement{0};
-    ArgumentType      type{ArgumentType::uniformBuffer};
-    BufferHandle      buffer{};
-    TextureViewHandle textureView{};
-    SamplerHandle     sampler{};
-    uint64_t          offset{0};
-    uint64_t          size{0};  // 0 = entire buffer
-};
-
-class ArgumentLayout {
-public:
-    virtual ~ArgumentLayout() = default;
-    virtual void init(void* nativeDevice, const ArgumentLayoutDesc& desc) = 0;
-    virtual void deinit() = 0;
-};
-
-class ArgumentTable {
-public:
-    virtual ~ArgumentTable() = default;
-    virtual void init(void* nativeDevice, ArgumentLayoutHandle layout, uint32_t maxEntries) = 0;
-    virtual void deinit() = 0;
-    virtual void update(uint32_t writeCount, const ArgumentWrite* writes) = 0;
-};
-
-} // namespace demo::rhi
-```
-
-**注意**：这里保留了 `void* nativeDevice` 作为过渡，后续 Wave 中会移除。
-
-#### File: `rhi/RHIEncoder.h` （新建）
+### 2.5 `rhi/RHIEncoder.h`（新建）—— 含 input-attachment / local-read 预留
 
 ```cpp
-#pragma once
-#include "RHIHandles.h"
-#include "RHITypes.h"
-#include "RHIStageBarrier.h"
-
-namespace demo::rhi {
-
-struct DrawIndexedDesc {
-    BufferHandle indexBuffer{};
-    uint64_t     indexBufferOffset{0};
-    IndexFormat  indexFormat{IndexFormat::uint32};
-    uint32_t     indexCount{0};
-    uint32_t     instanceCount{1};
-    uint32_t     firstIndex{0};
-    int32_t      vertexOffset{0};
-    uint32_t     firstInstance{0};
+// 关键：RenderPassDesc 预留 input attachment 与 local read（§0.7）
+struct RenderPassDesc {
+    Rect2D                  renderArea{};
+    const RenderTargetDesc* colorTargets{nullptr};
+    uint32_t                colorTargetCount{0};
+    const DepthTargetDesc*  depthTarget{nullptr};
+    // --- 预留：tile-resident deferred ---
+    const InputAttachmentDesc* inputAttachments{nullptr};  // 供 local read 的输入附件
+    uint32_t                   inputAttachmentCount{0};
+    bool                       enableLocalRead{false};     // 后端支持时映射 dynamic_rendering_local_read，否则回退
 };
 
-struct DrawIndirectDesc {
-    BufferHandle argsBuffer{};
-    uint64_t     offset{0};
-    uint32_t     drawCount{1};
-    uint32_t     stride{0};  // 0 = backend default
-};
-
-struct DrawIndirectCountDesc {
-    BufferHandle argsBuffer{};
-    uint64_t     argsOffset{0};
-    BufferHandle countBuffer{};
-    uint64_t     countBufferOffset{0};
-    uint32_t     maxDrawCount{0};
-    uint32_t     stride{0};
-};
-
-struct DispatchDesc {
-    uint32_t groupCountX{1};
-    uint32_t groupCountY{1};
-    uint32_t groupCountZ{1};
-};
-
-struct DispatchIndirectDesc {
-    BufferHandle argsBuffer{};
-    uint64_t     offset{0};
-};
-
+// 注意：setRoot*/setDynamicBuffer 带 ShaderStage（对齐设计文档 §6 与现有 pushConstants(ShaderStage,...)），
+// slot visibility 由 ShaderStage 显式表达，避免将来引入 RootBindingSchema 时破坏 API。
 class RenderEncoder {
 public:
-    virtual ~RenderEncoder() = default;
-
-    virtual void setPipeline(PipelineHandle pipeline) = 0;
-    virtual void setArgumentTable(uint32_t slot, ArgumentTableHandle table) = 0;
-    virtual void setDynamicBuffer(uint32_t slot, BufferHandle buffer, uint64_t offset, uint64_t size) = 0;
-    virtual void setRootConstants(uint32_t slot, const void* data, uint32_t size) = 0;
-    virtual void setRootPointer(uint32_t slot, GpuPtr ptr) = 0;
-
-    virtual void setViewport(const Viewport& viewport) = 0;
-    virtual void setScissor(const Rect2D& scissor) = 0;
-
-    virtual void bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers,
-                                   const uint64_t* offsets, uint32_t count) = 0;
-    virtual void bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format) = 0;
-
-    virtual void drawIndexed(const DrawIndexedDesc& desc) = 0;
-    virtual void drawIndexedIndirect(const DrawIndirectDesc& desc) = 0;
-    virtual void drawIndexedIndirectCount(const DrawIndirectCountDesc& desc) = 0;
-    virtual void drawIndirect(const DrawIndirectDesc& desc) = 0;  // non-indexed
-
-    // Mesh shader (optional, capability-gated)
-    virtual void drawMeshTasks(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
-    virtual void drawMeshTasksIndirect(const DrawIndirectDesc& desc) = 0;
+    virtual void setPipeline(PipelineHandle) = 0;
+    virtual void setArgumentTable(uint32_t slot, ArgumentTableHandle) = 0;
+    virtual void setDynamicBuffer(ShaderStage stage, uint32_t slot, BufferHandle, uint64_t offset, uint64_t size) = 0;
+    virtual void setRootConstants(ShaderStage stage, uint32_t slot, const void* data, uint32_t size) = 0;  // 小数据 fast path
+    virtual void setRootPointer(ShaderStage stage, uint32_t slot, GpuPtr ptr) = 0;                          // per-draw 主通道
+    virtual void setViewport(const Viewport&) = 0;
+    virtual void setScissor(const Rect2D&) = 0;
+    virtual void bindVertexBuffers(uint32_t first, const BufferHandle*, const uint64_t* offsets, uint32_t count) = 0;
+    virtual void bindIndexBuffer(BufferHandle, uint64_t offset, IndexFormat) = 0;
+    virtual void readInputAttachment(uint32_t index) = 0;  // 预留：local read 采样
+    virtual void drawIndexed(const DrawIndexedDesc&) = 0;
+    virtual void drawIndexedIndirect(const DrawIndirectDesc&) = 0;            // BufferHandle + offset
+    virtual void drawIndexedIndirect(GpuPtr args, uint32_t count, uint32_t stride) = 0;  // GpuPtr 重载（设计 §8）
+    virtual void drawIndexedIndirectCount(const DrawIndirectCountDesc&) = 0;
+    virtual void drawIndirect(const DrawIndirectDesc&) = 0;
+    virtual void drawMeshTasks(uint32_t, uint32_t, uint32_t) = 0;        // capability-gated
+    virtual void drawMeshTasksIndirect(const DrawIndirectDesc&) = 0;
 };
-
-class ComputeEncoder {
-public:
-    virtual ~ComputeEncoder() = default;
-
-    virtual void setPipeline(PipelineHandle pipeline) = 0;
-    virtual void setArgumentTable(uint32_t slot, ArgumentTableHandle table) = 0;
-    virtual void setRootConstants(uint32_t slot, const void* data, uint32_t size) = 0;
-    virtual void setRootPointer(uint32_t slot, GpuPtr ptr) = 0;
-
-    virtual void dispatch(const DispatchDesc& desc) = 0;
-    virtual void dispatchIndirect(const DispatchIndirectDesc& desc) = 0;
-};
-
-class CopyEncoder {
-public:
-    virtual ~CopyEncoder() = default;
-
-    virtual void copyBuffer(BufferHandle src, BufferHandle dst,
-                            uint64_t srcOffset, uint64_t dstOffset, uint64_t size) = 0;
-    virtual void copyBufferToTexture(const BufferTextureCopyDesc& desc) = 0;
-    virtual void copyTextureToBuffer(const TextureBufferCopyDesc& desc) = 0;
-    virtual void blitTexture(const TextureBlitDesc& desc) = 0;
-    virtual void fillBuffer(BufferHandle buffer, uint64_t offset, uint64_t size, uint32_t data) = 0;
-};
-
-} // namespace demo::rhi
+// ComputeEncoder: setPipeline/setArgumentTable/setRootConstants(slot,…)/setRootPointer(slot,…)/dispatch
+//                 （compute 阶段恒定，setRoot* 不带 ShaderStage）+ dispatchIndirect(BufferHandle/GpuPtr) 重载
+//                 + copy/blit 命令子集（无独立 CopyEncoder，对齐 Metal 4）：
+//                   copyBuffer/copyBufferToTexture/copyTextureToBuffer/blitTexture/fillBuffer
 ```
 
-#### File: `rhi/RHICommandBuffer.h` （新建）
+> `InputAttachmentDesc` 在 Wave 0 仅定义结构与接口；Vulkan 后端 Wave 1 可先实现为"分离采样回退"（行为同现状），
+> `enableLocalRead=true` 且设备支持时才走 local read。Pass 暂不使用，留作 Lighting pass 后续优化入口。
+
+### 2.6 `rhi/RHICommandBuffer.h`（新建）
+
+双 barrier 模型（设计文档 §7）：`barrier` 是主路径（stage/hazard），`resourceBarrier` 是**正式的特殊路径**
+（image layout / queue ownership / present / aliasing / validation），**不是 deprecated fallback**。
 
 ```cpp
-#pragma once
-#include "RHIEncoder.h"
-#include "RHIStageBarrier.h"
-
-namespace demo::rhi {
-
+// TextureBarrier{texture, before, after, range, srcQueue, dstQueue}
+// BufferBarrier {buffer,  before, after, offset, size, srcQueue, dstQueue}
 class CommandBuffer {
 public:
-    virtual ~CommandBuffer() = default;
-
-    virtual void begin() = 0;
-    virtual void end() = 0;
-
-    // Encoder factory
-    virtual RenderEncoder* beginRenderPass(const RenderPassDesc& desc) = 0;
-    virtual ComputeEncoder* beginComputePass() = 0;
-    virtual CopyEncoder* beginCopyPass() = 0;
-    virtual void endEncoding() = 0;  // End current encoder
-
-    // Cross-encoder / pre-encoder barrier
-    virtual void barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards) = 0;
-
-    // Debug markers
-    virtual void beginEvent(const char* name) = 0;
-    virtual void endEvent() = 0;
-};
-
-} // namespace demo::rhi
-```
-
-#### File: `rhi/RHIDevice.h` （扩展）
-
-在现有 `Device` 类上新增方法（不删除旧方法）：
-
-```cpp
-class Device {
-public:
-    // ... existing methods ...
-
-    // --- Buffer ---
-    virtual BufferHandle createBuffer(const BufferDesc& desc) = 0;
-    virtual void destroyBuffer(BufferHandle handle) = 0;
-    virtual GpuPtr getBufferGpuAddress(BufferHandle handle) const = 0;
-    virtual void* mapBuffer(BufferHandle handle) = 0;  // For CPU-visible buffers
-    virtual void unmapBuffer(BufferHandle handle) = 0;
-
-    // --- Sampler ---
-    virtual SamplerHandle createSampler(const SamplerDesc& desc) = 0;
-    virtual void destroySampler(SamplerHandle handle) = 0;
-
-    // --- Argument Table ---
-    virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc& desc) = 0;
-    virtual void destroyArgumentLayout(ArgumentLayoutHandle handle) = 0;
-    virtual ArgumentTableHandle createArgumentTable(ArgumentLayoutHandle layout, uint32_t maxEntries) = 0;
-    virtual void destroyArgumentTable(ArgumentTableHandle handle) = 0;
-    virtual void updateArgumentTable(ArgumentTableHandle table,
-                                     uint32_t writeCount, const ArgumentWrite* writes) = 0;
-
-    // --- CommandBuffer ---
-    virtual CommandBuffer* createCommandBuffer() = 0;
-    virtual void destroyCommandBuffer(CommandBuffer* cmdBuffer) = 0;
-
-    // --- QueryPool ---
-    virtual QueryPoolHandle createQueryPool(uint32_t queryCount) = 0;
-    virtual void destroyQueryPool(QueryPoolHandle handle) = 0;
-    virtual uint64_t getQueryPoolResult(QueryPoolHandle handle, uint32_t queryIndex) = 0;
-
-    // --- ResidencySet (optional, capability-gated) ---
-    virtual ResidencySetHandle createResidencySet(const ResidencySetDesc& desc) = 0;
-    virtual void destroyResidencySet(ResidencySetHandle handle) = 0;
-    virtual void addToResidencySet(ResidencySetHandle set, ResourceHandle resource) = 0;
+    virtual RenderEncoder*  beginRenderPass(const RenderPassDesc&) = 0;
+    virtual ComputeEncoder* beginComputePass() = 0;   // copy/blit 为其命令子集，无 beginCopyPass
+    virtual void            endEncoding() = 0;
+    virtual void            barrier(StageFlags producer, StageFlags consumer, HazardFlags) = 0;        // 主路径
+    virtual void            resourceBarrier(const TextureBarrier* textures, uint32_t textureCount,
+                                            const BufferBarrier* buffers, uint32_t bufferCount) = 0;   // 特殊路径（保留）
+    virtual void            beginEvent(const char* name) = 0;
+    virtual void            endEvent() = 0;
 };
 ```
 
-**注意**：现有 `createImage` / `createTextureView` 等方法保留，但新增语义化版本。
+### 2.7 `rhi/RHIDevice.h`（扩展，不删旧）
 
-### 3.2 编译验证
+```cpp
+// Buffer（包装既有 device address 路径）
+virtual BufferHandle createBuffer(const BufferDesc&) = 0;
+virtual void         destroyBuffer(BufferHandle) = 0;                  // 走延迟删除
+virtual GpuPtr       getBufferGpuAddress(BufferHandle) const = 0;      // 类型化既有 .address
+virtual void*        mapBuffer(BufferHandle) = 0;
+virtual void         unmapBuffer(BufferHandle) = 0;
+// Sampler / ArgumentTable / QueryPool（均走延迟删除）
+virtual SamplerHandle        createSampler(const SamplerDesc&) = 0;
+virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc&) = 0;
+virtual ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle) = 0;
+virtual void                 updateArgumentTable(ArgumentTableHandle, uint32_t writeCount, const ArgumentWrite*) = 0;
+virtual QueryPoolHandle      createQueryPool(uint32_t queryCount) = 0;
+virtual uint64_t             getQueryPoolResult(QueryPoolHandle, uint32_t index) = 0;
+// 注意：CommandBuffer 经 FrameContext::getCommandBuffer() 获取（§0.4），不在 Device 上 create/destroy
+```
 
-- 新建的头文件编译通过
-- 现有 `rhi/vulkan/*.cpp` 因新增纯虚方法而**编译失败**（这是预期行为，提醒需要实现）
-- 业务层代码不受影响（因为只新增了文件，没改现有接口）
+### 2.8 `rhi/RHIFrameContext.h`（扩展）
 
-**解决方案**：为新增方法提供默认空实现或 `assert(false)` stub，让 Vulkan 后端在 Wave 1 中逐步填充。
+```cpp
+virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制门面
+```
 
 ---
 
-## 4. Wave 1：Vulkan 后端新接口实现 + Buffer/Texture 管理重构
+> **每个 Wave 的统一节奏**：`目标` → `前置依赖` → `改动文件与步骤`（逐文件可执行）→ `验证`（可观测判据）→ `提交`（git commit message）。
+> 复选框为可勾选的执行项。签名以 `before → after` 表示。
 
-**目标**：让 Vulkan 后端实现 Wave 0 的新接口，同时引入 `ResourcePool<Hot, Cold>` 和 `GpuPtr` 支持。
+## 3. Wave 0：接口契约定义（不破坏现有代码） — ✅ 已落地（待全量编译）
 
-**验证标准**：Vulkan 后端编译通过，至少一个简单测试（如创建 buffer 并获取 address）通过。
+**目标**：定义 §2 全部接口，业务层与三后端继续编译。
+**前置依赖**：无（起点）。
 
-### 4.1 文件清单与修改内容
+> **实现说明（对计划的小幅修订）**：新增的 Device/FrameContext 方法采用**基类默认 `assert(false)` 实现**，
+> 而非"纯虚 + 每后端手写桩"。效果等价（未实现即运行期断言）但 Wave 0 **零改动三后端 cpp**，爆炸半径最小。
+> Vulkan 在 Wave 1 override 真实实现；D3D12/Metal 继承断言默认。
 
-#### File: `rhi/vulkan/VulkanDevice.h/cpp`
+**改动文件与步骤**：
+- [x] 新建 `rhi/RHIStageBarrier.h`：`StageFlags`/`HazardFlags`（+ `operator|/&/|=`/`any`）+ `TextureBarrier`/`BufferBarrier`/`TextureSubresourceRange`
+- [x] 新建 `rhi/RHIArgumentTable.h`：`ArgumentType`/`ArgumentBinding`/`ArgumentLayoutDesc`/`ArgumentWrite`（只含 RHI handle）
+- [x] 新建 `rhi/RHIEncoder.h`：`RenderEncoder`/`ComputeEncoder`（copy/blit 为 ComputeEncoder 命令子集，无独立 CopyEncoder，对齐 Metal 4）（`setRoot*` 带 `ShaderStage`、`readInputAttachment`、GpuPtr indirect 重载）+ Draw/Dispatch/Copy desc 结构
+- [x] 新建 `rhi/RHICommandBuffer.h`：`CommandBuffer`（`barrier` + `resourceBarrier` 双 verb）
+- [x] 改 `rhi/RHIHandles.h`：新增 `ArgumentLayoutHandle`/`ArgumentTableHandle`/`QueryPoolHandle`/`ResidencySetHandle`
+- [x] 改 `rhi/RHITypes.h`：新增 `GpuPtr`/`MemoryUsage`/语义化 `BufferUsageFlags`/`TextureUsageFlags`/`BufferDesc`/`SamplerDesc`（+Filter/MipmapMode/AddressMode）；**下沉** `RenderTargetDesc`/`DepthTargetDesc`/`RenderPassDesc`（+`InputAttachmentDesc` 与 local-read 三字段）
+- [x] 改 `rhi/RHICommandList.h`：移除已下沉的 3 个 struct（经其 `#include RHITypes.h` 仍可见）
+- [x] 改 `rhi/RHIDevice.h`：加 buffer/sampler/argument-table/query-pool 方法（基类默认 assert 实现）+ `#include RHIArgumentTable.h`/`<cassert>`
+- [x] 改 `rhi/RHIFrameContext.h`：加 `CommandBuffer* getCommandBuffer()`（默认 assert）+ `#include RHICommandBuffer.h`
+- [x] `CMakeLists.txt`：4 个新头加入 `demo_core` 源列表
+- [x] 三后端：因采用基类默认实现，**无需改动**（自动继承断言桩）
+- [ ] 接口干净性自查（非阻塞）：对照 §0.9 不变量 + 三后端映射表（待补 PR 描述）
+- [~] **延后到 Wave 1/2**：`TextureCreateDesc`/`TextureViewCreateDesc` 移除 native 字段——现 VulkanDevice 仍读 `nativeFormat/nativeUsage`，移除会破坏后端，随 buffer/texture 包装一起做。
 
-**修改**：
-1. 继承 `rhi::Device` 并声明新增纯虚方法
-2. 实现 `createBuffer` / `destroyBuffer` / `getBufferGpuAddress`
-3. 实现 `createSampler` / `destroySampler`
-4. 实现 `createCommandBuffer` / `destroyCommandBuffer`
-5. 实现 `createArgumentLayout` / `createArgumentTable` / `updateArgumentTable`
-6. 实现 `createQueryPool` / `destroyQueryPool`
+**验证**：
+- [x] 新头 + 改动头经 clang 19 `-std=c++20 -fsyntax-only` 独立校验通过（无错误）。
+- [x] **全量编译通过**：`out/build/x64-debug` 重新 configure 到 `G:/MGIF`（原缓存指向旧路径 `G:/VK_DEMO`，已清顶层 + `_deps` 残留缓存并复用已下载依赖重配）后，`cmake --build --target demo_core` 成功（`[179/179] Linking demo_core.lib`，无错误）。
+- 现有功能行为未变（纯接口新增 + 默认 assert 实现，无调用方改动）。
 
-**Buffer 实现细节**：
-```cpp
-// VulkanDevice.cpp
-BufferHandle VulkanDevice::createBuffer(const BufferDesc& desc) {
-    VkBufferCreateInfo bufferInfo{...};
-    bufferInfo.size = desc.size;
-    bufferInfo.usage = ToVkBufferUsageFlags(desc.usage);
-    if (desc.allowGpuAddress) bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    if (desc.allowIndirectArgument) bufferInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-
-    VmaAllocationCreateInfo allocInfo{...};
-    // 根据 desc.memoryUsage 选择 VMA_MEMORY_USAGE_GPU_ONLY / CPU_TO_GPU 等
-
-    VkBuffer buffer;
-    VmaAllocation allocation;
-    vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr);
-
-    GpuPtr gpuAddress = {0};
-    if (desc.allowGpuAddress) {
-        VkBufferDeviceAddressInfo addrInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buffer};
-        gpuAddress.value = vkGetBufferDeviceAddress(m_device, &addrInfo);
-    }
-
-    return m_buffers.create(buffer, allocation, gpuAddress, desc);
-}
-```
-
-#### File: `rhi/vulkan/VulkanCommandBuffer.h/cpp` （新建）
-
-实现 `rhi::CommandBuffer` 接口：
-- `beginRenderPass` → 创建 `VulkanRenderEncoder`
-- `beginComputePass` → 创建 `VulkanComputeEncoder`
-- `beginCopyPass` → 创建 `VulkanCopyEncoder`
-- `barrier` → `vkCmdPipelineBarrier2`（通过 `VkDependencyInfo` + `VkMemoryBarrier2` / `VkBufferMemoryBarrier2` / `VkImageMemoryBarrier2`）
-
-**关键设计**：内部维护当前活跃的 `VkCommandBuffer` 和当前 encoder 类型。`endEncoding()` 根据当前 encoder 类型调用 `vkCmdEndRendering` 或什么都不做（compute/copy encoder 在 Vulkan 下没有显式 end，只有 command buffer end）。
-
-#### File: `rhi/vulkan/VulkanRenderEncoder.h/cpp` （新建）
-
-实现 `rhi::RenderEncoder`：
-- `setPipeline` → `vkCmdBindPipeline`
-- `setArgumentTable` → `vkCmdBindDescriptorSets`（如果 ArgumentTable 映射到 DescriptorSet）
-- `setDynamicBuffer` → `vkCmdBindDescriptorSets` with dynamic offset
-- `setRootConstants` → `vkCmdPushConstants`
-- `setRootPointer` → **在 Vulkan 下需要特殊处理**。Root Pointer（GpuPtr）在 Vulkan 下通常是 `uint64_t` push constant 或 buffer device address in shader。可以映射为 `vkCmdPushConstants` 推送一个 `uint64_t` 地址。
-- `drawIndexed` → `vkCmdDrawIndexed`
-- `drawIndexedIndirect` → `vkCmdDrawIndexedIndirect`
-- `drawIndexedIndirectCount` → `vkCmdDrawIndexedIndirectCount`
-- `drawIndirect` → `vkCmdDrawIndirect`（新增）
-- `drawMeshTasks` → `vkCmdDrawMeshTasksEXT`（如果支持）
-
-#### File: `rhi/vulkan/VulkanComputeEncoder.h/cpp` （新建）
-
-实现 `rhi::ComputeEncoder`：
-- `dispatch` → `vkCmdDispatch`
-- `dispatchIndirect` → `vkCmdDispatchIndirect`（新增）
-
-#### File: `rhi/vulkan/VulkanCopyEncoder.h/cpp` （新建）
-
-实现 `rhi::CopyEncoder`：
-- `copyBuffer` → `vkCmdCopyBuffer`
-- `copyBufferToTexture` → `vkCmdCopyBufferToImage`
-- `blitTexture` → `vkCmdBlitImage`
-- `fillBuffer` → `vkCmdFillBuffer`
-
-#### File: `rhi/vulkan/VulkanArgumentTable.h/cpp` （新建）
-
-将现有 `VulkanDescriptor.cpp/h` 的概念迁移为 `VulkanArgumentTable`：
-- `VulkanArgumentLayout` 封装 `VkDescriptorSetLayout`
-- `VulkanArgumentTable` 封装 `VkDescriptorSet`
-- `updateArgumentTable` 映射为 `vkUpdateDescriptorSets`
-- 内部从 `ArgumentWrite`（RHI Handle）解析为 `VkWriteDescriptorSet`
-
-**注意**：这里需要一个 handle → native 的解析路径（`TextureHandle` → `VkImageView`，`BufferHandle` → `VkBuffer`）。这要求 `VulkanDevice` 或 `VulkanResourceTable` 提供 O(1) 的 handle resolve。
-
-#### File: `rhi/vulkan/VulkanResourceTable.h/cpp` （修改）
-
-**关键修改**：
-1. 新增 `HandlePool<BufferHandle, BufferRecord>` 用于 buffer 管理
-2. 新增 `HandlePool<TextureHandle, TextureRecord>` 已有的扩展
-3. **移除 `m_bindGroupTables` 的 `std::unordered_map`**，改为 `HandlePool<BindGroupHandle, BindTable*>` 或等待 Wave 3 被 ArgumentTable 替代
-4. 所有 `resolve*` 方法保持 O(1) 数组索引
-
-```cpp
-// VulkanResourceTable.h
-class VulkanResourceTable {
-    // ... existing pools ...
-    HandlePool<BufferHandle, BufferRecord> m_buffers;  // NEW
-    // BindGroup resolve: 改为数组索引
-    std::vector<BindTable*> m_bindGroupTables;  // index-based, size = max handle index + 1
-};
-```
-
-### 4.2 编译验证
-
-- `rhi/vulkan/*.cpp` 全部编译通过
-- `rhi/d3d12/*.cpp` 和 `rhi/metal/*.cpp` 因新增纯虚方法而编译失败 → **为它们提供 stub 实现**（`assert(false)`），保持项目可编译
-- 运行简单验证：创建 buffer → 获取 GpuPtr → 销毁 buffer
+**提交**：`feat(rhi): add Encoder/CommandBuffer/ArgumentTable/StageBarrier/GpuPtr interface contracts`
 
 ---
 
-## 5. Wave 2：Common 层拆分 + utils::Buffer 替换
+## 4. Wave 1：Vulkan 后端实现新接口 — ✅ 完成（全量编译通过）
 
-**目标**：将 `common/Common.h` 中的 Vulkan 类型下沉，用 `BufferHandle` 替换 `utils::Buffer`。
+**目标**：Vulkan 后端实现 §2 接口，可独立创建 buffer/获取 GpuPtr/录制空 encoder。
+**前置依赖**：Wave 0。
 
-**验证标准**：`render/` 下的文件不再直接 include Vulkan 类型，`BufferHandle` 可在 upload 路径中使用。
+> **进度**：增量 1（buffer/sampler/query-pool + 资源表池）与增量 2（CommandBuffer + 3 encoders + ArgumentTable + getCommandBuffer）均完成，全量编译通过（`[2/2] Linking demo_core.lib`）。
+> **对计划的小幅修订（已落地）**：
+> - `destroy*` 暂用即时销毁（与现有 `destroyImage` 一致）；延迟删除（§0.5）作为后续 wiring（需把 FrameContext 注入 Device）。
+> - `buffer device address` feature 现状已启用，无需补。
+> - 三个 encoder 与 CommandBuffer 合并到单个 `VulkanCommandBuffer.h/.cpp`（少建文件）；ArgumentTable 后端直接实现在 `VulkanDevice` + 资源表（descriptor pool 由 Device 懒创建），未单独建 `VulkanArgumentTable.*`，等价且更简洁。
+> - `BufferRecord` 当前是单结构（hot 字段在前）；完整 Hot/Cold `ResourcePool` 模板拆分留作性能优化（O(1) resolve 不变量已满足）。
+> - `setRoot*` 的 `slot` 在 Vulkan 解释为 push-constant 字节偏移（Vulkan 无 slot 概念）；具体偏移在 Wave 3 随试点 pass 的 shader 布局敲定。
+> - `getCommandBuffer()` 返回的门面需 render 层经 `VulkanFrameContext::setResourceTable()` 注入资源表（Wave 3 接线）；`drawIndexedIndirect(GpuPtr)`/`dispatchIndirect(GpuPtr)` 在 Vulkan core 不支持，断言提示用 BufferHandle 重载。
 
-### 5.1 文件清单
+**改动文件与步骤**：
+- [x] buffer device address：现状已启用（无需补）
+- [x] `VulkanDevice`：`createBuffer`/`destroyBuffer`/`getBufferGpuAddress`/`mapBuffer`/`unmapBuffer`/`createSampler`/`destroySampler`/`createQueryPool`/`destroyQueryPool`/`getQueryPoolResult`/`createArgumentLayout`/`destroyArgumentLayout`/`createArgumentTable`/`destroyArgumentTable`/`updateArgumentTable`（+ 懒创建 descriptor pool，deinit 释放）
+- [x] `VulkanResourceTable`：`BufferRecord`/`SamplerRecord`/`QueryPoolRecord`/`ArgumentLayoutRecord`/`ArgumentTableRecord` 的 `HandlePool` O(1) 池 + register/resolve/remove
+- [x] 新建 `rhi/vulkan/VulkanCommandBuffer.h/.cpp`：`VulkanCommandBuffer`（`beginRenderPass`→`vkCmdBeginRendering`/`endEncoding`/`barrier`(stage+hazard,`vkCmdPipelineBarrier2`)/`resourceBarrier`(image+buffer)/debug marker）+ `VulkanRenderEncoder`/`VulkanComputeEncoder`（copy/blit 并入 ComputeEncoder，无独立 CopyEncoder）（真实 `vkCmd*` 录制）
+- [x] `VulkanFrameContext`：`getCommandBuffer()`（返回当前帧 `VkCommandBuffer` 的门面）+ `setResourceTable()`；持有复用的 `VulkanCommandBuffer` 门面
+- [x] `CMakeLists.txt`：收录 `VulkanCommandBuffer.h/.cpp`
+- [~] 延迟删除 wiring（`destroy*`→`enqueueRetirement`）：留待后续（现即时销毁，与现有约定一致）
 
-#### File: `common/VulkanTypes.h` （新建）
+**验证**：
+- [x] **全量编译通过**：`cmake --build --target demo_core` → `[2/2] Linking demo_core.lib`（仅 C4819 编码告警；LSP 的 volk.h 报错为 LSP 配置噪声，非真实错误）。
+- [ ] 运行期冒烟（createBuffer→address→destroy / 空 compute pass 录制）：待 Wave 3 接入资源表后随试点 pass 一起验证。
 
-从 `common/Common.h` 中提取：
-```cpp
-#pragma once
-#include <vulkan/vulkan.h>
-#include "vk_mem_alloc.h"
-
-namespace utils {
-struct Buffer { VkBuffer buffer; VmaAllocation allocation; VkDeviceAddress address; void* mapped; };
-struct Image { VkImage image; VmaAllocation allocation; };
-struct ImageResource : Image { VkImageView view; VkExtent2D extent; VkImageLayout layout; };
-struct QueueInfo { uint32_t familyIndex; uint32_t queueIndex; VkQueue queue; };
-struct AccelerationStructure { VkAccelerationStructureKHR accel; VmaAllocation allocation; VkDeviceAddress deviceAddress; VkDeviceSize size; Buffer buffer; };
-} // namespace utils
-```
-
-#### File: `common/VulkanHelpers.h` （新建）
-
-从 `common/Common.h` 中提取所有 Vulkan helper 函数：
-- `cmdInitImageLayout`
-- `cmdTransitionSwapchainLayout`
-- `cmdBufferMemoryBarrier`
-- `findSupportedFormat`
-- `findDepthFormat`
-- `createShaderModule`
-- `beginSingleTimeCommands`
-- `endSingleTimeCommands`
-- `pNextChainPushFront`
-
-#### File: `common/VulkanContextConfig.h` （新建）
-
-从 `common/Common.h` 中提取：
-- `ExtensionConfig`
-- `ContextCreateInfo`
-- `ValidationSettings`
-
-#### File: `common/Common.h` （净化）
-
-**删除所有 Vulkan-specific 内容**，只保留：
-- `volk.h` → 移动到 `gfx/Context.h` 或 `rhi/vulkan/VulkanDevice.cpp`
-- `vk_mem_alloc.h` → 移动到 `common/VulkanTypes.h`
-- `Vertex::getBindingDescription()` → 改为返回 `rhi::VertexBindingDesc`
-- `Vertex::getAttributeDescriptions()` → 改为返回 `rhi::VertexAttributeDesc`
-- `packNormalRGB10A2` / `unpackNormalRGB10A2`
-- `findFile`
-- `GLM` includes
-- `shaderio` namespace
-- `ASSERT` macro
-- `hashCombine`
-
-#### File: `render/UploadUtils.h/cpp` （重写）
-
-**当前**：
-```cpp
-utils::Buffer createStaticBufferWithUpload(VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, ...);
-```
-
-**目标**：
-```cpp
-BufferHandle createStaticBufferWithUpload(rhi::Device& device, rhi::CommandBuffer& cmd,
-                                          std::span<const std::byte> data,
-                                          rhi::BufferUsageFlags usage);
-```
-
-**实现方式**：使用 `device.createBuffer()` + `cmd->copyBuffer()`（通过 `CopyEncoder`）。
-
-#### File: `render/GPUMeshletBuffer.h/cpp` （重写）
-
-**当前**：
-```cpp
-class GPUMeshletBuffer {
-    VkDevice m_device;
-    VmaAllocator m_allocator;
-    utils::Buffer m_meshletDataBuffer;
-    VkBuffer getMeshletDataBuffer() const;
-    uint64_t getMeshletDataAddress() const;  // VkDeviceAddress
-};
-```
-
-**目标**：
-```cpp
-class GPUMeshletBuffer {
-    rhi::Device* m_device{nullptr};
-    rhi::BufferHandle m_meshletDataBuffer;
-    rhi::BufferHandle m_meshletCullObjectBuffer;
-    rhi::BufferHandle m_meshletIndexBuffer;
-    rhi::BufferHandle getMeshletDataBuffer() const { return m_meshletDataBuffer; }
-    rhi::GpuPtr getMeshletDataAddress() const { return m_device->getBufferGpuAddress(m_meshletDataBuffer); }
-};
-```
-
-### 5.2 编译验证
-
-- `render/UploadUtils.cpp` 编译通过
-- `render/GPUMeshletBuffer.cpp` 编译通过
-- 运行测试：上传 meshlet 数据 → 获取 GpuPtr → 验证
+**提交**：`feat(rhi/vulkan): implement encoders, command buffer, argument table, buffer+gpuptr`
 
 ---
 
-## 6. Wave 3：试点 Pass 迁移（Compute → Encoder 模型）
+## 5. Wave 2：Common 层下沉 + 包装既有 Buffer 资源 — 🔁 已重排序（仅做安全增量）
 
-**目标**：选择 1-2 个纯 Compute Pass 完全迁移到新接口，验证 Encoder 模型在业务层的可行性。
+**目标**：Vulkan 类型移出公共头；用 `BufferHandle`/`GpuPtr` 包装既有 device-address 资源，**运行时行为不变**。
+**前置依赖**：Wave 1。
 
-**验证标准**：`GPUDrivenCullingPass` 和 `GPUDrivenDepthPyramidPass` 使用新接口后，渲染结果正确。
+> **重排序决策（实测后调整）**：实测 `Common.h` 被 **36 文件** include、**24 文件**直接用 `utils::Buffer`、
+> `VK_CHECK`×159/`ASSERT`×133 遍布全仓，且宏与 `utils::` helper 强耦合。"净化 Common.h + utils::Buffer→BufferHandle"
+> 是 30+ 文件的强波及大爆炸，违背"每 Wave 10–20 文件、保持编译绿色"，且即时价值低（消费方仍 include Common.h）。
+> 因此：
+> - **本 Wave 仅做安全增量**：FrameGpuAllocator（已完成）。
+> - **Common.h 净化 + `utils::Buffer→BufferHandle` 迁移降级**为"随消费方迁移逐步进行 / 靠近 Wave 9 的清理"，不作为阻塞性前置。
+> - Wave 3 试点（culling/depth-pyramid 用现有 pipeline/bindgroup/dispatch）**不依赖** buffer 包装，可直接进行。
 
-### 6.1 修改的文件
+**改动文件与步骤**：
+- [x] `render/TransientAllocator`（FrameGpuAllocator）：`Allocation`/`TypedAllocation` 增 `rhi::GpuPtr gpu`，`allocate()` 按 `m_buffer.address + offset` 填充（纯增量，编译通过）
+- [~] 以下降级为后续/随迁移进行（非阻塞）：
+  - 新建 `common/VulkanTypes.h`：迁入 `utils::Buffer/Image/ImageResource/QueueInfo/AccelerationStructure`
+- [ ] 新建 `common/VulkanHelpers.h`：迁入 `cmdInitImageLayout`/`cmdTransitionSwapchainLayout`/`cmdBufferMemoryBarrier`/`findSupportedFormat`/`findDepthFormat`/`createShaderModule`/`beginSingleTimeCommands`/`endSingleTimeCommands`/`pNextChainPushFront`
+- [ ] 新建 `common/VulkanContextConfig.h`：迁入 `ExtensionConfig`/`ContextCreateInfo`/`ValidationSettings`
+- [ ] 净化 `common/Common.h`：移除上述 Vulkan 内容；保留 GLM include / `shaderio` / `packNormalRGB10A2`+`unpack` / `findFile` / `ASSERT` / `hashCombine`；`Vertex::getBindingDescription/getAttributeDescriptions` 改返回 `rhi::Vertex*Desc`（`volk.h`/`vk_mem_alloc.h` 下沉到对应新头或后端 cpp）
+- [ ] `render/UploadUtils.h/.cpp`：
+  - `utils::Buffer createStaticBufferWithUpload(VkDevice, VmaAllocator, VkCommandBuffer, ...)` → `BufferHandle createStaticBufferWithUpload(rhi::Device&, rhi::CommandBuffer&, std::span<const std::byte>, rhi::BufferUsageFlags)`，内部 `createBuffer` + `ComputeEncoder::copyBuffer`（copy 子集）
+- [ ] `render/GPUMeshletBuffer.h/.cpp`：成员 `utils::Buffer`→`rhi::BufferHandle`；`getMeshletDataAddress()`(`uint64_t`)→`rhi::GpuPtr`（实现 = `device->getBufferGpuAddress(handle)`，**封装既有 `.address`，语义不变**，证据 `GPUMeshletBuffer.cpp:41`）
+- [ ] `render/GPUSceneRegistry.h/.cpp`：`m_objectBuffer`/`m_cullObjectBuffer` 改 `BufferHandle`；`getBufferAddress()`→`GpuPtr`（证据 `GPUSceneRegistry.cpp:43`），调用方同步改类型
 
-#### File: `render/Pass.h` （修改）
+**验证**：
+- [x] 安全增量（FrameGpuAllocator）编译通过：`[2/2] Linking demo_core.lib`。
+- [ ] 降级项的验证（RenderDoc 逐 buffer 对比、画面一致）随其实际迁移时进行。
 
-**当前**：
-```cpp
-struct PassContext {
-    rhi::CommandList* cmd{nullptr};
-    // ...
-};
-```
-
-**目标（兼容过渡）**：
-```cpp
-struct PassContext {
-    rhi::CommandList* cmd{nullptr};         // OLD，保留兼容
-    rhi::CommandBuffer* cmdBuffer{nullptr}; // NEW
-    // ...
-};
-```
-
-`PassExecutor::execute()` 需要同时设置 `cmd` 和 `cmdBuffer`。
-
-#### File: `render/PassExecutor.cpp` （修改）
-
-在 `execute()` 中，创建 `CommandBuffer` 并赋值给 `PassContext::cmdBuffer`。
-
-#### File: `render/passes/GPUDrivenCullingPass.h/cpp` （重写）
-
-**当前 `execute()`**：
-```cpp
-void GPUDrivenCullingPass::execute(const PassContext& context) const {
-    context.cmd->beginEvent("GPUDrivenCulling");
-    // ... 获取 pipeline layout, bind group, buffer handles ...
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, pipeline);
-    context.cmd->bindBindGroup(...);
-    context.cmd->dispatch((objectCount + 255) / 256, 1, 1);
-    context.cmd->endEvent();
-}
-```
-
-**目标 `execute()`**：
-```cpp
-void GPUDrivenCullingPass::execute(const PassContext& context) const {
-    auto* cmdBuffer = context.cmdBuffer;
-    cmdBuffer->beginEvent("GPUDrivenCulling");
-
-    // Barrier: ensure depth pyramid is ready
-    cmdBuffer->barrier(
-        rhi::StageFlags::compute,   // DepthPyramidPass producer
-        rhi::StageFlags::compute,   // This pass consumer
-        rhi::HazardFlags::textureWrites
-    );
-
-    auto* enc = cmdBuffer->beginComputePass();
-    enc->setPipeline(m_renderer->getGPUCullingPipelineHandle());
-    enc->setArgumentTable(0, m_renderer->getGPUCullingBindGroup(context.frameIndex));
-    // Root constants for push constants
-    enc->setRootConstants(0, &pushConsts, sizeof(pushConsts));
-    enc->dispatch((objectCount + 255) / 256, 1, 1);
-    cmdBuffer->endEncoding();
-
-    // Barrier: indirect args produced, consumed by subsequent graphics passes
-    cmdBuffer->barrier(
-        rhi::StageFlags::compute,
-        rhi::StageFlags::commandInput,
-        rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites
-    );
-
-    cmdBuffer->endEvent();
-}
-```
-
-**注意**：`GPUDrivenCullingPass` 当前 `#include "rhi/vulkan/VulkanCommandList.h"` 和 `m_renderer->getGPUCullingPipelineLayout()` / `m_renderer->getGPUCullingIndirectBufferOpaque()` / `getNativeComputePipeline()` 等 Native escape hatch。这些必须全部移除。
-
-#### File: `render/passes/GPUDrivenDepthPyramidPass.h/cpp` （重写）
-
-类似 `GPUDrivenCullingPass`，但更简单（它委托给 `m_renderer->executeDepthPyramidPass(*context.cmd, *context.params)`）。
-
-需要修改 `RenderDevice::executeDepthPyramidPass` 的签名：
-```cpp
-// 从
-void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
-// 改为
-void executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
-```
-
-### 6.2 编译验证
-
-- `GPUDrivenCullingPass` 和 `GPUDrivenDepthPyramidPass` 编译通过
-- 运行程序，验证 GPU Culling 结果正确（检查 `getLastGPUCullingStats`）
-- 如果失败，回退到旧 `CommandList` 路径进行对比调试
+**提交**：`feat(render): add FrameGpuAllocator GpuPtr to TransientAllocator`（降级项后续单独提交）
 
 ---
 
-## 7. Wave 4：所有 Compute Passes 迁移
+## 6. Wave 3：试点 Pass 迁移（Compute）— ✅ 试点完成（编译通过）
 
-**目标**：将所有纯 Compute Pass 迁移到 `ComputeEncoder`。
+**目标**：打通 `FrameContext→CommandBuffer→Encoder→Pass` 链路，验证模型可行。
+**前置依赖**：Wave 1（接口/后端）。buffer 包装非必需（试点 pass 用现有 pipeline/bindgroup/dispatch）。
 
-**Pass 列表**：
-1. `GPUDrivenLightCullingPass`
-2. `GPUDrivenClusteredLightCullingPass`
-3. `GPUDrivenVisibilitySortPass`
-4. `GPUDrivenAOPass`
-5. `GPUDrivenSSRPass`
-6. `GPUDrivenBloomPrefilterPass`
-7. `GPUDrivenBloomDownsamplePass`
-8. `GPUDrivenTAAResolvePass`
+> **进度**：`GPUDrivenCullingPass` 已迁移到 `ComputeEncoder`，整条链路打通并全量编译通过（`[4/4] Linking demo_core.lib`）。
+> `GPUDrivenDepthPyramidPass` 委托进 `RenderDevice::executeDepthPyramidPass`（大函数），随后单独迁移。
+> **关键发现/桥接**：试点 pass 仍用既有 `BindGroupHandle`，而新 `ComputeEncoder::setArgumentTable` 经新池解析。
+> 加了**过渡桥接**：`VulkanResourceTable::resolveArgumentTable` 在新池未命中时按 handle bits 回退到 `m_bindGroupTables`，
+> pass 把 bind group bits 当 `ArgumentTableHandle` 传入。Wave 8 正式替换 ArgumentTable 时移除该桥接。
 
-### 7.1 每个 Pass 的通用替换步骤
+**改动文件与步骤**：
+- [x] `render/Pass.h`：`PassContext` 增 `rhi::CommandBuffer* cmdBuffer`（保留 `cmd` 兼容）+ include `RHICommandBuffer.h`
+- [x] `render/RenderDevice.cpp`：frameContext init 后 `setResourceTable(&resourceTable)`（资源表注入）；`PassContext` 构造追加 `frameContext->getCommandBuffer()`
+- [x] `rhi/vulkan/VulkanResourceTable.cpp`：`resolveArgumentTable` 加 bind-group 过渡桥接
+- [x] `render/passes/GPUDrivenCullingPass.cpp`：删 `rhi/vulkan/VulkanCommandList.h` include 与 native barrier；`execute` 改 `beginComputePass`→`setPipeline`→`setArgumentTable`(桥接)→`dispatch`→`endEncoding`→`barrier(compute→commandInput, drawArguments|bufferWrites)`
+- [ ] `render/passes/GPUDrivenDepthPyramidPass.cpp` + `RenderDevice::executeDepthPyramidPass(CommandList&→CommandBuffer&)`：随后迁移
+- [x] 依赖声明（`getDependencies`）不动——barrier 仍由 `PassExecutor` 自动产生（Wave 7 才换动词）
 
-对于每个 Compute Pass：
+**验证**：
+- [x] **全量编译通过**：`[4/4] Linking demo_core.lib`。
+- [ ] 运行期（`getLastGPUCullingStats` 计数一致）：构建目录仅验证编译；运行验证待整机跑起来时进行。
 
-1. **移除 `#include "rhi/vulkan/VulkanCommandList.h"`**
-2. **修改 `execute()` 签名内部实现**：
-   - `context.cmd->beginEvent(...)` → `context.cmdBuffer->beginEvent(...)`
-   - `context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, ...)` → `enc->setPipeline(...)`
-   - `context.cmd->bindBindGroup(...)` → `enc->setArgumentTable(...)`
-   - `context.cmd->pushConstants(...)` → `enc->setRootConstants(...)` 或 `enc->setRootPointer(...)`
-   - `context.cmd->dispatch(...)` → `enc->dispatch(...)`
-   - `context.cmd->endEvent()` → `context.cmdBuffer->endEvent()`
-3. **在 `execute()` 开头和结尾添加 `barrier()`**：
-   - 开头：等待前一个 producer（通常是 graphics pass 的 `rasterDepthOut` 或前一个 compute pass 的 `compute`）
-   - 结尾：通知后续 consumer（通常是 graphics pass 的 `commandInput` 或 `fragmentShader`）
-4. **移除所有 `VkPipelineLayout` / `VkDescriptorSet` / `uint64_t` Native accessor 的调用**：
-   - `m_renderer->getXXXPipelineLayout()` → 不再需要（`setRootConstants` 不需要 layout）
-   - `m_renderer->getXXXDescriptorSetOpaque()` → 改用 `ArgumentTableHandle`
-   - `reinterpret_cast<VkPipeline>(...)` → 直接使用 `PipelineHandle`
-
-### 7.2 编译验证
-
-- 所有 Compute Pass 编译通过
-- 运行程序，验证 Compute-based effects（AO, SSR, Bloom, TAA）渲染正确
+**提交**：`refactor(render): migrate GPUDrivenCullingPass to ComputeEncoder (pilot) + frame/resource-table wiring + bindgroup bridge`
 
 ---
 
-## 8. Wave 5：Render Passes 迁移
+## 7. Wave 4：全部 Compute Pass 迁移 — ✅ 干净 compute 已迁（编译通过）
 
-**目标**：将所有 Render Pass 迁移到 `RenderEncoder`。
+**目标**：把真正的 Compute Pass 转 `ComputeEncoder`。
+**前置依赖**：Wave 3。
 
-**Pass 列表**（按复杂度从低到高）：
+> **triage 修正**：计划 §1 误把 `GPUDrivenBloomPrefilterPass` / `GPUDrivenBloomDownsamplePass` / `GPUDrivenTAAResolvePass`
+> 归为 Compute，实际它们是 **fullscreen render pass**（`beginRenderPass`+graphics+`draw(3)`）→ **移至 Wave 5（RenderEncoder）**。
+> 真正的 compute pass 有 5 个：3 个"干净"（本回合迁），2 个含 native buffer copy/fill（依赖 buffer 包装，推迟）。
 
-#### Tier 1（简单，fullscreen quad / simple draw）
-- `GPUDrivenSkyboxPass`
-- `GPUDrivenSkyPass`
-- `GPUDrivenDebugPass`
-- `GPUDrivenVelocityPass`
+**改动文件与步骤**：
+- [x] `GPUDrivenLightCullingPass`（2 dispatch + barrier）→ ComputeEncoder（+ bridge）
+- [x] `GPUDrivenAOPass`（trace+denoise 两 dispatch + pushConstants + barrier）→ ComputeEncoder
+- [x] `GPUDrivenSSRPass`（dispatch + pushConstants + barrier）→ ComputeEncoder
+- 模式：移除 `rhi/vulkan/*` include；`bindPipeline(compute)`→`setPipeline`；`bindBindGroup`→`setArgumentTable`(桥接)；`pushConstants`→`setRootConstants(slot,data,size)`；`dispatch`→`enc->dispatch(DispatchDesc)`；`memoryBarrier`→`cmdBuffer->barrier(stage,stage,hazard)`
+- [ ] **推迟（用 native uint64 buffer 的 copy/fill，待 buffer 包装/桥接）**：`GPUDrivenClusteredLightCullingPass`（`fillBuffer`）、`GPUDrivenVisibilitySortPass`（`copyBuffer`+bitonic）
 
-#### Tier 2（中等，standard geometry + MRT/depth）
-- `GPUDrivenDepthPrepass`
-- `GPUDrivenForwardPass`
-- `GPUDrivenLightPass`
-- `GPUDrivenCSMShadowPass`
-- `GPUDrivenShadowAtlasPass`
-- `GPUDrivenFinalColorPass`
+**验证**：
+- [x] **全量编译通过**：`[4/4] Linking demo_core.lib`。
+- [ ] 运行期效果对比（AO/SSR/light culling）：待整机运行验证。
 
-#### Tier 3（复杂，MDI / multi-layer）
-- `GPUDrivenGBufferPass`（最复杂，MRT + MDI + alpha test）
-
-### 8.1 每个 Render Pass 的通用替换步骤
-
-对于每个 Render Pass：
-
-1. **移除 `#include "rhi/vulkan/VulkanCommandList.h"`**
-2. **修改 `execute()`**：
-   ```cpp
-   void XXXPass::execute(const PassContext& context) const {
-       auto* cmdBuffer = context.cmdBuffer;
-       cmdBuffer->beginEvent("XXXPass");
-
-       // Barrier: wait for previous passes
-       cmdBuffer->barrier(producerStage, consumerStage, hazardFlags);
-
-       // Begin render pass
-       auto* enc = cmdBuffer->beginRenderPass({
-           .colorTargets = colorTargets,
-           .colorTargetCount = N,
-           .depthTarget = &depthTarget,
-       });
-
-       enc->setPipeline(pipelineHandle);
-       enc->setArgumentTable(0, globalTable);
-       enc->setArgumentTable(1, materialTable);
-       enc->setDynamicBuffer(2, drawDataBuffer, dynamicOffset, drawDataSize);
-
-       // For MDI passes
-       enc->drawIndexedIndirect(indirectBuffer, offset, drawCount, stride);
-
-       // Or for direct draw
-       enc->drawIndexed({.indexBuffer = ib, .indexCount = count, ...});
-
-       cmdBuffer->endEncoding();  // ends render pass
-       cmdBuffer->endEvent();
-   }
-   ```
-3. **替换 `VkImage` / `VkImageView` accessor**：
-   - `m_renderer->getSceneDepthImage()` → 使用 `rhi::TextureHandle` 或 `rhi::TextureViewHandle`
-   - `m_renderer->getCurrentSwapchainImageView()` → 使用 `swapchain->currentTextureView()`
-4. **替换 `VkExtent2D`**：
-   - `m_renderer->getSceneExtent()` → `rhi::Extent2D`
-5. **替换 `VkFormat`**：
-   - `m_renderer->getSceneDepthFormat()` → `rhi::TextureFormat`
-
-### 8.2 GBuffer Pass 的特殊处理
-
-`GPUDrivenGBufferPass` 是当前最复杂的 pass：
-- 使用 MRT（3 个 color target + 1 depth target）
-- 有 MDI（Multi-Draw Indirect）路径
-- 有 Alpha Test 分支
-- 当前直接操作 `VkImageView` 和 `VkPipelineLayout`
-
-**迁移策略**：
-1. 先确保 `RenderEncoder::drawIndexedIndirect` 和 `drawIndexedIndirectCount` 可用
-2. 将 MRT setup 从 Native `VkImageView` 改为 `rhi::TextureViewHandle` 数组
-3. 将 MDI buffer 从 `uint64_t` 改为 `BufferHandle`
-4. 分阶段：先迁移 non-MDI 路径，再迁移 MDI 路径
-
-### 8.3 编译验证
-
-- 所有 Render Pass 编译通过
-- 运行完整渲染管线，对比帧捕获（RenderDoc）验证输出一致
+**提交**：`refactor(render): migrate clean compute passes (light-culling/AO/SSR) to ComputeEncoder`
 
 ---
 
-## 9. Wave 6：Present Pass + Swapchain 迁移
+## 8. Wave 5：Render Pass 迁移 — 🔁 进行中（全屏 pass 已迁，几何 MDI pass 待 buffer 桥接）
 
-**目标**：迁移 `GPUDrivenPresentPass` 和 Swapchain 相关代码。
+**目标**：12 个 Render Pass 全部转 `RenderEncoder`。
+**前置依赖**：Wave 4。
 
-### 9.1 文件清单
+> **进度**：所有**纯全屏 pass** 已迁移到 `RenderEncoder`，全量编译通过（`[3/3] Linking demo_core.lib`）：
+> - Tier 1：`GPUDrivenSkyboxPass` / `GPUDrivenSkyPass` / `GPUDrivenVelocityPass`
+> - Tier 2 全屏：`GPUDrivenLightPass`（camera+scene 2 dyn offset）/ `GPUDrivenFinalColorPass`（camera+postProcess 2 dyn offset）
+>
+> **阻塞剩余 pass 的关键发现**：`GPUDrivenDepthPrepass` / `GPUDrivenForwardPass` / `GPUDrivenCSMShadowPass` / `GPUDrivenShadowAtlasPass` / `GPUDrivenGBufferPass` / `GPUDrivenDebugPass` / `GPUDrivenImguiPass` 都绑定**裸 `VkBuffer` 指针值**（`MeshRecord::vertexBufferHandle` = `reinterpret_cast<uint64_t>(VkBuffer)`、`getBufferOpaque()`、culling indirect buffer 的 uint64）。新 `RenderEncoder` 的 `bindVertexBuffers`/`bindIndexBuffer`/`drawIndexedIndirect*` 只接受 `BufferHandle` 并经 `m_table->resolveBuffer()`（buffer 池）解析；而 `BufferHandle{index,generation}` 装不下 64 位裸指针。
+> **决策点（下一步）**：需先实现 **buffer 句柄化桥接**——要么把这些 native buffer 注册进 `VulkanResourceTable` buffer 池拿到 `BufferHandle`，要么给 encoder 加 native-buffer 桥接路径（类似 ArgumentTable 的 bind-group 桥接，但需容纳 64 位）。这是几何 MDI pass 迁移的前置，单独处理。
+>
+> **进度（旧）**：Tier 1 的 `GPUDrivenSkyboxPass` / `GPUDrivenSkyPass` / `GPUDrivenVelocityPass` 已迁移到 `RenderEncoder`，全量编译通过（`[4/4] Linking demo_core.lib`）。
+> `GPUDrivenDebugPass` 的 `renderDebugOverlay` 当前被注释禁用（`execute` 不调用），且依赖 native 顶点缓冲（transient buffer 的 `getBufferOpaque()` uint64），随 buffer 包装/Tier 2 一并迁移。
+> **本回合补齐的 backend 缺口（RenderEncoder）**：
+> - 新增非索引 `draw(DrawDesc)`（`vkCmdDraw`）——fullscreen 三角形 `draw(3,1,0,0)` 所需，原接口缺失。
+> - `setDynamicBuffer`/`setArgumentTable` 改为**每 slot 累积多个 dynamic offset**（`kMaxDynOffsetPerSlot=4`，按调用顺序＝binding 顺序 flush）——`LSetScene` 需 2 个 dynamic UBO offset。
+> **迁移模式（behavior-preserving）**：手动 `transitionTexture`/`beginEvent`/`endEvent` 仍留在 `context.cmd`（与 `context.cmdBuffer` 同一 `VkCommandBuffer`），仅把 `beginRenderPass…draw…endRenderPass` 块换成 `context.cmdBuffer->beginRenderPass()`→encoder→`endEncoding`。layout transition 仍由 `PassExecutor` 自动生成（Wave 7 才换动词）。bind group 经 `ArgumentTableHandle{bg.index,bg.generation}` 桥接（Wave 8 正式替换）。
+> **native 泄漏未清**：3 个 pass 仍 include `rhi/vulkan/VulkanCommandList.h`（用于 `VkExtent2D`/`VK_NULL_HANDLE`/`VkImage` 的早退检查与 `transitionTexture`），随 native accessor 替换（`getSceneExtent()→Extent2D` 等）/Wave 9 清理。
 
-#### File: `render/passes/GPUDrivenPresentPass.cpp`
+**改动文件与步骤**：
+- [x] **Tier 1（简单 fullscreen）**：`GPUDrivenSkyboxPass` / `GPUDrivenSkyPass` / `GPUDrivenVelocityPass`（`GPUDrivenDebugPass` 推迟：dead code + native 顶点缓冲）
+- [x] **Tier 2 全屏**：`GPUDrivenLightPass` / `GPUDrivenFinalColorPass`（纯全屏 `draw(3)`，无 native 缓冲绑定）
+- [ ] **Tier 2 几何（buffer 句柄化进行中）**：`GPUDrivenDepthPrepass` / `GPUDrivenForwardPass` / `GPUDrivenCSMShadowPass`（cascade array）/ `GPUDrivenShadowAtlasPass`（atlas tiles）/ `GPUDrivenImguiPass`（ImGui draw data + 动态顶点缓冲）—— 均绑定裸 VkBuffer，阻塞于 buffer 句柄化
+  - **方案 1（选项 B：稳定 handle + 每帧更新 record）**：给 `VulkanResourceTable` 加 `updateBuffer(handle, native, gpuAddress=0)`，per-frame/arena buffer 一次分配稳定 `BufferHandle`，realloc 时只重绑 native，无 handle churn。
+  - [x] 基础设施：`VulkanResourceTable::updateBuffer`（rebind 稳定 handle）。
+  - [x] **MeshPool 共享 vertex/index arena 句柄化**：`MeshPool` 持 `VulkanResourceTable*`（前向声明，native include 落 .cpp，不污染 render 头）+ 2 个稳定 `BufferHandle`；`ensureSharedCapacity` realloc 后 register/updateBuffer（owned=false，VMA 寿命仍归 MeshPool）；`deinit/resetSharedBuffers` removeBuffer；新 getter `getSharedVertexBufferRHIHandle()`/`getSharedIndexBufferRHIHandle()`。`MeshPool::init` 增 `resourceTable` 参数（`RenderDevice.cpp:894`）。编译通过（`[5/5] Linking demo_core.lib`）。
+  - [x] **GPUMeshletBuffer meshlet index 句柄化**：持 `VulkanResourceTable*`（前向声明 + .cpp include）+ 稳定 handle；`ensureCapacities` realloc 后 register/updateBuffer（owned=false）；`deinit` removeBuffer；getter `getMeshletIndexBufferRHIHandle()`；`init` 增 resourceTable（`GPUDrivenRenderer.cpp:353` 传 `m_renderer.getResourceTable()`，RenderDevice 新增 `getResourceTable()`）。编译通过（`[3/3] Linking demo_core.lib`）。
+  - [x] **FrameUserData per-frame buffer 句柄化**：`FrameUserData` 加 4 个稳定 `BufferHandle`（cullingIndirect/cullingDrawCount/shadowCullingIndirect/persistentStream）；RenderDevice 加统一 helper `rebindFrameBufferHandle(handle, buffer)`（首次 register、之后 updateBuffer、null 时 remove，owned=false）；在 3 个创建点调用（`ensureGPUCullingBuffers:2552`、`ensureShadowCullingBuffers:2715`、persistent `:2955`）；加 7 个 RHI handle getter（含 previous 变体 = `(frameIndex+count-1)%count`，frameCounter>1 守卫）。编译通过（`[2/2] Linking demo_core.lib`）。
+  - **至此所有几何 pass 所需 buffer 均已句柄化**（MeshPool vertex/index、meshlet index、culling indirect/count/persistent/shadow）。
+  - [x] **试点迁移 `GPUDrivenDepthPrepass`**（buffer 句柄化首个消费者）：GPUDrivenRenderer 委托 3 个 RHI getter（meshlet index / previous culling indirect+drawCount / previous persistent stream）；pass 改用 `rhi::BufferHandle` + `RenderEncoder::bindVertexBuffers/bindIndexBuffer/drawIndexedIndirectCount(DrawIndirectCountDesc)`；vertex/index 用 `MeshPool::getSharedVertex/IndexBufferRHIHandle()`；MDI args/count 用 previous-frame handle；bind group 经 `ArgumentTableHandle` 桥接；transition/beginEvent 仍留 `context.cmd`。保留 uint64 变量仅用于有效性判断与 offset 逻辑。编译通过（`[2/2] Linking demo_core.lib`）。**运行/RenderDoc 验证待整机运行**（深度缓冲一致性、MDI draw 序列）。
+  - [x] **`GPUDrivenForwardPass`** 迁移：透明几何 MDI；`bindPipeline`/`bindBindGroup` 原在 `beginRenderPass` 前，**重排**到 encoder 之后；args=当前帧 persistent stream RHI handle，count=当前帧 culling drawCount RHI handle；`prepareAndDispatchVisibilityPatch` 仍走 `context.cmd`（render pass 外 compute）。编译通过。
+  - [x] **`GPUDrivenGBufferPass`**（Tier3）迁移：MDI opaque+alphaTest 两 pipeline；args=sorted persistent / culling indirect RHI handle，count=culling drawCount RHI handle；保留 uint64 变量做有效性判断与 offset 选择。编译通过（`[2/2] Linking demo_core.lib`）。
+  - GPUDrivenRenderer 补委托当前帧 RHI getter（culling indirect/drawCount/persistent stream）。
+  - [ ] **剩余（未做）**：`GPUDrivenCSMShadowPass`（shadow culling indirect 已句柄化，cascade array）/ `GPUDrivenShadowAtlasPass`（atlas tiles）/ `GPUDrivenImguiPass`（ImGui 动态顶点/索引缓冲，需先句柄化 transient ring buffer）/ `GPUDrivenDebugPass`（dead code + transient）。
+  - [ ] **全部 pass 迁移后需运行 + RenderDoc 验证**（深度/GBuffer/透明/阴影画面一致、MDI draw 序列、validation layer 零报错）——本环境仅验证编译。
+- [ ] **Tier 3（最复杂）**：`GPUDrivenGBufferPass` —— 先迁 non-MDI 路径，再迁 MDI（`drawIndexedIndirect`/`drawIndexedIndirectCount`），最后处理 alpha test 分支
+- 每个文件：`beginRenderPass({colorTargets,…,depthTarget})`→`setPipeline`→`setArgumentTable(0/1/2,…)`→`setDynamicBuffer`/`setRootPointer`→`drawIndexed`/`drawIndexedIndirect`→`endEncoding`
+- [ ] 替换 native accessor：`getSceneDepthImage()`/`getCurrentSwapchainImageView()`→`TextureViewHandle`；`getSceneExtent()`→`rhi::Extent2D`；`getSceneDepthFormat()`→`rhi::TextureFormat`
+- [ ] `GPUDrivenLightPass`：在注释标记为 **input-attachment/local-read 优化候选**（本 Wave 仍用 `getLightingInputBindGroup` 分离采样，`GPUDrivenLightPass.cpp:111`）
 
-**当前**：使用 `VkImage` + `blitImage` + `transitionTexture` + `VkExtent2D`
+**验证**：
+- 编译通过；
+- 完整管线 RenderDoc 对比：GBuffer 三张 + depth、阴影（CSM/atlas）、forward 透明、ImGui、最终色调映射逐 pass 一致。
 
-**目标**：
-```cpp
-void GPUDrivenPresentPass::execute(const PassContext& context) const {
-    auto* cmdBuffer = context.cmdBuffer;
-    cmdBuffer->beginEvent("GPUDrivenPresent");
-
-    // Barrier: light pass / final color wrote to output texture
-    cmdBuffer->barrier(
-        rhi::StageFlags::rasterColorOut,
-        rhi::StageFlags::transfer,
-        rhi::HazardFlags::textureWrites
-    );
-
-    auto* enc = cmdBuffer->beginCopyPass();
-    enc->blitTexture({
-        .srcTexture = m_renderer->getOutputTextureHandle(),
-        .dstTexture = m_renderer->getCurrentSwapchainTextureHandle(),
-        .srcState = rhi::ResourceState::TransferSrc,
-        .dstState = rhi::ResourceState::TransferDst,
-        // ... offsets based on aspect ratio letterboxing
-    });
-    cmdBuffer->endEncoding();
-
-    // Barrier: blit wrote to swapchain, prepare for present
-    cmdBuffer->barrier(
-        rhi::StageFlags::transfer,
-        rhi::StageFlags::rasterColorOut,  // Present engine consumer
-        rhi::HazardFlags::textureWrites
-    );
-
-    cmdBuffer->endEvent();
-}
-```
-
-**注意**：如果 Present 不是 blit 而是 fullscreen quad（如需要做 tone mapping in present pass），则它应该是 `RenderEncoder` 而不是 `CopyEncoder`。当前代码使用 `blitImage`，所以是 `CopyEncoder`。
-
-#### File: `rhi/RHISwapchain.h` / `rhi/vulkan/VulkanSwapchain.cpp`
-
-**修改**：
-- 移除 `getNativeSwapchain()` / `getNativeImageView()` / `getNativeImage()`
-- `currentTexture()` 返回 `TextureHandle`
-- 新增 `currentTextureView()` 返回 `TextureViewHandle`
-
-### 9.2 编译验证
-
-- Swapchain acquire + present 工作正常
-- 屏幕输出正确，无撕裂或布局错误
+**提交**：`refactor(render): migrate all render passes to RenderEncoder`
 
 ---
 
-## 10. Wave 7：ArgumentTable 全面替换 BindGroup/BindTable
+## 9. Wave 6：DrawStream decode + Present/Swapchain
 
-**目标**：将业务层和 RenderDevice 中的 `BindGroup` / `BindTable` 概念替换为 `ArgumentLayout` / `ArgumentTable`。
+**目标**：补齐 DrawStream→Encoder decode（设计文档 §9/Phase 7）；迁移 Present 与 Swapchain。
+**前置依赖**：Wave 5。
 
-### 10.1 文件清单
+**改动文件与步骤**：
+- [ ] Renderer Framework 层新增 `decodeDrawStream(rhi::RenderEncoder&, const DrawStream&)`：
+  - 维护 `DrawState`，用 dirty mask 压缩 pipeline / argument table / dynamic offset / index/vertex buffer 变化，仅变化字段调对应 setter（照设计文档 §9 伪码）
+  - **留在 Renderer 层，不下沉 RHI Core**（设计文档决策 #10）
+- [ ] 消费 `PassContext::drawStream`（`Pass.h:27`）的 Render Pass（GBuffer/Forward 等）改为调用 `decodeDrawStream`，替换逐 draw 手写
+- [ ] `render/passes/GPUDrivenPresentPass.cpp`：`transitionTexture`+`blitImage` → `beginComputePass`→`blitTexture({srcTexture, dstTexture, …letterbox offsets})`（copy 子集）→`endEncoding`（layout 由后端处理，见 Wave 7）
+- [ ] `rhi/RHISwapchain.h` + `rhi/vulkan/VulkanSwapchain.cpp`：移除 `getNativeSwapchain/getNativeImageView/getNativeImage`；`currentTexture()`→`TextureHandle`；新增 `currentTextureView()`→`TextureViewHandle`
 
-#### File: `render/BindGroups.h` （重写或新建 `render/ArgumentTables.h`）
+**验证**：
+- 编译通过；present 正确、无撕裂、letterbox 比例正确；
+- DrawStream 路径下 GBuffer/Forward 的 draw call 序列 RenderDoc 与 Wave 5 手写路径一致。
 
-将 `BindGroupDesc` / `BindGroupResource` 迁移为使用 `ArgumentTableHandle` / `ArgumentLayoutHandle`。
-
-#### File: `render/RenderDevice.h/cpp` （大规模修改）
-
-**当前内部**：大量 `VkDescriptorSetLayout` / `VkDescriptorSet` / `VkPipelineLayout`
-
-**目标**：
-- `DeviceLifetimeResources` 中的 `VkDescriptorSetLayout` → `ArgumentLayoutHandle`
-- `VkDescriptorSet` → `ArgumentTableHandle`
-- `VkPipelineLayout` → 完全由 Vulkan 后端内部管理，不暴露给业务层
-
-**具体修改**：
-1. `getLightPipelineLayout()` / `getGraphicsPipelineLayout()` 等返回 `PipelineLayoutHandle` 的方法 → **删除**
-2. `getGBufferColorDescriptorSet()` / `getLightingInputDescriptorSet()` 等返回 `uint64_t`（VkDescriptorSet）的方法 → 改为返回 `ArgumentTableHandle`
-3. `registerExternalGraphicsPipeline(VkPipeline, VkPipelineLayout)` → 改为 `registerExternalGraphicsPipeline(PipelineHandle)` 或完全移除（如果 pipeline 已由 RHI 创建）
-4. `createBindGroupLayout` / `createBindGroup` → 改为 `createArgumentLayout` / `createArgumentTable`
-5. `SamplerCache`（内部 `VkSampler` map）→ 使用 `rhi::Device::createSampler`
-
-### 10.2 编译验证
-
-- 所有 descriptor / bind group 创建路径编译通过
-- Material binding、per-frame dynamic buffer binding 工作正常
+**提交**：`feat(render): add DrawStream→Encoder decode; migrate present + swapchain`
 
 ---
 
-## 11. Wave 8：StageBarrier 全面替换 ResourceBarrier
+## 10. Wave 7：StageBarrier + ResourceBarrier 重构（PassExecutor 改发射动词）
 
-**目标**：移除 `transitionTexture` / `transitionBuffer` / `memoryBarrier` 的显式调用，改用 `barrier(producer, consumer, hazard)`。
+**目标**：双 barrier 模型（设计文档 §7）。常规同步走 `barrier(stage,hazard)`；显式 layout/queue/present 走 `resourceBarrier`；
+layout 由后端 tracker 推断。**`transitionTexture/transitionBuffer` 重塑为 `resourceBarrier`，非废弃删除**。
+**前置依赖**：Wave 6（所有 pass 已用 CommandBuffer）。
 
-### 11.1 文件清单
+**改动文件与步骤**：
+- [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：实现 `barrier(StageFlags, StageFlags, HazardFlags)`（主路径）
+  - `ToVkPipelineStageFlags2(StageFlags)` + `InferAccessFlags(StageFlags, HazardFlags, isProducer)` → `VkMemoryBarrier2`
+  - 装入 `VkDependencyInfo`（**字段为 `pMemoryBarriers`**，勿写成 `pMemoryMemoryBarriers`）→ `vkCmdPipelineBarrier2`
+- [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：实现 `resourceBarrier(TextureBarrier[], BufferBarrier[])`（特殊路径）
+  - 由现有 `transitionTexture/transitionBuffer` 逻辑重塑而来（`VkImageMemoryBarrier2`/`VkBufferMemoryBarrier2`），支持 `before/after` layout 与 `srcQueue/dstQueue` ownership
+- [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：新增 **per-texture layout tracker**（per-command-buffer 数组/`unordered_map<texture,VkImageLayout>`，仅录制期内部用，非热路径解析）
+  - 在 `beginRenderPass`（color/depth target）/`blitTexture`/present 时按目标 layout 自动补 `VkImageMemoryBarrier2`
+  - layout 目标由依赖的 `requiredState`（`PassResourceDependency.requiredState`，`Pass.h:55`）映射
+- [ ] `render/PassExecutor.cpp:239-336`：发射动词替换
+  - 常规依赖 → `context.cmdBuffer->barrier(producerStage, consumerStage, hazards)`（§0.3 映射表）
+  - 需显式 layout/queue/present 的边界 → `context.cmdBuffer->resourceBarrier(...)`
+  - 保留 `requiresBarrier(prev,next)` 去重（read→read 不插）
+- [ ] **双重 barrier 防护**：同一资源在单次 producer→consumer 边界仅一条 barrier；pass 不得对已被 PassExecutor 覆盖的资源再手写（仅 intrapass override）
+- [ ] `rhi/RHICommandList.h`：`memoryBarrier`/`setResourceState` 加 `[[deprecated]]`（`transitionTexture/transitionBuffer` 的能力迁移到 `resourceBarrier`，旧入口 deprecated）
 
-#### File: `rhi/RHICommandList.h` （标记 deprecated）
+**验证**：
+- 编译通过；Vulkan validation layer **零 layout/sync 报错**；
+- RenderDoc：barrier 数量较迁移前不增多（无冗余）、关键边界（culling→indirect、GBuffer→lighting、blit→present）均有正确 barrier；
+- 画面一致。
 
-将 `transitionTexture` / `transitionBuffer` / `memoryBarrier` / `setResourceState` 标记为 `[[deprecated]]`。
-
-#### File: `rhi/vulkan/VulkanCommandList.cpp`
-
-实现 `barrier(StageFlags, StageFlags, HazardFlags)`：
-
-```cpp
-void VulkanCommandBuffer::barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards) {
-    VkMemoryBarrier2 memBarrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    memBarrier.srcStageMask = ToVkPipelineStageFlags2(producer);
-    memBarrier.dstStageMask = ToVkPipelineStageFlags2(consumer);
-    memBarrier.srcAccessMask = InferAccessFlags(producer, hazards, true);
-    memBarrier.dstAccessMask = InferAccessFlags(consumer, hazards, false);
-
-    VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    depInfo.memoryBarrierCount = 1;
-    depInfo.pMemoryMemoryBarriers = &memBarrier;
-    vkCmdPipelineBarrier2(m_commandBuffer, &depInfo);
-}
-```
-
-**注意**：对于 image layout transition（如 swapchain image `TransferDst` → `Present`），`barrier()` 可能需要额外的信息。可以：
-- 方案 A：`barrier()` 只处理 execution/memory barrier，image layout 由后端自动推断（基于 resource tracking）
-- 方案 B：保留 `transitionTexture` 作为低频专用接口，仅用于 layout transition
-
-考虑到 Metal 不需要显式 layout transition，**方案 A 更好**：Vulkan 后端内部维护一个轻量的 resource state cache（per-command-buffer），在 `beginRenderPass` / `blitTexture` / `present` 时自动插入必要的 layout transition。
-
-#### File: `render/passes/*.cpp`
-
-将所有 `context.cmd->transitionTexture(...)` 替换为 `context.cmdBuffer->barrier(...)`。
-
-**特别注意 `GPUDrivenPresentPass`**：
-- 当前调用 `context.cmd->transitionTexture(...)` 两次（output texture → transfer src, swapchain → transfer dst）
-- 改为 `barrier(StageFlags::rasterColorOut, StageFlags::transfer, HazardFlags::textureWrites)`
-- Vulkan 后端在 `blitTexture` 内部自动处理 `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL` / `TRANSFER_DST_OPTIMAL`
-
-### 11.2 编译验证
-
-- 所有 pass 编译通过
-- 运行 RenderDoc 捕获，验证 barrier 数量和位置合理（没有多余的 barrier，也没有 missing barrier）
+**提交**：`refactor(rhi,render): dual barrier model — StageBarrier main path + ResourceBarrier special path`
 
 ---
 
-## 12. Wave 9：QueryPool / GPU Profiling + 清理旧接口
+## 11. Wave 8：ArgumentTable 全面替换 BindGroup
 
-**目标**：引入 `QueryPoolHandle`，替换 `VkQueryPool`；删除所有旧 RHI 接口和兼容层。
+**目标**：业务层与 RenderDevice 的 BindGroup/BindTable → ArgumentLayout/ArgumentTable 句柄。
+**前置依赖**：Wave 7。
 
-### 12.1 文件清单
+**改动文件与步骤**：
+- [ ] `render/BindGroups.h:34-41`：`BindGroupDesc` 的 `rhi::BindTableLayout* layout` / `rhi::BindTable* table` → `rhi::ArgumentLayoutHandle layout` / `rhi::ArgumentTableHandle table`（**字段替换**）
+- [ ] `render/RenderDevice.h/.cpp`：
+  - 成员 `VkDescriptorSetLayout`→`ArgumentLayoutHandle`；`VkDescriptorSet`→`ArgumentTableHandle`
+  - 删除 `getXXXPipelineLayout()`（返回 `PipelineLayoutHandle` 的方法，layout 由后端内部管理）
+  - `getXXXDescriptorSet()`（返回 `uint64_t`）→ 返回 `ArgumentTableHandle`（如 `getLightingInputBindGroup`，`GPUDrivenRenderer.h:763`）
+  - `createBindGroupLayout`/`createBindGroup`→`createArgumentLayout`/`createArgumentTable`
+  - `SamplerCache`（内部 `VkSampler` map）→ `rhi::Device::createSampler`
+- [ ] 绑定模式：沿用现状"per-frame 持久 table + dynamic offset"（不每帧重建 table），保留 per-frame 数组（`GPUDrivenRenderer.cpp:2312/2350`）；per-frame 内容更新仍走 `updateArgumentTable`（`GPUDrivenRenderer.cpp:3195-3267` 的等价路径）
+- [ ] 过渡别名：`using BindGroupHandle = rhi::ArgumentTableHandle;`（仅句柄层，不替代上面字段替换）
 
-#### File: `render/RenderDevice.h` （移除旧成员）
+**验证**：
+- 编译通过；
+- material 贴图绑定、per-frame camera/scene dynamic offset、bindless 全局组（`globalBindlessGroup`）渲染正确；
+- 验证 O(1) resolve（无 per-frame hashmap 查找热点）。
 
-删除：
-- `VkQueryPool queryPool` → 改为 `rhi::QueryPoolHandle`
-- `VkPipelineLayout lightPipelineLayout` 等 → 完全移除（由后端内部管理）
-- `VkDescriptorSet gbufferTextureSets` 等 → 改为 `rhi::ArgumentTableHandle`
-- `VkFence` / `VkCommandBuffer` / `VkCommandPool` → 完全由 `rhi::FrameContext` / `rhi::CommandBuffer` 管理
-
-#### File: `rhi/RHICommandList.h` （删除）
-
-当所有业务层迁移完成后，删除 `rhi::CommandList` 基类。
-
-#### File: `rhi/vulkan/VulkanCommandList.h/cpp` （删除或重构）
-
-- 删除 `getNativeCommandBuffer()` 和所有 `cmd*` 自由函数
-- 如果 `VulkanCommandList` 仍作为 `CommandBuffer` 的内部实现保留，则将其重命名为 `VulkanCommandBuffer`
-
-#### File: `rhi/RHIHandles.h` （清理）
-
-- 移除 `TextureViewHandle::fromNativePtr()` / `toNativePtr()`
-
-### 12.2 编译验证
-
-- 项目编译通过，无任何 `[[deprecated]]` 警告
-- 运行完整 benchmark，验证性能无回归
+**提交**：`refactor(render): replace BindGroup/BindTable with ArgumentLayout/ArgumentTable handles`
 
 ---
 
-## 13. 风险与回滚策略
+## 12. Wave 9：QueryPool + 清理兼容层
 
-| 风险 | 影响 | 缓解措施 |
-|------|------|---------|
-| Encoder 模型在 Vulkan 下引入额外开销 | 中 | `VulkanCommandBuffer` 内部维护单个 `VkCommandBuffer`，encoder 切换无 native 开销（只是 C++ 虚函数或内联调用）。`beginRenderPass` 映射为 `vkCmdBeginRendering`，`endEncoding` 映射为 `vkCmdEndRendering` |
-| `ArgumentTable` 替代 `BindTable` 导致 descriptor update 性能下降 | 中 | 确保 `updateArgumentTable` 内部批量调用 `vkUpdateDescriptorSets`，而非逐个 update。保持 descriptor set 的持久化（immutable persistent table） |
-| `StageBarrier` 自动推断 image layout 出错 | 高 | 保留 debug-only 的 `transitionTexture` 路径作为 fallback。在开发阶段开启 Vulkan validation layer，捕获 layout mismatch |
-| `BufferHandle` 替换 `utils::Buffer` 导致 upload 路径中断 | 高 | Wave 2 中先实现 `createBuffer` + `getBufferGpuAddress`，确保 `UploadUtils` 和 `GPUMeshletBuffer` 完全迁移后再继续 |
-| MDI / Indirect Draw 路径在新接口下行为异常 | 高 | GBuffer Pass 最后迁移，迁移后使用 RenderDoc 对比 capture，确保 indirect command buffer 内容一致 |
-| 编译时间剧增（大量文件同时修改） | 低 | 每 Wave 控制修改文件数量在 10-20 个以内，保持增量编译友好 |
+**目标**：QueryPool 句柄化；删除所有 deprecated 接口与 native escape hatch。
+**前置依赖**：Wave 8。
 
-**回滚策略**：
-- 每 Wave 完成后提交一个 Git commit
-- 如果某 Wave 验证失败，回退到上一个 Wave 的 commit
-- 保留旧接口的兼容层直到 Wave 9，随时可以切回旧路径
+**改动文件与步骤**：
+- [ ] `render/RenderDevice.h`：`VkQueryPool queryPool`→`rhi::QueryPoolHandle`；移除 `VkPipelineLayout`/`VkDescriptorSet`/`VkFence`/`VkCommandBuffer`/`VkCommandPool` 成员（改由 `FrameContext`/`CommandBuffer` 管理）
+- [ ] 删除 `rhi/RHICommandList.h`（基类）与 `rhi/vulkan/VulkanCommandList.h/.cpp` 的 escape hatch（`getNativeCommandBuffer()` 及 `cmd*` 自由函数）；若 `VulkanCommandList` 仍作内部实现则重命名 `VulkanCommandBuffer`
+- [ ] 清理 TRACY native 泄漏（不变量 #11）：`PassExecutor.cpp:236` 的 `rhi::vulkan::getNativeCommandBuffer` 改走 RHI 提供的 profiling 接口（如 `CommandBuffer` 暴露后端无关的 tracy 上下文），消除 `render/` 对 `rhi/vulkan/*` 的依赖
+- [ ] 删除 `rhi/RHIHandles.h` 的 `TextureViewHandle::fromNativePtr/toNativePtr`
+- [ ] 加 CI 守卫（落实 §0.9 不变量）：
+  - 禁止 `render/`、业务层 `#include "rhi/vulkan|d3d12|metal/*"`（#2）
+  - 解析热路径（`VulkanCommandList`/`VulkanResourceTable`/`render/`）无 `unordered_map`（#3）
+  - public RHI 头无 `Vk*`/`ID3D12*`/`MTL*`/`Vma*`（#1）
 
----
+**验证**：
+- 全量编译通过、**无 `[[deprecated]]` 警告**；
+- `grep -r 'rhi/vulkan' render/` 为空；
+- benchmark：迁移前后帧时间无回归（±2% 内），GPU timestamp（经新 QueryPool）正常输出。
 
-## 14. 执行检查清单（Checklist）
-
-### Wave 0 启动前
-- [ ] 确认 Git 仓库干净，创建分支 `feature/modern-rhi`
-- [ ] 确认 Vulkan SDK 版本 ≥ 1.3（支持 synchronization2, dynamic rendering, buffer device address）
-- [ ] 确认 RenderDoc 可用（用于 barrier/layout 验证）
-
-### Wave 0
-- [ ] `rhi/RHIStageBarrier.h` 创建
-- [ ] `rhi/RHIEncoder.h` 创建
-- [ ] `rhi/RHICommandBuffer.h` 创建
-- [ ] `rhi/RHIArgumentTable.h` 创建
-- [ ] `rhi/RHIHandles.h` 扩展新 Handle 类型
-- [ ] `rhi/RHITypes.h` 扩展 BufferDesc/TextureDesc/SamplerDesc/GpuPtr
-- [ ] `rhi/RHIDevice.h` 扩展新纯虚方法
-- [ ] **编译验证**：项目编译通过（为新增纯虚方法提供 `assert(false)` stub）
-
-### Wave 1
-- [ ] `rhi/vulkan/VulkanDevice.h/cpp` 实现 `createBuffer` / `getBufferGpuAddress`
-- [ ] `rhi/vulkan/VulkanCommandBuffer.h/cpp` 新建
-- [ ] `rhi/vulkan/VulkanRenderEncoder.h/cpp` 新建
-- [ ] `rhi/vulkan/VulkanComputeEncoder.h/cpp` 新建
-- [ ] `rhi/vulkan/VulkanCopyEncoder.h/cpp` 新建
-- [ ] `rhi/vulkan/VulkanArgumentTable.h/cpp` 新建
-- [ ] `rhi/vulkan/VulkanResourceTable.h/cpp` 修复 `m_bindGroupTables` 为 O(1) 数组
-- [ ] **编译验证**：Vulkan 后端编译通过
-- [ ] **功能验证**：创建 buffer → map → write → unmap → get GpuPtr → destroy
-
-### Wave 2
-- [ ] `common/VulkanTypes.h` 新建
-- [ ] `common/VulkanHelpers.h` 新建
-- [ ] `common/Common.h` 净化（移除 Vulkan types）
-- [ ] `render/UploadUtils.h/cpp` 重写为 BufferHandle
-- [ ] `render/GPUMeshletBuffer.h/cpp` 重写为 BufferHandle + GpuPtr
-- [ ] **编译验证**：`render/` 编译通过
-- [ ] **功能验证**：Meshlet upload → GPU address → shader access 正确
-
-### Wave 3
-- [ ] `render/Pass.h` 扩展 `PassContext` 增加 `cmdBuffer`
-- [ ] `render/PassExecutor.cpp` 设置 `cmdBuffer`
-- [ ] `render/passes/GPUDrivenCullingPass.cpp` 迁移为 ComputeEncoder
-- [ ] `render/passes/GPUDrivenDepthPyramidPass.cpp` 迁移为 ComputeEncoder
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：GPU Culling 统计正确
-
-### Wave 4
-- [ ] 迁移所有 Compute Pass（8 个）
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：AO/SSR/Bloom/TAA 渲染正确
-
-### Wave 5
-- [ ] Tier 1 Render Pass 迁移（4 个简单 pass）
-- [ ] Tier 2 Render Pass 迁移（6 个中等 pass）
-- [ ] Tier 3 Render Pass 迁移（GBuffer Pass）
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：完整渲染管线输出正确（RenderDoc 对比）
-
-### Wave 6
-- [ ] `GPUDrivenPresentPass.cpp` 迁移为 CopyEncoder
-- [ ] `rhi/RHISwapchain.h` 移除 Native accessor
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：Swapchain present 正确，无撕裂
-
-### Wave 7
-- [ ] `render/BindGroups.h` 迁移为 ArgumentTable
-- [ ] `render/RenderDevice.h/cpp` 移除 VkDescriptorSet/VkPipelineLayout 暴露
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：Material binding、per-frame dynamic buffer 正确
-
-### Wave 8
-- [ ] 所有 Pass 移除 `transitionTexture` / `transitionBuffer`
-- [ ] 改用 `barrier(producer, consumer, hazard)`
-- [ ] **编译验证**：项目编译通过
-- [ ] **功能验证**：RenderDoc 验证 barrier 合理
-
-### Wave 9
-- [ ] `render/RenderDevice.h` 移除所有 `Vk*` 成员
-- [ ] `rhi/RHICommandList.h` 删除
-- [ ] `rhi/vulkan/VulkanCommandList.h` 删除 escape hatches
-- [ ] `rhi/RHIHandles.h` 移除 `fromNativePtr` / `toNativePtr`
-- [ ] **编译验证**：项目编译通过，无 deprecated 警告
-- [ ] **性能验证**：Benchmark 对比迁移前后帧时间
+**提交**：`refactor(rhi,render): handle-ize query pool; remove CommandList compat layer and native escape hatches`
 
 ---
 
-## 15. 需要用户确认的关键决策
+## 13. 风险与回滚
 
-1. **Wave 0 的 `CommandBuffer` 是否保留旧 `CommandList` 兼容？**
-   - 建议：保留。`PassContext` 同时有 `cmd`（旧）和 `cmdBuffer`（新），未迁移的 pass 仍用 `cmd`。
+| 风险 | 影响 | 缓解 |
+|------|------|------|
+| 借迁移之名重写已工作的 device-address/GPUScene 路径致回归 | 高 | §0.2 原则：包装不重造；Wave 2 RenderDoc 逐 buffer 对比 |
+| StageBarrier 后端 layout 推断出错 | 高 | 用正式 `resourceBarrier` verb 做显式 layout 兜底（非 deprecated）；validation layer 全程开 |
+| 双重 barrier（PassExecutor 自动 + Pass 手写） | 中 | §0.3 禁止；Wave 7 同提交内移除旧 transition |
+| ArgumentTable 句柄化破坏 per-frame 绑定 | 高 | 沿用持久 table + dynamic offset；Wave 8 单独验证 |
+| Encoder 引入额外开销 | 中 | 单 `VkCommandBuffer`，encoder 切换仅内联/虚调用，`beginRenderPass`→`vkCmdBeginRendering` |
+| input-attachment 预留增加接口复杂度 | 低 | Wave 1 仅实现回退路径，Pass 暂不使用 |
+| 每 Wave 改动过大 | 低 | 每 Wave 文件数控制在 10-20，单独 commit |
 
-2. **`ArgumentTable` 是否保留 `BindGroup` 作为别名？**
-   - 建议：保留 `using BindGroupHandle = ArgumentTableHandle;` 作为过渡，减少业务层改名成本。
+**回滚**：每 Wave 一个 commit；验证失败回退上一 Wave；兼容层保留至 Wave 9。
 
-3. **`StageBarrier` 的 image layout 自动推断是否足够？**
-   - 风险：PresentPass 的 swapchain layout transition（`TRANSFER_DST` → `PRESENT_SRC_KHR`）需要精确控制。
-   - 建议：Vulkan 后端内部维护 per-resource layout cache，在 `present()` / `blitTexture` 时自动推断。如果验证发现推断错误，再增加显式 layout hint。
+---
 
-4. **是否允许 Wave 1-9 期间 D3D12/Metal stub 编译失败？**
-   - 建议：允许。为所有新增纯虚方法提供 `assert(false)` stub，保持 D3D12/Metal 后端可编译但运行时崩溃。等 Vulkan 验证完成后再填充 D3D12/Metal。
+## 14. 关键决策记录
 
-5. **GBuffer Pass 的 MDI 路径是否可以最后迁移？**
-   - 建议：可以。Tier 1/2 Render Pass 先迁移，验证 `RenderEncoder` 的 `drawIndexed` / `drawIndexedIndirect` 正确后，再处理 GBuffer 的复杂 MDI + Alpha Test 分支。
+| # | 决策 | 结论 |
+|---|------|------|
+| 1 | 后端实现顺序 | **Vulkan-first**；D3D12/Metal stub。接口保持三后端可映射（Wave 0 非阻塞自查） |
+| 2 | barrier 模型 | 双 barrier：`barrier`(stage/hazard) 主路径 + `resourceBarrier` 正式特殊路径；PassExecutor 集中生成（RenderGraph-lite），手写仅 intrapass override |
+| 3 | CommandBuffer 获取 | `FrameContext::getCommandBuffer()`，不在 Device create/destroy |
+| 4 | GpuPtr | 包装既有 device address，非新引入；只表示 buffer 地址（texture 走 view handle） |
+| 5 | per-draw 主数据通道 | root pointer（GpuPtr）；RenderEncoder 的 `setRoot*`/`setDynamicBuffer` 带 `ShaderStage`，ComputeEncoder 不带（阶段恒定）；`setRootConstants` 仅小数据 fast path |
+| 6 | ArgumentTable | 句柄化 + HandlePool；持久 table + dynamic offset，不每帧重建 |
+| 7 | 销毁语义 | 全部走延迟删除队列 |
+| 8 | input-attachment/local-read | 接口预留 + Vulkan 回退实现；tile 驻留优化为后续里程碑 |
+| 9 | 多线程录制 | 接口形状预留；本次仍单线程 |
+| 10 | 执行顺序（方案 A） | 纯 Vulkan-first；mock-first 仅作 Wave 0 非阻塞接口自查（对照三后端映射表） |
+| 11 | 多后端不变量 | §0.9 的 13 条作为各 Wave 验收门（⛔ 强制门违反不可合并） |
+| 12 | 范围外（接口预留不冲突） | async compute/多队列、descriptor_buffer/DescriptorHeap、GpuResourceRef、PipelineCompiler、Capability tier 矩阵、移动端 tier 选路、ResidencySet 实体、tile-resident deferred |
+
+---
+
+## 15. 执行检查清单（启动前）
+
+- [ ] git 干净，创建分支 `feature/modern-rhi`
+- [ ] Vulkan SDK ≥ 1.3（synchronization2 / dynamic rendering / buffer device address）
+- [ ] RenderDoc 可用（barrier/layout/capture 对比）
+- [ ] 确认 `VK_KHR_buffer_device_address` 当前启用状态（Wave 1 据此决定是否补启用）

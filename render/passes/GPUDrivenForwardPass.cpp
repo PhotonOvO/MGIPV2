@@ -165,9 +165,6 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, forwardPipeline);
-  context.cmd->bindBindGroup(shaderio::LSetTextures, m_renderer->getGraphicsMaterialBindGroup(), nullptr, 0);
-
   if(!context.cameraAllocValid)
   {
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
@@ -189,11 +186,6 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
 
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
   const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-  if(!cameraBindGroupHandle.isNull())
-  {
-    const uint32_t dynamicOffsets[] = {cameraAlloc.offset, 0u};
-    context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, dynamicOffsets, 2);
-  }
 
   const BindGroupHandle drawBindGroupHandle = m_renderer->getMDIDrawBindGroup(context.frameIndex);
   if(drawBindGroupHandle.isNull())
@@ -273,11 +265,24 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
       .colorTargetCount = 1,
       .depthTarget = &depthTarget,
   };
-  context.cmd->beginRenderPass(passDesc);
-  context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(renderExtent.width), static_cast<float>(renderExtent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, renderExtent});
+  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(renderExtent.width), static_cast<float>(renderExtent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, renderExtent});
 
-  context.cmd->bindBindGroup(shaderio::LSetDraw, drawBindGroupHandle, nullptr, 0);
+  // Pipeline + descriptor binds reordered after beginRenderPass (RenderEncoder owns them).
+  enc->setPipeline(forwardPipeline);
+  const BindGroupHandle materialBindGroup = m_renderer->getGraphicsMaterialBindGroup();
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                        rhi::ArgumentTableHandle{materialBindGroup.index, materialBindGroup.generation});  // bridge (Wave 8)
+  if(!cameraBindGroupHandle.isNull())
+  {
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
+    enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                          rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
+  }
+  enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
+                        rhi::ArgumentTableHandle{drawBindGroupHandle.index, drawBindGroupHandle.generation});  // bridge
 
   const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
   const MeshRecord* representativeMesh = nullptr;
@@ -296,13 +301,13 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
 
   if(representativeMesh != nullptr)
   {
-    const uint64_t vertexBufferHandle = representativeMesh->vertexBufferHandle;
-    const uint64_t indexBufferHandle = m_renderer->isMeshletRenderingActive()
-                                           ? m_renderer->getMeshletIndexBufferHandle()
-                                           : representativeMesh->indexBufferHandle;
-    if(indexBufferHandle == 0)
+    const rhi::BufferHandle vertexBufferRHI = meshPool.getSharedVertexBufferRHIHandle();
+    const rhi::BufferHandle indexBufferRHI  = m_renderer->isMeshletRenderingActive()
+                                                  ? m_renderer->getMeshletIndexBufferRHIHandle()
+                                                  : meshPool.getSharedIndexBufferRHIHandle();
+    if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
     {
-      context.cmd->endRenderPass();
+      context.cmdBuffer->endEncoding();
       context.cmd->transitionTexture(rhi::TextureBarrierDesc{
           .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
           .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
@@ -322,18 +327,21 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     const uint64_t vertexOffset = 0;
     const uint64_t transparentCommandOffset =
         static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * m_renderer->getGPUCullingIndirectCommandStride();
-    context.cmd->bindVertexBuffers(0, &vertexBufferHandle, &vertexOffset, 1);
-    context.cmd->bindIndexBuffer(indexBufferHandle, 0, rhi::IndexFormat::uint32);
+    enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+    enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
-    context.cmd->drawIndexedIndirectCount(forwardIndirectBufferHandle,
-                                          transparentCommandOffset,
-                                          countBufferHandle,
-                                          offsetof(shaderio::GPUCullDrawCounts, transparentCount),
-                                          transparentCapacity,
-                                          m_renderer->getGPUCullingIndirectCommandStride());
+    // Transparent pass uses the current-frame persistent indirect stream + culling counts.
+    enc->drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
+        .argsBuffer        = m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex),
+        .argsOffset        = transparentCommandOffset,
+        .countBuffer       = m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex),
+        .countBufferOffset = offsetof(shaderio::GPUCullDrawCounts, transparentCount),
+        .maxDrawCount      = transparentCapacity,
+        .stride            = m_renderer->getGPUCullingIndirectCommandStride(),
+    });
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
   context.cmd->transitionTexture(rhi::TextureBarrierDesc{
       .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
       .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),

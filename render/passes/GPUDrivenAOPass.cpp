@@ -1,7 +1,6 @@
 #include "GPUDrivenAOPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -25,7 +24,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenAOPass::getDependencies()
 
 void GPUDrivenAOPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
@@ -57,23 +56,28 @@ void GPUDrivenAOPass::execute(const PassContext& context) const
                            0.35f),
   };
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, aoTracePipeline);
-  context.cmd->bindBindGroup(0, aoBindGroup, nullptr, 0);
-  context.cmd->pushConstants(rhi::ShaderStage::compute, 0, sizeof(push), &push);
-  context.cmd->dispatch((halfExtent.width + 7u) / 8u, (halfExtent.height + 7u) / 8u, 1u);
+  const uint32_t groupsX = (halfExtent.width + 7u) / 8u;
+  const uint32_t groupsY = (halfExtent.height + 7u) / 8u;
+
+  rhi::ComputeEncoder* trace = context.cmdBuffer->beginComputePass();
+  trace->setPipeline(aoTracePipeline);
+  trace->setArgumentTable(0, rhi::ArgumentTableHandle{aoBindGroup.index, aoBindGroup.generation});  // bridge (Wave 8)
+  trace->setRootConstants(0, &push, sizeof(push));
+  trace->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
+  context.cmdBuffer->endEncoding();
 
   // Trace output feeds the denoise pass and later fragment sampling.
-  context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
-                             rhi::PipelineStage::Compute | rhi::PipelineStage::FragmentShader,
-                             rhi::ResourceAccess::readWrite);
+  context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
+                             rhi::HazardFlags::textureWrites);
 
-  context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, aoDenoisePipeline);
-  context.cmd->bindBindGroup(0, aoDenoiseBindGroup, nullptr, 0);
-  context.cmd->pushConstants(rhi::ShaderStage::compute, 0, sizeof(push), &push);
-  context.cmd->dispatch((halfExtent.width + 7u) / 8u, (halfExtent.height + 7u) / 8u, 1u);
-  context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
-                             rhi::PipelineStage::Compute | rhi::PipelineStage::FragmentShader,
-                             rhi::ResourceAccess::readWrite);
+  rhi::ComputeEncoder* denoise = context.cmdBuffer->beginComputePass();
+  denoise->setPipeline(aoDenoisePipeline);
+  denoise->setArgumentTable(0, rhi::ArgumentTableHandle{aoDenoiseBindGroup.index, aoDenoiseBindGroup.generation});
+  denoise->setRootConstants(0, &push, sizeof(push));
+  denoise->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
+  context.cmdBuffer->endEncoding();
+  context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
+                             rhi::HazardFlags::textureWrites);
 }
 
 }  // namespace demo
