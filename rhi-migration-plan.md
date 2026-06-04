@@ -525,10 +525,16 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 
 ---
 
-## 9. Wave 6：DrawStream decode + Present/Swapchain
+## 9. Wave 6：DrawStream decode + Present/Swapchain — ⏸ 阻塞（前置：pass/swapchain texture 句柄化 + 运行验证）
 
 **目标**：补齐 DrawStream→Encoder decode（设计文档 §9/Phase 7）；迁移 Present 与 Swapchain。
 **前置依赖**：Wave 5。
+
+> **现状盘点（实施前调研）**：
+> - **DrawStream decode**：`render/DrawStreamDecoder.{h,cpp}` 已存在（`decode()`/`decodeToDrawPackets()`），但**无任何 pass 调用**——GBuffer/DepthPrepass/Forward 实际走 MDI `drawIndexedIndirectCount`，`context.drawStream != nullptr` 仅作"有场景数据"标志位。故 decodeDrawStream 现状**无真实消费者**，接线属预留，价值低，暂缓。
+> - **Present 迁移阻塞**：`GPUDrivenPresentPass` 的 `blitImage` 源/目标是 **native VkImage**（`getSceneViewOutputImageOpaque()` / `getCurrentSwapchainImage()`），未注册到 `VulkanResourceTable`。`ComputeEncoder::blitTexture` 走 `resolveTexture(TextureHandle)`，故**必须先句柄化 output image + swapchain image**。swapchain image 每帧变（`acquireNextImage`），需每帧 register/update。
+> - **Swapchain**：`currentTexture()` 已返回 resource-table `TextureHandle`；但 `beginDynamicRenderingToSwapchain`（`RenderDevice.cpp:4569`）仍用 `getNativeImageView`。移除 native getter 需改这条路径。
+> - **结论**：Wave 6 实质内容（Present/Swapchain）阻塞于与 Wave 7 相同的「pass/swapchain texture 句柄化」前置，且 present 错误确定性可见（黑屏/崩溃），**必须运行验证**。建议新会话带完整 context + 整机运行逐步做。
 
 **改动文件与步骤**：
 - [ ] Renderer Framework 层新增 `decodeDrawStream(rhi::RenderEncoder&, const DrawStream&)`：
@@ -552,10 +558,13 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 layout 由后端 tracker 推断。**`transitionTexture/transitionBuffer` 重塑为 `resourceBarrier`，非废弃删除**。
 **前置依赖**：Wave 6（所有 pass 已用 CommandBuffer）。
 
+> **进度（部分落地）**：
+> - [x] **buffer 主路径已落地**：`VulkanCommandBuffer::barrier(StageFlags,StageFlags,HazardFlags)`（global `VkMemoryBarrier2`）+ `resourceBarrier`（image/buffer barrier）后端在 Wave 1 已实现。`PassExecutor` 的 **buffer 依赖** 已改发 `context.cmdBuffer->barrier(toStageFlags(producer), toStageFlags(consumer), bufferWrites|drawArguments)`（替换旧 `transitionBuffer`）。buffer 无 layout，global memory barrier 充分且行为保留（偏保守）。新增 `toStageFlags(ShaderStage)` helper。编译通过（`[2/2] Linking demo_core.lib`）。
+> - [ ] **texture 路径阻塞 + 高风险**：`PassExecutor` 的 **texture 依赖** 仍走旧 `context.cmd->transitionTexture`（保留显式 layout）。重塑为 `resourceBarrier` 需先**句柄化 pass texture 到 VulkanResourceTable**（`TextureBinding` 仅持 native image + Pass 全局 handle，`resolveTexture` 解析不到）；而 layout tracker 自动推断是出了名难写对的子系统，**错一处即画面崩溃/validation 报错，必须运行验证**。在无 validation/RenderDoc 的环境盲做＝确定性破坏，故暂缓，留新会话 + 整机运行逐 barrier 边界验证。
+
 **改动文件与步骤**：
-- [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：实现 `barrier(StageFlags, StageFlags, HazardFlags)`（主路径）
-  - `ToVkPipelineStageFlags2(StageFlags)` + `InferAccessFlags(StageFlags, HazardFlags, isProducer)` → `VkMemoryBarrier2`
-  - 装入 `VkDependencyInfo`（**字段为 `pMemoryBarriers`**，勿写成 `pMemoryMemoryBarriers`）→ `vkCmdPipelineBarrier2`
+- [x] `rhi/vulkan/VulkanCommandBuffer.cpp`：`barrier(StageFlags, StageFlags, HazardFlags)`（主路径，Wave 1 已实现）
+  - `toVkPipelineStage2(StageFlags)` + `inferProducerAccess/inferConsumerAccess(HazardFlags)` → `VkMemoryBarrier2` → `vkCmdPipelineBarrier2`
 - [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：实现 `resourceBarrier(TextureBarrier[], BufferBarrier[])`（特殊路径）
   - 由现有 `transitionTexture/transitionBuffer` 逻辑重塑而来（`VkImageMemoryBarrier2`/`VkBufferMemoryBarrier2`），支持 `before/after` layout 与 `srcQueue/dstQueue` ownership
 - [ ] `rhi/vulkan/VulkanCommandBuffer.cpp`：新增 **per-texture layout tracker**（per-command-buffer 数组/`unordered_map<texture,VkImageLayout>`，仅录制期内部用，非热路径解析）

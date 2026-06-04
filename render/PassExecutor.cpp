@@ -56,6 +56,18 @@ rhi::PipelineStage toPipelineStage(demo::rhi::ShaderStage stageMask)
   return rhi::any(result) ? result : rhi::PipelineStage::TopOfPipe;
 }
 
+// Wave 7: map the declarative ShaderStage mask to the StageFlags used by the
+// stage-barrier main path (CommandBuffer::barrier -> VkMemoryBarrier2).
+rhi::StageFlags toStageFlags(demo::rhi::ShaderStage stageMask)
+{
+  const uint32_t  mask   = static_cast<uint32_t>(stageMask);
+  rhi::StageFlags result = rhi::StageFlags::none;
+  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::vertex)) != 0)   result = result | rhi::StageFlags::vertexShader;
+  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::fragment)) != 0) result = result | rhi::StageFlags::fragmentShader;
+  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::compute)) != 0)  result = result | rhi::StageFlags::compute;
+  return result == rhi::StageFlags::none ? rhi::StageFlags::all : result;
+}
+
 [[nodiscard]] uint64_t toHandleKey(BufferHandle handle)
 {
   return (static_cast<uint64_t>(handle.generation) << 32u) | static_cast<uint64_t>(handle.index);
@@ -260,16 +272,15 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
 
         const uint64_t key = toHandleKey(dependency.bufferHandle);
         const auto     it  = bufferStates.find(key);
-        if(it != bufferStates.end() && requiresBarrier(it->second.access, dependency.access))
+        if(it != bufferStates.end() && requiresBarrier(it->second.access, dependency.access) && context.cmdBuffer != nullptr)
         {
-          context.cmd->transitionBuffer(rhi::BufferBarrierDesc{
-              .buffer       = toRhiHandle(dependency.bufferHandle),
-              .nativeBuffer = binding->nativeBuffer,
-              .srcStage     = toPipelineStage(it->second.stageMask),
-              .dstStage     = toPipelineStage(dependency.stageMask),
-              .srcAccess    = toRhiAccess(it->second.access),
-              .dstAccess    = toRhiAccess(dependency.access),
-          });
+          // Wave 7 dual-barrier model: buffer producer->consumer sync goes through the
+          // stage-barrier main path (global VkMemoryBarrier2). Buffers carry no image
+          // layout, so a memory barrier is sufficient; the hazard covers both shader
+          // buffer writes and indirect-argument reads.
+          context.cmdBuffer->barrier(toStageFlags(it->second.stageMask),
+                                     toStageFlags(dependency.stageMask),
+                                     rhi::HazardFlags::bufferWrites | rhi::HazardFlags::drawArguments);
         }
 
         bufferStates[key] = BufferUsageState{
