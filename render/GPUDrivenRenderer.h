@@ -863,7 +863,11 @@ public:
   void beginPresentPass(rhi::CommandList& cmd) { m_renderer.beginPresentPass(cmd); }
   void endPresentPass(rhi::CommandList& cmd) { m_renderer.endPresentPass(cmd); }
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params) { m_renderer.executeImGuiPass(cmd, params); }
-  void bindStaticPassResources() { m_renderer.bindStaticPassResources(m_passExecutor); }
+  void bindStaticPassResources()
+  {
+    m_passExecutor.setResourceTable(m_renderer.getResourceTable());
+    m_renderer.bindStaticPassResources(m_passExecutor);
+  }
   void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }
   bool prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
                                          uint32_t          frameIndex,

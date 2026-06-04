@@ -2,6 +2,7 @@
 #include "../common/ProfilerMarkers.h"
 #include "../common/TracyProfiling.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
+#include "../rhi/vulkan/VulkanResourceTable.h"
 
 #include <cassert>
 #include <unordered_map>
@@ -158,19 +159,46 @@ void PassExecutor::addPass(const PassNode& pass)
   m_passes.push_back(&pass);
 }
 
+void PassExecutor::setResourceTable(rhi::vulkan::VulkanResourceTable* table)
+{
+  m_resourceTable = table;
+}
+
 void PassExecutor::clearResourceBindings()
 {
+  if(m_resourceTable != nullptr)
+  {
+    for(TextureBinding& binding : m_textureBindings)
+    {
+      if(!binding.rhiTexture.isNull())
+      {
+        m_resourceTable->removeTexture(binding.rhiTexture);
+      }
+    }
+  }
   m_textureBindings.clear();
   m_bufferBindings.clear();
 }
 
 void PassExecutor::bindTexture(TextureBinding binding)
 {
+  // Mirror the native image into the backend registry so the Wave 7 resourceBarrier
+  // path can resolve this attachment as a TextureHandle (owned=false: SceneResources
+  // own the VMA lifetime, the registry only mirrors the native image).
+  if(m_resourceTable != nullptr && binding.nativeImage != 0)
+  {
+    binding.rhiTexture = m_resourceTable->registerTexture(binding.nativeImage, 0, /*owned=*/false);
+  }
+
   // Update existing binding if handle already bound, otherwise add new
   for(TextureBinding& existing : m_textureBindings)
   {
     if(existing.handle == binding.handle)
     {
+      if(m_resourceTable != nullptr && !existing.rhiTexture.isNull())
+      {
+        m_resourceTable->removeTexture(existing.rhiTexture);
+      }
       existing = binding;
       return;
     }

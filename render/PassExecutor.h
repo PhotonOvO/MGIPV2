@@ -6,6 +6,10 @@
 #include <cstddef>
 #include <vector>
 
+namespace demo::rhi::vulkan {
+class VulkanResourceTable;
+}
+
 namespace demo {
 
 // Forward declaration for Tracy GPU context
@@ -40,6 +44,10 @@ public:
     rhi::TextureAspect aspect{rhi::TextureAspect::color};
     rhi::ResourceState initialState{rhi::ResourceState::general};
     bool               isSwapchain{false};
+    // Backend registry handle mirroring nativeImage, so the Wave 7 resourceBarrier
+    // path can resolveTexture() the pass attachments. Filled in bindTexture when a
+    // resource table is set; null otherwise.
+    rhi::TextureHandle rhiTexture{};
   };
 
   struct BufferBinding
@@ -50,6 +58,9 @@ public:
 
   void                 clear();
   void                 addPass(const PassNode& pass);
+  // Optional: when set, bindTexture mirrors each native image into the backend
+  // registry so pass attachments are resolvable as TextureHandles.
+  void                 setResourceTable(rhi::vulkan::VulkanResourceTable* table);
   void                 clearResourceBindings();
   void                 bindTexture(TextureBinding binding);
   void                 bindBuffer(BufferBinding binding);
@@ -62,9 +73,10 @@ private:
   [[nodiscard]] const TextureBinding* findTextureBinding(TextureHandle handle) const;
   [[nodiscard]] const BufferBinding*  findBufferBinding(BufferHandle handle) const;
 
-  std::vector<const PassNode*> m_passes;
-  std::vector<TextureBinding>  m_textureBindings;
-  std::vector<BufferBinding>   m_bufferBindings;
+  std::vector<const PassNode*>      m_passes;
+  std::vector<TextureBinding>       m_textureBindings;
+  std::vector<BufferBinding>        m_bufferBindings;
+  rhi::vulkan::VulkanResourceTable* m_resourceTable{nullptr};
 };
 
 }  // namespace demo
