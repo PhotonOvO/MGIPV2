@@ -838,7 +838,7 @@ public:
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params) { m_renderer.executeImGuiPass(cmd, params); }
   void bindStaticPassResources()
   {
-    m_passExecutor.setResourceTable(m_renderer.getResourceTable());
+    m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
     m_renderer.bindStaticPassResources(m_passExecutor);
   }
   void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }

@@ -1,7 +1,7 @@
 #include "PassExecutor.h"
 #include "../common/ProfilerMarkers.h"
 #include "../common/TracyProfiling.h"
-#include "../rhi/vulkan/VulkanResourceTable.h"
+#include "../rhi/RHIDevice.h"
 
 #include <cassert>
 #include <unordered_map>
@@ -158,9 +158,9 @@ void PassExecutor::addPass(const PassNode& pass)
   m_passes.push_back(&pass);
 }
 
-void PassExecutor::setResourceTable(rhi::vulkan::VulkanResourceTable* table)
+void PassExecutor::setResourceTable(rhi::Device* device)
 {
-  m_resourceTable = table;
+  m_device = device;
 }
 
 rhi::TextureHandle PassExecutor::getTextureRHIHandle(TextureHandle handle) const
@@ -171,7 +171,7 @@ rhi::TextureHandle PassExecutor::getTextureRHIHandle(TextureHandle handle) const
 
 rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t nativeImage) const
 {
-  if(nativeImage == 0 || m_resourceTable == nullptr)
+  if(nativeImage == 0 || m_device == nullptr)
   {
     return rhi::TextureHandle{};
   }
@@ -182,20 +182,20 @@ rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t nativeImage) con
       return handle;
     }
   }
-  const rhi::TextureHandle handle = m_resourceTable->registerTexture(nativeImage, 0, /*owned=*/false);
+  const rhi::TextureHandle handle = m_device->registerExternalTexture(nativeImage);
   m_barrierTextureCache.emplace_back(nativeImage, handle);
   return handle;
 }
 
 void PassExecutor::clearResourceBindings()
 {
-  if(m_resourceTable != nullptr)
+  if(m_device != nullptr)
   {
     for(TextureBinding& binding : m_textureBindings)
     {
       if(!binding.rhiTexture.isNull())
       {
-        m_resourceTable->removeTexture(binding.rhiTexture);
+        m_device->destroyImage(binding.rhiTexture);
       }
     }
     for(const auto& [image, handle] : m_barrierTextureCache)
@@ -203,7 +203,7 @@ void PassExecutor::clearResourceBindings()
       (void)image;
       if(!handle.isNull())
       {
-        m_resourceTable->removeTexture(handle);
+        m_device->destroyImage(handle);
       }
     }
   }
@@ -217,9 +217,9 @@ void PassExecutor::bindTexture(TextureBinding binding)
   // Mirror the native image into the backend registry so the Wave 7 resourceBarrier
   // path can resolve this attachment as a TextureHandle (owned=false: SceneResources
   // own the VMA lifetime, the registry only mirrors the native image).
-  if(m_resourceTable != nullptr && binding.nativeImage != 0)
+  if(m_device != nullptr && binding.nativeImage != 0)
   {
-    binding.rhiTexture = m_resourceTable->registerTexture(binding.nativeImage, 0, /*owned=*/false);
+    binding.rhiTexture = m_device->registerExternalTexture(binding.nativeImage);
   }
 
   // Update existing binding if handle already bound, otherwise add new
@@ -227,9 +227,9 @@ void PassExecutor::bindTexture(TextureBinding binding)
   {
     if(existing.handle == binding.handle)
     {
-      if(m_resourceTable != nullptr && !existing.rhiTexture.isNull())
+      if(m_device != nullptr && !existing.rhiTexture.isNull())
       {
-        m_resourceTable->removeTexture(existing.rhiTexture);
+        m_device->destroyImage(existing.rhiTexture);
       }
       existing = binding;
       return;

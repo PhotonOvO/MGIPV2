@@ -6,8 +6,8 @@
 #include <cstddef>
 #include <vector>
 
-namespace demo::rhi::vulkan {
-class VulkanResourceTable;
+namespace demo::rhi {
+class Device;
 }
 
 namespace demo {
@@ -60,7 +60,7 @@ public:
   void                 addPass(const PassNode& pass);
   // Optional: when set, bindTexture mirrors each native image into the backend
   // registry so pass attachments are resolvable as TextureHandles.
-  void                 setResourceTable(rhi::vulkan::VulkanResourceTable* table);
+  void                 setResourceTable(rhi::Device* device);
   void                 clearResourceBindings();
   void                 bindTexture(TextureBinding binding);
   void                 bindBuffer(BufferBinding binding);
@@ -84,7 +84,7 @@ private:
   std::vector<const PassNode*>      m_passes;
   std::vector<TextureBinding>       m_textureBindings;
   std::vector<BufferBinding>        m_bufferBindings;
-  rhi::vulkan::VulkanResourceTable* m_resourceTable{nullptr};
+  rhi::Device* m_device{nullptr};
   // owned=false native-image -> handle cache for pass-driven resourceBarrier. Small
   // (a handful of attachments); linear scan avoids a hashmap on the recording path.
   mutable std::vector<std::pair<uint64_t, rhi::TextureHandle>> m_barrierTextureCache;
