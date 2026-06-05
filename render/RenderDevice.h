@@ -250,6 +250,11 @@ public:
   // BindGroup creation (Wave 8: ArgumentLayout/ArgumentTable handles; a BindGroupHandle IS an ArgumentTableHandle)
   rhi::ArgumentLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
   void                      destroyBindGroup(BindGroupHandle handle);
+  // Allocates a persistent ArgumentTable from the layout, wrapped as a BindGroupHandle and
+  // tracked for cleanup in destroyBindGroups(). For per-frame subsystem bind groups owned
+  // outside RenderDevice (e.g. GPUDrivenRenderer light culling).
+  BindGroupHandle           createPersistentBindGroup(rhi::ArgumentLayoutHandle layout, const char* debugName);
+  void                      updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const;
   // Native VkDescriptorSetLayout (as uint64) backing an ArgumentLayoutHandle, e.g. to
   // build a VkPipelineLayout that is compatible with temporary bind groups of this layout.
   [[nodiscard]] uint64_t    getBindGroupLayoutHandleNative(rhi::ArgumentLayoutHandle handle) const;
@@ -856,7 +861,6 @@ private:
   // Wave 8: build an ArgumentLayout + ArgumentTable from layout entries, track them for
   // teardown, and return the table handle (which IS the BindGroupHandle).
   BindGroupHandle createBindGroup(BindGroupDesc desc);
-  void            updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const;
   // Converts legacy BindTableLayoutEntry list into an owned ArgumentLayout handle.
   rhi::ArgumentLayoutHandle createArgumentLayoutFromEntries(const std::vector<rhi::BindTableLayoutEntry>& entries,
                                                             const char* debugName);

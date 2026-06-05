@@ -5,6 +5,7 @@
 #include "../loader/Ktx2Loader.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
 #include "../rhi/vulkan/VulkanAdoptedBindGroup.h"
+#include "../rhi/vulkan/VulkanPipelines.h"
 
 #include <algorithm>
 #include <cstring>
@@ -2307,23 +2308,19 @@ void GPUDrivenRenderer::initLightingResources()
   };
   VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &sceneLayoutInfo, nullptr, &m_lightingSceneSetLayout));
 
-  const std::array<VkDescriptorSetLayoutBinding, 9> cullingBindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  const std::array<rhi::BindGroupLayoutEntry, 9> cullingEntries{{
+      rhi::BindGroupLayoutEntry{.binding = 0, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 1, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
   }};
-  const VkDescriptorSetLayoutCreateInfo cullingLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(cullingBindings.size()),
-      .pBindings = cullingBindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &cullingLayoutInfo, nullptr, &m_lightCoarseCullingSetLayout));
+  m_lightCoarseCullingArgumentLayout = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = cullingEntries.data(), .entryCount = static_cast<uint32_t>(cullingEntries.size())});
 
   std::vector<VkDescriptorSetLayout> lightingLayouts(frameCount, m_lightingSetLayout);
   m_lightingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
@@ -2346,23 +2343,52 @@ void GPUDrivenRenderer::initLightingResources()
         m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingDescriptorSets[i]), "gpu-driven-lighting-input");
   }
 
-  std::vector<VkDescriptorSetLayout> cullingLayouts(frameCount, m_lightCoarseCullingSetLayout);
-  m_lightCoarseCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo cullingAlloc{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_lightingDescriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts = cullingLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &cullingAlloc, m_lightCoarseCullingDescriptorSets.data()));
-
-  // Phase 6: adopt the coarse-culling sets so the point/spot + clustered light-culling
-  // passes bind via cmd->bindBindGroup. Owned by the bind-group pool (freed at shutdown).
+  // Owned RHI ArgumentTables for the coarse-culling set (point/spot + clustered). The 9
+  // light-resource buffers are stable after init (GPUDrivenLightResources has no resize),
+  // so mirror them as RHI handles and write each table once here instead of per-frame.
   m_lightCoarseCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  m_lightCoarseCullingBufferHandles.clear();
+  m_lightCoarseCullingBufferHandles.reserve(frameCount * 9u);
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_lightCoarseCullingBindGroups[i] = m_renderer.registerExternalBindGroup(
-        reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[i]), "gpu-driven-light-coarse-culling");
+    m_lightCoarseCullingBindGroups[i] =
+        m_renderer.createPersistentBindGroup(m_lightCoarseCullingArgumentLayout, "gpu-driven-light-coarse-culling");
+
+    const std::array<VkBuffer, 9> cullBuffers{{
+        m_lightResources.getPointLightBuffer(i),
+        m_lightResources.getSpotLightBuffer(i),
+        m_lightResources.getPointCoarseBoundsBuffer(i),
+        m_lightResources.getSpotCoarseBoundsBuffer(i),
+        m_lightResources.getCoarseUniformBuffer(i),
+        m_lightResources.getClusteredUniformBuffer(i),
+        m_lightResources.getClusterCountsBuffer(i),
+        m_lightResources.getClusterIndicesBuffer(i),
+        m_lightResources.getClusterStatsBuffer(i),
+    }};
+    const std::array<uint64_t, 9> cullSizes{{
+        0, 0, 0, 0,
+        sizeof(shaderio::LightCoarseCullingUniforms),
+        sizeof(shaderio::ClusteredLightUniforms),
+        0, 0,
+        sizeof(GPUDrivenLightResources::ClusterStats),
+    }};
+    std::array<rhi::ArgumentWrite, 9> cullWrites{};
+    for(uint32_t b = 0; b < 9u; ++b)
+    {
+      rhi::vulkan::BufferRecord rec{};
+      rec.nativeBuffer            = reinterpret_cast<uint64_t>(cullBuffers[b]);
+      rec.owned                   = false;  // GPUDrivenLightResources owns the VMA lifetime.
+      const rhi::BufferHandle h   = resourceTable->registerBuffer(rec);
+      m_lightCoarseCullingBufferHandles.push_back(h);
+      cullWrites[b] = rhi::ArgumentWrite{
+          .binding = b,
+          .type    = (b == 4 || b == 5) ? rhi::ArgumentType::uniformBuffer : rhi::ArgumentType::storageBuffer,
+          .buffer  = h,
+          .size    = cullSizes[b],
+      };
+    }
+    m_renderer.updateBindGroup(m_lightCoarseCullingBindGroups[i], cullWrites.data(), static_cast<uint32_t>(cullWrites.size()));
   }
 
   std::vector<VkDescriptorSetLayout> sceneLayouts(frameCount, m_lightingSceneSetLayout);
@@ -2386,12 +2412,20 @@ void GPUDrivenRenderer::initLightingResources()
         m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[i]), "gpu-driven-lighting-scene");
   }
 
-  const VkPipelineLayoutCreateInfo cullingPipelineLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &m_lightCoarseCullingSetLayout,
+  // RHI pipeline layout owning a single descriptor set (set 0 = coarse-culling layout).
+  const uint64_t cullingSetLayoutNative = m_renderer.getBindGroupLayoutHandleNative(m_lightCoarseCullingArgumentLayout);
+  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> cullingLayoutMappings{{
+      rhi::vulkan::makePipelineLayoutBindingMapping(0, cullingSetLayoutNative),
+  }};
+  const rhi::vulkan::VulkanPipelineLayoutLowering cullingLayoutLowering{
+      .setLayouts     = cullingLayoutMappings.data(),
+      .setLayoutCount = static_cast<uint32_t>(cullingLayoutMappings.size()),
   };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &cullingPipelineLayoutInfo, nullptr, &m_lightCoarseCullingPipelineLayout));
+  rhi::PipelineLayoutDesc cullingPipelineLayoutDesc{};
+  cullingPipelineLayoutDesc.debugName = "gpu-driven-light-coarse-culling";
+  auto cullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+  cullingPipelineLayout->init(static_cast<void*>(nativeDevice), cullingPipelineLayoutDesc, cullingLayoutLowering);
+  m_lightCoarseCullingPipelineLayout = std::move(cullingPipelineLayout);
 
   const std::array<VkDescriptorSetLayout, 2> lightSetLayouts{m_lightingSetLayout, m_lightingSceneSetLayout};
   const VkPipelineLayoutCreateInfo lightPipelineLayoutInfo{
@@ -2412,10 +2446,10 @@ void GPUDrivenRenderer::shutdownLightingResources()
       vkDestroyPipelineLayout(nativeDevice, m_lightPipelineLayout, nullptr);
       m_lightPipelineLayout = VK_NULL_HANDLE;
     }
-    if(m_lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
+    if(m_lightCoarseCullingPipelineLayout)
     {
-      vkDestroyPipelineLayout(nativeDevice, m_lightCoarseCullingPipelineLayout, nullptr);
-      m_lightCoarseCullingPipelineLayout = VK_NULL_HANDLE;
+      m_lightCoarseCullingPipelineLayout->deinit();
+      m_lightCoarseCullingPipelineLayout.reset();
     }
     if(m_lightingSetLayout != VK_NULL_HANDLE)
     {
@@ -2426,11 +2460,6 @@ void GPUDrivenRenderer::shutdownLightingResources()
     {
       vkDestroyDescriptorSetLayout(nativeDevice, m_lightingSceneSetLayout, nullptr);
       m_lightingSceneSetLayout = VK_NULL_HANDLE;
-    }
-    if(m_lightCoarseCullingSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_lightCoarseCullingSetLayout, nullptr);
-      m_lightCoarseCullingSetLayout = VK_NULL_HANDLE;
     }
     if(m_lightingDescriptorPool != VK_NULL_HANDLE)
     {
@@ -2450,7 +2479,21 @@ void GPUDrivenRenderer::shutdownLightingResources()
   // shutdown; here we only drop the (now-stale) handles.
   m_lightingSceneBindGroups.clear();
   m_lightingInputBindGroups.clear();
-  m_lightCoarseCullingDescriptorSets.clear();
+  // Drop the RHI buffer-handle mirrors for the coarse-culling buffers (owned=false; the
+  // owned ArgumentTables + layout are freed by RenderDevice::destroyBindGroups()).
+  if(rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable())
+  {
+    for(const rhi::BufferHandle& handle : m_lightCoarseCullingBufferHandles)
+    {
+      if(!handle.isNull())
+      {
+        resourceTable->removeBuffer(handle);
+      }
+    }
+  }
+  m_lightCoarseCullingBufferHandles.clear();
+  m_lightCoarseCullingBindGroups.clear();
+  m_lightCoarseCullingArgumentLayout = {};
   m_lightResources.deinit();
   m_gpuDrivenPointLights.clear();
   m_gpuDrivenSpotLights.clear();
@@ -3392,34 +3435,8 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
       VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLBrdfLut, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblBrdfLutInfo},
   }};
   vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-
-  if(frameIndex < m_lightCoarseCullingDescriptorSets.size())
-  {
-    const std::array<VkDescriptorBufferInfo, 9> cullBuffers{{
-        VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getSpotCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getCoarseUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
-        VkDescriptorBufferInfo{m_lightResources.getClusteredUniformBuffer(frameIndex), 0, sizeof(shaderio::ClusteredLightUniforms)},
-        VkDescriptorBufferInfo{m_lightResources.getClusterCountsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getClusterIndicesBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getClusterStatsBuffer(frameIndex), 0, sizeof(GPUDrivenLightResources::ClusterStats)},
-    }};
-    std::array<VkWriteDescriptorSet, 9> cullWrites{};
-    for(uint32_t i = 0; i < static_cast<uint32_t>(cullWrites.size()); ++i)
-    {
-      cullWrites[i] = VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_lightCoarseCullingDescriptorSets[frameIndex],
-          .dstBinding = i,
-          .descriptorCount = 1,
-          .descriptorType = (i == 4 || i == 5) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &cullBuffers[i],
-      };
-    }
-    vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(cullWrites.size()), cullWrites.data(), 0, nullptr);
-  }
+  // The coarse-culling ArgumentTable is written once in initLightingResources (its 9
+  // light-resource buffers are stable), so no per-frame rewrite is needed here.
 }
 
 
@@ -3522,8 +3539,10 @@ void GPUDrivenRenderer::initLightingPipelines()
   m_gpuDrivenVelocityPipeline = createFullscreenPipeline("fragmentVelocityMain", getVelocityFormat(), false, 0x6107u);
   m_gpuDrivenBloomUpsamplePipeline = createFullscreenPipeline("fragmentBloomUpsampleMain", SceneResources::kBloomFormat, false, 0x6108u);
 
-  if(m_lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
+  if(m_lightCoarseCullingPipelineLayout)
   {
+    const VkPipelineLayout cullingLayout =
+        reinterpret_cast<VkPipelineLayout>(m_lightCoarseCullingPipelineLayout->getNativeHandle());
     VkShaderModule cullingShaderModule =
         utils::createShaderModule(nativeDevice, {shader_light_culling_slang, std::size(shader_light_culling_slang)});
     const auto createComputePipeline = [&](const char* entryPoint, uint32_t variant, VkPipeline& outPipeline) {
@@ -3536,13 +3555,13 @@ void GPUDrivenRenderer::initLightingPipelines()
       const VkComputePipelineCreateInfo pipelineInfo{
           .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
           .stage = stage,
-          .layout = m_lightCoarseCullingPipelineLayout,
+          .layout = cullingLayout,
       };
       VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
       // Phase 6: register as a real registry handle (with layout) so passes bind via
       // cmd->bindPipeline/bindBindGroup. Ownership stays here (unregistered + destroyed
       // in shutdownLightingPipelines).
-      return m_renderer.registerExternalComputePipeline(outPipeline, m_lightCoarseCullingPipelineLayout, variant);
+      return m_renderer.registerExternalComputePipeline(outPipeline, cullingLayout, variant);
     };
     m_pointLightCoarseCullingPipeline =
         createComputePipeline("kernelPointLightCoarseCulling", 0x6201u, m_pointLightCoarseCullingVkPipeline);
@@ -3561,7 +3580,7 @@ void GPUDrivenRenderer::initLightingPipelines()
     const VkComputePipelineCreateInfo clusteredPipelineInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = clusteredStage,
-        .layout = m_lightCoarseCullingPipelineLayout,
+        .layout = cullingLayout,
     };
     VK_CHECK(vkCreateComputePipelines(nativeDevice,
                                       VK_NULL_HANDLE,
@@ -3570,7 +3589,7 @@ void GPUDrivenRenderer::initLightingPipelines()
                                       nullptr,
                                       &m_clusteredLightCullingVkPipeline));
     m_clusteredLightCullingPipeline =
-        m_renderer.registerExternalComputePipeline(m_clusteredLightCullingVkPipeline, m_lightCoarseCullingPipelineLayout, 0x6203u);
+        m_renderer.registerExternalComputePipeline(m_clusteredLightCullingVkPipeline, cullingLayout, 0x6203u);
     vkDestroyShaderModule(nativeDevice, clusteredShaderModule, nullptr);
   }
   vkDestroyShaderModule(nativeDevice, lightShaderModule, nullptr);

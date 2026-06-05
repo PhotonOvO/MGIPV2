@@ -465,13 +465,7 @@ public:
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
   [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
-  [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightCoarseCullingPipelineLayout); }
-  [[nodiscard]] uint64_t getLightCoarseCullingDescriptorSetAt(uint32_t frameIndex) const
-  {
-    return frameIndex < m_lightCoarseCullingDescriptorSets.size()
-               ? reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[frameIndex])
-               : 0;
-  }
+  [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return m_lightCoarseCullingPipelineLayout ? m_lightCoarseCullingPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
   {
     return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
@@ -1030,9 +1024,11 @@ private:
   VkDescriptorPool                   m_lightingDescriptorPool{VK_NULL_HANDLE};
   VkDescriptorSetLayout              m_lightingSetLayout{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_lightingDescriptorSets;
-  VkDescriptorSetLayout              m_lightCoarseCullingSetLayout{VK_NULL_HANDLE};
-  std::vector<VkDescriptorSet>       m_lightCoarseCullingDescriptorSets;
-  // Phase 6: adopted bind groups for the coarse-culling set (point/spot + clustered).
+  // Wave 9: the coarse-culling set is an RHI ArgumentLayout + owned ArgumentTables
+  // (point/spot + clustered). The 9 light-resource buffers are mirrored as RHI handles
+  // (owned=false) so updateArgumentTable can resolve them; removed at shutdown.
+  rhi::ArgumentLayoutHandle          m_lightCoarseCullingArgumentLayout{};
+  std::vector<rhi::BufferHandle>     m_lightCoarseCullingBufferHandles;
   std::vector<BindGroupHandle>       m_lightCoarseCullingBindGroups;
   VkDescriptorSetLayout              m_lightingSceneSetLayout{VK_NULL_HANDLE};
   std::vector<VkDescriptorSet>       m_lightingSceneDescriptorSets;
@@ -1046,7 +1042,7 @@ private:
   std::vector<BindGroupHandle>                         m_lightingSceneBindGroups;
   std::vector<BindGroupHandle>                         m_lightingInputBindGroups;
   VkSampler                          m_linearClampSampler{VK_NULL_HANDLE};
-  VkPipelineLayout                   m_lightCoarseCullingPipelineLayout{VK_NULL_HANDLE};
+  std::unique_ptr<rhi::PipelineLayout> m_lightCoarseCullingPipelineLayout;
   VkPipelineLayout                   m_lightPipelineLayout{VK_NULL_HANDLE};
   PipelineHandle                     m_pointLightCoarseCullingPipeline{};
   PipelineHandle                     m_spotLightCoarseCullingPipeline{};

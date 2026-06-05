@@ -6758,6 +6758,18 @@ BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
   return desc.table;
 }
 
+BindGroupHandle RenderDevice::createPersistentBindGroup(rhi::ArgumentLayoutHandle layout, const char* debugName)
+{
+  ASSERT(!layout.isNull(), "createPersistentBindGroup requires a valid argument layout handle");
+  return createBindGroup(BindGroupDesc{
+      .slot                = BindGroupSetSlot::shaderSpecific,
+      .layout              = layout,
+      .table               = m_device.device->createArgumentTable(layout),
+      .primaryLogicalIndex = 0,
+      .debugName           = debugName,
+  });
+}
+
 BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::ArgumentLayoutHandle layoutHandle,
                                                        const rhi::ArgumentWrite* writes, uint32_t writeCount,
                                                        BindGroupSetSlot slot, const char* debugName)
