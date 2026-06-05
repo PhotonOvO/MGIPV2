@@ -562,7 +562,10 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 
 ---
 
-## 10. Wave 7：StageBarrier + ResourceBarrier 重构（PassExecutor 改发射动词）— 🔁 buffer 主路径已收敛（运行验证通过），texture 替换待续
+## 10. Wave 7：StageBarrier + ResourceBarrier 重构（PassExecutor 改发射动词）— ✅ 完成（双 barrier 模型，运行验证通过）
+
+> **texture 收敛（运行验证通过，commit `62c7df2`）**：PassExecutor 的 texture 依赖已发 `cmdBuffer->resourceBarrier`（registry rhiTexture + 全覆盖 range），替换旧 `transitionTexture`。两个关键修复：(1) backend `resourceBarrier` 加 `toVkAspect`，depthStencil→DEPTH|STENCIL（原当 color，会在 D24S8 scene depth 出错）；(2) `before` layout 取**共享追踪器** `context.cmd->getTrackedState`（提升到 CommandList 接口），反映各 pass 自身 transition 后的真实 layout，而非 PassExecutor 看不到 pass transition 的本地 map——解决了 `VUID-...-oldLayout-01197`（before=ColorAttachment 实际=General）。validation 零报错、画面正确。
+> **剩余（清理性，归 Wave 9）**：deprecated `memoryBarrier`/`transitionTexture`/`setResourceState` 旧入口；passes 内残留的手动 transition 是否能进一步收敛到 PassExecutor。
 
 > **收敛状态（运行验证通过，commit `e943b53`）**：Wave 6 Present + Wave 7 buffer 主路径已整机运行、Vulkan validation **零报错**。本回合修复：
 > - barrier 主路径：`barrier()` 在 `drawArguments` hazard 时给 consumer `dstStageMask` 补 `DRAW_INDIRECT`（否则 `INDIRECT_COMMAND_READ` access 与 fragment stage 不匹配）。
