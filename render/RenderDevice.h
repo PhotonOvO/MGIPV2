@@ -123,9 +123,6 @@ public:
   PipelineHandle getShadowPipelineHandle() const;
   PipelineHandle getDebugPipelineHandle() const;
   PipelineHandle getGPUCullingDebugPipelineHandle() const;
-  void executeLightCoarseCullingPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
-  void executeGPUCullingPass(rhi::CommandList& cmd, const RenderParams& params);
   PipelineHandle getGPUCullingPipelineHandle() const;
   uint64_t       getGPUCullingPipelineLayout() const;
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
