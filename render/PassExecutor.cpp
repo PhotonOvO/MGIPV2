@@ -169,6 +169,24 @@ rhi::TextureHandle PassExecutor::getTextureRHIHandle(TextureHandle handle) const
   return binding != nullptr ? binding->rhiTexture : rhi::TextureHandle{};
 }
 
+rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t nativeImage) const
+{
+  if(nativeImage == 0 || m_resourceTable == nullptr)
+  {
+    return rhi::TextureHandle{};
+  }
+  for(const auto& [image, handle] : m_barrierTextureCache)
+  {
+    if(image == nativeImage)
+    {
+      return handle;
+    }
+  }
+  const rhi::TextureHandle handle = m_resourceTable->registerTexture(nativeImage, 0, /*owned=*/false);
+  m_barrierTextureCache.emplace_back(nativeImage, handle);
+  return handle;
+}
+
 void PassExecutor::clearResourceBindings()
 {
   if(m_resourceTable != nullptr)
@@ -180,7 +198,16 @@ void PassExecutor::clearResourceBindings()
         m_resourceTable->removeTexture(binding.rhiTexture);
       }
     }
+    for(const auto& [image, handle] : m_barrierTextureCache)
+    {
+      (void)image;
+      if(!handle.isNull())
+      {
+        m_resourceTable->removeTexture(handle);
+      }
+    }
   }
+  m_barrierTextureCache.clear();
   m_textureBindings.clear();
   m_bufferBindings.clear();
 }

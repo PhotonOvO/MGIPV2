@@ -69,6 +69,11 @@ public:
   // Resolvable backend handle mirroring a bound pass attachment (null if unbound
   // or no resource table was set). Used by present to blit through the registry.
   [[nodiscard]] rhi::TextureHandle getTextureRHIHandle(TextureHandle handle) const;
+  // Mirror a native VkImage into the backend registry (owned=false) and return a cached
+  // resolvable TextureHandle. Lets passes express their own layout transitions through
+  // cmdBuffer->resourceBarrier without holding native handles. Cache is keyed by native
+  // image and cleared with the other resource bindings (rebuilt on resize).
+  [[nodiscard]] rhi::TextureHandle resolveBarrierTexture(uint64_t nativeImage) const;
   void                 execute(const PassContext& context, const ExecutionHooks* hooks = nullptr,
                                profiling::TracyVulkanContext* tracyVkCtx = nullptr) const;
 
@@ -80,6 +85,9 @@ private:
   std::vector<TextureBinding>       m_textureBindings;
   std::vector<BufferBinding>        m_bufferBindings;
   rhi::vulkan::VulkanResourceTable* m_resourceTable{nullptr};
+  // owned=false native-image -> handle cache for pass-driven resourceBarrier. Small
+  // (a handful of attachments); linear scan avoids a hashmap on the recording path.
+  mutable std::vector<std::pair<uint64_t, rhi::TextureHandle>> m_barrierTextureCache;
 };
 
 }  // namespace demo

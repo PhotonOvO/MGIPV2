@@ -4126,6 +4126,7 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
       getCurrentMaterialBindGroupHandle(), cameraAlloc, true, m_perFrame.frameContext->getCommandBuffer()};
+  context.executor = &passExecutor;
   resetPassGpuProfileQueries(*context.cmdBuffer, currentFrameIndex);
 
 #ifdef TRACY_ENABLE

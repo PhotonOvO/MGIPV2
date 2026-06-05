@@ -15,6 +15,7 @@ namespace demo {
 // hard dependency on the full RenderParams type from RenderDevice.
 struct RenderParams;
 struct SceneUploadResult;
+class PassExecutor;
 
 struct PassContext
 {
@@ -36,6 +37,10 @@ struct PassContext
   // NEW (Wave 3+): one-shot recording facade over the same per-frame VkCommandBuffer as `cmd`.
   // Migrated passes record through this; un-migrated passes keep using `cmd`.
   rhi::CommandBuffer* cmdBuffer{nullptr};
+  // Wave 9 (P0-3): lets a pass mirror a native image into the backend registry so its
+  // own layout transitions can be expressed via cmdBuffer->resourceBarrier (handle-based)
+  // instead of the legacy cmd->transitionTexture (native seam). Set by the executor.
+  const PassExecutor* executor{nullptr};
 };
 
 enum class ResourceAccess : uint8_t
