@@ -1,6 +1,7 @@
 #include "GPUDrivenTAAResolvePass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -28,7 +29,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenTAAResolvePass::getDepend
 
 void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
@@ -47,19 +48,19 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenTAAResolve");
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHistoryWriteHandle.index, kPassSceneColorHistoryWriteHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHistoryWriteImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  context.cmdBuffer->beginEvent("GPUDrivenTAAResolve");
+  const rhi::TextureHandle historyBarrierTex =
+      context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->sceneColorHistoryWriteImage));
+  const auto transitionHistory = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = historyBarrierTex,
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
+  transitionHistory(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -124,19 +125,8 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHistoryWriteHandle.index, kPassSceneColorHistoryWriteHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHistoryWriteImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-  context.cmd->endEvent();
+  transitionHistory(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

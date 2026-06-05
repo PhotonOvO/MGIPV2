@@ -1,6 +1,7 @@
 #include "GPUDrivenBloomPrefilterPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -26,7 +27,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenBloomPrefilterPass::getDe
 
 void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr
      || !context.params->debugOptions.enablePostProcessing
      || !context.params->debugOptions.enableBloom)
   {
@@ -41,21 +42,18 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenBloomPrefilter");
-  const auto restoreBloomState = [&]() {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassBloomHalfHandle.index, kPassBloomHalfHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(bloomImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+  context.cmdBuffer->beginEvent("GPUDrivenBloomPrefilter");
+  const rhi::TextureHandle bloomBarrierTex = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(bloomImage));
+  const auto transitionBloom = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = bloomBarrierTex,
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
   };
+  const auto restoreBloomState = [&]() { transitionBloom(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General); };
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
       .view = bloomView,
@@ -65,18 +63,7 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassBloomHalfHandle.index, kPassBloomHalfHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(bloomImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  transitionBloom(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   const rhi::Extent2D extent{bloomExtent.width, bloomExtent.height};
   rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
@@ -93,7 +80,7 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
   {
     context.cmdBuffer->endEncoding();
     restoreBloomState();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
   const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
@@ -143,7 +130,7 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
 
   context.cmdBuffer->endEncoding();
   restoreBloomState();
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

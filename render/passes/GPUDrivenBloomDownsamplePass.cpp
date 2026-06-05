@@ -1,6 +1,7 @@
 #include "GPUDrivenBloomDownsamplePass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -40,7 +41,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenBloomDownsamplePass::getD
 
 void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr
      || !context.params->debugOptions.enablePostProcessing
      || !context.params->debugOptions.enableBloom)
   {
@@ -67,25 +68,23 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenBloomDownsample");
+  context.cmdBuffer->beginEvent("GPUDrivenBloomDownsample");
+  const auto transitionStep = [&](uint64_t nativeImage, rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(nativeImage),
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
   const auto renderStep = [&](const BloomStep& step) {
     if(step.image == VK_NULL_HANDLE || step.view.isNull() || step.extent.width == 0u || step.extent.height == 0u)
     {
       return;
     }
 
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{step.handle.index, step.handle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(step.image),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::read,
-        .dstAccess = rhi::ResourceAccess::write,
-        .oldState = rhi::ResourceState::General,
-        .newState = rhi::ResourceState::ColorAttachment,
-        .isSwapchain = false,
-    });
+    transitionStep(reinterpret_cast<uint64_t>(step.image), rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
     rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -150,18 +149,7 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{step.handle.index, step.handle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(step.image),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    transitionStep(reinterpret_cast<uint64_t>(step.image), rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
   };
 
   renderStep(BloomStep{m_renderer->getBloomQuarterImage(), m_renderer->getBloomQuarterView(), m_renderer->getBloomQuarterExtent(), m_renderer->getBloomHalfExtent(), kPassBloomQuarterHandle, downsamplePipeline, 5u, 0u, 1.0f});
@@ -172,7 +160,7 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
   renderStep(BloomStep{m_renderer->getBloomUpsampleEighthImage(), m_renderer->getBloomUpsampleEighthView(), m_renderer->getBloomUpsampleEighthExtent(), m_renderer->getBloomSixteenthExtent(), kPassBloomUpsampleEighthHandle, upsamplePipeline, 13u, 16u, 1.0f});
   renderStep(BloomStep{m_renderer->getBloomUpsampleQuarterImage(), m_renderer->getBloomUpsampleQuarterView(), m_renderer->getBloomUpsampleQuarterExtent(), m_renderer->getBloomEighthExtent(), kPassBloomUpsampleQuarterHandle, upsamplePipeline, 6u, 17u, 1.0f});
   renderStep(BloomStep{m_renderer->getBloomOutputImage(), m_renderer->getBloomOutputView(), m_renderer->getBloomOutputExtent(), m_renderer->getBloomQuarterExtent(), kPassBloomOutputHandle, upsamplePipeline, 5u, 18u, 1.0f});
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo
