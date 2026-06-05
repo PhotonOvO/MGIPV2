@@ -816,9 +816,7 @@ namespace {
 TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTextureView");
-  // Prefer the RHI image handle (business layer holds no VkImage); fall back to the legacy
-  // nativeImage seam for call sites that still pass a raw VkImage.
-  const uint64_t nativeImage = !desc.image.isNull() ? resolveImageNative(desc.image) : desc.nativeImage;
+  const uint64_t nativeImage = resolveImageNative(desc.image);
   const VkImageViewCreateInfo info{
       .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image      = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),

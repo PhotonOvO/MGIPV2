@@ -934,8 +934,10 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     // no longer owns these; the CSM pass binds them by handle.
     for(uint32_t cascadeIndex = 0; cascadeIndex < m_csmShadowResources.getCascadeCount(); ++cascadeIndex)
     {
+      const rhi::TextureHandle cascadeImageHandle =
+          m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()));
       m_csmCascadeViewHandles[cascadeIndex] = createTextureView(rhi::TextureViewCreateDesc{
-          .nativeImage    = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+          .image          = cascadeImageHandle,
           .format         = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
           .viewType       = rhi::ImageViewType::e2D,
           .aspect         = rhi::TextureAspect::depth,
@@ -943,10 +945,13 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
           .layerCount     = 1,
           .debugName      = "CSM_CascadeLayerView",
       });
+      m_device.device->destroyImage(cascadeImageHandle);
     }
     // Full-array sampling view (all cascades), used by the lighting GBuffer descriptor set.
+    const rhi::TextureHandle cascadeArrayImageHandle =
+        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()));
     m_csmCascadeArrayViewHandle = createTextureView(rhi::TextureViewCreateDesc{
-        .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+        .image        = cascadeArrayImageHandle,
         .format       = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
         .viewType     = rhi::ImageViewType::e2DArray,
         .aspect       = rhi::TextureAspect::depth,
@@ -954,6 +959,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
         .layerCount     = m_csmShadowResources.getCascadeCount(),
         .debugName      = "CSM_CascadeArrayView",
     });
+    m_device.device->destroyImage(cascadeArrayImageHandle);
 
     // Create per-frame GBuffer descriptor sets for LightPass.
     {

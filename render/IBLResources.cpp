@@ -98,14 +98,16 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
 
   const auto makeView = [&](VkImage image, VkFormat format, rhi::ImageViewType viewType, uint32_t levelCount,
                             uint32_t layerCount, const char* name) -> rhi::TextureViewHandle {
+    const rhi::TextureHandle imageHandle = m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(image));
     rhi::TextureViewCreateDesc desc{};
-    desc.nativeImage  = reinterpret_cast<uint64_t>(image);
+    desc.image        = imageHandle;
     desc.format       = toPortableTextureFormat(format);
     desc.viewType     = viewType;
     desc.aspect       = rhi::TextureAspect::color;
     desc.levelCount   = levelCount;
     desc.layerCount   = layerCount;
     const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
+    m_rhiDevice->destroyImage(imageHandle);
     dutil.setObjectName(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle))),
                         name);
     return handle;
@@ -349,8 +351,10 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
     {
       const uint32_t mipSize = std::max(1u, createInfo.cubeMapSize >> mip);
       const VkDescriptorSet prefilterSet = prefilterSets[mip];
+      const rhi::TextureHandle mipImageHandle =
+          m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(m_prefilteredMap.image));
       rhi::TextureViewCreateDesc mipViewDesc{};
-      mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_prefilteredMap.image);
+      mipViewDesc.image         = mipImageHandle;
       mipViewDesc.format        = toPortableTextureFormat(createInfo.cubeMapFormat);
       mipViewDesc.viewType      = rhi::ImageViewType::e2DArray;
       mipViewDesc.aspect        = rhi::TextureAspect::color;
@@ -359,6 +363,7 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
       mipViewDesc.baseArrayLayer = 0;
       mipViewDesc.layerCount    = 6;
       const rhi::TextureViewHandle mipView = m_rhiDevice->createTextureView(mipViewDesc);
+      m_rhiDevice->destroyImage(mipImageHandle);
       m_generationMipViews.push_back(mipView);
       const VkDescriptorImageInfo prefilterOutputInfo{VK_NULL_HANDLE, nativeOf(mipView), VK_IMAGE_LAYOUT_GENERAL};
       writes = {{

@@ -547,14 +547,16 @@ void HiZDepthPyramid::recreateResources()
   m_mipViews.resize(m_mipCount);
   for(uint32_t mipLevel = 0; mipLevel < m_mipCount; ++mipLevel)
   {
+    const rhi::TextureHandle mipImageHandle = m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(m_image));
     rhi::TextureViewCreateDesc mipViewDesc{};
-    mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_image);
+    mipViewDesc.image         = mipImageHandle;
     mipViewDesc.format        = rhi::TextureFormat::r32Sfloat;
     mipViewDesc.viewType      = rhi::ImageViewType::e2D;
     mipViewDesc.aspect        = rhi::TextureAspect::color;
     mipViewDesc.baseMipLevel  = mipLevel;
     mipViewDesc.levelCount    = 1;
     m_mipViews[mipLevel] = m_rhiDevice->createTextureView(mipViewDesc);
+    m_rhiDevice->destroyImage(mipImageHandle);
   }
 
   m_valid = true;

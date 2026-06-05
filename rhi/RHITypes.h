@@ -170,16 +170,13 @@ enum class TextureFormat : uint8_t
   r32Sfloat   = 9,
 };
 
-// Describes a texture view to create through the RHI. The handle returned by
-// RenderDevice::createTextureView is the only thing business/pass code should hold.
-// NOTE (transitional): `nativeImage` is a native VkImage because images are not yet RHI
-// handles — the remaining "creation seam". The view format is fully portable (TextureFormat).
+// Describes a texture view to create through the RHI. Fully portable: the source image is
+// an RHI handle (adopt a native image via Device::registerExternalTexture) and the format is
+// the portable TextureFormat enum. The handle returned by createTextureView is the only thing
+// business/pass code should hold.
 struct TextureViewCreateDesc
 {
-  // Prefer `image` (an RHI handle). `nativeImage` is the legacy seam for call sites that
-  // still hold a raw VkImage; createTextureView resolves `image` first when it is set.
   TextureHandle    image{};
-  uint64_t         nativeImage{0};
   TextureFormat    format{TextureFormat::undefined};
   ImageViewType    viewType{ImageViewType::e2D};
   TextureAspect    aspect{TextureAspect::color};

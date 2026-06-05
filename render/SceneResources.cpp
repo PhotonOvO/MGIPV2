@@ -177,8 +177,11 @@ void SceneResources::create(VkCommandBuffer cmd)
   const auto createView = [&](VkImage image, VkFormat format, rhi::TextureAspect aspect, const std::string& name,
                               rhi::ComponentMapping swizzle = {}, uint32_t baseMip = 0,
                               uint32_t levelCount = 1) -> rhi::TextureViewHandle {
+    // Adopt the native image as a transient owned=false handle so the view desc stays
+    // handle+enum only; unregister it right after (the view does not retain the image handle).
+    const rhi::TextureHandle imageHandle = m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(image));
     rhi::TextureViewCreateDesc desc{};
-    desc.nativeImage   = reinterpret_cast<uint64_t>(image);
+    desc.image         = imageHandle;
     desc.format        = toPortableTextureFormat(format);
     desc.viewType      = rhi::ImageViewType::e2D;
     desc.aspect        = aspect;
@@ -186,6 +189,7 @@ void SceneResources::create(VkCommandBuffer cmd)
     desc.levelCount    = levelCount;
     desc.components    = swizzle;
     const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
+    m_rhiDevice->destroyImage(imageHandle);
     dutil.setObjectName(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle))),
                         name);
     return handle;
