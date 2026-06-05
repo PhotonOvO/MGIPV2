@@ -2699,34 +2699,18 @@ void GPUDrivenRenderer::initPhase7Resources()
     return;
   }
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
-  const std::array<VkDescriptorPoolSize, 3> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount * 8u},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, frameCount * 4u},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameCount},
-  }};
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = frameCount * 3u,
-      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-      .pPoolSizes = poolSizes.data(),
-  };
-  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_phase7DescriptorPool));
 
-  const std::array<VkDescriptorSetLayoutBinding, 3> aoBindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  // AO set: 2 sampled images + 1 storage image (compute). RHI ArgumentLayout + per-frame
+  // owned ArgumentTables (AO trace + denoise). SSR set is already an RHI ArgumentLayout
+  // (per-frame temporary bind group via acquireSSRTempBindGroup).
+  const std::array<rhi::BindGroupLayoutEntry, 3> aoLayoutEntries{{
+      {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
+      {2, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageTexture, 1},
   }};
-  const VkDescriptorSetLayoutCreateInfo aoLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(aoBindings.size()),
-      .pBindings = aoBindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &aoLayoutInfo, nullptr, &m_aoSetLayout));
+  m_aoArgumentLayout = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = aoLayoutEntries.data(), .entryCount = static_cast<uint32_t>(aoLayoutEntries.size())});
 
-  // Phase 6: SSR uses a per-frame temporary bind group, so its set layout is created
-  // through the RHI (createBindGroupLayout) instead of raw Vulkan. The native
-  // VkDescriptorSetLayout is cached for building the compute pipeline layout below.
   const std::array<rhi::BindGroupLayoutEntry, 6> ssrLayoutEntries{{
       {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
       {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
@@ -2737,68 +2721,30 @@ void GPUDrivenRenderer::initPhase7Resources()
   }};
   m_ssrLayoutHandle = m_renderer.createBindGroupLayout(
       rhi::BindGroupLayoutDesc{.entries = ssrLayoutEntries.data(), .entryCount = static_cast<uint32_t>(ssrLayoutEntries.size())});
-  m_ssrSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
-      static_cast<uintptr_t>(m_renderer.getBindGroupLayoutHandleNative(m_ssrLayoutHandle)));
 
-  const VkPushConstantRange aoPushRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(shaderio::GPUDrivenAOPushConstants),
+  // RHI pipeline layouts (single set + a compute push-constant range each).
+  const auto makeComputeLayout = [&](rhi::ArgumentLayoutHandle setLayout, uint32_t pushSize, const char* name) {
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> mappings{{
+        rhi::vulkan::makePipelineLayoutBindingMapping(0, m_renderer.getBindGroupLayoutHandleNative(setLayout)),
+    }};
+    const rhi::vulkan::VulkanPipelineLayoutLowering lowering{.setLayouts = mappings.data(), .setLayoutCount = 1};
+    rhi::PipelineLayoutDesc desc{};
+    desc.debugName = name;
+    desc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute, .offset = 0, .size = pushSize});
+    auto layout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    layout->init(static_cast<void*>(nativeDevice), desc, lowering);
+    return layout;
   };
-  const VkPipelineLayoutCreateInfo aoPipelineLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &m_aoSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &aoPushRange,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &aoPipelineLayoutInfo, nullptr, &m_aoPipelineLayout));
+  m_aoPipelineLayout  = makeComputeLayout(m_aoArgumentLayout, sizeof(shaderio::GPUDrivenAOPushConstants), "gpu-driven-ao");
+  m_ssrPipelineLayout = makeComputeLayout(m_ssrLayoutHandle, sizeof(shaderio::GPUDrivenSSRPushConstants), "gpu-driven-ssr");
 
-  const VkPushConstantRange ssrPushRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(shaderio::GPUDrivenSSRPushConstants),
-  };
-  const VkPipelineLayoutCreateInfo ssrPipelineLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &m_ssrSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &ssrPushRange,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &ssrPipelineLayoutInfo, nullptr, &m_ssrPipelineLayout));
-
-  m_aoDescriptorSets.resize(frameCount);
-  m_aoDenoiseDescriptorSets.resize(frameCount);
-  std::vector<VkDescriptorSetLayout> aoLayouts(frameCount * 2u, m_aoSetLayout);
-  std::vector<VkDescriptorSet> aoSets(frameCount * 2u, VK_NULL_HANDLE);
-  VkDescriptorSetAllocateInfo aoAlloc{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_phase7DescriptorPool,
-      .descriptorSetCount = static_cast<uint32_t>(aoSets.size()),
-      .pSetLayouts = aoLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &aoAlloc, aoSets.data()));
-  for(uint32_t i = 0; i < frameCount; ++i)
-  {
-    m_aoDescriptorSets[i] = aoSets[i * 2u + 0u];
-    m_aoDenoiseDescriptorSets[i] = aoSets[i * 2u + 1u];
-  }
-
-  // Phase 6: adopt the AO descriptor sets as RHI bind groups so the AO pass binds them
-  // via cmd->bindBindGroup. Sets are allocated once here (resize only recreates the
-  // images / rewrites contents), so a single adoption per frame is stable for the
-  // app lifetime; the bind-group pool frees the adapters at device shutdown. (SSR
-  // instead builds a per-frame temporary bind group in acquireSSRTempBindGroup.)
-  const auto adoptComputeSet = [&](VkDescriptorSet set, VkDescriptorSetLayout /*setLayout*/, const char* name) {
-    return m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(set), name);
-  };
+  // Per-frame owned ArgumentTables for AO trace + denoise (written in updatePhase7Descriptors).
   m_aoBindGroups.assign(frameCount, BindGroupHandle{});
   m_aoDenoiseBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_aoBindGroups[i]        = adoptComputeSet(m_aoDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao");
-    m_aoDenoiseBindGroups[i] = adoptComputeSet(m_aoDenoiseDescriptorSets[i], m_aoSetLayout, "gpu-driven-ao-denoise");
+    m_aoBindGroups[i]        = m_renderer.createPersistentBindGroup(m_aoArgumentLayout, "gpu-driven-ao");
+    m_aoDenoiseBindGroups[i] = m_renderer.createPersistentBindGroup(m_aoArgumentLayout, "gpu-driven-ao-denoise");
   }
 
   resizePhase7Resources();
@@ -2836,36 +2782,30 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
 
   if(nativeDevice != VK_NULL_HANDLE)
   {
-    if(m_aoPipelineLayout != VK_NULL_HANDLE)
+    if(m_aoPipelineLayout)
     {
-      vkDestroyPipelineLayout(nativeDevice, m_aoPipelineLayout, nullptr);
-      m_aoPipelineLayout = VK_NULL_HANDLE;
+      m_aoPipelineLayout->deinit();
+      m_aoPipelineLayout.reset();
     }
-    if(m_ssrPipelineLayout != VK_NULL_HANDLE)
+    if(m_ssrPipelineLayout)
     {
-      vkDestroyPipelineLayout(nativeDevice, m_ssrPipelineLayout, nullptr);
-      m_ssrPipelineLayout = VK_NULL_HANDLE;
-    }
-    if(m_aoSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_aoSetLayout, nullptr);
-      m_aoSetLayout = VK_NULL_HANDLE;
-    }
-    // m_ssrSetLayout is owned by the RHI bind-group-layout pool (m_ssrLayoutHandle),
-    // not raw-created here, so it is not destroyed in this function.
-    m_ssrSetLayout = VK_NULL_HANDLE;
-    if(m_phase7DescriptorPool != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorPool(nativeDevice, m_phase7DescriptorPool, nullptr);
-      m_phase7DescriptorPool = VK_NULL_HANDLE;
+      m_ssrPipelineLayout->deinit();
+      m_ssrPipelineLayout.reset();
     }
   }
-  m_aoDescriptorSets.clear();
-  m_aoDenoiseDescriptorSets.clear();
-  // Adapter objects are freed by RenderDevice::destroyBindGroups at device shutdown;
-  // just drop our handle references here.
+  // Drop the adopted AO storage-image view handles (owned=false RHI mirrors).
+  const auto dropView = [&](rhi::TextureViewHandle& h, VkImageView& nativeView) {
+    if(!h.isNull()) m_renderer.destroyTextureView(h);
+    h          = {};
+    nativeView = VK_NULL_HANDLE;
+  };
+  dropView(m_aoRawViewHandle, m_aoRawViewNative);
+  dropView(m_aoDenoisedViewHandle, m_aoDenoisedViewNative);
+  // Owned ArgumentTables + layouts are freed by RenderDevice::destroyBindGroups at device
+  // shutdown; just drop our handle references here.
   m_aoBindGroups.clear();
   m_aoDenoiseBindGroups.clear();
+  m_aoArgumentLayout = {};
   m_phase7HalfExtent = {};
   m_shadowAtlasAllocatedTiles = 0u;
 }
@@ -2976,10 +2916,12 @@ void GPUDrivenRenderer::initPhase7Pipelines()
 {
   shutdownPhase7Pipelines();
   const VkDevice nativeDevice = getNativeDeviceHandle();
-  if(nativeDevice == VK_NULL_HANDLE || m_aoPipelineLayout == VK_NULL_HANDLE || m_ssrPipelineLayout == VK_NULL_HANDLE)
+  if(nativeDevice == VK_NULL_HANDLE || !m_aoPipelineLayout || !m_ssrPipelineLayout)
   {
     return;
   }
+  const VkPipelineLayout aoLayoutNative  = reinterpret_cast<VkPipelineLayout>(m_aoPipelineLayout->getNativeHandle());
+  const VkPipelineLayout ssrLayoutNative = reinterpret_cast<VkPipelineLayout>(m_ssrPipelineLayout->getNativeHandle());
 
 #ifdef USE_SLANG
   const auto createComputePipeline = [&](const void* shaderData,
@@ -3003,16 +2945,16 @@ void GPUDrivenRenderer::initPhase7Pipelines()
     vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
   };
 
-  createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO", m_aoPipelineLayout, m_gtaoPipeline);
-  createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise", m_aoPipelineLayout, m_aoDenoisePipeline);
-  createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace", m_ssrPipelineLayout, m_ssrTracePipeline);
+  createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO", aoLayoutNative, m_gtaoPipeline);
+  createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise", aoLayoutNative, m_aoDenoisePipeline);
+  createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace", ssrLayoutNative, m_ssrTracePipeline);
 
   // Phase 6: register the raw compute pipelines (with their layouts) so the AO/SSR
   // passes bind them through cmd->bindPipeline + cmd->bindBindGroup. Ownership stays
   // here (unregistered + vkDestroyed in shutdownPhase7Pipelines).
-  m_gtaoPipelineHandle      = m_renderer.registerExternalComputePipeline(m_gtaoPipeline, m_aoPipelineLayout, 100u);
-  m_aoDenoisePipelineHandle = m_renderer.registerExternalComputePipeline(m_aoDenoisePipeline, m_aoPipelineLayout, 101u);
-  m_ssrTracePipelineHandle  = m_renderer.registerExternalComputePipeline(m_ssrTracePipeline, m_ssrPipelineLayout, 102u);
+  m_gtaoPipelineHandle      = m_renderer.registerExternalComputePipeline(m_gtaoPipeline, aoLayoutNative, 100u);
+  m_aoDenoisePipelineHandle = m_renderer.registerExternalComputePipeline(m_aoDenoisePipeline, aoLayoutNative, 101u);
+  m_ssrTracePipelineHandle  = m_renderer.registerExternalComputePipeline(m_ssrTracePipeline, ssrLayoutNative, 102u);
 #endif
 }
 
@@ -3048,7 +2990,7 @@ void GPUDrivenRenderer::shutdownPhase7Pipelines()
 
 void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
 {
-  if(frameIndex >= m_aoDescriptorSets.size() || frameIndex >= m_aoDenoiseDescriptorSets.size())
+  if(frameIndex >= m_aoBindGroups.size() || frameIndex >= m_aoDenoiseBindGroups.size())
   {
     return;
   }
@@ -3059,45 +3001,33 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
     return;
   }
 
-  const auto nativeOf = [&](rhi::TextureViewHandle h) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_renderer.resolveTextureViewNative(h)));
+  const auto adopt = [&](VkImageView native, rhi::TextureViewHandle& cachedHandle, VkImageView& cachedNative) {
+    if(native != cachedNative)
+    {
+      if(!cachedHandle.isNull()) m_renderer.destroyTextureView(cachedHandle);
+      cachedHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(native));
+      cachedNative = native;
+    }
+    return cachedHandle;
   };
-  // SSR is bound via a per-frame temporary bind group (acquireSSRTempBindGroup); only
-  // the persistent AO/denoise sets are rewritten here.
-  const std::array<VkDescriptorImageInfo, 3> aoInfos{{
-      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.gbufferViews[1]), VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
-  }};
-  const std::array<VkDescriptorImageInfo, 3> denoiseInfos{{
-      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoRaw.view, VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL},
-      VkDescriptorImageInfo{VK_NULL_HANDLE, m_aoDenoised.view, VK_IMAGE_LAYOUT_GENERAL},
-  }};
+  const rhi::TextureViewHandle aoRawView      = adopt(m_aoRaw.view, m_aoRawViewHandle, m_aoRawViewNative);
+  const rhi::TextureViewHandle aoDenoisedView = adopt(m_aoDenoised.view, m_aoDenoisedViewHandle, m_aoDenoisedViewNative);
 
-  std::array<VkWriteDescriptorSet, 6> writes{};
-  uint32_t writeIndex = 0;
-  const auto addWrite = [&](VkDescriptorSet set,
-                            uint32_t binding,
-                            VkDescriptorType type,
-                            const VkDescriptorImageInfo* info) {
-    writes[writeIndex++] = VkWriteDescriptorSet{
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = set,
-        .dstBinding = binding,
-        .descriptorCount = 1,
-        .descriptorType = type,
-        .pImageInfo = info,
-    };
-  };
-  addWrite(m_aoDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &aoInfos[0]);
-  addWrite(m_aoDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &aoInfos[1]);
-  addWrite(m_aoDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &aoInfos[2]);
-  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[0]);
-  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &denoiseInfos[1]);
-  addWrite(m_aoDenoiseDescriptorSets[frameIndex], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &denoiseInfos[2]);
+  // AO trace set: depth + normals sampled, aoRaw storage out.
+  const std::array<rhi::ArgumentWrite, 3> aoWrites{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView, .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[1], .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageTexture, .textureView = aoRawView},
+  }};
+  m_renderer.updateBindGroup(m_aoBindGroups[frameIndex], aoWrites.data(), static_cast<uint32_t>(aoWrites.size()));
 
-  vkUpdateDescriptorSets(getNativeDeviceHandle(), writeIndex, writes.data(), 0, nullptr);
+  // Denoise set: aoRaw + depth sampled, aoDenoised storage out.
+  const std::array<rhi::ArgumentWrite, 3> denoiseWrites{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = aoRawView, .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView, .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageTexture, .textureView = aoDenoisedView},
+  }};
+  m_renderer.updateBindGroup(m_aoDenoiseBindGroups[frameIndex], denoiseWrites.data(), static_cast<uint32_t>(denoiseWrites.size()));
 }
 
 BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer, uint32_t cameraOffset)

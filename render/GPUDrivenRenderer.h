@@ -481,17 +481,9 @@ public:
   [[nodiscard]] VkExtent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
   [[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_gtaoPipeline); }
   [[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoisePipeline); }
-  [[nodiscard]] uint64_t getAOPipelineLayout() const { return reinterpret_cast<uint64_t>(m_aoPipelineLayout); }
+  [[nodiscard]] uint64_t getAOPipelineLayout() const { return m_aoPipelineLayout ? m_aoPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getAORawImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoRaw.image); }
   [[nodiscard]] uint64_t getAODenoisedImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoised.image); }
-  [[nodiscard]] uint64_t getAODescriptorSetAt(uint32_t frameIndex) const
-  {
-    return frameIndex < m_aoDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_aoDescriptorSets[frameIndex]) : 0;
-  }
-  [[nodiscard]] uint64_t getAODenoiseDescriptorSetAt(uint32_t frameIndex) const
-  {
-    return frameIndex < m_aoDenoiseDescriptorSets.size() ? reinterpret_cast<uint64_t>(m_aoDenoiseDescriptorSets[frameIndex]) : 0;
-  }
   [[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
   [[nodiscard]] PipelineHandle getAODenoisePipelineHandle() const { return m_aoDenoisePipelineHandle; }
   [[nodiscard]] BindGroupHandle getAOBindGroup(uint32_t frameIndex) const
@@ -503,7 +495,7 @@ public:
     return frameIndex < m_aoDenoiseBindGroups.size() ? m_aoDenoiseBindGroups[frameIndex] : BindGroupHandle{};
   }
   [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_ssrTracePipeline); }
-  [[nodiscard]] uint64_t getSSRPipelineLayout() const { return reinterpret_cast<uint64_t>(m_ssrPipelineLayout); }
+  [[nodiscard]] uint64_t getSSRPipelineLayout() const { return m_ssrPipelineLayout ? m_ssrPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
   [[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
   // Builds the SSR compute set as a per-frame temporary bind group (gbuffer/depth/history
@@ -1061,16 +1053,18 @@ private:
   VkPipeline                         m_spotLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_clusteredLightCullingVkPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_clusteredLightCullingPipeline{};
-  VkDescriptorPool                   m_phase7DescriptorPool{VK_NULL_HANDLE};
-  VkDescriptorSetLayout              m_aoSetLayout{VK_NULL_HANDLE};
-  VkDescriptorSetLayout              m_ssrSetLayout{VK_NULL_HANDLE};
-  VkPipelineLayout                   m_aoPipelineLayout{VK_NULL_HANDLE};
-  VkPipelineLayout                   m_ssrPipelineLayout{VK_NULL_HANDLE};
+  // Wave 9: AO set is an RHI ArgumentLayout + owned ArgumentTables; AO/SSR pipeline
+  // layouts are RHI VulkanPipelineLayouts (SSR set layout comes from m_ssrLayoutHandle).
+  rhi::ArgumentLayoutHandle          m_aoArgumentLayout{};
+  std::unique_ptr<rhi::PipelineLayout> m_aoPipelineLayout;
+  std::unique_ptr<rhi::PipelineLayout> m_ssrPipelineLayout;
   VkPipeline                         m_gtaoPipeline{VK_NULL_HANDLE};
   VkPipeline                         m_aoDenoisePipeline{VK_NULL_HANDLE};
   VkPipeline                         m_ssrTracePipeline{VK_NULL_HANDLE};
-  std::vector<VkDescriptorSet>       m_aoDescriptorSets;
-  std::vector<VkDescriptorSet>       m_aoDenoiseDescriptorSets;
+  // Adopted (owned=false) view handles for the AO raw / denoised storage images, fed into
+  // the AO ArgumentTables; re-registered when the native view changes.
+  rhi::TextureViewHandle             m_aoRawViewHandle{};       VkImageView m_aoRawViewNative{VK_NULL_HANDLE};
+  rhi::TextureViewHandle             m_aoDenoisedViewHandle{};  VkImageView m_aoDenoisedViewNative{VK_NULL_HANDLE};
   // Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
   // so the AO/SSR passes record through cmd-> verbs instead of raw vkCmd*. AO uses
   // persistent adopted sets; SSR builds a per-frame temporary bind group from
