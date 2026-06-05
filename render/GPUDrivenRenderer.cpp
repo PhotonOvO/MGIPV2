@@ -3535,7 +3535,6 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                                    && m_sceneView.gbufferImages[0] != VK_NULL_HANDLE
                                    && !m_sceneView.gbufferViews[0].isNull();
   const bool hasLightingResources = !getGPUDrivenLightHdrPipelineHandle().isNull()
-                                    && getLightPipelineLayout() != 0
                                     && getLightingInputDescriptorSet() != 0;
   const bool hasShadowResources = !getCSMShadowPipelineHandle().isNull()
                                   && getCSMShadowResources().getCascadeImage() != VK_NULL_HANDLE;

@@ -451,7 +451,6 @@ public:
   [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
   [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const { return m_renderer.getGraphicsMaterialBindGroup(); }
-  [[nodiscard]] uint64_t getLightPipelineLayout() const { return m_lightPipelineLayout ? m_lightPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
   [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
   void updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t cameraOffset);
