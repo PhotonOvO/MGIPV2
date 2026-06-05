@@ -27,7 +27,7 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenPresent");
+  context.cmdBuffer->beginEvent("GPUDrivenPresent");
   const VkExtent2D srcExtent = m_renderer->getSceneViewDepthExtent();
   const VkExtent2D dstExtent = m_renderer->getSwapchainExtent();
   const VkImage srcImage = reinterpret_cast<VkImage>(m_renderer->getSceneViewOutputImageOpaque());
@@ -39,7 +39,7 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
   const rhi::TextureHandle dstTex = m_renderer->getCurrentSwapchainTextureRHIHandle();
   if(srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE || srcTex.isNull() || dstTex.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -95,12 +95,11 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
       {.texture = srcTex, .before = rhi::ResourceState::TransferSrc, .after = rhi::ResourceState::General, .range = colorRange},
   };
   context.cmdBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
-  context.cmd->setResourceState(
-      rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      rhi::ResourceState::General);
 
+  // ImGui UI pass is a native-backend exception: beginPresentPass sets up dynamic
+  // rendering to the swapchain through the legacy CommandList for the ImGui draw path.
   m_renderer->beginPresentPass(*context.cmd);
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo
