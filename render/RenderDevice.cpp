@@ -1570,15 +1570,6 @@ PipelineHandle RenderDevice::getCSMShadowPipelineHandle() const
   return m_csmShadowPipeline.isNull() ? m_shadowPipeline : m_csmShadowPipeline;
 }
 
-uint64_t RenderDevice::getCSMShadowPipelineLayout() const
-{
-  if(m_device.csmShadowMdiPipelineLayout)
-  {
-    return m_device.csmShadowMdiPipelineLayout->getNativeHandle();
-  }
-  return getGBufferPipelineLayout();
-}
-
 PipelineHandle RenderDevice::getShadowCullingPipelineHandle() const
 {
   return m_shadowCullingPipeline;
@@ -8430,11 +8421,6 @@ void RenderDevice::updateMeshTransform(MeshHandle handle, const glm::mat4& trans
 uint64_t RenderDevice::getLightPipelineLayout() const
 {
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
-}
-
-uint64_t RenderDevice::getGBufferPipelineLayout() const
-{
-  return m_device.gbufferPipelineLayout ? m_device.gbufferPipelineLayout->getNativeHandle() : 0;
 }
 
 uint64_t RenderDevice::getGBufferColorDescriptorSet() const

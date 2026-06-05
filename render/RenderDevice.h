@@ -125,7 +125,6 @@ public:
   PipelineHandle getGPUCullingDebugPipelineHandle() const;
   PipelineHandle getGPUCullingPipelineHandle() const;
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
-  uint64_t       getCSMShadowPipelineLayout() const;
   PipelineHandle getShadowCullingPipelineHandle() const;
   uint64_t       getShadowCullingPipelineLayout() const;
   uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
@@ -185,7 +184,6 @@ public:
   [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
-  uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout (CSM fallback)
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getGBufferTextureSetLayout() const;      // Layout of the GBuffer texture set

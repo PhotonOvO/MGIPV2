@@ -463,7 +463,6 @@ public:
   [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const { return m_iblEnvironmentEstimatedBytes; }
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const { return m_iblEnvironmentPath; }
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
-  [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
   [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
   {
@@ -762,10 +761,6 @@ public:
   [[nodiscard]] uint64_t getNativeComputePipeline(PipelineHandle pipelineHandle) const
   {
     return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE));
-  }
-  [[nodiscard]] uint64_t getNativeGraphicsPipeline(PipelineHandle pipelineHandle) const
-  {
-    return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS));
   }
   // BindGroup wrapping the per-frame lighting-scene descriptor set (set LSetScene),
   // so GPUDriven fullscreen passes can bind it through cmd->bindBindGroup.

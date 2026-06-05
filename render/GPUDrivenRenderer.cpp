@@ -3538,7 +3538,6 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                                     && getLightPipelineLayout() != 0
                                     && getLightingInputDescriptorSet() != 0;
   const bool hasShadowResources = !getCSMShadowPipelineHandle().isNull()
-                                  && getCSMShadowPipelineLayout() != 0
                                   && getCSMShadowResources().getCascadeImage() != VK_NULL_HANDLE;
   const bool hasMaterialDescriptors = getGraphicsMaterialDescriptorSet() != 0;
   const bool hasCurrentVisibility = m_sceneView.usePersistentCullingObjects

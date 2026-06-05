@@ -52,14 +52,7 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   }
 
   const PipelineHandle shadowPipeline = m_renderer->getCSMShadowPipelineHandle();
-  const VkPipelineLayout pipelineLayout = reinterpret_cast<VkPipelineLayout>(m_renderer->getCSMShadowPipelineLayout());
-  if(shadowPipeline.isNull() || pipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  const VkPipeline nativePipeline = reinterpret_cast<VkPipeline>(m_renderer->getNativeGraphicsPipeline(shadowPipeline));
-  if(nativePipeline == VK_NULL_HANDLE)
+  if(shadowPipeline.isNull())
   {
     return;
   }
