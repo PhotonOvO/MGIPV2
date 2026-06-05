@@ -1695,7 +1695,32 @@ rhi::TextureHandle RenderDevice::getCurrentSwapchainTextureHandle() const
   {
     return {};
   }
-  return m_swapchainDependent.swapchain->currentTexture();
+  // Swapchain::currentTexture() is a swapchain-local synthetic handle that is NOT in
+  // the device resource table the command buffer resolves against. Mirror the current
+  // backbuffer's native image into that table instead, caching one handle per image
+  // index and re-registering only when the native image changes (swapchain rebuild).
+  const uint32_t idx    = m_swapchainDependent.currentImageIndex;
+  const uint64_t native = m_swapchainDependent.swapchain->getNativeImage(idx);
+  if(native == 0)
+  {
+    return {};
+  }
+  auto& table = const_cast<rhi::vulkan::VulkanResourceTable&>(m_device.resourceTable);
+  if(idx >= m_swapchainTextureHandles.size())
+  {
+    m_swapchainTextureHandles.resize(idx + 1);
+    m_swapchainTextureNatives.resize(idx + 1, 0);
+  }
+  if(m_swapchainTextureNatives[idx] != native)
+  {
+    if(!m_swapchainTextureHandles[idx].isNull())
+    {
+      table.removeTexture(m_swapchainTextureHandles[idx]);
+    }
+    m_swapchainTextureHandles[idx] = table.registerTexture(native, 0, /*owned=*/false);
+    m_swapchainTextureNatives[idx] = native;
+  }
+  return m_swapchainTextureHandles[idx];
 }
 
 rhi::TextureViewHandle RenderDevice::getOutputTextureView() const

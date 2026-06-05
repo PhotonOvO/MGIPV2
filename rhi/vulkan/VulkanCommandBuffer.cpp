@@ -129,13 +129,13 @@ void VulkanRenderEncoder::setRootPointer(ShaderStage stage, uint32_t slot, GpuPt
 void VulkanRenderEncoder::setViewport(const Viewport& viewport)
 {
   const VkViewport vp{viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth};
-  vkCmdSetViewport(m_cmd, 0, 1, &vp);
+  vkCmdSetViewportWithCount(m_cmd, 1, &vp);
 }
 
 void VulkanRenderEncoder::setScissor(const Rect2D& scissor)
 {
   const VkRect2D rect{{scissor.offset.x, scissor.offset.y}, {scissor.extent.width, scissor.extent.height}};
-  vkCmdSetScissor(m_cmd, 0, 1, &rect);
+  vkCmdSetScissorWithCount(m_cmd, 1, &rect);
 }
 
 void VulkanRenderEncoder::bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets, uint32_t count)
@@ -394,11 +394,19 @@ void VulkanCommandBuffer::endEncoding()
 
 void VulkanCommandBuffer::barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards)
 {
+  VkPipelineStageFlags2 dstStage = toVkPipelineStage2(consumer);
+  // INDIRECT_COMMAND_READ access is only valid alongside the DRAW_INDIRECT stage, so
+  // when the consumer reads indirect arguments, ensure that stage is present even if
+  // the declarative consumer mask only named shader stages.
+  if((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::drawArguments)) != 0)
+  {
+    dstStage |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+  }
   const VkMemoryBarrier2 memoryBarrier{
       .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
       .srcStageMask  = toVkPipelineStage2(producer),
       .srcAccessMask = inferProducerAccess(hazards),
-      .dstStageMask  = toVkPipelineStage2(consumer),
+      .dstStageMask  = dstStage,
       .dstAccessMask = inferConsumerAccess(hazards),
   };
   const VkDependencyInfo dependencyInfo{

@@ -319,6 +319,10 @@ public:
   VkImageView getCurrentSwapchainImageView() const;
   VkImage getCurrentSwapchainImage() const;
   rhi::TextureHandle getCurrentSwapchainTextureHandle() const;
+  // Per-image-index registry handles mirroring the swapchain backbuffers into the
+  // device resource table (lazily (re)registered by getCurrentSwapchainTextureHandle).
+  mutable std::vector<rhi::TextureHandle> m_swapchainTextureHandles;
+  mutable std::vector<uint64_t>           m_swapchainTextureNatives;
   VkFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
   VkImage getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
   rhi::TextureViewHandle getSceneDepthImageView() const { return m_swapchainDependent.sceneResources.getDepthImageView(); }
