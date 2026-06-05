@@ -562,7 +562,13 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 
 ---
 
-## 10. Wave 7：StageBarrier + ResourceBarrier 重构（PassExecutor 改发射动词）
+## 10. Wave 7：StageBarrier + ResourceBarrier 重构（PassExecutor 改发射动词）— 🔁 buffer 主路径已收敛（运行验证通过），texture 替换待续
+
+> **收敛状态（运行验证通过，commit `e943b53`）**：Wave 6 Present + Wave 7 buffer 主路径已整机运行、Vulkan validation **零报错**。本回合修复：
+> - barrier 主路径：`barrier()` 在 `drawArguments` hazard 时给 consumer `dstStageMask` 补 `DRAW_INDIRECT`（否则 `INDIRECT_COMMAND_READ` access 与 fragment stage 不匹配）。
+> - Present：`Swapchain::currentTexture()` 是 swapchain 本地合成 handle（未注册进 device 表），改为 `getCurrentSwapchainTextureHandle` 把当前 backbuffer native image 注册进 command buffer 解析的 device resource table（per-image-index 缓存）。
+> - 另：启动崩溃实为**增量构建 ABI 不一致**（构建脚本只 build `demo_core` 未 build `Demo.exe`），干净重建后消失——后续务必 build `Demo` 目标。
+> **剩余（texture resourceBarrier 替换，未做）**：见下方 texture 路径条目；需先修 backend `resourceBarrier` 的 depthStencil aspect + 全覆盖 range，逐 barrier 边界运行验证。
 
 **目标**：双 barrier 模型（设计文档 §7）。常规同步走 `barrier(stage,hazard)`；显式 layout/queue/present 走 `resourceBarrier`；
 layout 由后端 tracker 推断。**`transitionTexture/transitionBuffer` 重塑为 `resourceBarrier`，非废弃删除**。
