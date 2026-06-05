@@ -1321,7 +1321,11 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
       case ArgumentType::storageTexture:
         imageInfos[i] = VkDescriptorImageInfo{
             .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
-            .imageLayout = w.type == ArgumentType::storageTexture ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            // storageTexture is always GENERAL; sampledTexture defaults to SHADER_READ_ONLY_OPTIMAL
+            // but honors w.imageLayout == General for images sampled while kept in GENERAL.
+            .imageLayout = (w.type == ArgumentType::storageTexture || w.imageLayout == ResourceState::General)
+                               ? VK_IMAGE_LAYOUT_GENERAL
+                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
         out.pImageInfo = &imageInfos[i];
         break;

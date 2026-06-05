@@ -48,6 +48,10 @@ struct ArgumentWrite
   SamplerHandle     sampler{};
   uint64_t          offset{0};
   uint64_t          size{0};  // 0 = entire buffer
+  // Layout a sampledTexture is expected to be in when accessed. Defaults to ShaderRead
+  // (SHADER_READ_ONLY_OPTIMAL); set to General for images kept in VK_IMAGE_LAYOUT_GENERAL
+  // (e.g. storage-written images that are also sampled, like the Hi-Z depth pyramid).
+  ResourceState     imageLayout{ResourceState::ShaderRead};
 };
 
 }  // namespace demo::rhi
