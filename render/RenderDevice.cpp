@@ -1963,6 +1963,7 @@ void RenderDevice::createFrameSubmission(uint32_t numFrames)
     // buffer) as RHI BufferHandles for ArgumentWrite-based bind-group updates.
     rebindFrameBufferHandle(frameUserData.lightingBufferRHI, frameUserData.lightingBuffer);
     rebindFrameBufferHandle(frameUserData.lightCullingBufferRHI, frameUserData.lightCullingBuffer);
+    rebindFrameBufferHandle(frameUserData.gpuCullingUniformBufferRHI, frameUserData.gpuCullingUniformBuffer);
     {
       rhi::vulkan::BufferRecord transientRec{};
       transientRec.nativeBuffer = frameUserData.transientAllocator.getBufferOpaque();
@@ -2625,6 +2626,9 @@ void RenderDevice::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& fra
 
   rebindFrameBufferHandle(frameUserData.gpuCullingIndirectBufferRHI, frameUserData.gpuCullingIndirectBuffer);
   rebindFrameBufferHandle(frameUserData.gpuCullingDrawCountBufferRHI, frameUserData.gpuCullingDrawCountBuffer);
+  rebindFrameBufferHandle(frameUserData.gpuCullingObjectBufferRHI, frameUserData.gpuCullingObjectBuffer);
+  rebindFrameBufferHandle(frameUserData.gpuCullingStatsBufferRHI, frameUserData.gpuCullingStatsBuffer);
+  rebindFrameBufferHandle(frameUserData.gpuCullingResultBufferRHI, frameUserData.gpuCullingResultBuffer);
 }
 
 void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
@@ -2667,6 +2671,12 @@ void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderPara
       useExternalPersistentObjects
       && frameUserData.externalGPUCullingMeshletBuffer != VK_NULL_HANDLE
       && frameUserData.externalGPUCullingSceneObjectBuffer != VK_NULL_HANDLE;
+  rebindFrameBufferHandle(frameUserData.externalGPUCullingObjectBufferRHI,
+                          frameUserData.externalGPUCullingObjectBuffer);
+  rebindFrameBufferHandle(frameUserData.externalGPUCullingMeshletBufferRHI,
+                          frameUserData.externalGPUCullingMeshletBuffer);
+  rebindFrameBufferHandle(frameUserData.externalGPUCullingSceneObjectBufferRHI,
+                          frameUserData.externalGPUCullingSceneObjectBuffer);
   frameUserData.gpuCullingSourceModel = useExternalPersistentObjects ? nullptr : params.gltfModel;
   frameUserData.gpuCullingObjectCount = objectCount;
   m_externalGPUCullingOverlayObjects =
@@ -8844,7 +8854,12 @@ uint64_t RenderDevice::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frame
 
 void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer)
 {
-  if(buffer.buffer == VK_NULL_HANDLE)
+  rebindFrameBufferHandle(handle, buffer.buffer);
+}
+
+void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, VkBuffer buffer)
+{
+  if(buffer == VK_NULL_HANDLE)
   {
     if(!handle.isNull())
     {
@@ -8853,7 +8868,7 @@ void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, const util
     }
     return;
   }
-  const uint64_t native = reinterpret_cast<uint64_t>(buffer.buffer);
+  const uint64_t native = reinterpret_cast<uint64_t>(buffer);
   if(handle.isNull())
   {
     rhi::vulkan::BufferRecord rec{};

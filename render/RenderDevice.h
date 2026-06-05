@@ -576,6 +576,16 @@ private:
       // RenderEncoder-based passes via getXxxBufferRHIHandle().
       rhi::BufferHandle  gpuCullingIndirectBufferRHI{};
       rhi::BufferHandle  gpuCullingDrawCountBufferRHI{};
+      // Wave 9 (gpuCulling step 2): stable RHI handles mirroring the remaining native
+      // culling buffers (binding 0/2/3/6 owned here, 7/8 the external variants). Rebound
+      // on realloc / per-frame external swap; consumed by step 3's updateArgumentTable.
+      rhi::BufferHandle  gpuCullingObjectBufferRHI{};
+      rhi::BufferHandle  gpuCullingStatsBufferRHI{};
+      rhi::BufferHandle  gpuCullingResultBufferRHI{};
+      rhi::BufferHandle  gpuCullingUniformBufferRHI{};
+      rhi::BufferHandle  externalGPUCullingObjectBufferRHI{};
+      rhi::BufferHandle  externalGPUCullingMeshletBufferRHI{};
+      rhi::BufferHandle  externalGPUCullingSceneObjectBufferRHI{};
       rhi::BufferHandle  shadowCullingIndirectBufferRHI{};
       rhi::BufferHandle  gpuDrivenPersistentIndirectStreamBufferRHI{};
       // Wave 8: stable RHI handles mirroring the per-frame UBO/SSBO buffers consumed by
@@ -812,6 +822,7 @@ private:
   // Registers (first call) or rebinds (subsequent) a stable RHI BufferHandle to a
   // per-frame native buffer; clears the handle when the buffer is null.
   void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer);
+  void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, VkBuffer buffer);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 createShadowCullingResources();
   void                 updateShadowCullingDescriptorSet(uint32_t frameIndex);
