@@ -525,7 +525,17 @@ virtual CommandBuffer* getCommandBuffer() = 0;   // 当前帧的 one-shot 录制
 
 ---
 
-## 9. Wave 6：DrawStream decode + Present/Swapchain — ⏸ 阻塞（前置：pass/swapchain texture 句柄化 + 运行验证）
+## 9. Wave 6：DrawStream decode + Present/Swapchain — 🔁 Present 已迁移（编译通过，显示正确性待运行验证）
+
+> **进度（本回合）**：
+> - [x] **Present 迁移到 registry 路径**：`GPUDrivenPresentPass` 的 `transitionTexture`×4 → `context.cmdBuffer->resourceBarrier`（output General↔TransferSrc / swapchain General↔TransferDst，显式 before/after，**行为等价**旧 transition）；`blitImage` → `beginComputePass`→`blitTexture({srcTex,dstTex,letterbox offsets})`→`endEncoding`。两张图均 **color 单 mip 单 layer**，避开 depthStencil aspect / array-range 陷阱。
+>   - texture handle 来源：output = `PassExecutor::getTextureRHIHandle(kPassOutputHandle)`（地基注册的 rhiTexture，经 GPUDrivenRenderer 委托）；swapchain = `Swapchain::currentTexture()`（经 `RenderDevice::getCurrentSwapchainTextureHandle`）。任一为 null 则安全早退（回退保护）。
+>   - 编译通过（`[4/4] Linking demo_core.lib`）。**present 显示正确性（黑屏/letterbox/撕裂）必须整机运行验证**。
+> - [~] **Swapchain native getter 移除**：降级为 Wave 9 清理。`getNativeImage/getNativeImageView` 仍被 `getCurrentSwapchainImage`（Present null 检查）/ `getCurrentSwapchainImageView`（ImGui present render）使用，移除需先把这些迁到 handle/`currentTextureView` 并运行验证 ImGui 显示，耦合较大。
+> - [~] **DrawStream decode**：`DrawStreamDecoder` 已存在但**无 pass 消费者**（均走 MDI indirect），接线属 dead code，跳过（避免 no half-finished）。
+
+**目标**：补齐 DrawStream→Encoder decode（设计文档 §9/Phase 7）；迁移 Present 与 Swapchain。
+**前置依赖**：Wave 5。
 
 **目标**：补齐 DrawStream→Encoder decode（设计文档 §9/Phase 7）；迁移 Present 与 Swapchain。
 **前置依赖**：Wave 5。

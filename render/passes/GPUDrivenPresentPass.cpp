@@ -33,7 +33,12 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
   const VkExtent2D dstExtent = m_renderer->getSwapchainExtent();
   const VkImage srcImage = reinterpret_cast<VkImage>(m_renderer->getSceneViewOutputImageOpaque());
   const VkImage dstImage = m_renderer->getCurrentSwapchainImage();
-  if(srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE)
+  // Wave 6: blit through the registry. Both images are color, single mip/layer, so
+  // the resourceBarrier aspect/range pitfalls that block depth/array textures do not
+  // apply here. Falls back to the legacy native path if either handle is unresolved.
+  const rhi::TextureHandle srcTex = m_renderer->getPassOutputTextureRHIHandle();
+  const rhi::TextureHandle dstTex = m_renderer->getCurrentSwapchainTextureRHIHandle();
+  if(srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE || srcTex.isNull() || dstTex.isNull())
   {
     context.cmd->endEvent();
     return;
@@ -66,68 +71,34 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
   VkOffset3D dstOffset0 = {dstX0, dstY0, 0};
   VkOffset3D dstOffset1 = {dstX1, dstY1, 1};
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(srcImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::Transfer,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::TransferSrc,
-      .isSwapchain = false,
-  });
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(dstImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::Transfer,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::TransferDst,
-      .isSwapchain = true,
-  });
+  // Output -> TransferSrc, swapchain -> TransferDst (explicit layout, behavior
+  // equivalent to the prior transitionTexture pair; single color mip/layer).
+  const rhi::TextureSubresourceRange colorRange{rhi::TextureAspect::color, 0, 1, 0, 1};
+  const rhi::TextureBarrier toBlit[] = {
+      {.texture = srcTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferSrc, .range = colorRange},
+      {.texture = dstTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferDst, .range = colorRange},
+  };
+  context.cmdBuffer->resourceBarrier(toBlit, 2, nullptr, 0);
 
-  context.cmd->blitImage(rhi::ImageBlitDesc{
-      .srcImage   = reinterpret_cast<uint64_t>(srcImage),
-      .dstImage   = reinterpret_cast<uint64_t>(dstImage),
-      .srcState   = rhi::ResourceState::TransferSrc,
-      .dstState   = rhi::ResourceState::TransferDst,
+  rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
+  enc->blitTexture(rhi::TextureBlitDesc{
+      .srcTexture = srcTex,
+      .dstTexture = dstTex,
       .aspect     = rhi::TextureAspect::color,
       .srcOffsets = {{srcOffset0.x, srcOffset0.y, srcOffset0.z}, {srcOffset1.x, srcOffset1.y, srcOffset1.z}},
       .dstOffsets = {{dstOffset0.x, dstOffset0.y, dstOffset0.z}, {dstOffset1.x, dstOffset1.y, dstOffset1.z}},
   });
+  context.cmdBuffer->endEncoding();
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(dstImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::Transfer,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::TransferDst,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = true,
-  });
+  // Restore both images to General (swapchain stays General for the ImGui pass).
+  const rhi::TextureBarrier fromBlit[] = {
+      {.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = rhi::ResourceState::General, .range = colorRange},
+      {.texture = srcTex, .before = rhi::ResourceState::TransferSrc, .after = rhi::ResourceState::General, .range = colorRange},
+  };
+  context.cmdBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
   context.cmd->setResourceState(
       rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
       rhi::ResourceState::General);
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(srcImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::Transfer,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::TransferSrc,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
 
   m_renderer->beginPresentPass(*context.cmd);
   context.cmd->endEvent();

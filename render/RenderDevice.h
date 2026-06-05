@@ -318,6 +318,7 @@ public:
   uint32_t   getSwapchainImageCount() const { return m_swapchainDependent.swapchain->getRequestedImageCount(); }
   VkImageView getCurrentSwapchainImageView() const;
   VkImage getCurrentSwapchainImage() const;
+  rhi::TextureHandle getCurrentSwapchainTextureHandle() const;
   VkFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
   VkImage getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
   rhi::TextureViewHandle getSceneDepthImageView() const { return m_swapchainDependent.sceneResources.getDepthImageView(); }

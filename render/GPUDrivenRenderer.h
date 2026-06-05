@@ -775,6 +775,8 @@ public:
   }
   [[nodiscard]] VkExtent2D getSwapchainExtent() const { return m_renderer.getSwapchainExtent(); }
   [[nodiscard]] VkImage getCurrentSwapchainImage() const { return m_renderer.getCurrentSwapchainImage(); }
+  [[nodiscard]] rhi::TextureHandle getCurrentSwapchainTextureRHIHandle() const { return m_renderer.getCurrentSwapchainTextureHandle(); }
+  [[nodiscard]] rhi::TextureHandle getPassOutputTextureRHIHandle() const { return m_passExecutor.getTextureRHIHandle(kPassOutputHandle); }
   [[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
   [[nodiscard]] VkDevice getNativeDeviceHandle() const { return m_renderer.getNativeDeviceHandle(); }
   [[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }

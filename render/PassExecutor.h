@@ -66,6 +66,9 @@ public:
   void                 bindBuffer(BufferBinding binding);
   [[nodiscard]] size_t getPassCount() const;
   [[nodiscard]] const PassNode* getPass(size_t index) const;
+  // Resolvable backend handle mirroring a bound pass attachment (null if unbound
+  // or no resource table was set). Used by present to blit through the registry.
+  [[nodiscard]] rhi::TextureHandle getTextureRHIHandle(TextureHandle handle) const;
   void                 execute(const PassContext& context, const ExecutionHooks* hooks = nullptr,
                                profiling::TracyVulkanContext* tracyVkCtx = nullptr) const;
 

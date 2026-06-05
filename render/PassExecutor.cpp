@@ -164,6 +164,12 @@ void PassExecutor::setResourceTable(rhi::vulkan::VulkanResourceTable* table)
   m_resourceTable = table;
 }
 
+rhi::TextureHandle PassExecutor::getTextureRHIHandle(TextureHandle handle) const
+{
+  const TextureBinding* binding = findTextureBinding(handle);
+  return binding != nullptr ? binding->rhiTexture : rhi::TextureHandle{};
+}
+
 void PassExecutor::clearResourceBindings()
 {
   if(m_resourceTable != nullptr)

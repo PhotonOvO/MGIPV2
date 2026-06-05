@@ -1689,6 +1689,15 @@ VkImage RenderDevice::getCurrentSwapchainImage() const
       m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex));
 }
 
+rhi::TextureHandle RenderDevice::getCurrentSwapchainTextureHandle() const
+{
+  if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
+  {
+    return {};
+  }
+  return m_swapchainDependent.swapchain->currentTexture();
+}
+
 rhi::TextureViewHandle RenderDevice::getOutputTextureView() const
 {
   return m_swapchainDependent.sceneResources.getOutputTextureView();
