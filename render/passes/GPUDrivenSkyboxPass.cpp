@@ -1,6 +1,7 @@
 #include "GPUDrivenSkyboxPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -25,7 +26,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyboxPass::getDependenci
 
 void GPUDrivenSkyboxPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr
      || !context.params->debugOptions.enableIBL || context.params->gpuDrivenSceneView == nullptr
      || !context.cameraAllocValid)
   {
@@ -39,30 +40,22 @@ void GPUDrivenSkyboxPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenSkybox");
+  context.cmdBuffer->beginEvent("GPUDrivenSkybox");
 
   // Single source of truth for the color/depth state flips around the pass.
-  const auto transition = [&](TextureHandle handle, uint64_t nativeImage, rhi::TextureAspect aspect,
-                              rhi::ResourceAccess srcAccess, rhi::ResourceAccess dstAccess, rhi::ResourceState from,
+  const auto transition = [&](uint64_t nativeImage, rhi::TextureAspect aspect, rhi::ResourceState from,
                               rhi::ResourceState to) {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{handle.index, handle.generation},
-        .nativeImage = nativeImage,
-        .aspect      = aspect,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::FragmentShader,
-        .srcAccess   = srcAccess,
-        .dstAccess   = dstAccess,
-        .oldState    = from,
-        .newState    = to,
-        .isSwapchain = false,
-    });
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(nativeImage),
+        .before  = from,
+        .after   = to,
+        .range   = {.aspect = aspect, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
   };
 
-  transition(kPassSceneColorHdrHandle, targets.colorImage, rhi::TextureAspect::color, rhi::ResourceAccess::read,
-             rhi::ResourceAccess::write, rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
-  transition(kPassSceneDepthHandle, targets.depthImage, targets.depthAspect, rhi::ResourceAccess::read,
-             rhi::ResourceAccess::read, rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
+  transition(targets.colorImage, rhi::TextureAspect::color, rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
+  transition(targets.depthImage, targets.depthAspect, rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -112,12 +105,10 @@ void GPUDrivenSkyboxPass::execute(const PassContext& context) const
 
   context.cmdBuffer->endEncoding();
 
-  transition(kPassSceneColorHdrHandle, targets.colorImage, rhi::TextureAspect::color, rhi::ResourceAccess::write,
-             rhi::ResourceAccess::read, rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
-  transition(kPassSceneDepthHandle, targets.depthImage, targets.depthAspect, rhi::ResourceAccess::read,
-             rhi::ResourceAccess::read, rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
+  transition(targets.colorImage, rhi::TextureAspect::color, rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+  transition(targets.depthImage, targets.depthAspect, rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

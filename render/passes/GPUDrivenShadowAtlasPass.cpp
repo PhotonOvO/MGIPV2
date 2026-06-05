@@ -1,6 +1,7 @@
 #include "GPUDrivenShadowAtlasPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -34,7 +35,8 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
 
   m_renderer->setShadowAtlasAllocatedTiles(0u);
   const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
-  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr
+  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmdBuffer == nullptr
+     || context.executor == nullptr
      || !context.params->debugOptions.enableShadowAtlas || sceneView == nullptr || !sceneView->usePersistentCullingObjects
      || sceneView->shadowPackedMeshes == nullptr || sceneView->shadowPackedMeshCount == 0
      || sceneView->shadowPackedVertexBuffer == VK_NULL_HANDLE || sceneView->shadowPackedIndexBuffer == VK_NULL_HANDLE
@@ -88,7 +90,7 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenShadowAtlas");
+  context.cmdBuffer->beginEvent("GPUDrivenShadowAtlas");
   const rhi::DepthTargetDesc depthTarget{
       .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
       .view = m_renderer->getShadowAtlasViewHandle(),
@@ -177,20 +179,15 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
-      .nativeImage = m_renderer->getShadowAtlasImageOpaque(),
-      .aspect = rhi::TextureAspect::depth,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::DepthStencilAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  const rhi::TextureBarrier atlasBarrier{
+      .texture = context.executor->resolveBarrierTexture(m_renderer->getShadowAtlasImageOpaque()),
+      .before  = rhi::ResourceState::DepthStencilAttachment,
+      .after   = rhi::ResourceState::General,
+      .range   = {.aspect = rhi::TextureAspect::depth, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+  };
+  context.cmdBuffer->resourceBarrier(&atlasBarrier, 1, nullptr, 0);
   m_renderer->setShadowAtlasAllocatedTiles(cascadeCount);
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

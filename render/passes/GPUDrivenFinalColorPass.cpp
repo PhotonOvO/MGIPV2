@@ -1,6 +1,7 @@
 #include "GPUDrivenFinalColorPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <algorithm>
@@ -27,7 +28,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenFinalColorPass::getDepend
 
 void GPUDrivenFinalColorPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
@@ -40,21 +41,18 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenFinalColor");
-  const auto restoreOutputState = [&]() {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(outputImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+  context.cmdBuffer->beginEvent("GPUDrivenFinalColor");
+  const rhi::TextureHandle outputBarrierTex = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(outputImage));
+  const auto transitionOutput = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = outputBarrierTex,
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
   };
+  const auto restoreOutputState = [&]() { transitionOutput(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General); };
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
       .view = outputView,
@@ -64,18 +62,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(outputImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  transitionOutput(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   const rhi::Extent2D extent{outputExtent.width, outputExtent.height};
   rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
@@ -92,7 +79,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
   {
     context.cmdBuffer->endEncoding();
     restoreOutputState();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
   const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
@@ -171,7 +158,7 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
 
   context.cmdBuffer->endEncoding();
   restoreOutputState();
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

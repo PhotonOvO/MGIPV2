@@ -1,5 +1,6 @@
 #include "GPUDrivenSkyPass.h"
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -23,7 +24,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyPass::getDependencies(
 
 void GPUDrivenSkyPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
@@ -41,20 +42,20 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenSkyPass");
+  context.cmdBuffer->beginEvent("GPUDrivenSkyPass");
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-      .aspect      = rhi::TextureAspect::color,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::read,
-      .dstAccess   = rhi::ResourceAccess::write,
-      .oldState    = rhi::ResourceState::General,
-      .newState    = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  const rhi::TextureHandle outputBarrierTex =
+      context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->outputImage));
+  const auto transitionOutput = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = outputBarrierTex,
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
+  transitionOutput(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -94,20 +95,9 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
   enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
   context.cmdBuffer->endEncoding();
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-      .aspect      = rhi::TextureAspect::color,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::write,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::ColorAttachment,
-      .newState    = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  transitionOutput(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

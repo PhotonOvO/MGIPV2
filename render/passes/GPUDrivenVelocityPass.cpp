@@ -1,6 +1,7 @@
 #include "GPUDrivenVelocityPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -24,7 +25,8 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenVelocityPass::getDependen
 
 void GPUDrivenVelocityPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr || !context.cameraAllocValid)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr
+     || !context.cameraAllocValid)
   {
     return;
   }
@@ -41,19 +43,19 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenVelocity");
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassVelocityHandle.index, kPassVelocityHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->velocityImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  context.cmdBuffer->beginEvent("GPUDrivenVelocity");
+  const rhi::TextureHandle velocityBarrierTex =
+      context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->velocityImage));
+  const auto transitionVelocity = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = velocityBarrierTex,
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
+  transitionVelocity(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -93,19 +95,8 @@ void GPUDrivenVelocityPass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassVelocityHandle.index, kPassVelocityHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->velocityImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-  context.cmd->endEvent();
+  transitionVelocity(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo
