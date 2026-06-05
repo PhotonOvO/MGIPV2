@@ -4010,6 +4010,14 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 
+  // Wave 9: adopt the native compute pipeline as a PipelineHandle so the patch dispatch
+  // can move to ComputeEncoder. Behavior-neutral until consumed.
+  if(m_transparentVisibilityPatchPipeline != VK_NULL_HANDLE && m_transparentVisibilityPatchPipelineLayout != VK_NULL_HANDLE)
+  {
+    m_transparentVisibilityPatchPipelineHandle = m_renderer.registerExternalComputePipeline(
+        m_transparentVisibilityPatchPipeline, m_transparentVisibilityPatchPipelineLayout, 0x7001u);
+  }
+
   std::vector<VkDescriptorSetLayout> layouts(frameCount * 2u, m_transparentVisibilityPatchSetLayout);
   std::vector<VkDescriptorSet> descriptorSets(frameCount * 2u, VK_NULL_HANDLE);
   const VkDescriptorSetAllocateInfo allocInfo{
@@ -4025,6 +4033,13 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
   {
     m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[0] = descriptorSets[frameIndex * 2u + 0u];
     m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[1] = descriptorSets[frameIndex * 2u + 1u];
+    // Wave 9: adopt each native set as a (non-owned) ArgumentTable handle. The native set is
+    // still re-written per frame via updateTransparentVisibilityPatchDescriptorSet; the handle
+    // just gives a stable binding identity for the encoder path.
+    m_transparentVisibilityPatchFrames[frameIndex].argumentTables[0] =
+        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex * 2u + 0u]), "transparent-visibility-patch");
+    m_transparentVisibilityPatchFrames[frameIndex].argumentTables[1] =
+        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex * 2u + 1u]), "transparent-visibility-patch");
   }
 }
 
@@ -4036,8 +4051,24 @@ void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
   {
     destroyBuffer(allocator, frameResources.prefixBuffers[0]);
     destroyBuffer(allocator, frameResources.prefixBuffers[1]);
+    // Wave 9: drop the adopted ArgumentTable handles (non-owned: the native sets die with
+    // the descriptor pool below, this only clears the registry entries).
+    for(BindGroupHandle& table : frameResources.argumentTables)
+    {
+      if(!table.isNull())
+      {
+        m_renderer.destroyBindGroup(table);
+        table = {};
+      }
+    }
   }
   m_transparentVisibilityPatchFrames.clear();
+
+  if(!m_transparentVisibilityPatchPipelineHandle.isNull())
+  {
+    m_renderer.unregisterExternalPipeline(m_transparentVisibilityPatchPipelineHandle);
+    m_transparentVisibilityPatchPipelineHandle = {};
+  }
 
   if(nativeDevice != VK_NULL_HANDLE)
   {

@@ -901,6 +901,7 @@ private:
   {
     std::array<utils::Buffer, 2>   prefixBuffers{};
     std::array<VkDescriptorSet, 2> descriptorSets{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    std::array<BindGroupHandle, 2> argumentTables{};  // Wave 9: adopted ArgumentTable handles for descriptorSets[0/1]
     std::array<uint64_t, 2>        boundSortKeyHandles{0, 0};
     std::array<uint64_t, 2>        boundSortValueHandles{0, 0};
     std::array<uint64_t, 2>        boundSourceIndirectHandles{0, 0};
@@ -1030,6 +1031,7 @@ private:
   VkDescriptorSetLayout              m_transparentVisibilityPatchSetLayout{VK_NULL_HANDLE};
   VkPipelineLayout                   m_transparentVisibilityPatchPipelineLayout{VK_NULL_HANDLE};
   VkPipeline                         m_transparentVisibilityPatchPipeline{VK_NULL_HANDLE};
+  PipelineHandle                     m_transparentVisibilityPatchPipelineHandle{};  // Wave 9: adopted compute pipeline handle
   std::vector<TransparentVisibilityFrameResources> m_transparentVisibilityPatchFrames;
   VkDescriptorPool                   m_lightingDescriptorPool{VK_NULL_HANDLE};
   VkDescriptorSetLayout              m_lightingSetLayout{VK_NULL_HANDLE};
