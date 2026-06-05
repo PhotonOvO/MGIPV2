@@ -2258,55 +2258,40 @@ void GPUDrivenRenderer::initLightingResources()
       .maxLod = VK_LOD_CLAMP_NONE,
   };
   VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &m_linearClampSampler));
+  // Register the shared samplers (linear-clamp + IBL cube/LUT) as RHI handles for the
+  // combinedImageSampler ArgumentWrites of the lighting-input set.
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+  m_linearClampSamplerHandle = resourceTable->registerSampler(reinterpret_cast<uint64_t>(m_linearClampSampler));
+  // IBL samplers are created later in initIBLResources(); their handles are registered
+  // lazily on first use in updateLightingDescriptorSet.
 
-  const std::array<VkDescriptorPoolSize, 4> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, frameCount * (kGPUDrivenLightPassTextureCount + 4u)},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 12u},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameCount * 7u},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, frameCount * 2u},
+  // lighting-input set (set LSetTextures): combined image samplers + light buffers + IBL.
+  const std::array<rhi::BindGroupLayoutEntry, 12> lightingEntries{{
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindTextures, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = kGPUDrivenLightPassTextureCount},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindShadowMap, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLIrradiance, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLPrefiltered, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLBrdfLut, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
   }};
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-      .maxSets = frameCount * 3u,
-      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-      .pPoolSizes = poolSizes.data(),
-  };
-  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_lightingDescriptorPool));
+  m_lightingArgumentLayout = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = lightingEntries.data(), .entryCount = static_cast<uint32_t>(lightingEntries.size())});
 
-  const std::array<VkDescriptorSetLayoutBinding, 12> lightingBindings{{
-      VkDescriptorSetLayoutBinding{shaderio::LBindTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kGPUDrivenLightPassTextureCount, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindShadowMap, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindIBLIrradiance, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindIBLPrefiltered, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindIBLBrdfLut, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+  // lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting/culling UBO.
+  const std::array<rhi::BindGroupLayoutEntry, 4> sceneEntries{{
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindCamera, .visibility = rhi::ShaderStage::allGraphics, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindLighting, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindLightCulling, .visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(rhi::ShaderStage::fragment) | static_cast<uint32_t>(rhi::ShaderStage::compute)), .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindPostProcess, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
   }};
-  const VkDescriptorSetLayoutCreateInfo lightingLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(lightingBindings.size()),
-      .pBindings = lightingBindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &lightingLayoutInfo, nullptr, &m_lightingSetLayout));
-
-  const std::array<VkDescriptorSetLayoutBinding, 4> sceneBindings{{
-      VkDescriptorSetLayoutBinding{shaderio::LBindCamera, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindLighting, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindLightCulling, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{shaderio::LBindPostProcess, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-  }};
-  const VkDescriptorSetLayoutCreateInfo sceneLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(sceneBindings.size()),
-      .pBindings = sceneBindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &sceneLayoutInfo, nullptr, &m_lightingSceneSetLayout));
+  m_lightingSceneArgumentLayout = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = sceneEntries.data(), .entryCount = static_cast<uint32_t>(sceneEntries.size())});
 
   const std::array<rhi::BindGroupLayoutEntry, 9> cullingEntries{{
       rhi::BindGroupLayoutEntry{.binding = 0, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
@@ -2322,25 +2307,45 @@ void GPUDrivenRenderer::initLightingResources()
   m_lightCoarseCullingArgumentLayout = m_renderer.createBindGroupLayout(
       rhi::BindGroupLayoutDesc{.entries = cullingEntries.data(), .entryCount = static_cast<uint32_t>(cullingEntries.size())});
 
-  std::vector<VkDescriptorSetLayout> lightingLayouts(frameCount, m_lightingSetLayout);
-  m_lightingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo lightingAlloc{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_lightingDescriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts = lightingLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &lightingAlloc, m_lightingDescriptorSets.data()));
-
-  // Wrap each lighting-input set (set LSetTextures) as a BindGroup so screen-space
-  // passes can bind it through cmd->bindBindGroup. The adapter objects are owned by
-  // the bind-group pool (deleted in destroyBindGroups), matching the convention used
-  // for the camera/material bind groups.
+  // Owned RHI ArgumentTables for the lighting-input set. The buffer bindings (2-8) come from
+  // stable GPUDrivenLightResources buffers; mirror them as owned=false handles. The image
+  // bindings are written per-frame in updateLightingDescriptorSet (views change on resize).
   m_lightingInputBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
     m_lightingInputBindGroups[i] =
-        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingDescriptorSets[i]), "gpu-driven-lighting-input");
+        m_renderer.createPersistentBindGroup(m_lightingArgumentLayout, "gpu-driven-lighting-input");
+
+    // Buffer bindings 2-8 come from stable light-resource buffers; register + write once.
+    const std::array<VkBuffer, 7> inputBuffers{{
+        m_lightResources.getPointLightBuffer(i),
+        m_lightResources.getPointCoarseBoundsBuffer(i),
+        m_lightResources.getCoarseUniformBuffer(i),
+        m_lightResources.getClusterCountsBuffer(i),
+        m_lightResources.getClusterIndicesBuffer(i),
+        m_lightResources.getClusteredUniformBuffer(i),
+        m_lightResources.getSpotLightBuffer(i),
+    }};
+    const std::array<uint32_t, 7>          inputBindings{{2, 3, 4, 5, 6, 7, 8}};
+    const std::array<rhi::ArgumentType, 7> inputTypes{{
+        rhi::ArgumentType::storageBuffer, rhi::ArgumentType::storageBuffer, rhi::ArgumentType::uniformBuffer,
+        rhi::ArgumentType::storageBuffer, rhi::ArgumentType::storageBuffer, rhi::ArgumentType::uniformBuffer,
+        rhi::ArgumentType::storageBuffer,
+    }};
+    const std::array<uint64_t, 7> inputSizes{{
+        0, 0, sizeof(shaderio::LightCoarseCullingUniforms), 0, 0, sizeof(shaderio::ClusteredLightUniforms), 0,
+    }};
+    std::array<rhi::ArgumentWrite, 7> inputWrites{};
+    for(uint32_t b = 0; b < 7u; ++b)
+    {
+      rhi::vulkan::BufferRecord rec{};
+      rec.nativeBuffer          = reinterpret_cast<uint64_t>(inputBuffers[b]);
+      rec.owned                 = false;
+      const rhi::BufferHandle h = resourceTable->registerBuffer(rec);
+      m_lightingInputBufferHandles.push_back(h);
+      inputWrites[b] = rhi::ArgumentWrite{.binding = inputBindings[b], .type = inputTypes[b], .buffer = h, .size = inputSizes[b]};
+    }
+    m_renderer.updateBindGroup(m_lightingInputBindGroups[i], inputWrites.data(), static_cast<uint32_t>(inputWrites.size()));
   }
 
   // Owned RHI ArgumentTables for the coarse-culling set (point/spot + clustered). The 9
@@ -2349,7 +2354,6 @@ void GPUDrivenRenderer::initLightingResources()
   m_lightCoarseCullingBindGroups.assign(frameCount, BindGroupHandle{});
   m_lightCoarseCullingBufferHandles.clear();
   m_lightCoarseCullingBufferHandles.reserve(frameCount * 9u);
-  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
   for(uint32_t i = 0; i < frameCount; ++i)
   {
     m_lightCoarseCullingBindGroups[i] =
@@ -2391,28 +2395,37 @@ void GPUDrivenRenderer::initLightingResources()
     m_renderer.updateBindGroup(m_lightCoarseCullingBindGroups[i], cullWrites.data(), static_cast<uint32_t>(cullWrites.size()));
   }
 
-  std::vector<VkDescriptorSetLayout> sceneLayouts(frameCount, m_lightingSceneSetLayout);
-  m_lightingSceneDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo sceneAlloc{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_lightingDescriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts = sceneLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &sceneAlloc, m_lightingSceneDescriptorSets.data()));
-  m_lightingSceneDescriptorTransientBuffers.assign(frameCount, VK_NULL_HANDLE);
-
-  // Wrap each lighting-scene set as a BindGroup so GPUDriven fullscreen passes can
-  // bind it through cmd->bindBindGroup. The adapters adopt the existing set/layout
-  // and are owned here; they live until shutdownLightingResources().
+  // Owned RHI ArgumentTables for the lighting-scene set (camera/postProcess dynamic UBO +
+  // lighting/culling UBO). Written once below from stable buffers; dynamic offsets supplied
+  // at bind time via setDynamicBuffer.
   m_lightingSceneBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
     m_lightingSceneBindGroups[i] =
-        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[i]), "gpu-driven-lighting-scene");
+        m_renderer.createPersistentBindGroup(m_lightingSceneArgumentLayout, "gpu-driven-lighting-scene");
+
+    const rhi::BufferHandle transientHandle = m_renderer.getTransientBufferHandle(i);
+    rhi::vulkan::BufferRecord lightingRec{};
+    lightingRec.nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getLightingUniformBuffer(i));
+    lightingRec.owned        = false;
+    const rhi::BufferHandle lightingHandle = resourceTable->registerBuffer(lightingRec);
+    rhi::vulkan::BufferRecord coarseRec{};
+    coarseRec.nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseUniformBuffer(i));
+    coarseRec.owned        = false;
+    const rhi::BufferHandle coarseHandle = resourceTable->registerBuffer(coarseRec);
+    m_lightingInputBufferHandles.push_back(lightingHandle);
+    m_lightingInputBufferHandles.push_back(coarseHandle);
+
+    const std::array<rhi::ArgumentWrite, 4> sceneWrites{{
+        rhi::ArgumentWrite{.binding = shaderio::LBindCamera, .type = rhi::ArgumentType::uniformBuffer, .buffer = transientHandle, .size = sizeof(shaderio::CameraUniforms)},
+        rhi::ArgumentWrite{.binding = shaderio::LBindLighting, .type = rhi::ArgumentType::uniformBuffer, .buffer = lightingHandle, .size = sizeof(shaderio::LightingUniforms)},
+        rhi::ArgumentWrite{.binding = shaderio::LBindLightCulling, .type = rhi::ArgumentType::uniformBuffer, .buffer = coarseHandle, .size = sizeof(shaderio::LightCoarseCullingUniforms)},
+        rhi::ArgumentWrite{.binding = shaderio::LBindPostProcess, .type = rhi::ArgumentType::uniformBuffer, .buffer = transientHandle, .size = sizeof(shaderio::PostProcessUniforms)},
+    }};
+    m_renderer.updateBindGroup(m_lightingSceneBindGroups[i], sceneWrites.data(), static_cast<uint32_t>(sceneWrites.size()));
   }
 
-  // RHI pipeline layout owning a single descriptor set (set 0 = coarse-culling layout).
+  // RHI pipeline layout for the coarse-culling compute pipelines (set 0 = coarse layout).
   const uint64_t cullingSetLayoutNative = m_renderer.getBindGroupLayoutHandleNative(m_lightCoarseCullingArgumentLayout);
   const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> cullingLayoutMappings{{
       rhi::vulkan::makePipelineLayoutBindingMapping(0, cullingSetLayoutNative),
@@ -2427,13 +2440,21 @@ void GPUDrivenRenderer::initLightingResources()
   cullingPipelineLayout->init(static_cast<void*>(nativeDevice), cullingPipelineLayoutDesc, cullingLayoutLowering);
   m_lightCoarseCullingPipelineLayout = std::move(cullingPipelineLayout);
 
-  const std::array<VkDescriptorSetLayout, 2> lightSetLayouts{m_lightingSetLayout, m_lightingSceneSetLayout};
-  const VkPipelineLayoutCreateInfo lightPipelineLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = static_cast<uint32_t>(lightSetLayouts.size()),
-      .pSetLayouts = lightSetLayouts.data(),
+  // RHI pipeline layout for the fullscreen lighting/post graphics pipelines: set
+  // LSetTextures = lighting-input, set LSetScene = lighting-scene.
+  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 2> lightLayoutMappings{{
+      rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, m_renderer.getBindGroupLayoutHandleNative(m_lightingArgumentLayout)),
+      rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, m_renderer.getBindGroupLayoutHandleNative(m_lightingSceneArgumentLayout)),
+  }};
+  const rhi::vulkan::VulkanPipelineLayoutLowering lightLayoutLowering{
+      .setLayouts     = lightLayoutMappings.data(),
+      .setLayoutCount = static_cast<uint32_t>(lightLayoutMappings.size()),
   };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &lightPipelineLayoutInfo, nullptr, &m_lightPipelineLayout));
+  rhi::PipelineLayoutDesc lightPipelineLayoutDesc{};
+  lightPipelineLayoutDesc.debugName = "gpu-driven-light";
+  auto lightPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+  lightPipelineLayout->init(static_cast<void*>(nativeDevice), lightPipelineLayoutDesc, lightLayoutLowering);
+  m_lightPipelineLayout = std::move(lightPipelineLayout);
 }
 
 void GPUDrivenRenderer::shutdownLightingResources()
@@ -2441,30 +2462,15 @@ void GPUDrivenRenderer::shutdownLightingResources()
   const VkDevice nativeDevice = getNativeDeviceHandle();
   if(nativeDevice != VK_NULL_HANDLE)
   {
-    if(m_lightPipelineLayout != VK_NULL_HANDLE)
+    if(m_lightPipelineLayout)
     {
-      vkDestroyPipelineLayout(nativeDevice, m_lightPipelineLayout, nullptr);
-      m_lightPipelineLayout = VK_NULL_HANDLE;
+      m_lightPipelineLayout->deinit();
+      m_lightPipelineLayout.reset();
     }
     if(m_lightCoarseCullingPipelineLayout)
     {
       m_lightCoarseCullingPipelineLayout->deinit();
       m_lightCoarseCullingPipelineLayout.reset();
-    }
-    if(m_lightingSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_lightingSetLayout, nullptr);
-      m_lightingSetLayout = VK_NULL_HANDLE;
-    }
-    if(m_lightingSceneSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_lightingSceneSetLayout, nullptr);
-      m_lightingSceneSetLayout = VK_NULL_HANDLE;
-    }
-    if(m_lightingDescriptorPool != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorPool(nativeDevice, m_lightingDescriptorPool, nullptr);
-      m_lightingDescriptorPool = VK_NULL_HANDLE;
     }
     if(m_linearClampSampler != VK_NULL_HANDLE)
     {
@@ -2472,25 +2478,40 @@ void GPUDrivenRenderer::shutdownLightingResources()
       m_linearClampSampler = VK_NULL_HANDLE;
     }
   }
-  m_lightingDescriptorSets.clear();
-  m_lightingSceneDescriptorSets.clear();
-  m_lightingSceneDescriptorTransientBuffers.clear();
-  // Adapter objects are deleted by m_renderer's destroyBindGroups() during
-  // shutdown; here we only drop the (now-stale) handles.
-  m_lightingSceneBindGroups.clear();
-  m_lightingInputBindGroups.clear();
-  // Drop the RHI buffer-handle mirrors for the coarse-culling buffers (owned=false; the
-  // owned ArgumentTables + layout are freed by RenderDevice::destroyBindGroups()).
+  // Owned ArgumentTables + layouts (lighting-input/scene/coarse) are freed by
+  // RenderDevice::destroyBindGroups(); here we drop the now-stale handles and the
+  // owned=false buffer/view/sampler mirrors registered in the resource table.
   if(rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable())
   {
     for(const rhi::BufferHandle& handle : m_lightCoarseCullingBufferHandles)
     {
-      if(!handle.isNull())
-      {
-        resourceTable->removeBuffer(handle);
-      }
+      if(!handle.isNull()) resourceTable->removeBuffer(handle);
     }
+    for(const rhi::BufferHandle& handle : m_lightingInputBufferHandles)
+    {
+      if(!handle.isNull()) resourceTable->removeBuffer(handle);
+    }
+    if(!m_linearClampSamplerHandle.isNull()) resourceTable->removeSampler(m_linearClampSamplerHandle);
+    if(!m_iblCubeSamplerHandle.isNull())     resourceTable->removeSampler(m_iblCubeSamplerHandle);
+    if(!m_iblLutSamplerHandle.isNull())      resourceTable->removeSampler(m_iblLutSamplerHandle);
   }
+  const auto dropView = [&](rhi::TextureViewHandle& h, VkImageView& nativeView) {
+    if(!h.isNull()) m_renderer.destroyTextureView(h);
+    h          = {};
+    nativeView = VK_NULL_HANDLE;
+  };
+  dropView(m_iblEnvViewHandle, m_iblEnvViewNative);
+  dropView(m_aoViewHandle, m_aoViewNative);
+  dropView(m_ssrViewHandle, m_ssrViewNative);
+  dropView(m_shadowMapViewHandle, m_shadowMapViewNative);
+  m_lightingInputBufferHandles.clear();
+  m_lightingSceneBindGroups.clear();
+  m_lightingInputBindGroups.clear();
+  m_lightingArgumentLayout         = {};
+  m_lightingSceneArgumentLayout    = {};
+  m_linearClampSamplerHandle       = {};
+  m_iblCubeSamplerHandle           = {};
+  m_iblLutSamplerHandle            = {};
   m_lightCoarseCullingBufferHandles.clear();
   m_lightCoarseCullingBindGroups.clear();
   m_lightCoarseCullingArgumentLayout = {};
@@ -3235,16 +3256,20 @@ void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32
 uint64_t GPUDrivenRenderer::getLightingInputDescriptorSet() const
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
-  return frameIndex < m_lightingDescriptorSets.size()
-             ? reinterpret_cast<uint64_t>(m_lightingDescriptorSets[frameIndex])
-             : 0;
+  if(frameIndex >= m_lightingInputBindGroups.size())
+  {
+    return 0;
+  }
+  return m_renderer.getBindGroupDescriptorSet(m_lightingInputBindGroups[frameIndex], BindGroupSetSlot::shaderSpecific);
 }
 
 uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) const
 {
-  return frameIndex < m_lightingSceneDescriptorSets.size()
-             ? reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[frameIndex])
-             : 0;
+  if(frameIndex >= m_lightingSceneBindGroups.size())
+  {
+    return 0;
+  }
+  return m_renderer.getBindGroupDescriptorSet(m_lightingSceneBindGroups[frameIndex], BindGroupSetSlot::shaderSpecific);
 }
 
 BindGroupHandle GPUDrivenRenderer::getCurrentLightCullingBindGroup() const
@@ -3253,83 +3278,16 @@ BindGroupHandle GPUDrivenRenderer::getCurrentLightCullingBindGroup() const
   return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
 }
 
-void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t)
+void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t /*frameIndex*/, uint64_t /*transientBufferOpaque*/, uint32_t)
 {
-  const VkBuffer transientBuffer = reinterpret_cast<VkBuffer>(transientBufferOpaque);
-  if(frameIndex >= m_lightingSceneDescriptorSets.size() || transientBuffer == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  if(m_lightingSceneDescriptorTransientBuffers.size() < m_lightingSceneDescriptorSets.size())
-  {
-    m_lightingSceneDescriptorTransientBuffers.resize(m_lightingSceneDescriptorSets.size(), VK_NULL_HANDLE);
-  }
-  if(m_lightingSceneDescriptorTransientBuffers[frameIndex] == transientBuffer)
-  {
-    return;
-  }
-
-  const VkDescriptorBufferInfo cameraBufferInfo{
-      .buffer = transientBuffer,
-      .offset = 0,
-      .range = sizeof(shaderio::CameraUniforms),
-  };
-  const VkDescriptorBufferInfo postProcessBufferInfo{
-      .buffer = transientBuffer,
-      .offset = 0,
-      .range = sizeof(shaderio::PostProcessUniforms),
-  };
-  const VkDescriptorBufferInfo lightingBufferInfo{
-      .buffer = m_lightResources.getLightingUniformBuffer(frameIndex),
-      .offset = 0,
-      .range = sizeof(shaderio::LightingUniforms),
-  };
-  const VkDescriptorBufferInfo lightCullingBufferInfo{
-      .buffer = m_lightResources.getCoarseUniformBuffer(frameIndex),
-      .offset = 0,
-      .range = sizeof(shaderio::LightCoarseCullingUniforms),
-  };
-  const std::array<VkWriteDescriptorSet, 4> writes{{
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
-          .dstBinding = shaderio::LBindCamera,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-          .pBufferInfo = &cameraBufferInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
-          .dstBinding = shaderio::LBindLighting,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo = &lightingBufferInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
-          .dstBinding = shaderio::LBindLightCulling,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo = &lightCullingBufferInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = m_lightingSceneDescriptorSets[frameIndex],
-          .dstBinding = shaderio::LBindPostProcess,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-          .pBufferInfo = &postProcessBufferInfo,
-      },
-  }};
-  vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-  m_lightingSceneDescriptorTransientBuffers[frameIndex] = transientBuffer;
+  // No-op: the lighting-scene ArgumentTable is written once in initLightingResources from
+  // stable buffers (camera/postProcess are dynamic UBOs whose offset is supplied at bind
+  // time via setDynamicBuffer), so there is nothing to rewrite per-frame.
 }
 
 void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
 {
-  if(frameIndex >= m_lightingDescriptorSets.size())
+  if(frameIndex >= m_lightingInputBindGroups.size() || m_lightingInputBindGroups[frameIndex].isNull())
   {
     return;
   }
@@ -3347,96 +3305,84 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
     }
   }
 
-  const VkSampler sampler = m_linearClampSampler;
-  if(sampler == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  const auto nativeOf = [&](rhi::TextureViewHandle h) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_renderer.resolveTextureViewNative(h)));
+  // Adopt a per-frame native VkImageView as an owned=false RHI view handle, re-registering
+  // only when the underlying native view changes (resize / resource swap).
+  const auto adopt = [&](VkImageView native, rhi::TextureViewHandle& cachedHandle, VkImageView& cachedNative,
+                         rhi::TextureViewHandle fallback) -> rhi::TextureViewHandle {
+    if(native == VK_NULL_HANDLE)
+    {
+      return fallback;
+    }
+    if(native != cachedNative)
+    {
+      if(!cachedHandle.isNull())
+      {
+        m_renderer.destroyTextureView(cachedHandle);
+      }
+      cachedHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(native));
+      cachedNative = native;
+    }
+    return cachedHandle;
   };
-  std::array<VkDescriptorImageInfo, kGPUDrivenLightPassTextureCount> imageInfos{};
+  const auto viewOr = [](rhi::TextureViewHandle h, rhi::TextureViewHandle fb) { return h.isNull() ? fb : h; };
+
+  const rhi::TextureViewHandle fallbackColor = sceneView.gbufferViews[0];
+  const rhi::TextureViewHandle fallbackDepth = sceneView.sceneDepthView;
+  std::array<rhi::TextureViewHandle, kGPUDrivenLightPassTextureCount> texViews{};
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    imageInfos[i] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.gbufferViews[i]), VK_IMAGE_LAYOUT_GENERAL};
+    texViews[i] = sceneView.gbufferViews[i];
   }
-  imageInfos[kGPUDrivenLightPassDepthTextureIndex] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.sceneDepthView), VK_IMAGE_LAYOUT_GENERAL};
-  const VkImageView safeColorFallback = nativeOf(sceneView.gbufferViews[0]);
-  const VkImageView safeDepthFallback = nativeOf(sceneView.sceneDepthView);
-  imageInfos[kGPUDrivenLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{sampler, nativeOf(sceneView.sceneColorHdrView), VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomHalfIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomHalfView.isNull() ? nativeOf(sceneView.bloomHalfView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomQuarterIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomQuarterView.isNull() ? nativeOf(sceneView.bloomQuarterView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomEighthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomEighthView.isNull() ? nativeOf(sceneView.bloomEighthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomSixteenthView.isNull() ? nativeOf(sceneView.bloomSixteenthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomThirtySecondView.isNull() ? nativeOf(sceneView.bloomThirtySecondView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleSixteenthView.isNull() ? nativeOf(sceneView.bloomUpsampleSixteenthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleEighthView.isNull() ? nativeOf(sceneView.bloomUpsampleEighthView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomUpsampleQuarterView.isNull() ? nativeOf(sceneView.bloomUpsampleQuarterView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassBloomOutputIndex] = VkDescriptorImageInfo{sampler, !sceneView.bloomOutputView.isNull() ? nativeOf(sceneView.bloomOutputView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassColorGradingLutIndex] = VkDescriptorImageInfo{sampler, !sceneView.colorGradingLutView.isNull() ? nativeOf(sceneView.colorGradingLutView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassVelocityIndex] = VkDescriptorImageInfo{sampler, !sceneView.velocityView.isNull() ? nativeOf(sceneView.velocityView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassHistoryReadIndex] = VkDescriptorImageInfo{sampler, !sceneView.sceneColorHistoryReadView.isNull() ? nativeOf(sceneView.sceneColorHistoryReadView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassHistoryWriteIndex] = VkDescriptorImageInfo{sampler, !sceneView.sceneColorHistoryWriteView.isNull() ? nativeOf(sceneView.sceneColorHistoryWriteView) : safeColorFallback, VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassIBLEnvironmentIndex] =
-      VkDescriptorImageInfo{sampler,
-                            m_iblEnvironment.view != VK_NULL_HANDLE ? m_iblEnvironment.view : safeColorFallback,
-                            VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassAOIndex] =
-      VkDescriptorImageInfo{sampler,
-                            m_aoDenoised.view != VK_NULL_HANDLE ? m_aoDenoised.view : safeDepthFallback,
-                            VK_IMAGE_LAYOUT_GENERAL};
-  imageInfos[kGPUDrivenLightPassSSRIndex] =
-      VkDescriptorImageInfo{sampler,
-                            m_ssrRaw.view != VK_NULL_HANDLE ? m_ssrRaw.view : safeColorFallback,
-                            VK_IMAGE_LAYOUT_GENERAL};
-  const VkImageView shadowMapNative = m_renderer.getShadowMapView();
-  const VkDescriptorImageInfo shadowInfo{
-      .sampler = sampler,
-      .imageView = shadowMapNative != VK_NULL_HANDLE ? shadowMapNative : safeDepthFallback,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo iblIrradianceInfo{
-      .sampler = m_iblResources.getCubeMapSampler(),
-      .imageView = nativeOf(m_iblResources.getIrradianceMapView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo iblPrefilteredInfo{
-      .sampler = m_iblResources.getCubeMapSampler(),
-      .imageView = nativeOf(m_iblResources.getPrefilteredMapView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo iblBrdfLutInfo{
-      .sampler = m_iblResources.getLUTSampler(),
-      .imageView = nativeOf(m_iblResources.getDFGLUTView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
+  texViews[kGPUDrivenLightPassDepthTextureIndex]            = sceneView.sceneDepthView;
+  texViews[kGPUDrivenLightPassSceneColorHdrIndex]           = sceneView.sceneColorHdrView;
+  texViews[kGPUDrivenLightPassBloomHalfIndex]               = viewOr(sceneView.bloomHalfView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomQuarterIndex]            = viewOr(sceneView.bloomQuarterView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomEighthIndex]             = viewOr(sceneView.bloomEighthView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomSixteenthIndex]          = viewOr(sceneView.bloomSixteenthView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomThirtySecondIndex]       = viewOr(sceneView.bloomThirtySecondView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomUpsampleSixteenthIndex]  = viewOr(sceneView.bloomUpsampleSixteenthView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomUpsampleEighthIndex]     = viewOr(sceneView.bloomUpsampleEighthView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomUpsampleQuarterIndex]    = viewOr(sceneView.bloomUpsampleQuarterView, fallbackColor);
+  texViews[kGPUDrivenLightPassBloomOutputIndex]             = viewOr(sceneView.bloomOutputView, fallbackColor);
+  texViews[kGPUDrivenLightPassColorGradingLutIndex]         = viewOr(sceneView.colorGradingLutView, fallbackColor);
+  texViews[kGPUDrivenLightPassVelocityIndex]                = viewOr(sceneView.velocityView, fallbackColor);
+  texViews[kGPUDrivenLightPassHistoryReadIndex]             = viewOr(sceneView.sceneColorHistoryReadView, fallbackColor);
+  texViews[kGPUDrivenLightPassHistoryWriteIndex]            = viewOr(sceneView.sceneColorHistoryWriteView, fallbackColor);
+  texViews[kGPUDrivenLightPassIBLEnvironmentIndex]          = adopt(m_iblEnvironment.view, m_iblEnvViewHandle, m_iblEnvViewNative, fallbackColor);
+  texViews[kGPUDrivenLightPassAOIndex]                      = adopt(m_aoDenoised.view, m_aoViewHandle, m_aoViewNative, fallbackDepth);
+  texViews[kGPUDrivenLightPassSSRIndex]                     = adopt(m_ssrRaw.view, m_ssrViewHandle, m_ssrViewNative, fallbackColor);
 
-  const std::array<VkDescriptorBufferInfo, 7> bufferInfos{{
-      VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_lightResources.getCoarseUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
-      VkDescriptorBufferInfo{m_lightResources.getClusterCountsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_lightResources.getClusterIndicesBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_lightResources.getClusteredUniformBuffer(frameIndex), 0, sizeof(shaderio::ClusteredLightUniforms)},
-      VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-  }};
-  const std::array<VkWriteDescriptorSet, 12> writes{{
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindTextures, .descriptorCount = kGPUDrivenLightPassTextureCount, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = imageInfos.data()},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindShadowMap, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &shadowInfo},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[0]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 3, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[1]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 4, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bufferInfos[2]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 5, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[3]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 6, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[4]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 7, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bufferInfos[5]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = 8, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bufferInfos[6]},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLIrradiance, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblIrradianceInfo},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLPrefiltered, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblPrefilteredInfo},
-      VkWriteDescriptorSet{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_lightingDescriptorSets[frameIndex], .dstBinding = shaderio::LBindIBLBrdfLut, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &iblBrdfLutInfo},
-  }};
-  vkUpdateDescriptorSets(getNativeDeviceHandle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-  // The coarse-culling ArgumentTable is written once in initLightingResources (its 9
-  // light-resource buffers are stable), so no per-frame rewrite is needed here.
+  const rhi::TextureViewHandle shadowView =
+      adopt(m_renderer.getShadowMapView(), m_shadowMapViewHandle, m_shadowMapViewNative, fallbackDepth);
+
+  // IBL samplers are created after initLightingResources(); register their handles lazily.
+  if(m_iblCubeSamplerHandle.isNull() && m_iblResources.getCubeMapSampler() != VK_NULL_HANDLE)
+  {
+    m_iblCubeSamplerHandle = m_renderer.getResourceTable()->registerSampler(reinterpret_cast<uint64_t>(m_iblResources.getCubeMapSampler()));
+  }
+  if(m_iblLutSamplerHandle.isNull() && m_iblResources.getLUTSampler() != VK_NULL_HANDLE)
+  {
+    m_iblLutSamplerHandle = m_renderer.getResourceTable()->registerSampler(reinterpret_cast<uint64_t>(m_iblResources.getLUTSampler()));
+  }
+  const rhi::SamplerHandle iblCubeSampler = m_iblCubeSamplerHandle.isNull() ? m_linearClampSamplerHandle : m_iblCubeSamplerHandle;
+  const rhi::SamplerHandle iblLutSampler  = m_iblLutSamplerHandle.isNull() ? m_linearClampSamplerHandle : m_iblLutSamplerHandle;
+
+  std::vector<rhi::ArgumentWrite> writes;
+  writes.reserve(kGPUDrivenLightPassTextureCount + 4);
+  for(uint32_t i = 0; i < kGPUDrivenLightPassTextureCount; ++i)
+  {
+    writes.push_back(rhi::ArgumentWrite{
+        .binding = shaderio::LBindTextures, .arrayElement = i, .type = rhi::ArgumentType::combinedImageSampler,
+        .textureView = texViews[i], .sampler = m_linearClampSamplerHandle, .imageLayout = rhi::ResourceState::General});
+  }
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler, .textureView = shadowView, .sampler = m_linearClampSamplerHandle, .imageLayout = rhi::ResourceState::General});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLIrradiance, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getIrradianceMapView(), .sampler = iblCubeSampler, .imageLayout = rhi::ResourceState::General});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLPrefiltered, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getPrefilteredMapView(), .sampler = iblCubeSampler, .imageLayout = rhi::ResourceState::General});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLBrdfLut, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getDFGLUTView(), .sampler = iblLutSampler, .imageLayout = rhi::ResourceState::General});
+
+  m_renderer.updateBindGroup(m_lightingInputBindGroups[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
+  // Buffer bindings 2-8 are written once in initLightingResources (stable light-resource
+  // buffers); the coarse-culling table is likewise written once there.
 }
 
 
@@ -3444,10 +3390,11 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
 void GPUDrivenRenderer::initLightingPipelines()
 {
   const VkDevice nativeDevice = getNativeDeviceHandle();
-  if(nativeDevice == VK_NULL_HANDLE || m_lightPipelineLayout == VK_NULL_HANDLE)
+  if(nativeDevice == VK_NULL_HANDLE || !m_lightPipelineLayout)
   {
     return;
   }
+  const VkPipelineLayout lightLayoutNative = reinterpret_cast<VkPipelineLayout>(m_lightPipelineLayout->getNativeHandle());
 
 #ifdef USE_SLANG
   VkShaderModule lightShaderModule =
@@ -3523,11 +3470,11 @@ void GPUDrivenRenderer::initLightingPipelines()
         .pDepthStencilState = &depthStencil,
         .pColorBlendState = &colorBlending,
         .pDynamicState = &dynamicState,
-        .layout = m_lightPipelineLayout,
+        .layout = lightLayoutNative,
     };
     VkPipeline pipeline = VK_NULL_HANDLE;
     VK_CHECK(vkCreateGraphicsPipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-    return m_renderer.registerExternalGraphicsPipeline(pipeline, m_lightPipelineLayout, variant);
+    return m_renderer.registerExternalGraphicsPipeline(pipeline, lightLayoutNative, variant);
   };
 
   m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain", getSceneColorHdrFormat(), false, 0x6101u);

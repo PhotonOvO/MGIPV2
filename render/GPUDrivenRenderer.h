@@ -451,7 +451,7 @@ public:
   [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
   [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const { return m_renderer.getGraphicsMaterialBindGroup(); }
-  [[nodiscard]] uint64_t getLightPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightPipelineLayout); }
+  [[nodiscard]] uint64_t getLightPipelineLayout() const { return m_lightPipelineLayout ? m_lightPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
   [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
   void updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t cameraOffset);
@@ -1021,29 +1021,30 @@ private:
   VkPipeline                         m_transparentVisibilityPatchPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_transparentVisibilityPatchPipelineHandle{};  // Wave 9: adopted compute pipeline handle
   std::vector<TransparentVisibilityFrameResources> m_transparentVisibilityPatchFrames;
-  VkDescriptorPool                   m_lightingDescriptorPool{VK_NULL_HANDLE};
-  VkDescriptorSetLayout              m_lightingSetLayout{VK_NULL_HANDLE};
-  std::vector<VkDescriptorSet>       m_lightingDescriptorSets;
-  // Wave 9: the coarse-culling set is an RHI ArgumentLayout + owned ArgumentTables
-  // (point/spot + clustered). The 9 light-resource buffers are mirrored as RHI handles
-  // (owned=false) so updateArgumentTable can resolve them; removed at shutdown.
+  // Wave 9: lighting-input (set LSetTextures) and lighting-scene (set LSetScene) are RHI
+  // ArgumentLayouts + owned ArgumentTables. The coarse-culling set (point/spot + clustered)
+  // is likewise RHI; its 9 light-resource buffers are mirrored as owned=false RHI handles.
+  rhi::ArgumentLayoutHandle          m_lightingArgumentLayout{};
+  rhi::ArgumentLayoutHandle          m_lightingSceneArgumentLayout{};
   rhi::ArgumentLayoutHandle          m_lightCoarseCullingArgumentLayout{};
   std::vector<rhi::BufferHandle>     m_lightCoarseCullingBufferHandles;
+  // Stable light-resource buffer handles (owned=false) consumed by the lighting-input set.
+  std::vector<rhi::BufferHandle>     m_lightingInputBufferHandles;
   std::vector<BindGroupHandle>       m_lightCoarseCullingBindGroups;
-  VkDescriptorSetLayout              m_lightingSceneSetLayout{VK_NULL_HANDLE};
-  std::vector<VkDescriptorSet>       m_lightingSceneDescriptorSets;
-  std::vector<VkBuffer>              m_lightingSceneDescriptorTransientBuffers;
-  // BindGroup wrappers that adopt the lighting-scene sets above so they flow
-  // through the RHI bind path. The adapter objects must outlive the bind groups.
-  // BindGroup wrappers for the lighting-scene set (set LSetScene) and the
-  // lighting-input texture set (set LSetTextures). The adapter BindTable/Layout
-  // objects are owned by the bind-group pool (deleted in destroyBindGroups), so
-  // only the handles are tracked here.
-  std::vector<BindGroupHandle>                         m_lightingSceneBindGroups;
-  std::vector<BindGroupHandle>                         m_lightingInputBindGroups;
+  std::vector<BindGroupHandle>       m_lightingSceneBindGroups;
+  std::vector<BindGroupHandle>       m_lightingInputBindGroups;
   VkSampler                          m_linearClampSampler{VK_NULL_HANDLE};
+  rhi::SamplerHandle                 m_linearClampSamplerHandle{};
+  rhi::SamplerHandle                 m_iblCubeSamplerHandle{};
+  rhi::SamplerHandle                 m_iblLutSamplerHandle{};
+  // Adopted (owned=false) RHI view handles for the per-frame native VkImageViews fed into
+  // the lighting-input set; re-registered when the underlying native view changes.
+  rhi::TextureViewHandle             m_iblEnvViewHandle{};      VkImageView m_iblEnvViewNative{VK_NULL_HANDLE};
+  rhi::TextureViewHandle             m_aoViewHandle{};          VkImageView m_aoViewNative{VK_NULL_HANDLE};
+  rhi::TextureViewHandle             m_ssrViewHandle{};         VkImageView m_ssrViewNative{VK_NULL_HANDLE};
+  rhi::TextureViewHandle             m_shadowMapViewHandle{};   VkImageView m_shadowMapViewNative{VK_NULL_HANDLE};
   std::unique_ptr<rhi::PipelineLayout> m_lightCoarseCullingPipelineLayout;
-  VkPipelineLayout                   m_lightPipelineLayout{VK_NULL_HANDLE};
+  std::unique_ptr<rhi::PipelineLayout> m_lightPipelineLayout;
   PipelineHandle                     m_pointLightCoarseCullingPipeline{};
   PipelineHandle                     m_spotLightCoarseCullingPipeline{};
   // Fullscreen graphics pipelines now live in the device pipeline registry; only

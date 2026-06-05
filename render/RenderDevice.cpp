@@ -8961,6 +8961,15 @@ rhi::BufferHandle RenderDevice::getCurrentTransientBufferHandle() const
   return m_perFrame.frameUserData[frameIndex].transientBufferRHI;
 }
 
+rhi::BufferHandle RenderDevice::getTransientBufferHandle(uint32_t frameIndex) const
+{
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return {};
+  }
+  return m_perFrame.frameUserData[frameIndex].transientBufferRHI;
+}
+
 glm::vec4 RenderDevice::getMaterialBaseColorFactor(MaterialHandle handle) const
 {
   const MaterialResources::MaterialRecord* material = tryGetMaterial(handle);

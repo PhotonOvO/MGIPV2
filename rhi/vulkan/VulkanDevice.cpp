@@ -1337,7 +1337,10 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
         imageInfos[i] = VkDescriptorImageInfo{
             .sampler     = reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_resourceTable->resolveSampler(w.sampler))),
             .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            // Defaults to SHADER_READ_ONLY_OPTIMAL; honors w.imageLayout == General for images
+            // sampled while kept in VK_IMAGE_LAYOUT_GENERAL (e.g. the GPU-driven lighting inputs).
+            .imageLayout = (w.imageLayout == ResourceState::General) ? VK_IMAGE_LAYOUT_GENERAL
+                                                                     : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
         out.pImageInfo = &imageInfos[i];
         break;

@@ -302,6 +302,7 @@ public:
   BindGroupHandle getGlobalBindlessGroup() const;
   // Wave 8: current frame's transient allocator buffer as an RHI handle (for ArgumentWrites).
   [[nodiscard]] rhi::BufferHandle getCurrentTransientBufferHandle() const;
+  [[nodiscard]] rhi::BufferHandle getTransientBufferHandle(uint32_t frameIndex) const;
 
   void updateBindlessTexture(uint32_t index, TextureHandle textureHandle);
   void invalidateBindlessTexture(uint32_t index);
