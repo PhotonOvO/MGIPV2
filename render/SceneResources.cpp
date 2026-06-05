@@ -1,5 +1,6 @@
 #include "SceneResources.h"
 #include "BatchUploadContext.h"
+#include "RHIFormatBridge.h"
 
 #include <algorithm>
 #include <cmath>
@@ -178,7 +179,7 @@ void SceneResources::create(VkCommandBuffer cmd)
                               uint32_t levelCount = 1) -> rhi::TextureViewHandle {
     rhi::TextureViewCreateDesc desc{};
     desc.nativeImage   = reinterpret_cast<uint64_t>(image);
-    desc.nativeFormat  = static_cast<uint64_t>(format);
+    desc.format        = toPortableTextureFormat(format);
     desc.viewType      = rhi::ImageViewType::e2D;
     desc.aspect        = aspect;
     desc.baseMipLevel  = baseMip;

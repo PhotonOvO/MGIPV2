@@ -1,4 +1,5 @@
 #include "IBLResources.h"
+#include "RHIFormatBridge.h"
 
 #include <algorithm>
 #include <array>
@@ -99,7 +100,7 @@ void IBLResources::createImages(VkCommandBuffer cmd, const CreateInfo& createInf
                             uint32_t layerCount, const char* name) -> rhi::TextureViewHandle {
     rhi::TextureViewCreateDesc desc{};
     desc.nativeImage  = reinterpret_cast<uint64_t>(image);
-    desc.nativeFormat = static_cast<uint64_t>(format);
+    desc.format       = toPortableTextureFormat(format);
     desc.viewType     = viewType;
     desc.aspect       = rhi::TextureAspect::color;
     desc.levelCount   = levelCount;
@@ -350,7 +351,7 @@ void IBLResources::generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& create
       const VkDescriptorSet prefilterSet = prefilterSets[mip];
       rhi::TextureViewCreateDesc mipViewDesc{};
       mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_prefilteredMap.image);
-      mipViewDesc.nativeFormat  = static_cast<uint64_t>(createInfo.cubeMapFormat);
+      mipViewDesc.format        = toPortableTextureFormat(createInfo.cubeMapFormat);
       mipViewDesc.viewType      = rhi::ImageViewType::e2DArray;
       mipViewDesc.aspect        = rhi::TextureAspect::color;
       mipViewDesc.baseMipLevel  = mip;

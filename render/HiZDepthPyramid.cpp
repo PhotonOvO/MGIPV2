@@ -549,7 +549,7 @@ void HiZDepthPyramid::recreateResources()
   {
     rhi::TextureViewCreateDesc mipViewDesc{};
     mipViewDesc.nativeImage   = reinterpret_cast<uint64_t>(m_image);
-    mipViewDesc.nativeFormat  = static_cast<uint64_t>(VK_FORMAT_R32_SFLOAT);
+    mipViewDesc.format        = rhi::TextureFormat::r32Sfloat;
     mipViewDesc.viewType      = rhi::ImageViewType::e2D;
     mipViewDesc.aspect        = rhi::TextureAspect::color;
     mipViewDesc.baseMipLevel  = mipLevel;

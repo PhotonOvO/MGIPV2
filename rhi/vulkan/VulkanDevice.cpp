@@ -819,14 +819,11 @@ TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& d
   // Prefer the RHI image handle (business layer holds no VkImage); fall back to the legacy
   // nativeImage seam for call sites that still pass a raw VkImage.
   const uint64_t nativeImage = !desc.image.isNull() ? resolveImageNative(desc.image) : desc.nativeImage;
-  // Prefer the portable format enum; fall back to the legacy raw-VkFormat seam.
-  const VkFormat viewFormat =
-      desc.format != TextureFormat::undefined ? toVkViewFormat(desc.format) : static_cast<VkFormat>(desc.nativeFormat);
   const VkImageViewCreateInfo info{
       .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image      = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),
       .viewType   = toVkImageViewType(desc.viewType),
-      .format     = viewFormat,
+      .format     = toVkViewFormat(desc.format),
       .components = {toVkSwizzle(desc.components.r), toVkSwizzle(desc.components.g), toVkSwizzle(desc.components.b),
                      toVkSwizzle(desc.components.a)},
       .subresourceRange = {.aspectMask     = toVkImageAspect(desc.aspect),

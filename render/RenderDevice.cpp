@@ -5,6 +5,7 @@
 #include "../rhi/vulkan/VulkanDevice.h"
 #include "../rhi/vulkan/VulkanFrameContext.h"
 #include "FrameSubmission.h"
+#include "RHIFormatBridge.h"
 #include "ClipSpaceConvention.h"
 #include "ImguiAxis.h"
 #include "BatchUploadContext.h"
@@ -740,33 +741,6 @@ static VkDeviceSize getStagingBufferBytes(const VmaAllocator allocator, const st
   return totalBytes;
 }
 
-static rhi::TextureFormat toPortableTextureFormat(VkFormat format)
-{
-  switch(format)
-  {
-    case VK_FORMAT_R8G8B8A8_UNORM:
-      return rhi::TextureFormat::rgba8Unorm;
-    case VK_FORMAT_B8G8R8A8_UNORM:
-      return rhi::TextureFormat::bgra8Unorm;
-    case VK_FORMAT_R16G16B16A16_SFLOAT:
-      return rhi::TextureFormat::rgba16Sfloat;
-    case VK_FORMAT_D16_UNORM:
-      return rhi::TextureFormat::d16Unorm;
-    case VK_FORMAT_D32_SFLOAT:
-      return rhi::TextureFormat::d32Sfloat;
-    case VK_FORMAT_D24_UNORM_S8_UINT:
-      return rhi::TextureFormat::d24UnormS8;
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-      return rhi::TextureFormat::d32SfloatS8;
-    case VK_FORMAT_R16G16_SFLOAT:
-      return rhi::TextureFormat::rg16Sfloat;
-    case VK_FORMAT_R32_SFLOAT:
-      return rhi::TextureFormat::r32Sfloat;
-    default:
-      return rhi::TextureFormat::undefined;
-  }
-}
-
 static rhi::ShaderReflectionData buildRasterShaderReflection()
 {
   rhi::ShaderReflectionData reflection{};
@@ -962,7 +936,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     {
       m_csmCascadeViewHandles[cascadeIndex] = createTextureView(rhi::TextureViewCreateDesc{
           .nativeImage    = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
-          .nativeFormat   = static_cast<uint64_t>(m_csmShadowResources.getShadowFormat()),
+          .format         = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
           .viewType       = rhi::ImageViewType::e2D,
           .aspect         = rhi::TextureAspect::depth,
           .baseArrayLayer = cascadeIndex,
@@ -973,7 +947,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     // Full-array sampling view (all cascades), used by the lighting GBuffer descriptor set.
     m_csmCascadeArrayViewHandle = createTextureView(rhi::TextureViewCreateDesc{
         .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
-        .nativeFormat = static_cast<uint64_t>(m_csmShadowResources.getShadowFormat()),
+        .format       = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
         .viewType     = rhi::ImageViewType::e2DArray,
         .aspect       = rhi::TextureAspect::depth,
         .baseArrayLayer = 0,
