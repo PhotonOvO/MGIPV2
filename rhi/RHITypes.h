@@ -299,24 +299,6 @@ enum class SampleCount : uint8_t
   count8 = 8,
 };
 
-// Describes a texture (image) to create through the RHI. The handle returned by
-// createImage is the only thing business code holds. nativeFormat/nativeUsage are native
-// Vulkan values (the deliberate "creation seam"); everything downstream is handle-only.
-struct TextureCreateDesc
-{
-  uint64_t         nativeFormat{0};  // VkFormat
-  uint64_t         nativeUsage{0};   // VkImageUsageFlags
-  uint32_t         width{0};
-  uint32_t         height{0};
-  uint32_t         depth{1};
-  uint32_t         mipLevels{1};
-  uint32_t         arrayLayers{1};
-  SampleCount      sampleCount{SampleCount::count1};
-  TextureDimension dimension{TextureDimension::e2D};
-  bool             cubeCompatible{false};
-  const char*      debugName{nullptr};
-};
-
 enum class VertexInputRate : uint8_t
 {
   perVertex   = 0,

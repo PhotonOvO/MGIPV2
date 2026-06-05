@@ -107,11 +107,9 @@ public:
   virtual uint64_t          resolveTextureViewNative(TextureViewHandle handle) const = 0;
 
   // --- Textures (images) ---
-  // createImage builds a native image (vmaCreateImage) from the desc and registers an
-  // owned handle. registerExternalTexture adopts an externally-owned native image (e.g.
-  // swapchain) without taking ownership. destroyImage frees owned images. resolveImageNative
+  // registerExternalTexture adopts an externally-owned native image (e.g. swapchain)
+  // without taking ownership. destroyImage frees owned images. resolveImageNative
   // returns the backing native VkImage (as uint64) for command/seam paths.
-  virtual TextureHandle createImage(const TextureCreateDesc& desc)              = 0;
   virtual TextureHandle registerExternalTexture(uint64_t nativeImage)           = 0;
   virtual void          destroyImage(TextureHandle handle)                      = 0;
   virtual uint64_t      resolveImageNative(TextureHandle handle) const          = 0;

@@ -49,7 +49,6 @@ public:
   void              destroyTextureView(TextureViewHandle handle) override;
   uint64_t          resolveTextureViewNative(TextureViewHandle handle) const override;
 
-  TextureHandle createImage(const TextureCreateDesc& desc) override;
   TextureHandle registerExternalTexture(uint64_t nativeImage) override;
   void          destroyImage(TextureHandle handle) override;
   uint64_t      resolveImageNative(TextureHandle handle) const override;

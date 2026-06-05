@@ -856,36 +856,6 @@ namespace {
 }
 }  // namespace
 
-TextureHandle VulkanDevice::createImage(const TextureCreateDesc& desc)
-{
-  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createImage");
-  assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createImage");
-  const VkImageCreateInfo info{
-      .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .flags       = desc.cubeCompatible ? static_cast<VkImageCreateFlags>(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) : 0u,
-      .imageType   = toVkImageType(desc.dimension),
-      .format      = static_cast<VkFormat>(desc.nativeFormat),
-      .extent      = {desc.width, desc.height, desc.depth},
-      .mipLevels   = desc.mipLevels,
-      .arrayLayers = desc.arrayLayers,
-      .samples     = toVkSamples(desc.sampleCount),
-      .tiling      = VK_IMAGE_TILING_OPTIMAL,
-      .usage       = static_cast<VkImageUsageFlags>(desc.nativeUsage),
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-  };
-  const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-  VkImage       image      = VK_NULL_HANDLE;
-  VmaAllocation allocation = nullptr;
-  VK_CHECK(vmaCreateImage(m_allocator, &info, &allocInfo, &image, &allocation, nullptr));
-  if(desc.debugName != nullptr)
-  {
-    utils::DebugUtil::getInstance().setObjectName(image, desc.debugName);
-  }
-  return m_resourceTable->registerTexture(reinterpret_cast<uint64_t>(image),
-                                          reinterpret_cast<uint64_t>(allocation), /*owned=*/true);
-}
-
 TextureHandle VulkanDevice::registerExternalTexture(uint64_t nativeImage)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalTexture");
