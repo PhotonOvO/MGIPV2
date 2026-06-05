@@ -1871,29 +1871,18 @@ void RenderDevice::beginPresentPass(rhi::CommandList& cmd)
 {
   m_presentPassActive = false;
 
-  const VkImage swapchainImage = getCurrentSwapchainImage();
-  if(swapchainImage != VK_NULL_HANDLE)
+  // Move the swapchain image into a color-attachment layout for the UI pass via the
+  // resource-barrier verb. The backend emits a conservative ALL_COMMANDS barrier; the
+  // layout transition (General -> ColorAttachment) matches the previous explicit barrier.
+  const rhi::TextureHandle swapchainHandle = getCurrentSwapchainTextureHandle();
+  if(!swapchainHandle.isNull())
   {
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-    const VkImageMemoryBarrier2 barrier{
-        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
-        .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-        .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = swapchainImage,
-        .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    const rhi::TextureBarrier barrier{
+        .texture = swapchainHandle,
+        .before  = rhi::ResourceState::General,
+        .after   = rhi::ResourceState::ColorAttachment,
     };
-    const VkDependencyInfo dependencyInfo{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &barrier,
-    };
-    vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+    m_perFrame.frameContext->getCommandBuffer()->resourceBarrier(&barrier, 1, nullptr, 0);
   }
 
   beginDynamicRenderingToSwapchain(cmd);
@@ -1913,32 +1902,20 @@ void RenderDevice::endPresentPass(rhi::CommandList& cmd)
   // Close the swapchain image layout explicitly at the end of the final UI pass.
   // This keeps presentation correctness local to the presentation path instead of
   // relying on PassExecutor's state inference after the pass graph has completed.
-  VkImage swapchainImage = getCurrentSwapchainImage();
-  if(swapchainImage == VK_NULL_HANDLE)
+  const rhi::TextureHandle swapchainHandle = getCurrentSwapchainTextureHandle();
+  if(swapchainHandle.isNull())
   {
     return;
   }
 
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const VkImageMemoryBarrier2 barrier{
-      .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-      .srcAccessMask       = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-      .dstStageMask        = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-      .dstAccessMask       = VK_ACCESS_2_NONE,
-      .oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .image               = swapchainImage,
-      .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+  // ColorAttachment -> Present via the resource-barrier verb (layout transition preserved;
+  // backend emits the conservative ALL_COMMANDS sync used across the present path).
+  const rhi::TextureBarrier barrier{
+      .texture = swapchainHandle,
+      .before  = rhi::ResourceState::ColorAttachment,
+      .after   = rhi::ResourceState::Present,
   };
-  const VkDependencyInfo dependencyInfo{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &barrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &dependencyInfo);
+  m_perFrame.frameContext->getCommandBuffer()->resourceBarrier(&barrier, 1, nullptr, 0);
 
   cmd.setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
                        rhi::ResourceState::Present);
