@@ -3765,6 +3765,8 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
     {
       if(!frameResources.keyBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.keyBufferHandle);
       if(!frameResources.valueBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.valueBufferHandle);
+      if(!frameResources.uploadKeyBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.uploadKeyBufferHandle);
+      if(!frameResources.uploadValueBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.uploadValueBufferHandle);
     }
     frameResources = {};  // owned ArgumentTable freed by RenderDevice::destroyBindGroups
   }
@@ -4255,6 +4257,8 @@ void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
   };
   rebind(frameResources.keyBufferHandle, frameResources.keyBuffer.buffer);
   rebind(frameResources.valueBufferHandle, frameResources.valueBuffer.buffer);
+  rebind(frameResources.uploadKeyBufferHandle, frameResources.uploadKeyBuffer.buffer);
+  rebind(frameResources.uploadValueBufferHandle, frameResources.uploadValueBuffer.buffer);
 
   const std::array<rhi::ArgumentWrite, 2> writes{{
       rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBufferHandle},

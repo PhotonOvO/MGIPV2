@@ -28,37 +28,38 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenClusteredLightCullingPass
 
 void GPUDrivenClusteredLightCullingPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenClusteredLightCulling");
+  context.cmdBuffer->beginEvent("GPUDrivenClusteredLightCulling");
 
   const PipelineHandle pipeline = m_renderer->getClusteredLightCullingPipelineHandle();
   const BindGroupHandle bindGroup = m_renderer->getLightCoarseCullingBindGroup(context.frameIndex);
   if(context.params->debugOptions.enableClusteredLighting && !pipeline.isNull() && !bindGroup.isNull())
   {
-    const uint64_t statsBuffer = m_renderer->getClusterStatsBufferOpaque(context.frameIndex);
-    if(statsBuffer != 0)
+    const rhi::BufferHandle statsBuffer = m_renderer->getClusterStatsBufferHandle(context.frameIndex);
+    if(!statsBuffer.isNull())
     {
-      context.cmd->fillBuffer(statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
+      rhi::ComputeEncoder* clear = context.cmdBuffer->beginComputePass();
+      clear->fillBuffer(statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
+      context.cmdBuffer->endEncoding();
       // Stats reset (transfer) must complete before the culling shader accumulates into it.
-      context.cmd->memoryBarrier(rhi::PipelineStage::Transfer, rhi::ResourceAccess::write,
-                                 rhi::PipelineStage::Compute, rhi::ResourceAccess::write);
+      context.cmdBuffer->barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute, rhi::HazardFlags::bufferWrites);
     }
 
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, pipeline);
-    context.cmd->bindBindGroup(0, bindGroup, nullptr, 0);
-    context.cmd->dispatch((shaderio::LClusterCount + 63u) / 64u, 1u, 1u);
+    rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
+    enc->setPipeline(pipeline);
+    enc->setArgumentTable(0, rhi::ArgumentTableHandle{bindGroup.index, bindGroup.generation});  // bridge (Wave 8)
+    enc->dispatch(rhi::DispatchDesc{(shaderio::LClusterCount + 63u) / 64u, 1u, 1u});
+    context.cmdBuffer->endEncoding();
 
     // Cluster light lists feed the lighting fragment stage; stats are read back on the host.
-    context.cmd->memoryBarrier(rhi::PipelineStage::Compute, rhi::ResourceAccess::write,
-                               rhi::PipelineStage::FragmentShader | rhi::PipelineStage::Host,
-                               rhi::ResourceAccess::read);
+    context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader, rhi::HazardFlags::bufferWrites);
   }
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

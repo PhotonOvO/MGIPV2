@@ -476,6 +476,12 @@ public:
   {
     return reinterpret_cast<uint64_t>(m_lightResources.getClusterStatsBuffer(frameIndex));
   }
+  // Stats buffer (binding 8) registered as owned=false handle alongside the coarse-culling table.
+  [[nodiscard]] rhi::BufferHandle getClusterStatsBufferHandle(uint32_t frameIndex) const
+  {
+    const size_t idx = static_cast<size_t>(frameIndex) * 9u + 8u;
+    return idx < m_lightCoarseCullingBufferHandles.size() ? m_lightCoarseCullingBufferHandles[idx] : rhi::BufferHandle{};
+  }
   [[nodiscard]] VkExtent2D getPhase7HalfExtent() const { return m_phase7HalfExtent; }
   [[nodiscard]] uint64_t   getSceneViewOutputImageOpaque() const { return reinterpret_cast<uint64_t>(m_sceneView.outputImage); }
   [[nodiscard]] VkExtent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
@@ -507,15 +513,12 @@ public:
   // visibility-sort pass can record without reaching into renderer internals.
   struct VisibilitySortDispatch
   {
-    PipelineHandle  pipelineHandle{};
-    BindGroupHandle bindGroup{};
-    uint64_t pipeline{0};
-    uint64_t pipelineLayout{0};
-    uint64_t descriptorSet{0};
-    uint64_t uploadKeyBuffer{0};
-    uint64_t uploadValueBuffer{0};
-    uint64_t keyBuffer{0};
-    uint64_t valueBuffer{0};
+    PipelineHandle    pipelineHandle{};
+    BindGroupHandle   bindGroup{};
+    rhi::BufferHandle uploadKeyBufferHandle{};
+    rhi::BufferHandle uploadValueBufferHandle{};
+    rhi::BufferHandle keyBufferHandle{};
+    rhi::BufferHandle valueBufferHandle{};
     uint32_t paddedElementCount{0};
     bool     valid{false};
   };
@@ -528,12 +531,12 @@ public:
       return info;
     }
     const VisibilitySortFrameResources& f = m_visibilitySortFrames[frameIndex];
-    info.pipelineHandle     = m_visibilitySortPipelineHandle;
-    info.bindGroup          = f.bindGroup;
-    info.uploadKeyBuffer    = reinterpret_cast<uint64_t>(f.uploadKeyBuffer.buffer);
-    info.uploadValueBuffer  = reinterpret_cast<uint64_t>(f.uploadValueBuffer.buffer);
-    info.keyBuffer          = reinterpret_cast<uint64_t>(f.keyBuffer.buffer);
-    info.valueBuffer        = reinterpret_cast<uint64_t>(f.valueBuffer.buffer);
+    info.pipelineHandle          = m_visibilitySortPipelineHandle;
+    info.bindGroup               = f.bindGroup;
+    info.uploadKeyBufferHandle   = f.uploadKeyBufferHandle;
+    info.uploadValueBufferHandle = f.uploadValueBufferHandle;
+    info.keyBufferHandle         = f.keyBufferHandle;
+    info.valueBufferHandle       = f.valueBufferHandle;
     info.paddedElementCount = f.paddedElementCount;
     info.valid = !f.bindGroup.isNull() && f.paddedElementCount > 1u
                  && f.uploadKeyBuffer.buffer != VK_NULL_HANDLE && f.uploadValueBuffer.buffer != VK_NULL_HANDLE;
@@ -870,6 +873,8 @@ private:
     BindGroupHandle bindGroup{};         // owned RHI ArgumentTable
     rhi::BufferHandle keyBufferHandle{};   // owned=false mirror, rebound on realloc
     rhi::BufferHandle valueBufferHandle{};
+    rhi::BufferHandle uploadKeyBufferHandle{};    // owned=false mirror of staging buffer
+    rhi::BufferHandle uploadValueBufferHandle{};
     uint32_t capacity{0};
     uint32_t activeElementCount{0};
     uint32_t paddedElementCount{0};

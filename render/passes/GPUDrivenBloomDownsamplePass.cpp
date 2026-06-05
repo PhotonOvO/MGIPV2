@@ -96,20 +96,21 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
     };
     const rhi::Extent2D extent{step.extent.width, step.extent.height};
-    context.cmd->beginRenderPass(rhi::RenderPassDesc{
+    rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
         .renderArea = {{0, 0}, extent},
         .colorTargets = &colorTarget,
         .colorTargetCount = 1,
         .depthTarget = nullptr,
     });
-    context.cmd->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-    context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+    enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
+    enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
     const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
     if(!step.pipeline.isNull() && !inputBindGroup.isNull())
     {
-      context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, step.pipeline);
-      context.cmd->bindBindGroup(shaderio::LSetTextures, inputBindGroup, nullptr, 0);
+      enc->setPipeline(step.pipeline);
+      enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+                            rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
 
     const shaderio::PostProcessUniforms postProcessUniforms{
         .params0 = glm::vec4(context.params->debugOptions.postExposure,
@@ -140,14 +141,15 @@ void GPUDrivenBloomDownsamplePass::execute(const PassContext& context) const
     const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
     if(!sceneBindGroup.isNull())
     {
-      const std::array<uint32_t, 2> dynamicOffsets{context.cameraAlloc.offset, postProcessAlloc.offset};
-      context.cmd->bindBindGroup(shaderio::LSetScene, sceneBindGroup, dynamicOffsets.data(),
-                                 static_cast<uint32_t>(dynamicOffsets.size()));
-      context.cmd->draw(3, 1, 0, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, postProcessAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
+                            rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+      enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
     }
   }
 
-  context.cmd->endRenderPass();
+  context.cmdBuffer->endEncoding();
     context.cmd->transitionTexture(rhi::TextureBarrierDesc{
         .texture = rhi::TextureHandle{step.handle.index, step.handle.generation},
         .nativeImage = reinterpret_cast<uint64_t>(step.image),
