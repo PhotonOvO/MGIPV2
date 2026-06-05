@@ -1,7 +1,6 @@
 #include "PassExecutor.h"
 #include "../common/ProfilerMarkers.h"
 #include "../common/TracyProfiling.h"
-#include "../rhi/vulkan/VulkanCommandList.h"
 #include "../rhi/vulkan/VulkanResourceTable.h"
 
 #include <cassert>
@@ -279,7 +278,8 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
   }
 
 #ifdef TRACY_ENABLE
-  const VkCommandBuffer vkCmd = tracyVkCtx ? rhi::vulkan::getNativeCommandBuffer(*context.cmd) : VK_NULL_HANDLE;
+  const VkCommandBuffer vkCmd =
+      (tracyVkCtx && context.cmdBuffer != nullptr) ? static_cast<VkCommandBuffer>(context.cmdBuffer->getNativeHandle()) : VK_NULL_HANDLE;
 #endif
 
   for(uint32_t passIndex = 0; passIndex < m_passes.size(); ++passIndex)

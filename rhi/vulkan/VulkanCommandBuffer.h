@@ -96,6 +96,8 @@ public:
   void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) override;
   void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) override;
 
+  void* getNativeHandle() const override { return m_cmd; }
+
 private:
   enum class EncoderKind : uint8_t
   {

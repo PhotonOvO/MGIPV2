@@ -37,6 +37,12 @@ public:
   // backend; afterAllCommands selects bottom-of-pipe (true) vs top-of-pipe (false).
   virtual void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) = 0;
   virtual void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) = 0;
+
+  // Escape hatch for backend-specific profiling/interop only (e.g. Tracy GPU zones,
+  // which take the native command buffer). Returns the backend command-buffer object
+  // (VkCommandBuffer / ID3D12GraphicsCommandList* / id<MTLCommandBuffer>). Not for
+  // recording commands — use the encoders/verbs above for that.
+  virtual void* getNativeHandle() const = 0;
 };
 
 }  // namespace demo::rhi

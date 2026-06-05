@@ -4312,7 +4312,7 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
 #ifdef TRACY_ENABLE
   if(m_tracyVkCtx)
   {
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+    const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(context.cmdBuffer->getNativeHandle());
     TracyVkZone(m_tracyVkCtx->context(), vkCmd, "RenderFrame");
   }
 #endif
@@ -4373,7 +4373,7 @@ void RenderDevice::endFrame(rhi::CommandList& cmd)
   // TracyVkCollect resets query pools and reads results from GPU
   if(m_tracyVkCtx)
   {
-    const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
+    const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(m_perFrame.frameContext->getCommandBuffer()->getNativeHandle());
     TracyVkCollect(m_tracyVkCtx->context(), vkCmd);
   }
 #endif
