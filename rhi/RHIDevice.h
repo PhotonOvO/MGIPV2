@@ -143,6 +143,10 @@ public:
   virtual QueryPoolHandle createQueryPool(uint32_t /*queryCount*/) { assert(false && "createQueryPool not implemented"); return {}; }
   virtual void            destroyQueryPool(QueryPoolHandle) { assert(false && "destroyQueryPool not implemented"); }
   virtual uint64_t        getQueryPoolResult(QueryPoolHandle, uint32_t /*queryIndex*/) { assert(false && "getQueryPoolResult not implemented"); return 0; }
+  // Non-blocking batch read. Writes queryCount (value, availability) pairs into outPairs
+  // (size >= queryCount*2). availability==0 means the result is not yet ready. Returns
+  // false if the whole batch could not be read.
+  virtual bool            getQueryPoolResultsWithAvailability(QueryPoolHandle, uint32_t /*firstQuery*/, uint32_t /*queryCount*/, uint64_t* /*outPairs*/) { assert(false && "getQueryPoolResultsWithAvailability not implemented"); return false; }
 };
 
 }  // namespace demo::rhi

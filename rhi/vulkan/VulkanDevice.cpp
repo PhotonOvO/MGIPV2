@@ -1122,6 +1122,26 @@ uint64_t VulkanDevice::getQueryPoolResult(QueryPoolHandle handle, uint32_t query
   return result;
 }
 
+bool VulkanDevice::getQueryPoolResultsWithAvailability(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, uint64_t* outPairs)
+{
+  if(m_resourceTable == nullptr || outPairs == nullptr || queryCount == 0)
+  {
+    return false;
+  }
+  const uint64_t nativePool = m_resourceTable->resolveQueryPool(handle);
+  if(nativePool == 0)
+  {
+    return false;
+  }
+  // Two uint64 per query: [value, availability]. Non-blocking (no WAIT_BIT) so callers can
+  // skip not-yet-ready timestamps instead of stalling the CPU on the GPU.
+  const VkResult result = vkGetQueryPoolResults(
+      m_device, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(nativePool)), firstQuery, queryCount,
+      sizeof(uint64_t) * 2u * queryCount, outPairs, sizeof(uint64_t) * 2u,
+      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+  return result == VK_SUCCESS || result == VK_NOT_READY;
+}
+
 namespace {
 [[nodiscard]] VkShaderStageFlags toVkShaderStageFlags(ShaderStage stages)
 {

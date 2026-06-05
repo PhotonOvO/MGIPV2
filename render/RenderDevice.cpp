@@ -3388,17 +3388,10 @@ void RenderDevice::createPassGpuProfileResources(const PassExecutor& passExecuto
   m_passGpuProfile.latestPassDurationsMs.assign(passExecutor.getPassCount(), 0.0);
   m_passGpuProfile.currentCpuPassStartNs.assign(passExecutor.getPassCount(), 0ull);
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   m_passGpuProfile.frames.resize(m_perFrame.frameUserData.size());
   for(PassGpuProfileFrame& frame : m_passGpuProfile.frames)
   {
-    const VkQueryPoolCreateInfo queryPoolInfo{
-        .sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-        .queryType  = VK_QUERY_TYPE_TIMESTAMP,
-        .queryCount = m_passGpuProfile.queryCount,
-    };
-    VK_CHECK(vkCreateQueryPool(device, &queryPoolInfo, nullptr, &frame.queryPool));
-    DBG_VK_NAME(frame.queryPool);
+    frame.queryPool = m_device.device->createQueryPool(m_passGpuProfile.queryCount);
     frame.cpuPassDurationsMs.assign(passExecutor.getPassCount(), 0.0);
     frame.passDurationsMs.assign(passExecutor.getPassCount(), 0.0);
     frame.valid = false;
@@ -3410,13 +3403,12 @@ void RenderDevice::destroyPassGpuProfileResources()
 {
   if(m_device.device != nullptr)
   {
-    const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
     for(PassGpuProfileFrame& frame : m_passGpuProfile.frames)
     {
-      if(frame.queryPool != VK_NULL_HANDLE)
+      if(!frame.queryPool.isNull())
       {
-        vkDestroyQueryPool(device, frame.queryPool, nullptr);
-        frame.queryPool = VK_NULL_HANDLE;
+        m_device.device->destroyQueryPool(frame.queryPool);
+        frame.queryPool = {};
       }
       frame.cpuPassDurationsMs.clear();
       frame.passDurationsMs.clear();
@@ -3443,21 +3435,13 @@ void RenderDevice::resolvePassGpuProfileResults(uint32_t frameIndex)
   }
 
   PassGpuProfileFrame& frame = m_passGpuProfile.frames[frameIndex];
-  if(frame.queryPool == VK_NULL_HANDLE || !frame.hasRecordedQueries)
+  if(frame.queryPool.isNull() || !frame.hasRecordedQueries)
   {
     return;
   }
 
   std::vector<uint64_t> queryData(static_cast<size_t>(m_passGpuProfile.queryCount) * 2u, 0ull);
-  const VkResult result = vkGetQueryPoolResults(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                frame.queryPool,
-                                                0,
-                                                m_passGpuProfile.queryCount,
-                                                sizeof(uint64_t) * queryData.size(),
-                                                queryData.data(),
-                                                sizeof(uint64_t) * 2u,
-                                                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-  if(result != VK_SUCCESS)
+  if(!m_device.device->getQueryPoolResultsWithAvailability(frame.queryPool, 0, m_passGpuProfile.queryCount, queryData.data()))
   {
     frame.valid = false;
     return;
@@ -3493,33 +3477,33 @@ void RenderDevice::resolvePassGpuProfileResults(uint32_t frameIndex)
   }
 }
 
-void RenderDevice::resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex)
+void RenderDevice::resetPassGpuProfileQueries(rhi::CommandBuffer& cmdBuffer, uint32_t frameIndex)
 {
   if(frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
     return;
   }
 
-  const VkQueryPool queryPool = m_passGpuProfile.frames[frameIndex].queryPool;
-  if(queryPool == VK_NULL_HANDLE)
+  const rhi::QueryPoolHandle queryPool = m_passGpuProfile.frames[frameIndex].queryPool;
+  if(queryPool.isNull())
   {
     return;
   }
 
-  vkCmdResetQueryPool(rhi::vulkan::getNativeCommandBuffer(cmd), queryPool, 0, m_passGpuProfile.queryCount);
+  cmdBuffer.resetQueryPool(queryPool, 0, m_passGpuProfile.queryCount);
   m_passGpuProfile.frames[frameIndex].valid = false;
   m_passGpuProfile.frames[frameIndex].hasRecordedQueries = false;
 }
 
 void RenderDevice::writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const
 {
-  if(context.cmd == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
+  if(context.cmdBuffer == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
     return;
   }
 
-  const VkQueryPool queryPool = m_passGpuProfile.frames[context.frameIndex].queryPool;
-  if(queryPool == VK_NULL_HANDLE)
+  const rhi::QueryPoolHandle queryPool = m_passGpuProfile.frames[context.frameIndex].queryPool;
+  if(queryPool.isNull())
   {
     return;
   }
@@ -3530,10 +3514,7 @@ void RenderDevice::writePassGpuProfileTimestamp(const PassContext& context, uint
     return;
   }
 
-  vkCmdWriteTimestamp2(rhi::vulkan::getNativeCommandBuffer(*context.cmd),
-                       isBegin ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                       queryPool,
-                       queryIndex);
+  context.cmdBuffer->writeTimestamp(queryPool, queryIndex, /*afterAllCommands=*/!isBegin);
 }
 
 void RenderDevice::drawPassGpuProfileOverlay(const RenderParams& params) const
@@ -4483,7 +4464,7 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
   demo::PassContext context{
       &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
       getCurrentMaterialBindGroupHandle(), cameraAlloc, true, m_perFrame.frameContext->getCommandBuffer()};
-  resetPassGpuProfileQueries(cmd, currentFrameIndex);
+  resetPassGpuProfileQueries(*context.cmdBuffer, currentFrameIndex);
 
 #ifdef TRACY_ENABLE
   if(m_tracyVkCtx)

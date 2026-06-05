@@ -849,7 +849,7 @@ private:
   void                 createPassGpuProfileResources(const PassExecutor& passExecutor);
   void                 destroyPassGpuProfileResources();
   void                 resolvePassGpuProfileResults(uint32_t frameIndex);
-  void                 resetPassGpuProfileQueries(const rhi::CommandList& cmd, uint32_t frameIndex);
+  void                 resetPassGpuProfileQueries(rhi::CommandBuffer& cmdBuffer, uint32_t frameIndex);
   void                 writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const;
   void                 drawPassGpuProfileOverlay(const RenderParams& params) const;
   void                 initImGui(void* window);
@@ -898,7 +898,7 @@ private:
 
   struct PassGpuProfileFrame
   {
-    VkQueryPool         queryPool{VK_NULL_HANDLE};
+    rhi::QueryPoolHandle queryPool{};
     std::vector<double> cpuPassDurationsMs;
     std::vector<double> passDurationsMs;
     bool                valid{false};

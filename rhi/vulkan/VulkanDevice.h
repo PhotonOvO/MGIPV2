@@ -67,6 +67,7 @@ public:
   QueryPoolHandle createQueryPool(uint32_t queryCount) override;
   void            destroyQueryPool(QueryPoolHandle handle) override;
   uint64_t        getQueryPoolResult(QueryPoolHandle handle, uint32_t queryIndex) override;
+  bool            getQueryPoolResultsWithAvailability(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, uint64_t* outPairs) override;
 
   ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc& desc) override;
   void                 destroyArgumentLayout(ArgumentLayoutHandle handle) override;

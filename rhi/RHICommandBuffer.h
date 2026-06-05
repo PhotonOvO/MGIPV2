@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RHIEncoder.h"
+#include "RHIHandles.h"
 #include "RHIStageBarrier.h"
 #include "RHITypes.h"
 
@@ -31,6 +32,11 @@ public:
   // Debug markers (RenderDoc / PIX / Tracy).
   virtual void beginEvent(const char* name) = 0;
   virtual void endEvent()                   = 0;
+
+  // Timestamp queries (GPU profiling). The pool is an RHI handle resolved by the
+  // backend; afterAllCommands selects bottom-of-pipe (true) vs top-of-pipe (false).
+  virtual void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) = 0;
+  virtual void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) = 0;
 };
 
 }  // namespace demo::rhi

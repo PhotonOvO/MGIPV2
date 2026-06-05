@@ -492,4 +492,26 @@ void VulkanCommandBuffer::endEvent()
   }
 }
 
+void VulkanCommandBuffer::resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount)
+{
+  const uint64_t nativePool = m_table != nullptr ? m_table->resolveQueryPool(pool) : 0;
+  if(nativePool == 0 || queryCount == 0)
+  {
+    return;
+  }
+  vkCmdResetQueryPool(m_cmd, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(nativePool)), firstQuery, queryCount);
+}
+
+void VulkanCommandBuffer::writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands)
+{
+  const uint64_t nativePool = m_table != nullptr ? m_table->resolveQueryPool(pool) : 0;
+  if(nativePool == 0)
+  {
+    return;
+  }
+  vkCmdWriteTimestamp2(m_cmd,
+                       afterAllCommands ? VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                       reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(nativePool)), queryIndex);
+}
+
 }  // namespace demo::rhi::vulkan
