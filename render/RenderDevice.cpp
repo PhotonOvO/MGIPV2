@@ -1203,18 +1203,12 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     vkDestroyPipelineLayout(device, m_device.postProcessPipelineLayout, nullptr);
     m_device.postProcessPipelineLayout = VK_NULL_HANDLE;
   }
-  if(m_device.gpuCullingPipelineLayout != VK_NULL_HANDLE)
+  if(m_device.gpuCullingPipelineLayout)
   {
-    vkDestroyPipelineLayout(device, m_device.gpuCullingPipelineLayout, nullptr);
-    m_device.gpuCullingPipelineLayout = VK_NULL_HANDLE;
+    m_device.gpuCullingPipelineLayout->deinit();
+    m_device.gpuCullingPipelineLayout.reset();
   }
-  m_device.gpuCullingDescriptorSets.clear();
   m_device.gpuCullingBindGroups.clear();
-  if(m_device.gpuCullingSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.gpuCullingSetLayout, nullptr);
-    m_device.gpuCullingSetLayout = VK_NULL_HANDLE;
-  }
   if(m_device.shadowCullingPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.shadowCullingPipelineLayout, nullptr);
@@ -3670,13 +3664,21 @@ void RenderDevice::createGPUCullingResources()
     });
   }
 
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts    = &setLayout,
+  // Wave 9 (step 4): the compute pipeline layout is now an RHI VulkanPipelineLayout owning a
+  // single descriptor set (set 0 = the culling ArgumentLayout), replacing the native member.
+  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> layoutMappings{{
+      rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(setLayout)),
+  }};
+  const rhi::vulkan::VulkanPipelineLayoutLowering layoutLowering{
+      .setLayouts     = layoutMappings.data(),
+      .setLayoutCount = static_cast<uint32_t>(layoutMappings.size()),
   };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.gpuCullingPipelineLayout));
-  DBG_VK_NAME(m_device.gpuCullingPipelineLayout);
+  rhi::PipelineLayoutDesc cullingLayoutDesc{};
+  cullingLayoutDesc.debugName = "gpu-culling";
+  auto cullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+  cullingPipelineLayout->init(static_cast<void*>(nativeDevice), cullingLayoutDesc, layoutLowering);
+  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(cullingPipelineLayout->getNativeHandle()));
+  m_device.gpuCullingPipelineLayout = std::move(cullingPipelineLayout);
 
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
@@ -7121,7 +7123,7 @@ void RenderDevice::createLightCoarseCullingPipelines()
 
 void RenderDevice::createGPUCullingPipeline()
 {
-  if(m_device.gpuCullingPipelineLayout == VK_NULL_HANDLE)
+  if(!m_device.gpuCullingPipelineLayout)
   {
     return;
   }
@@ -7132,24 +7134,29 @@ void RenderDevice::createGPUCullingPipeline()
       utils::createShaderModule(nativeDevice, {shader_gpu_culling_slang, std::size(shader_gpu_culling_slang)});
   DBG_VK_NAME(shaderModule);
 
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "gpuCullingMain",
+  const rhi::ComputePipelineDesc computeDesc{
+      .layout      = m_device.gpuCullingPipelineLayout.get(),
+      .shaderStage =
+          {
+              .stage        = rhi::ShaderStage::compute,
+              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .entryPoint   = "gpuCullingMain",
+          },
   };
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStage,
-      .layout = m_device.gpuCullingPipelineLayout,
+  const rhi::vulkan::ComputePipelineCreateInfo createInfo{
+      .key =
+          {
+              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::compute,
+              .specializationVariant = 13,
+          },
+      .desc          = computeDesc,
+      .pipelineFlags = 0,
   };
-
-  VkPipeline pipeline = VK_NULL_HANDLE;
-  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+  const VkPipeline pipeline = rhi::vulkan::createComputePipeline(nativeDevice, createInfo);
   DBG_VK_NAME(pipeline);
   m_gpuCullingPipeline =
       registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 13,
-                       reinterpret_cast<uint64_t>(m_device.gpuCullingPipelineLayout));
+                       m_device.gpuCullingPipelineLayout->getNativeHandle());
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif

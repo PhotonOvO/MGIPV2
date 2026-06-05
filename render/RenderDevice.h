@@ -485,10 +485,8 @@ private:
     std::string                                iblEnvironmentStatus{"Not initialized"};
     VkPipelineLayout                           lightPipelineLayout{nullptr};
     VkPipelineLayout                           postProcessPipelineLayout{nullptr};
-    VkDescriptorSetLayout                      gpuCullingSetLayout{nullptr};
-    std::vector<VkDescriptorSet>               gpuCullingDescriptorSets;
     std::vector<BindGroupHandle>               gpuCullingBindGroups;
-    VkPipelineLayout                           gpuCullingPipelineLayout{nullptr};
+    std::unique_ptr<rhi::PipelineLayout>       gpuCullingPipelineLayout;
     VkDescriptorSetLayout                      shadowCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               shadowCullingDescriptorSets;
     std::vector<BindGroupHandle>               shadowCullingBindGroups;
