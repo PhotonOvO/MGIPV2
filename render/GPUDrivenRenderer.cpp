@@ -982,14 +982,14 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   ++m_temporalFrameCounter;
 }
 
-void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams&)
+void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams&)
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   const VkImage sourceDepthImage = m_sceneView.sceneDepthImage;
   const rhi::TextureViewHandle sourceDepthView = m_sceneView.sceneDepthView;
   const VkExtent2D sourceDepthExtent = m_sceneView.sceneDepthExtent;
   m_hiZDepthPyramid.generate(frameIndex,
-                             rhi::vulkan::getNativeCommandBuffer(cmd),
+                             static_cast<VkCommandBuffer>(cmdBuffer.getNativeHandle()),
                              sourceDepthExtent,
                              sourceDepthImage,
                              sourceDepthView,

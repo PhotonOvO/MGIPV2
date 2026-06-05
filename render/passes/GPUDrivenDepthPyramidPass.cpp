@@ -23,11 +23,11 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenDepthPyramidPass::getDepe
 
 void GPUDrivenDepthPyramidPass::execute(const PassContext& context) const
 {
-  if(m_renderer != nullptr && context.cmd != nullptr && context.params != nullptr)
+  if(m_renderer != nullptr && context.cmdBuffer != nullptr && context.params != nullptr)
   {
-    context.cmd->beginEvent("GPUDrivenDepthPyramid");
-    m_renderer->executeDepthPyramidPass(*context.cmd, *context.params);
-    context.cmd->endEvent();
+    context.cmdBuffer->beginEvent("GPUDrivenDepthPyramid");
+    m_renderer->executeDepthPyramidPass(*context.cmdBuffer, *context.params);
+    context.cmdBuffer->endEvent();
   }
 }
 

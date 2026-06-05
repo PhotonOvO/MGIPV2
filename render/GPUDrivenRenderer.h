@@ -862,7 +862,7 @@ public:
   {
     m_renderer.ensureGPUDrivenPersistentIndirectStream(frameIndex, requiredDrawCount);
   }
-  void executeDepthPyramidPass(rhi::CommandList& cmd, const RenderParams& params);
+  void executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
   void beginPresentPass(rhi::CommandList& cmd) { m_renderer.beginPresentPass(cmd); }
   void endPresentPass(rhi::CommandList& cmd) { m_renderer.endPresentPass(cmd); }
   void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params) { m_renderer.executeImGuiPass(cmd, params); }
