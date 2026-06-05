@@ -1629,11 +1629,14 @@ uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) 
 
 uint64_t RenderDevice::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
-  if(frameIndex >= m_device.gpuCullingDescriptorSets.size())
+  // Resolves the native VkDescriptorSet backing the per-frame ArgumentTable (step 3). The
+  // Hi-Z pyramid pass still writes binding 5 directly into this set via bindForCulling, and
+  // the ownsHiZVisibilityChain diagnostic compares against it.
+  if(frameIndex >= m_device.gpuCullingBindGroups.size())
   {
     return 0;
   }
-  return reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex]);
+  return m_device.resourceTable.resolveArgumentTable(m_device.gpuCullingBindGroups[frameIndex]);
 }
 
 uint64_t RenderDevice::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
@@ -3635,48 +3638,42 @@ void RenderDevice::createGPUCullingResources()
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
-  const std::array<VkDescriptorSetLayoutBinding, 9> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-  }};
-
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
+  // Wave 9 (step 3): the 9-binding culling descriptor layout is now an RHI ArgumentLayout
+  // (binding 5 is a SAMPLED_IMAGE array of LDepthPyramidMaxMips), and each per-frame set is
+  // an RHI ArgumentTable wrapped as a BindGroupHandle. updateGPUCullingDescriptorSet writes
+  // them via updateArgumentTable. The compute pipeline layout (step 4 migrates it) is still
+  // native but sourced from the RHI-owned VkDescriptorSetLayout.
+  const std::vector<rhi::BindTableLayoutEntry> layoutEntries{
+      rhi::BindTableLayoutEntry{.logicalIndex = 0, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 1, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 2, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 3, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 4, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 5, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = shaderio::LDepthPyramidMaxMips, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 6, .resourceType = rhi::BindlessResourceType::uniformBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 7, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 8, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
   };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.gpuCullingSetLayout));
-  DBG_VK_NAME(m_device.gpuCullingSetLayout);
+  const rhi::ArgumentLayoutHandle cullingLayout = createArgumentLayoutFromEntries(layoutEntries, "gpu-culling");
+  const VkDescriptorSetLayout     setLayout =
+      reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(cullingLayout)));
 
-  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.gpuCullingSetLayout);
-  m_device.gpuCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_device.descriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts        = setLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.gpuCullingDescriptorSets.data()));
-
-  // Phase 6: adopt the GPU-culling sets so the culling pass binds via cmd->bindBindGroup.
   m_device.gpuCullingBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.gpuCullingBindGroups[frameIndex] =
-        registerExternalBindGroup(reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex]), "gpu-culling");
+    m_device.gpuCullingBindGroups[frameIndex] = createBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = cullingLayout,
+        .table               = m_device.device->createArgumentTable(cullingLayout),
+        .primaryLogicalIndex = 0,
+        .debugName           = "gpu-culling",
+    });
   }
 
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
       .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = 1,
-      .pSetLayouts    = &m_device.gpuCullingSetLayout,
+      .pSetLayouts    = &setLayout,
   };
   VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.gpuCullingPipelineLayout));
   DBG_VK_NAME(m_device.gpuCullingPipelineLayout);
@@ -3746,29 +3743,31 @@ void RenderDevice::createShadowCullingResources()
 
 void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
 {
-  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingDescriptorSets.size()
-     || m_device.gpuCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingBindGroups.size()
+     || m_device.gpuCullingBindGroups[frameIndex].isNull())
   {
     return;
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  const VkBuffer objectBuffer =
+  // binding 0/7/8 resolve to either the external persistent buffers or the per-frame native
+  // object buffer (step 2 mirrored both as RHI handles), exactly like the native path did.
+  const rhi::BufferHandle objectHandle =
       frameUserData.useExternalGPUCullingObjectBuffer
-          ? frameUserData.externalGPUCullingObjectBuffer
-          : frameUserData.gpuCullingObjectBuffer.buffer;
-  const VkBuffer meshletBuffer =
-      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingMeshletBuffer : objectBuffer;
-  const VkBuffer sceneObjectBuffer =
-      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingSceneObjectBuffer : objectBuffer;
-  if(objectBuffer == VK_NULL_HANDLE
-     || meshletBuffer == VK_NULL_HANDLE
-     || sceneObjectBuffer == VK_NULL_HANDLE
-     || frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
-     || frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE
-     || frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE
-     || frameUserData.gpuCullingUniformBuffer.buffer == VK_NULL_HANDLE
-     || frameUserData.gpuCullingResultBuffer.buffer == VK_NULL_HANDLE)
+          ? frameUserData.externalGPUCullingObjectBufferRHI
+          : frameUserData.gpuCullingObjectBufferRHI;
+  const rhi::BufferHandle meshletHandle =
+      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingMeshletBufferRHI : objectHandle;
+  const rhi::BufferHandle sceneObjectHandle =
+      frameUserData.useExternalGPUCullingMeshletData ? frameUserData.externalGPUCullingSceneObjectBufferRHI : objectHandle;
+  if(objectHandle.isNull()
+     || meshletHandle.isNull()
+     || sceneObjectHandle.isNull()
+     || frameUserData.gpuCullingIndirectBufferRHI.isNull()
+     || frameUserData.gpuCullingDrawCountBufferRHI.isNull()
+     || frameUserData.gpuCullingStatsBufferRHI.isNull()
+     || frameUserData.gpuCullingUniformBufferRHI.isNull()
+     || frameUserData.gpuCullingResultBufferRHI.isNull())
   {
     return;
   }
@@ -3780,106 +3779,29 @@ void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const auto nativeOf = [&](rhi::TextureViewHandle h) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
-  };
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const std::array<VkDescriptorBufferInfo, 8> bufferInfos{{
-      VkDescriptorBufferInfo{objectBuffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameUserData.gpuCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameUserData.gpuCullingStatsBuffer.buffer, 0, sizeof(shaderio::GPUCullStats)},
-      VkDescriptorBufferInfo{frameUserData.gpuCullingResultBuffer.buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameUserData.gpuCullingDrawCountBuffer.buffer, 0, sizeof(shaderio::GPUCullDrawCounts)},
-      VkDescriptorBufferInfo{frameUserData.gpuCullingUniformBuffer.buffer, 0, sizeof(shaderio::GPUCullingUniforms)},
-      VkDescriptorBufferInfo{meshletBuffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{sceneObjectBuffer, 0, VK_WHOLE_SIZE},
-  }};
-
-  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
-  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
+  std::vector<rhi::ArgumentWrite> writes;
+  writes.reserve(8 + shaderio::LDepthPyramidMaxMips);
+  writes.push_back(rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = objectHandle});
+  writes.push_back(rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingIndirectBufferRHI});
+  writes.push_back(rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingStatsBufferRHI, .size = sizeof(shaderio::GPUCullStats)});
+  writes.push_back(rhi::ArgumentWrite{.binding = 3, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingResultBufferRHI});
+  writes.push_back(rhi::ArgumentWrite{.binding = 4, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingDrawCountBufferRHI, .size = sizeof(shaderio::GPUCullDrawCounts)});
+  for(uint32_t i = 0; i < static_cast<uint32_t>(shaderio::LDepthPyramidMaxMips); ++i)
   {
-    pyramidMipInfos[i] = VkDescriptorImageInfo{
-        .sampler     = VK_NULL_HANDLE,
-        .imageView   = nativeOf(sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u))),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
+    writes.push_back(rhi::ArgumentWrite{
+        .binding      = 5,
+        .arrayElement = i,
+        .type         = rhi::ArgumentType::sampledTexture,
+        .textureView  = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
+        .imageLayout  = rhi::ResourceState::General,
+    });
   }
+  writes.push_back(rhi::ArgumentWrite{.binding = 6, .type = rhi::ArgumentType::uniformBuffer, .buffer = frameUserData.gpuCullingUniformBufferRHI, .size = sizeof(shaderio::GPUCullingUniforms)});
+  writes.push_back(rhi::ArgumentWrite{.binding = 7, .type = rhi::ArgumentType::storageBuffer, .buffer = meshletHandle});
+  writes.push_back(rhi::ArgumentWrite{.binding = 8, .type = rhi::ArgumentType::storageBuffer, .buffer = sceneObjectHandle});
 
-  const std::array<VkWriteDescriptorSet, 9> writes{{
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[0],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 1,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[1],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 2,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[2],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 3,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[3],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 4,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[4],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 5,
-          .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = pyramidMipInfos.data(),
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 6,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo     = &bufferInfos[5],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 7,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[6],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.gpuCullingDescriptorSets[frameIndex],
-          .dstBinding      = 8,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[7],
-      },
-  }};
-  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  m_device.device->updateArgumentTable(m_device.gpuCullingBindGroups[frameIndex],
+                                       static_cast<uint32_t>(writes.size()), writes.data());
 }
 
 void RenderDevice::createLightCoarseCullingResources()
