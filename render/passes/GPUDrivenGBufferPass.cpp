@@ -4,7 +4,6 @@
 #include "../GPUDrivenRenderer.h"
 #include "../MeshPool.h"
 #include "../../common/TracyProfiling.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>

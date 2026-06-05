@@ -1,7 +1,6 @@
 #include "GPUDrivenDebugPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>

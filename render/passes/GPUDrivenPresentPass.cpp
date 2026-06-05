@@ -1,7 +1,6 @@
 #include "GPUDrivenPresentPass.h"
 
 #include "../GPUDrivenRenderer.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 
 #include <array>
 

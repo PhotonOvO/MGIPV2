@@ -6,7 +6,6 @@
 #include "../ClipSpaceConvention.h"
 #include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
-#include "../../rhi/vulkan/VulkanCommandList.h"
 
 #include <algorithm>
 #include <array>
