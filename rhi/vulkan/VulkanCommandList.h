@@ -78,7 +78,7 @@ private:
     ResourceState  state{ResourceState::Undefined};
   };
 
-  [[nodiscard]] ResourceState getTrackedState(ResourceHandle resource, ResourceState fallback) const;
+  [[nodiscard]] ResourceState getTrackedState(ResourceHandle resource, ResourceState fallback) const override;
 
   VkCommandBuffer                 m_commandBuffer{VK_NULL_HANDLE};
   std::vector<ResourceStateEntry> m_resourceStates;

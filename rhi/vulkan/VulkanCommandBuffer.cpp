@@ -59,6 +59,16 @@ namespace {
   }
 }
 
+[[nodiscard]] VkImageAspectFlags toVkAspect(TextureAspect aspect)
+{
+  switch(aspect)
+  {
+    case TextureAspect::depth:        return VK_IMAGE_ASPECT_DEPTH_BIT;
+    case TextureAspect::depthStencil: return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    default:                          return VK_IMAGE_ASPECT_COLOR_BIT;
+  }
+}
+
 [[nodiscard]] VkShaderStageFlags toVkShaderStageFlags(ShaderStage stages)
 {
   VkShaderStageFlags flags = 0;
@@ -434,7 +444,7 @@ void VulkanCommandBuffer::resourceBarrier(const TextureBarrier* textures, uint32
                .oldLayout        = toVkImageLayout(b.before),
                .newLayout        = toVkImageLayout(b.after),
                .image            = asImage(m_table->resolveTexture(b.texture)),
-               .subresourceRange = {.aspectMask     = static_cast<VkImageAspectFlags>(b.range.aspect == TextureAspect::depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT),
+               .subresourceRange = {.aspectMask     = toVkAspect(b.range.aspect),
                                     .baseMipLevel   = b.range.baseMipLevel,
                                     .levelCount     = b.range.levelCount,
                                     .baseArrayLayer = b.range.baseArrayLayer,

@@ -105,6 +105,13 @@ public:
   virtual void setScissor(const Rect2D& scissor)     = 0;
 
   virtual void setResourceState(ResourceHandle resource, ResourceState state) = 0;
+  // Actual recorded layout/state of a resource (the legacy transition tracker). Used
+  // by the dual-barrier path so resourceBarrier's before-layout matches reality even
+  // when passes also transition the image through this command list.
+  [[nodiscard]] virtual ResourceState getTrackedState(ResourceHandle resource, ResourceState fallback) const
+  {
+    return fallback;
+  }
   virtual void insertBarrier(BarrierType barrierType)                         = 0;
   // Global memory barrier with explicit src/dst scopes (replaces inline VkMemoryBarrier2 usage in passes).
   virtual void memoryBarrier(PipelineStage  srcStage,

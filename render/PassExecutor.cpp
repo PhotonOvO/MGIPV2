@@ -347,35 +347,49 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
       const rhi::ResourceState requiredState = resolveRequiredTextureState(*binding, dependency);
       const rhi::ResourceState currentState  = textureStateIt->second.state;
 
-      if(currentState != requiredState)
+      const bool needsBarrier =
+          currentState != requiredState || requiresBarrier(textureStateIt->second.access, dependency.access);
+      if(needsBarrier)
       {
-        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-            .texture     = toRhiHandle(dependency.textureHandle),
-            .nativeImage = binding->nativeImage,
-            .aspect      = binding->aspect,
-            .srcStage    = toPipelineStage(textureStateIt->second.stageMask),
-            .dstStage    = toPipelineStage(dependency.stageMask),
-            .srcAccess   = toRhiAccess(textureStateIt->second.access),
-            .dstAccess   = toRhiAccess(dependency.access),
-            .oldState    = currentState,
-            .newState    = requiredState,
-            .isSwapchain = binding->isSwapchain,
-        });
-      }
-      else if(requiresBarrier(textureStateIt->second.access, dependency.access))
-      {
-        context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-            .texture     = toRhiHandle(dependency.textureHandle),
-            .nativeImage = binding->nativeImage,
-            .aspect      = binding->aspect,
-            .srcStage    = toPipelineStage(textureStateIt->second.stageMask),
-            .dstStage    = toPipelineStage(dependency.stageMask),
-            .srcAccess   = toRhiAccess(textureStateIt->second.access),
-            .dstAccess   = toRhiAccess(dependency.access),
-            .oldState    = requiredState,
-            .newState    = requiredState,
-            .isSwapchain = binding->isSwapchain,
-        });
+        if(context.cmdBuffer != nullptr && !binding->rhiTexture.isNull())
+        {
+          // Wave 7 dual-barrier model: explicit image layout via resourceBarrier over
+          // the whole subresource range. The before-layout comes from the command
+          // list's actual tracked state (shared with the passes' own transitions), not
+          // from this executor's local map, which does not see those transitions.
+          const rhi::ResourceState before = context.cmd->getTrackedState(
+              rhi::ResourceHandle{rhi::ResourceKind::Texture, dependency.textureHandle.index,
+                                  dependency.textureHandle.generation},
+              currentState);
+          const rhi::TextureBarrier textureBarrier{
+              .texture = binding->rhiTexture,
+              .before  = before,
+              .after   = requiredState,
+              .range   = {.aspect         = binding->aspect,
+                          .baseMipLevel   = 0,
+                          .levelCount     = ~0u,
+                          .baseArrayLayer = 0,
+                          .layerCount     = ~0u},
+          };
+          context.cmdBuffer->resourceBarrier(&textureBarrier, 1, nullptr, 0);
+        }
+        else
+        {
+          // Fallback: attachment not mirrored into the registry — keep the legacy
+          // native transition (e.g. when no resource table was set).
+          context.cmd->transitionTexture(rhi::TextureBarrierDesc{
+              .texture     = toRhiHandle(dependency.textureHandle),
+              .nativeImage = binding->nativeImage,
+              .aspect      = binding->aspect,
+              .srcStage    = toPipelineStage(textureStateIt->second.stageMask),
+              .dstStage    = toPipelineStage(dependency.stageMask),
+              .srcAccess   = toRhiAccess(textureStateIt->second.access),
+              .dstAccess   = toRhiAccess(dependency.access),
+              .oldState    = currentState,
+              .newState    = requiredState,
+              .isSwapchain = binding->isSwapchain,
+          });
+        }
       }
 
       textureStateIt->second.stageMask = dependency.stageMask;
