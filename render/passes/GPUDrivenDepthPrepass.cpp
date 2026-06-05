@@ -3,6 +3,7 @@
 #include "../ClipSpaceConvention.h"
 #include "../GPUDrivenRenderer.h"
 #include "../MeshPool.h"
+#include "../PassExecutor.h"
 #include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
 
@@ -47,17 +48,18 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenDepthPrepass::getDependen
 
 void GPUDrivenDepthPrepass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr)
+  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
+     || context.cmdBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenDepthPrepass");
+  context.cmdBuffer->beginEvent("GPUDrivenDepthPrepass");
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || sceneView->sceneDepthView.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
   const VkExtent2D vkExtent = sceneView->sceneDepthExtent;
@@ -78,18 +80,13 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
       .colorTargetCount = 0,
       .depthTarget      = &depthTarget,
   };
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-      .aspect      = sceneDepthAspect(sceneView->sceneDepthFormat),
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::read,
-      .dstAccess   = rhi::ResourceAccess::write,
-      .oldState    = rhi::ResourceState::General,
-      .newState    = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
+  const rhi::TextureBarrier depthBarrier{
+      .texture = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage)),
+      .before  = rhi::ResourceState::General,
+      .after   = rhi::ResourceState::DepthStencilAttachment,
+      .range   = {.aspect = sceneDepthAspect(sceneView->sceneDepthFormat), .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+  };
+  context.cmdBuffer->resourceBarrier(&depthBarrier, 1, nullptr, 0);
   rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
   enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   enc->setScissor(rhi::Rect2D{{0, 0}, extent});
@@ -97,14 +94,14 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   if(context.drawStream == nullptr)
   {
     context.cmdBuffer->endEncoding();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
   if(!context.cameraAllocValid)
   {
     context.cmdBuffer->endEncoding();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
@@ -161,7 +158,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
       if(representativeMesh == nullptr)
       {
         context.cmdBuffer->endEncoding();
-        context.cmd->endEvent();
+        context.cmdBuffer->endEvent();
         return;
       }
 
@@ -174,7 +171,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
       if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
       {
         context.cmdBuffer->endEncoding();
-        context.cmd->endEvent();
+        context.cmdBuffer->endEvent();
         return;
       }
       const uint64_t vertexOffset = 0;
@@ -245,7 +242,7 @@ void GPUDrivenDepthPrepass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

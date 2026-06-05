@@ -3,6 +3,7 @@
 #include "../ClipSpaceConvention.h"
 #include "../GPUDrivenRenderer.h"
 #include "../MeshPool.h"
+#include "../PassExecutor.h"
 #include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
 
@@ -53,17 +54,29 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenGBufferPass::getDependenc
 
 void GPUDrivenGBufferPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr)
+  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
+     || context.cmdBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenGBufferPass");
+  context.cmdBuffer->beginEvent("GPUDrivenGBufferPass");
+
+  const auto transitionGB = [&](uint64_t nativeImage, rhi::TextureAspect aspect, rhi::ResourceState before,
+                                rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(nativeImage),
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = aspect, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || sceneView->sceneDepthView.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
   const rhi::Extent2D extent = {sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
@@ -71,18 +84,8 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
   std::array<rhi::RenderTargetDesc, kPackedGBufferTargetCount> colorTargets{};
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{static_cast<uint32_t>(kPassGBuffer0Handle.index + i), kPassGBuffer0Handle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->gbufferImages[i]),
-        .aspect      = rhi::TextureAspect::color,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::FragmentShader,
-        .srcAccess   = rhi::ResourceAccess::read,
-        .dstAccess   = rhi::ResourceAccess::write,
-        .oldState    = rhi::ResourceState::General,
-        .newState    = rhi::ResourceState::ColorAttachment,
-        .isSwapchain = false,
-    });
+    transitionGB(reinterpret_cast<uint64_t>(sceneView->gbufferImages[i]), rhi::TextureAspect::color,
+                 rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
     colorTargets[i] = {
         .texture    = {},
@@ -103,18 +106,8 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       .clearValue = {0.0f, 0},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-      .aspect      = sceneDepthAspect(sceneView->sceneDepthFormat),
-      .srcStage    = rhi::PipelineStage::Compute,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::read,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::General,
-      .newState    = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
+  transitionGB(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
+               rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
   uint64_t sortedIndirectBufferHandle = 0;
   uint64_t sortedCountBufferHandle = 0;
@@ -183,7 +176,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
     if(!context.cameraAllocValid)
     {
       context.cmdBuffer->endEncoding();
-      context.cmd->endEvent();
+      context.cmdBuffer->endEvent();
       return;
     }
     const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
@@ -228,7 +221,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         if(representativeMesh == nullptr)
         {
           context.cmdBuffer->endEncoding();
-          context.cmd->endEvent();
+          context.cmdBuffer->endEvent();
           return;
         }
 
@@ -239,7 +232,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
         {
           context.cmdBuffer->endEncoding();
-          context.cmd->endEvent();
+          context.cmdBuffer->endEvent();
           return;
         }
         const uint64_t vertexOffset = 0;
@@ -302,41 +295,16 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
 
   context.cmdBuffer->endEncoding();
 
-  const std::array<std::pair<TextureHandle, VkImage>, kPackedGBufferTargetCount> colorImages{{
-      {kPassGBuffer0Handle, sceneView->gbufferImages[0]},
-      {kPassGBuffer1Handle, sceneView->gbufferImages[1]},
-      {kPassGBuffer2Handle, sceneView->gbufferImages[2]},
-  }};
-  for(const auto& [handle, image] : colorImages)
+  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{handle.index, handle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(image),
-        .aspect      = rhi::TextureAspect::color,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::FragmentShader,
-        .srcAccess   = rhi::ResourceAccess::write,
-        .dstAccess   = rhi::ResourceAccess::read,
-        .oldState    = rhi::ResourceState::ColorAttachment,
-        .newState    = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    transitionGB(reinterpret_cast<uint64_t>(sceneView->gbufferImages[i]), rhi::TextureAspect::color,
+                 rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
   }
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-      .aspect      = sceneDepthAspect(sceneView->sceneDepthFormat),
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::write,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::DepthStencilAttachment,
-      .newState    = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  transitionGB(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
+               rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo
