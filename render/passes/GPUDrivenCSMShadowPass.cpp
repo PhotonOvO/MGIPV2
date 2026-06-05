@@ -85,7 +85,6 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
   }
 
   const bool useShadowCulling = !m_renderer->getShadowCullingPipelineHandle().isNull()
-                                && m_renderer->getShadowCullingPipelineLayout() != 0
                                 && m_renderer->getShadowCullingDescriptorSetOpaque(frameIndex) != 0;
   if(!useShadowCulling)
   {

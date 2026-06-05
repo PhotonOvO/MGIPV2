@@ -126,7 +126,6 @@ public:
   PipelineHandle getGPUCullingPipelineHandle() const;
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
   PipelineHandle getShadowCullingPipelineHandle() const;
-  uint64_t       getShadowCullingPipelineLayout() const;
   uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
   uint64_t       getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const;
   [[nodiscard]] BindGroupHandle getGPUCullingBindGroup(uint32_t frameIndex) const

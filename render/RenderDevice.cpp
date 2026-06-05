@@ -1580,11 +1580,6 @@ PipelineHandle RenderDevice::getGPUCullingPipelineHandle() const
   return m_gpuCullingPipeline;
 }
 
-uint64_t RenderDevice::getShadowCullingPipelineLayout() const
-{
-  return m_device.shadowCullingPipelineLayout ? m_device.shadowCullingPipelineLayout->getNativeHandle() : 0;
-}
-
 uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_device.shadowCullingBindGroups.size())

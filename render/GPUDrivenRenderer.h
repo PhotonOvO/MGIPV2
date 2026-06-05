@@ -462,7 +462,6 @@ public:
   [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const { return m_iblEnvironmentEstimatedBytes; }
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const { return m_iblEnvironmentPath; }
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
-  [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
   [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
   {
     return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
