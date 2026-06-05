@@ -1,6 +1,7 @@
 #include "GPUDrivenLightPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -31,26 +32,37 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightPass::getDependencie
 
 void GPUDrivenLightPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.transientAllocator == nullptr)
+  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr
+     || context.transientAllocator == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenLightPass");
+  context.cmdBuffer->beginEvent("GPUDrivenLightPass");
 
   const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
   if(sceneView == nullptr || sceneView->sceneColorHdrView.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
+
+  const auto transitionColor = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage)),
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
 
   rhi::TextureViewHandle outputViewHandle = sceneView->sceneColorHdrView;
   const VkExtent2D outputExtent = sceneView->sceneDepthExtent;
   const rhi::Extent2D extent = {outputExtent.width, outputExtent.height};
   if(outputViewHandle.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -63,18 +75,7 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  transitionColor(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   const rhi::RenderPassDesc passDesc{
       .renderArea = {{0, 0}, extent},
@@ -90,19 +91,8 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   if(lightPipeline.isNull())
   {
     context.cmdBuffer->endEncoding();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
+    transitionColor(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -114,19 +104,8 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
   if(!context.cameraAllocValid)
   {
     context.cmdBuffer->endEncoding();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
+    transitionColor(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -145,20 +124,9 @@ void GPUDrivenLightPass::execute(const PassContext& context) const
 
   enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
   context.cmdBuffer->endEncoding();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  transitionColor(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

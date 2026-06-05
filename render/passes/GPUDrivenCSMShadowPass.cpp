@@ -1,6 +1,7 @@
 #include "GPUDrivenCSMShadowPass.h"
 
 #include "../GPUDrivenRenderer.h"
+#include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
@@ -24,7 +25,8 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenCSMShadowPass::getDepende
 
 void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr || context.cmd == nullptr)
+  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
+     || context.cmdBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
@@ -56,22 +58,20 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenCSMShadow");
+  context.cmdBuffer->beginEvent("GPUDrivenCSMShadow");
 
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   const uint32_t cascadeCount = csm.getCascadeCount();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(csm.getCascadeImage()),
-      .aspect      = rhi::TextureAspect::depth,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::read,
-      .dstAccess   = rhi::ResourceAccess::write,
-      .oldState    = rhi::ResourceState::General,
-      .newState    = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
+  const auto transitionCascade = [&](rhi::ResourceState before, rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(csm.getCascadeImage())),
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = rhi::TextureAspect::depth, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
+  transitionCascade(rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
   const uint32_t frameIndex = context.frameIndex;
   const bool hasShadowIndirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(frameIndex) != 0;
@@ -87,7 +87,7 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
            shadowIndirectCapacity,
            sceneView->shadowPackedMeshCount);
     }
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -97,7 +97,7 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
   if(!useShadowCulling)
   {
     LOGW("Skipping GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -112,22 +112,17 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
       {
         const shaderio::ShadowCullPushConstants pushConstants =
             m_renderer->buildShadowCullPushConstants(cascadeIndex, sceneView->shadowPackedMeshCount);
-        context.cmd->bindPipeline(rhi::PipelineBindPoint::compute, computePipeline);
-        context.cmd->bindBindGroup(0, computeBindGroup, nullptr, 0);
-        context.cmd->pushConstants(rhi::ShaderStage::compute, 0, sizeof(pushConstants), &pushConstants);
-        context.cmd->dispatch((sceneView->shadowPackedMeshCount + shaderio::LGPUCullingThreadCount - 1u)
-                                  / shaderio::LGPUCullingThreadCount,
-                              1u,
-                              1u);
+        rhi::ComputeEncoder* cenc = context.cmdBuffer->beginComputePass();
+        cenc->setPipeline(computePipeline);
+        cenc->setArgumentTable(0, rhi::ArgumentTableHandle{computeBindGroup.index, computeBindGroup.generation});  // bridge (Wave 8)
+        cenc->setRootConstants(0, &pushConstants, sizeof(pushConstants));
+        cenc->dispatch(rhi::DispatchDesc{(sceneView->shadowPackedMeshCount + shaderio::LGPUCullingThreadCount - 1u)
+                                             / shaderio::LGPUCullingThreadCount,
+                                         1u, 1u});
+        context.cmdBuffer->endEncoding();
 
         // Per-cascade indirect draw args are consumed by drawIndexedIndirect below.
-        context.cmd->transitionBuffer(rhi::BufferBarrierDesc{
-            .nativeBuffer = indirectBuffer,
-            .srcStage     = rhi::PipelineStage::Compute,
-            .dstStage     = rhi::PipelineStage::DrawIndirect,
-            .srcAccess    = rhi::ResourceAccess::write,
-            .dstAccess    = rhi::ResourceAccess::read,
-        });
+        context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput, rhi::HazardFlags::drawArguments);
       }
     }
 
@@ -213,20 +208,9 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     context.cmdBuffer->endEncoding();
   }
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(csm.getCascadeImage()),
-      .aspect      = rhi::TextureAspect::depth,
-      .srcStage    = rhi::PipelineStage::FragmentShader,
-      .dstStage    = rhi::PipelineStage::FragmentShader,
-      .srcAccess   = rhi::ResourceAccess::write,
-      .dstAccess   = rhi::ResourceAccess::read,
-      .oldState    = rhi::ResourceState::DepthStencilAttachment,
-      .newState    = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  transitionCascade(rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
 
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo

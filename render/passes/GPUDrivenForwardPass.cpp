@@ -3,6 +3,7 @@
 #include "../GPUDrivenRenderer.h"
 #include "../RenderDevice.h"
 #include "../MeshPool.h"
+#include "../PassExecutor.h"
 #include "../ClipSpaceConvention.h"
 #include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
@@ -48,37 +49,43 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenForwardPass::getDependenc
 
 void GPUDrivenForwardPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr)
+  if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
+     || context.cmdBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenForwardPass");
+  context.cmdBuffer->beginEvent("GPUDrivenForwardPass");
+
+  const auto transition = [&](uint64_t nativeImage, rhi::TextureAspect aspect, rhi::ResourceState before,
+                              rhi::ResourceState after) {
+    const rhi::TextureBarrier barrier{
+        .texture = context.executor->resolveBarrierTexture(nativeImage),
+        .before  = before,
+        .after   = after,
+        .range   = {.aspect = aspect, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
+    };
+    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+  };
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || sceneView->sceneDepthView.isNull() || sceneView->sceneColorHdrView.isNull())
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
+  const auto restoreColorForSampling = [&]() {
+    transition(reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage), rhi::TextureAspect::color,
+               rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
+  };
   bool depthInAttachmentLayout = false;
   const auto restoreDepthForSampling = [&]() {
     if(!depthInAttachmentLayout)
     {
       return;
     }
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-        .aspect = sceneDepthAspect(sceneView->sceneDepthFormat),
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::read,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::DepthStencilAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    transition(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
+               rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
     depthInAttachmentLayout = false;
   };
 
@@ -87,7 +94,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const rhi::Extent2D renderExtent = {vkExtent.width, vkExtent.height};
   if(outputImageView.isNull() || renderExtent.width == 0 || renderExtent.height == 0)
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -97,22 +104,12 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const uint64_t countBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
   if(objectCount == 0 || indirectBufferHandle == 0 || countBufferHandle == 0)
   {
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
+  transition(reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage), rhi::TextureAspect::color,
+             rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
 
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -130,56 +127,24 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
       .clearValue = {0.0f, 0},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneDepthHandle.index, kPassSceneDepthHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneDepthImage),
-      .aspect = sceneDepthAspect(sceneView->sceneDepthFormat),
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::DepthStencilAttachment,
-      .isSwapchain = false,
-  });
+  transition(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
+             rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
   depthInAttachmentLayout = true;
 
   const PipelineHandle forwardPipeline = m_renderer->getForwardMDIPipelineHandle();
   if(forwardPipeline.isNull())
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    restoreColorForSampling();
     restoreDepthForSampling();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
   if(!context.cameraAllocValid)
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    restoreColorForSampling();
     restoreDepthForSampling();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -189,40 +154,18 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const BindGroupHandle drawBindGroupHandle = m_renderer->getMDIDrawBindGroup(context.frameIndex);
   if(drawBindGroupHandle.isNull())
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    restoreColorForSampling();
     restoreDepthForSampling();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
   const uint32_t transparentCapacity = static_cast<uint32_t>(m_renderer->getTransparentDrawIndices().size());
   if(transparentCapacity == 0u)
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    restoreColorForSampling();
     restoreDepthForSampling();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -241,20 +184,9 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   m_renderer->recordForwardVisibilityPatch(transparentPatched, transparentCapacity, totalPersistentCapacity);
   if(!transparentPatched)
   {
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
+    restoreColorForSampling();
     restoreDepthForSampling();
-    context.cmd->endEvent();
+    context.cmdBuffer->endEvent();
     return;
   }
 
@@ -307,20 +239,9 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
     if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
     {
       context.cmdBuffer->endEncoding();
-      context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-          .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-          .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-          .aspect = rhi::TextureAspect::color,
-          .srcStage = rhi::PipelineStage::FragmentShader,
-          .dstStage = rhi::PipelineStage::FragmentShader,
-          .srcAccess = rhi::ResourceAccess::write,
-          .dstAccess = rhi::ResourceAccess::read,
-          .oldState = rhi::ResourceState::ColorAttachment,
-          .newState = rhi::ResourceState::General,
-          .isSwapchain = false,
-      });
+      restoreColorForSampling();
       restoreDepthForSampling();
-      context.cmd->endEvent();
+      context.cmdBuffer->endEvent();
       return;
     }
     const uint64_t vertexOffset = 0;
@@ -341,20 +262,9 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   }
 
   context.cmdBuffer->endEncoding();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassSceneColorHdrHandle.index, kPassSceneColorHdrHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->sceneColorHdrImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
+  restoreColorForSampling();
   restoreDepthForSampling();
-  context.cmd->endEvent();
+  context.cmdBuffer->endEvent();
 }
 
 }  // namespace demo
