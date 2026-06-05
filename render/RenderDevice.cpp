@@ -1209,18 +1209,12 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     m_device.gpuCullingPipelineLayout.reset();
   }
   m_device.gpuCullingBindGroups.clear();
-  if(m_device.shadowCullingPipelineLayout != VK_NULL_HANDLE)
+  if(m_device.shadowCullingPipelineLayout)
   {
-    vkDestroyPipelineLayout(device, m_device.shadowCullingPipelineLayout, nullptr);
-    m_device.shadowCullingPipelineLayout = VK_NULL_HANDLE;
+    m_device.shadowCullingPipelineLayout->deinit();
+    m_device.shadowCullingPipelineLayout.reset();
   }
-  m_device.shadowCullingDescriptorSets.clear();
   m_device.shadowCullingBindGroups.clear();
-  if(m_device.shadowCullingSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.shadowCullingSetLayout, nullptr);
-    m_device.shadowCullingSetLayout = VK_NULL_HANDLE;
-  }
   if(m_device.lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.lightCoarseCullingPipelineLayout, nullptr);
@@ -1609,16 +1603,16 @@ PipelineHandle RenderDevice::getGPUCullingPipelineHandle() const
 
 uint64_t RenderDevice::getShadowCullingPipelineLayout() const
 {
-  return reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout);
+  return m_device.shadowCullingPipelineLayout ? m_device.shadowCullingPipelineLayout->getNativeHandle() : 0;
 }
 
 uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
-  if(frameIndex >= m_device.shadowCullingDescriptorSets.size())
+  if(frameIndex >= m_device.shadowCullingBindGroups.size())
   {
     return 0;
   }
-  return reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]);
+  return m_device.resourceTable.resolveArgumentTable(m_device.shadowCullingBindGroups[frameIndex]);
 }
 
 uint64_t RenderDevice::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
@@ -2780,6 +2774,7 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
   frameUserData.shadowCullingMeshCapacity = requiredCapacity;
   frameUserData.shadowCullingScratchObjects.resize(requiredCapacity);
   frameUserData.shadowCullingScratchDrawData.resize(requiredCapacity);
+  rebindFrameBufferHandle(frameUserData.shadowCullingObjectBufferRHI, frameUserData.shadowCullingObjectBuffer);
   rebindFrameBufferHandle(frameUserData.shadowCullingIndirectBufferRHI, frameUserData.shadowCullingIndirectBuffer);
   rebindFrameBufferHandle(frameUserData.shadowCullingDrawDataBufferRHI, frameUserData.shadowCullingDrawDataBuffer);
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
@@ -2789,44 +2784,24 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
 
 void RenderDevice::updateShadowCullingDescriptorSet(uint32_t frameIndex)
 {
-  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingDescriptorSets.size()
-     || m_device.shadowCullingDescriptorSets[frameIndex] == VK_NULL_HANDLE)
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingBindGroups.size()
+     || m_device.shadowCullingBindGroups[frameIndex].isNull())
   {
     return;
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  if(frameUserData.shadowCullingObjectBuffer.buffer == VK_NULL_HANDLE
-     || frameUserData.shadowCullingIndirectBuffer.buffer == VK_NULL_HANDLE)
+  if(frameUserData.shadowCullingObjectBufferRHI.isNull() || frameUserData.shadowCullingIndirectBufferRHI.isNull())
   {
     return;
   }
 
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const std::array<VkDescriptorBufferInfo, 2> bufferInfos{{
-      VkDescriptorBufferInfo{frameUserData.shadowCullingObjectBuffer.buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameUserData.shadowCullingIndirectBuffer.buffer, 0, VK_WHOLE_SIZE},
+  const std::array<rhi::ArgumentWrite, 2> writes{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.shadowCullingObjectBufferRHI},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.shadowCullingIndirectBufferRHI},
   }};
-
-  const std::array<VkWriteDescriptorSet, 2> writes{{
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.shadowCullingDescriptorSets[frameIndex],
-          .dstBinding      = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[0],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.shadowCullingDescriptorSets[frameIndex],
-          .dstBinding      = 1,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[1],
-      },
-  }};
-  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  m_device.device->updateArgumentTable(m_device.shadowCullingBindGroups[frameIndex],
+                                       static_cast<uint32_t>(writes.size()), writes.data());
 }
 
 void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
@@ -3691,51 +3666,47 @@ void RenderDevice::createShadowCullingResources()
   const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
-  const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-  }};
-
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
+  // Wave 9 (shadowCulling RHI migration): the 2-binding descriptor layout is an RHI
+  // ArgumentLayout and each per-frame set an ArgumentTable; the pipeline layout is an RHI
+  // VulkanPipelineLayout carrying the ShadowCullPushConstants range. Isomorphic to gpuCulling.
+  const std::vector<rhi::BindTableLayoutEntry> layoutEntries{
+      rhi::BindTableLayoutEntry{.logicalIndex = 0, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+      rhi::BindTableLayoutEntry{.logicalIndex = 1, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
   };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.shadowCullingSetLayout));
-  DBG_VK_NAME(m_device.shadowCullingSetLayout);
+  const rhi::ArgumentLayoutHandle shadowLayout = createArgumentLayoutFromEntries(layoutEntries, "shadow-culling");
+  const VkDescriptorSetLayout     setLayout =
+      reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(shadowLayout)));
 
-  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.shadowCullingSetLayout);
-  m_device.shadowCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_device.descriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts        = setLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.shadowCullingDescriptorSets.data()));
-
-  // Phase 6: adopt the shadow-culling sets for the CSM shadow pass compute step.
   m_device.shadowCullingBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.shadowCullingBindGroups[frameIndex] =
-        registerExternalBindGroup(reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]), "shadow-culling");
+    m_device.shadowCullingBindGroups[frameIndex] = createBindGroup(BindGroupDesc{
+        .slot                = BindGroupSetSlot::shaderSpecific,
+        .layout              = shadowLayout,
+        .table               = m_device.device->createArgumentTable(shadowLayout),
+        .primaryLogicalIndex = 0,
+        .debugName           = "shadow-culling",
+    });
   }
 
-  const VkPushConstantRange pushConstantRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset     = 0,
-      .size       = sizeof(shaderio::ShadowCullPushConstants),
+  rhi::PipelineLayoutDesc shadowLayoutDesc{};
+  shadowLayoutDesc.debugName = "shadow-culling";
+  shadowLayoutDesc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{
+      .stages = rhi::ShaderStage::compute,
+      .offset = 0,
+      .size   = sizeof(shaderio::ShadowCullPushConstants),
+  });
+  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> layoutMappings{{
+      rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(setLayout)),
+  }};
+  const rhi::vulkan::VulkanPipelineLayoutLowering layoutLowering{
+      .setLayouts     = layoutMappings.data(),
+      .setLayoutCount = static_cast<uint32_t>(layoutMappings.size()),
   };
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_device.shadowCullingSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &pushConstantRange,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.shadowCullingPipelineLayout));
-  DBG_VK_NAME(m_device.shadowCullingPipelineLayout);
+  auto shadowPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+  shadowPipelineLayout->init(static_cast<void*>(nativeDevice), shadowLayoutDesc, layoutLowering);
+  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(shadowPipelineLayout->getNativeHandle()));
+  m_device.shadowCullingPipelineLayout = std::move(shadowPipelineLayout);
 
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
@@ -7164,7 +7135,7 @@ void RenderDevice::createGPUCullingPipeline()
 
 void RenderDevice::createShadowCullingPipeline()
 {
-  if(m_device.shadowCullingPipelineLayout == VK_NULL_HANDLE)
+  if(!m_device.shadowCullingPipelineLayout)
   {
     return;
   }
@@ -7175,24 +7146,29 @@ void RenderDevice::createShadowCullingPipeline()
       utils::createShaderModule(nativeDevice, {shader_shadow_culling_slang, std::size(shader_shadow_culling_slang)});
   DBG_VK_NAME(shaderModule);
 
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "shadowCullingMain",
+  const rhi::ComputePipelineDesc computeDesc{
+      .layout      = m_device.shadowCullingPipelineLayout.get(),
+      .shaderStage =
+          {
+              .stage        = rhi::ShaderStage::compute,
+              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .entryPoint   = "shadowCullingMain",
+          },
   };
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStage,
-      .layout = m_device.shadowCullingPipelineLayout,
+  const rhi::vulkan::ComputePipelineCreateInfo createInfo{
+      .key =
+          {
+              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::compute,
+              .specializationVariant = 14,
+          },
+      .desc          = computeDesc,
+      .pipelineFlags = 0,
   };
-
-  VkPipeline pipeline = VK_NULL_HANDLE;
-  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+  const VkPipeline pipeline = rhi::vulkan::createComputePipeline(nativeDevice, createInfo);
   DBG_VK_NAME(pipeline);
   m_shadowCullingPipeline =
       registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 14,
-                       reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout));
+                       m_device.shadowCullingPipelineLayout->getNativeHandle());
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif

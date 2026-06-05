@@ -487,10 +487,8 @@ private:
     VkPipelineLayout                           postProcessPipelineLayout{nullptr};
     std::vector<BindGroupHandle>               gpuCullingBindGroups;
     std::unique_ptr<rhi::PipelineLayout>       gpuCullingPipelineLayout;
-    VkDescriptorSetLayout                      shadowCullingSetLayout{nullptr};
-    std::vector<VkDescriptorSet>               shadowCullingDescriptorSets;
     std::vector<BindGroupHandle>               shadowCullingBindGroups;
-    VkPipelineLayout                           shadowCullingPipelineLayout{nullptr};
+    std::unique_ptr<rhi::PipelineLayout>       shadowCullingPipelineLayout;
     VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
     VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
@@ -584,6 +582,7 @@ private:
       rhi::BufferHandle  externalGPUCullingObjectBufferRHI{};
       rhi::BufferHandle  externalGPUCullingMeshletBufferRHI{};
       rhi::BufferHandle  externalGPUCullingSceneObjectBufferRHI{};
+      rhi::BufferHandle  shadowCullingObjectBufferRHI{};
       rhi::BufferHandle  shadowCullingIndirectBufferRHI{};
       rhi::BufferHandle  gpuDrivenPersistentIndirectStreamBufferRHI{};
       // Wave 8: stable RHI handles mirroring the per-frame UBO/SSBO buffers consumed by
