@@ -49,10 +49,10 @@ class RenderDevice
 public:
   static constexpr uint32_t kDemoMaterialSlotCount = 2;
 
-  // Register a bind group that adopts caller-owned BindTable/BindTableLayout
-  // objects (e.g. wrapping an externally-managed descriptor set). The caller must
-  // keep those objects alive for the lifetime of the returned handle.
-  BindGroupHandle registerExternalBindGroup(BindGroupDesc desc) { return createBindGroup(std::move(desc)); }
+  // Register a bind group that adopts an externally-managed native VkDescriptorSet
+  // (Wave 8: registered as a non-owned ArgumentTable, so the device argument pool
+  // never frees it). The caller keeps the native set alive for the handle's lifetime.
+  BindGroupHandle registerExternalBindGroup(uint64_t nativeDescriptorSet, const char* debugName);
 
   RenderDevice() = default;
 
@@ -257,14 +257,12 @@ public:
   void uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadDepthMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
 
-  // BindGroup creation (new RHI interface)
-  rhi::BindGroupLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
-  rhi::BindGroupHandle createBindGroup(const rhi::BindGroupDesc& desc);
-  void destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle);
-  void destroyBindGroup(rhi::BindGroupHandle handle);
-  // Native VkDescriptorSetLayout (as uint64) backing a BindGroupLayoutHandle, e.g. to
+  // BindGroup creation (Wave 8: ArgumentLayout/ArgumentTable handles; a BindGroupHandle IS an ArgumentTableHandle)
+  rhi::ArgumentLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
+  void                      destroyBindGroup(BindGroupHandle handle);
+  // Native VkDescriptorSetLayout (as uint64) backing an ArgumentLayoutHandle, e.g. to
   // build a VkPipelineLayout that is compatible with temporary bind groups of this layout.
-  [[nodiscard]] uint64_t getBindGroupLayoutHandleNative(rhi::BindGroupLayoutHandle handle) const;
+  [[nodiscard]] uint64_t    getBindGroupLayoutHandleNative(rhi::ArgumentLayoutHandle handle) const;
 
   // --- Texture views as RHI handles (the only thing business/pass code should hold) ---
   // createTextureView does vkCreateImageView from the desc and registers an owned view;
@@ -280,10 +278,9 @@ public:
   // descriptor set from the given layout, writes it, and returns a handle valid only
   // for the current frame — it is destroyed automatically when this frame index is
   // recorded again (after its fence). Callers must NOT cache the handle across frames.
-  BindGroupHandle createTemporaryBindGroup(rhi::BindGroupLayoutHandle layout,
-                                           const rhi::BindTableWrite* writes, uint32_t writeCount,
-                                           uint32_t maxLogicalEntries, BindGroupSetSlot slot,
-                                           rhi::ResourceIndex primaryLogicalIndex, const char* debugName);
+  BindGroupHandle createTemporaryBindGroup(rhi::ArgumentLayoutHandle layout,
+                                           const rhi::ArgumentWrite* writes, uint32_t writeCount,
+                                           BindGroupSetSlot slot, const char* debugName);
 
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
@@ -307,7 +304,9 @@ public:
   rhi::TextureViewHandle getCurrentSwapchainView() const;
   rhi::TextureViewHandle getGBufferView(uint32_t index) const;
   rhi::TextureViewHandle getDepthView() const;
-  rhi::BindGroupHandle getGlobalBindlessGroup() const;
+  BindGroupHandle getGlobalBindlessGroup() const;
+  // Wave 8: current frame's transient allocator buffer as an RHI handle (for ArgumentWrites).
+  [[nodiscard]] rhi::BufferHandle getCurrentTransientBufferHandle() const;
 
   void updateBindlessTexture(uint32_t index, TextureHandle textureHandle);
   void invalidateBindlessTexture(uint32_t index);
@@ -591,6 +590,16 @@ private:
       rhi::BufferHandle  gpuCullingDrawCountBufferRHI{};
       rhi::BufferHandle  shadowCullingIndirectBufferRHI{};
       rhi::BufferHandle  gpuDrivenPersistentIndirectStreamBufferRHI{};
+      // Wave 8: stable RHI handles mirroring the per-frame UBO/SSBO buffers consumed by
+      // camera/draw/scene/mdi bind groups (Option B rebind on realloc). The transient
+      // allocator buffer is registered once (its native VkBuffer is stable after init).
+      rhi::BufferHandle  transientBufferRHI{};
+      rhi::BufferHandle  lightingBufferRHI{};
+      rhi::BufferHandle  lightCullingBufferRHI{};
+      rhi::BufferHandle  mdiDrawDataBufferRHI{};
+      rhi::BufferHandle  gbufferMdiDrawDataBufferRHI{};
+      rhi::BufferHandle  depthMdiDrawDataBufferRHI{};
+      rhi::BufferHandle  shadowCullingDrawDataBufferRHI{};
       uint32_t           shadowCullingMeshCapacity{0};
       uint32_t           mdiDrawCapacity{0};
       uint32_t           gbufferMdiDrawCapacity{0};
@@ -718,10 +727,13 @@ private:
 
     struct TextureHotData
     {
-      TextureRuntimeKind runtimeKind{TextureRuntimeKind::materialSampled};
-      uint32_t           viewportAttachmentIndex{0};
-      VkImageView        sampledImageView{VK_NULL_HANDLE};
-      VkImageLayout      sampledImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
+      TextureRuntimeKind     runtimeKind{TextureRuntimeKind::materialSampled};
+      uint32_t               viewportAttachmentIndex{0};
+      VkImageView            sampledImageView{VK_NULL_HANDLE};
+      VkImageLayout          sampledImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
+      // Wave 8: adopted RHI view handle mirroring sampledImageView, for ArgumentWrite-based
+      // material (combinedImageSampler) bindless updates. Released via removeTextureView.
+      rhi::TextureViewHandle sampledViewHandle{};
     };
 
     struct TextureColdData
@@ -768,15 +780,20 @@ private:
 
     HandlePool<TextureHandle, TextureRecord>       texturePool;
     HandlePool<MaterialHandle, MaterialRecord>     materialPool;
-    HandlePool<BindGroupHandle, BindGroupResource> bindGroupPool;
-    // New RHI interface handle pools
-    HandlePool<rhi::BindGroupLayoutHandle, std::unique_ptr<rhi::BindTableLayout>> bindGroupLayoutPool;
-    HandlePool<rhi::BindGroupHandle, std::unique_ptr<rhi::BindGroup>> bindGroupRhiPool;
+    // Wave 8: a bind group is an ArgumentTable. Track all device-created tables and the
+    // layouts they were built from so destroyBindGroups() can release them. Adopted
+    // external tables (owned=false) are tracked here too and unregistered on teardown
+    // (their native descriptor set is freed by whoever owns the external pool).
+    std::vector<rhi::ArgumentTableHandle>  ownedArgumentTables;
+    std::vector<rhi::ArgumentLayoutHandle> ownedArgumentLayouts;
     MaterialHandle                                 sampleMaterials[kDemoMaterialSlotCount]{};
     TextureHandle                                  viewportTextureHandle{};
     BindGroupHandle                                materialBindGroup{};
+    rhi::SamplerHandle                             materialSamplerHandle{};  // Wave 8: shared sampler for combinedImageSampler ArgumentWrite
     std::vector<BindGroupHandle>                   materialBindGroups;
-    std::vector<rhi::DescriptorImageInfo>          materialDescriptorImageInfos;
+    // Wave 8: per-slot adopted view handles for the bindless material array. The shared
+    // sampler is materialSamplerHandle; writes go through combinedImageSampler ArgumentWrites.
+    std::vector<rhi::TextureViewHandle>            materialDescriptorViews;
     std::vector<uint8_t>                           materialDescriptorValid;
     std::vector<uint64_t>                          materialBindGroupGenerations;
     uint64_t                                       materialDescriptorGeneration{0};
@@ -848,18 +865,21 @@ private:
   void                 updateGBufferTextureDescriptorSet();
   void                 destroyBindGroups();
   utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
-  rhi::ResourceIndex   getBindGroupPrimaryLogicalIndex(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   const MaterialResources::MaterialRecord*  tryGetMaterial(MaterialHandle handle) const;
   const MaterialResources::TextureHotData*  tryGetTextureHot(TextureHandle handle) const;
   const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;
-  BindGroupHandle                           createBindGroup(BindGroupDesc desc);
-  void           updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const;
-  // destroyBindGroup is provided by public RHI interface (line 145)
+  // Wave 8: build an ArgumentLayout + ArgumentTable from layout entries, track them for
+  // teardown, and return the table handle (which IS the BindGroupHandle).
+  BindGroupHandle createBindGroup(BindGroupDesc desc);
+  void            updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const;
+  // Converts legacy BindTableLayoutEntry list into an owned ArgumentLayout handle.
+  rhi::ArgumentLayoutHandle createArgumentLayoutFromEntries(const std::vector<rhi::BindTableLayoutEntry>& entries,
+                                                            const char* debugName);
+  // destroyBindGroup is provided by public RHI interface
   PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
                                   uint64_t nativeLayout = 0, bool owned = true);
   void           destroyPipelines();
   const rhi::vulkan::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;
-  const BindGroupResource* tryGetBindGroup(BindGroupHandle handle) const;
   uint64_t                 getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
   static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);

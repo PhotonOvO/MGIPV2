@@ -12,7 +12,10 @@ using BufferHandle    = rhi::BufferHandle;
 using TextureHandle   = rhi::TextureHandle;
 using PipelineHandle  = rhi::PipelineHandle;
 using SamplerHandle   = rhi::SamplerHandle;
-using BindGroupHandle = rhi::BindGroupHandle;
+// Wave 8: a "bind group" is now an ArgumentTable handle. This alias keeps the existing
+// call sites compiling while the underlying object is the new ArgumentTable, resolved
+// O(1) via VulkanResourceTable (no bind-group hashmap bridge).
+using BindGroupHandle = rhi::ArgumentTableHandle;
 
 // Keep application-specific handles that don't exist in RHI
 // Using the original macro pattern
@@ -40,6 +43,6 @@ inline constexpr rhi::BufferHandle   kNullBufferHandle{};
 inline constexpr rhi::TextureHandle  kNullTextureHandle{};
 inline constexpr rhi::PipelineHandle kNullPipelineHandle{};
 inline constexpr rhi::SamplerHandle  kNullSamplerHandle{};
-inline constexpr rhi::BindGroupHandle kNullBindGroupHandle{};
+inline constexpr rhi::ArgumentTableHandle kNullBindGroupHandle{};
 
 }  // namespace demo

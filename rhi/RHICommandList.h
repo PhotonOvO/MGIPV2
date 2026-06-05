@@ -134,10 +134,10 @@ public:
                              BindTableHandle   bindTable,
                              const uint32_t*   dynamicOffsets,
                              uint32_t          dynamicOffsetCount)                = 0;
-  virtual void bindBindGroup(uint32_t        slot,
-                             BindGroupHandle bindGroup,
-                             const uint32_t* dynamicOffsets,
-                             uint32_t        dynamicOffsetCount)                  = 0;
+  virtual void bindBindGroup(uint32_t            slot,
+                             ArgumentTableHandle bindGroup,
+                             const uint32_t*     dynamicOffsets,
+                             uint32_t            dynamicOffsetCount)              = 0;
   // Bind vertex buffers with opaque handles (can store native pointers)
   virtual void bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,
                                  const uint64_t* offsets, uint32_t bufferCount) = 0;

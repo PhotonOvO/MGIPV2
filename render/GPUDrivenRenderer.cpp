@@ -2342,14 +2342,8 @@ void GPUDrivenRenderer::initLightingResources()
   m_lightingInputBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    BindGroupDesc inputBindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightingSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightingDescriptorSets[i])),
-        .primaryLogicalIndex = shaderio::LBindTextures,
-        .debugName           = "gpu-driven-lighting-input",
-    };
-    m_lightingInputBindGroups[i] = m_renderer.registerExternalBindGroup(inputBindGroupDesc);
+    m_lightingInputBindGroups[i] =
+        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingDescriptorSets[i]), "gpu-driven-lighting-input");
   }
 
   std::vector<VkDescriptorSetLayout> cullingLayouts(frameCount, m_lightCoarseCullingSetLayout);
@@ -2367,13 +2361,8 @@ void GPUDrivenRenderer::initLightingResources()
   m_lightCoarseCullingBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_lightCoarseCullingBindGroups[i] = m_renderer.registerExternalBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightCoarseCullingSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[i])),
-        .primaryLogicalIndex = 0,
-        .debugName           = "gpu-driven-light-coarse-culling",
-    });
+    m_lightCoarseCullingBindGroups[i] = m_renderer.registerExternalBindGroup(
+        reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[i]), "gpu-driven-light-coarse-culling");
   }
 
   std::vector<VkDescriptorSetLayout> sceneLayouts(frameCount, m_lightingSceneSetLayout);
@@ -2393,14 +2382,8 @@ void GPUDrivenRenderer::initLightingResources()
   m_lightingSceneBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    BindGroupDesc sceneBindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_lightingSceneSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[i])),
-        .primaryLogicalIndex = shaderio::LBindCamera,
-        .debugName           = "gpu-driven-lighting-scene",
-    };
-    m_lightingSceneBindGroups[i] = m_renderer.registerExternalBindGroup(sceneBindGroupDesc);
+    m_lightingSceneBindGroups[i] =
+        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(m_lightingSceneDescriptorSets[i]), "gpu-driven-lighting-scene");
   }
 
   const VkPipelineLayoutCreateInfo cullingPipelineLayoutInfo{
@@ -2743,14 +2726,8 @@ void GPUDrivenRenderer::initPhase7Resources()
   // images / rewrites contents), so a single adoption per frame is stable for the
   // app lifetime; the bind-group pool frees the adapters at device shutdown. (SSR
   // instead builds a per-frame temporary bind group in acquireSSRTempBindGroup.)
-  const auto adoptComputeSet = [&](VkDescriptorSet set, VkDescriptorSetLayout setLayout, const char* name) {
-    return m_renderer.registerExternalBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(setLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(set)),
-        .primaryLogicalIndex = 0,
-        .debugName           = name,
-    });
+  const auto adoptComputeSet = [&](VkDescriptorSet set, VkDescriptorSetLayout /*setLayout*/, const char* name) {
+    return m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(set), name);
   };
   m_aoBindGroups.assign(frameCount, BindGroupHandle{});
   m_aoDenoiseBindGroups.assign(frameCount, BindGroupHandle{});
@@ -2780,6 +2757,11 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
   };
   destroyImage(m_aoRaw);
   destroyImage(m_aoDenoised);
+  if(!m_ssrRawViewHandle.isNull())
+  {
+    m_renderer.destroyTextureView(m_ssrRawViewHandle);
+    m_ssrRawViewHandle = {};
+  }
   destroyImage(m_ssrRaw);
   destroyImage(m_shadowAtlas);
 
@@ -2849,6 +2831,11 @@ void GPUDrivenRenderer::resizePhase7Resources()
   };
   destroyOnlyImage(m_aoRaw);
   destroyOnlyImage(m_aoDenoised);
+  if(!m_ssrRawViewHandle.isNull())
+  {
+    m_renderer.destroyTextureView(m_ssrRawViewHandle);  // adopted view: unregister only, native freed below
+    m_ssrRawViewHandle = {};
+  }
   destroyOnlyImage(m_ssrRaw);
   destroyOnlyImage(m_shadowAtlas);
   m_phase7HalfExtent = halfExtent;
@@ -2887,6 +2874,7 @@ void GPUDrivenRenderer::resizePhase7Resources()
   m_aoRaw = createImageResource(kGPUDrivenAOFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
   m_aoDenoised = createImageResource(kGPUDrivenAOFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
   m_ssrRaw = createImageResource(kGPUDrivenSSRFormat, halfExtent, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+  m_ssrRawViewHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(m_ssrRaw.view));
   m_shadowAtlas = createImageResource(kGPUDrivenShadowAtlasFormat,
                                       m_shadowAtlasExtent,
                                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -3049,30 +3037,27 @@ BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer
                                       : sceneView.sceneColorHdrView;
   if(historyView.isNull() || sceneView.sceneDepthView.isNull()
      || sceneView.gbufferViews[0].isNull() || sceneView.gbufferViews[1].isNull()
-     || m_ssrRaw.view == VK_NULL_HANDLE)
+     || m_ssrRawViewHandle.isNull())
   {
     return BindGroupHandle{};
   }
 
-  const uint32_t generalLayout = static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL);
-  const std::array<rhi::DescriptorImageInfo, 5> imageInfos{{
-      {0, m_renderer.resolveTextureViewNative(historyView), generalLayout},
-      {0, m_renderer.resolveTextureViewNative(sceneView.sceneDepthView), generalLayout},
-      {0, m_renderer.resolveTextureViewNative(sceneView.gbufferViews[1]), generalLayout},
-      {0, m_renderer.resolveTextureViewNative(sceneView.gbufferViews[0]), generalLayout},
-      {0, reinterpret_cast<uint64_t>(m_ssrRaw.view), generalLayout},
+  const rhi::BufferHandle cameraBufferHandle = m_renderer.getCurrentTransientBufferHandle();
+  if(cameraBufferHandle.isNull())
+  {
+    return BindGroupHandle{};
+  }
+
+  const std::array<rhi::ArgumentWrite, 6> writes{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = historyView},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView},
+      rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[1]},
+      rhi::ArgumentWrite{.binding = 3, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[0]},
+      rhi::ArgumentWrite{.binding = 4, .type = rhi::ArgumentType::storageTexture, .textureView = m_ssrRawViewHandle},
+      rhi::ArgumentWrite{.binding = 5, .type = rhi::ArgumentType::uniformBuffer, .buffer = cameraBufferHandle, .offset = cameraOffset, .size = sizeof(shaderio::CameraUniforms)},
   }};
-  const rhi::DescriptorBufferInfo cameraInfo{cameraBuffer, cameraOffset, sizeof(shaderio::CameraUniforms)};
-  const std::array<rhi::BindTableWrite, 6> writes{{
-      {.dstIndex = 0, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[0]},
-      {.dstIndex = 1, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[1]},
-      {.dstIndex = 2, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[2]},
-      {.dstIndex = 3, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = 1, .pImageInfo = &imageInfos[3]},
-      {.dstIndex = 4, .resourceType = rhi::BindlessResourceType::storageTexture, .descriptorCount = 1, .pImageInfo = &imageInfos[4]},
-      {.dstIndex = 5, .resourceType = rhi::BindlessResourceType::uniformBuffer, .descriptorCount = 1, .pBufferInfo = &cameraInfo},
-  }};
-  return m_renderer.createTemporaryBindGroup(m_ssrLayoutHandle, writes.data(), static_cast<uint32_t>(writes.size()), 6u,
-                                             BindGroupSetSlot::shaderSpecific, 0, "gpu-driven-ssr-temp");
+  return m_renderer.createTemporaryBindGroup(m_ssrLayoutHandle, writes.data(), static_cast<uint32_t>(writes.size()),
+                                             BindGroupSetSlot::shaderSpecific, "gpu-driven-ssr-temp");
 }
 
 void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)
@@ -3886,13 +3871,8 @@ void GPUDrivenRenderer::initVisibilitySortResources()
   {
     m_visibilitySortFrames[frameIndex].descriptorSet = descriptorSets[frameIndex];
     // Phase 6: adopt the sort set so the visibility-sort pass binds via cmd->bindBindGroup.
-    m_visibilitySortFrames[frameIndex].bindGroup = m_renderer.registerExternalBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_visibilitySortSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(descriptorSets[frameIndex])),
-        .primaryLogicalIndex = 0,
-        .debugName           = "gpu-driven-visibility-sort",
-    });
+    m_visibilitySortFrames[frameIndex].bindGroup =
+        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex]), "gpu-driven-visibility-sort");
   }
 }
 

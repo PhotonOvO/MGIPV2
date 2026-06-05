@@ -1146,6 +1146,7 @@ namespace {
     case ArgumentType::sampledTexture:        return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     case ArgumentType::storageTexture:        return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     case ArgumentType::sampler:               return VK_DESCRIPTOR_TYPE_SAMPLER;
+    case ArgumentType::combinedImageSampler:  return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     case ArgumentType::accelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     default:                                  return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   }
@@ -1156,6 +1157,7 @@ ArgumentLayoutHandle VulkanDevice::createArgumentLayout(const ArgumentLayoutDesc
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentLayout");
   std::vector<VkDescriptorSetLayoutBinding> bindings(desc.bindingCount);
+  std::vector<uint32_t>                     dynamicBindings;
   for(uint32_t i = 0; i < desc.bindingCount; ++i)
   {
     const ArgumentBinding& b = desc.bindings[i];
@@ -1165,6 +1167,10 @@ ArgumentLayoutHandle VulkanDevice::createArgumentLayout(const ArgumentLayoutDesc
                      .descriptorCount = b.arrayCount,
                      .stageFlags      = toVkShaderStageFlags(b.visibility),
     };
+    if(b.dynamicOffset)
+    {
+      dynamicBindings.push_back(b.binding);
+    }
   }
   const VkDescriptorSetLayoutCreateInfo info{
       .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1173,7 +1179,7 @@ ArgumentLayoutHandle VulkanDevice::createArgumentLayout(const ArgumentLayoutDesc
   };
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
   VK_CHECK(vkCreateDescriptorSetLayout(m_device, &info, nullptr, &layout));
-  return m_resourceTable->registerArgumentLayout(reinterpret_cast<uint64_t>(layout));
+  return m_resourceTable->registerArgumentLayout(reinterpret_cast<uint64_t>(layout), std::move(dynamicBindings));
 }
 
 void VulkanDevice::destroyArgumentLayout(ArgumentLayoutHandle handle)
@@ -1194,7 +1200,7 @@ ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layou
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentTable");
   if(m_argumentPool == VK_NULL_HANDLE)
   {
-    const std::array<VkDescriptorPoolSize, 7> sizes{{
+    const std::array<VkDescriptorPoolSize, 8> sizes{{
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1024},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
@@ -1202,6 +1208,7 @@ ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layou
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
         {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384},
     }};
     const VkDescriptorPoolCreateInfo poolInfo{
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1224,7 +1231,7 @@ ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layou
   };
   VkDescriptorSet set = VK_NULL_HANDLE;
   VK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &set));
-  return m_resourceTable->registerArgumentTable(reinterpret_cast<uint64_t>(set));
+  return m_resourceTable->registerArgumentTable(reinterpret_cast<uint64_t>(set), layout);
 }
 
 void VulkanDevice::destroyArgumentTable(ArgumentTableHandle handle)
@@ -1234,7 +1241,7 @@ void VulkanDevice::destroyArgumentTable(ArgumentTableHandle handle)
     return;
   }
   const ArgumentTableRecord record = m_resourceTable->removeArgumentTable(handle);
-  if(record.nativeSet != 0 && m_argumentPool != VK_NULL_HANDLE)
+  if(record.owned && record.nativeSet != 0 && m_argumentPool != VK_NULL_HANDLE)
   {
     VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(record.nativeSet));
     vkFreeDescriptorSets(m_device, m_argumentPool, 1, &set);
@@ -1247,12 +1254,30 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
   {
     return;
   }
-  const uint64_t nativeSet = m_resourceTable->resolveArgumentTable(table);
-  if(nativeSet == 0)
+  const ArgumentTableRecord* tableRecord = m_resourceTable->tryGetArgumentTable(table);
+  if(tableRecord == nullptr || tableRecord->nativeSet == 0)
   {
     return;
   }
-  VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(nativeSet));
+  VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(tableRecord->nativeSet));
+
+  // Per-binding dynamic-ness comes from the layout: a write's descriptorType must
+  // match the layout, so dynamic UBO/SSBO bindings need the *_DYNAMIC variant.
+  const ArgumentLayoutRecord* layoutRecord = m_resourceTable->tryGetArgumentLayout(tableRecord->layout);
+  const auto isDynamicBinding = [layoutRecord](uint32_t binding) -> bool {
+    if(layoutRecord == nullptr)
+    {
+      return false;
+    }
+    for(uint32_t dyn : layoutRecord->dynamicBindings)
+    {
+      if(dyn == binding)
+      {
+        return true;
+      }
+    }
+    return false;
+  };
 
   std::vector<VkDescriptorBufferInfo> bufferInfos(writeCount);
   std::vector<VkDescriptorImageInfo>  imageInfos(writeCount);
@@ -1260,7 +1285,7 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
   for(uint32_t i = 0; i < writeCount; ++i)
   {
     const ArgumentWrite& w    = writes[i];
-    const VkDescriptorType type = toVkDescriptorType(w.type, /*dynamicOffset=*/false);
+    const VkDescriptorType type = toVkDescriptorType(w.type, isDynamicBinding(w.binding));
     VkWriteDescriptorSet&  out  = vkWrites[i];
     out = VkWriteDescriptorSet{
         .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1282,6 +1307,14 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
         break;
       case ArgumentType::sampler:
         imageInfos[i]  = VkDescriptorImageInfo{.sampler = reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_resourceTable->resolveSampler(w.sampler)))};
+        out.pImageInfo = &imageInfos[i];
+        break;
+      case ArgumentType::combinedImageSampler:
+        imageInfos[i] = VkDescriptorImageInfo{
+            .sampler     = reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_resourceTable->resolveSampler(w.sampler))),
+            .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
         out.pImageInfo = &imageInfos[i];
         break;
       default:  // buffer types

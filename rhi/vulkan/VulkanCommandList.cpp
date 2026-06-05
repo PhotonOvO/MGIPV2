@@ -521,10 +521,10 @@ void VulkanCommandList::bindBindTable(PipelineBindPoint, uint32_t, BindTableHand
   ensureCommandBuffer(m_commandBuffer);
 }
 
-void VulkanCommandList::bindBindGroup(uint32_t        slot,
-                                      BindGroupHandle bindGroup,
-                                      const uint32_t* dynamicOffsets,
-                                      uint32_t        dynamicOffsetCount)
+void VulkanCommandList::bindBindGroup(uint32_t            slot,
+                                      ArgumentTableHandle bindGroup,
+                                      const uint32_t*     dynamicOffsets,
+                                      uint32_t            dynamicOffsetCount)
 {
   ensureCommandBuffer(m_commandBuffer);
   if(m_resourceTable == nullptr || bindGroup.isNull() || m_currentPipelineLayout == VK_NULL_HANDLE)
@@ -533,7 +533,7 @@ void VulkanCommandList::bindBindGroup(uint32_t        slot,
   }
 
   const VkDescriptorSet descriptorSet =
-      reinterpret_cast<VkDescriptorSet>(m_resourceTable->resolveBindGroupDescriptorSet(bindGroup));
+      reinterpret_cast<VkDescriptorSet>(m_resourceTable->resolveArgumentTable(bindGroup));
   if(descriptorSet == VK_NULL_HANDLE)
   {
     return;

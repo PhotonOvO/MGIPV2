@@ -31,18 +31,15 @@ static_assert(static_cast<uint32_t>(BindGroupSetSlot::shaderSpecific) == 3, "Bin
   return index < kBindGroupSetCount;
 }
 
+// Wave 8: a bind group owns an RHI ArgumentTable (and the ArgumentLayout it was built
+// from). The returned BindGroupHandle *is* the ArgumentTableHandle (see common/Handles.h).
 struct BindGroupDesc
 {
-  BindGroupSetSlot      slot{BindGroupSetSlot::shaderSpecific};
-  rhi::BindTableLayout* layout{nullptr};
-  rhi::BindTable*       table{nullptr};
-  rhi::ResourceIndex    primaryLogicalIndex{rhi::kInvalidResourceIndex};
-  const char*           debugName{"bind-group"};
-};
-
-struct BindGroupResource
-{
-  BindGroupDesc desc{};
+  BindGroupSetSlot          slot{BindGroupSetSlot::shaderSpecific};
+  rhi::ArgumentLayoutHandle layout{};
+  rhi::ArgumentTableHandle  table{};
+  rhi::ResourceIndex        primaryLogicalIndex{rhi::kInvalidResourceIndex};
+  const char*               debugName{"bind-group"};
 };
 
 }  // namespace demo

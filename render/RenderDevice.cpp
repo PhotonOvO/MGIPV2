@@ -1097,6 +1097,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
                 .sampledImageView   = materialImage0.view,
                 .sampledImageLayout = materialImage0.layout,
+                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage0.view)),
             },
         .cold =
             {
@@ -1120,6 +1121,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
                 .sampledImageView   = materialImage1.view,
                 .sampledImageLayout = materialImage1.layout,
+                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage1.view)),
             },
         .cold =
             {
@@ -1287,18 +1289,20 @@ void RenderDevice::shutdown(rhi::Surface& surface)
 
   destroyPipelines();
   // Destroy any owned texture views still registered (adopted/external ones are left to
-  // their owners). At shutdown the table is otherwise dropped without freeing the natives.
+  // their owners). Route through destroyTextureView so each view is both freed and removed
+  // from the registry: later per-subsystem destroyTextureView() calls then hit a generation
+  // mismatch and become safe no-ops instead of double-freeing the same VkImageView.
   {
-    std::vector<VkImageView> ownedViews;
-    m_device.resourceTable.forEachTextureView([&](rhi::TextureViewHandle, const rhi::vulkan::TextureViewRecord& record) {
+    std::vector<rhi::TextureViewHandle> ownedViewHandles;
+    m_device.resourceTable.forEachTextureView([&](rhi::TextureViewHandle handle, const rhi::vulkan::TextureViewRecord& record) {
       if(record.owned && record.nativeView != 0)
       {
-        ownedViews.push_back(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(record.nativeView)));
+        ownedViewHandles.push_back(handle);
       }
     });
-    for(VkImageView view : ownedViews)
+    for(const rhi::TextureViewHandle handle : ownedViewHandles)
     {
-      vkDestroyImageView(device, view, nullptr);
+      m_device.device->destroyTextureView(handle);
     }
   }
   if(m_device.graphicPipelineLayout)
@@ -1366,6 +1370,10 @@ void RenderDevice::shutdown(rhi::Surface& surface)
       [&](TextureHandle handle, const MaterialResources::TextureRecord&) { texturesToDestroy.push_back(handle); });
   for(const TextureHandle handle : texturesToDestroy)
   {
+    if(const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->sampledViewHandle.isNull())
+    {
+      m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
+    }
     const MaterialResources::TextureColdData* textureCold = tryGetTextureCold(handle);
     if(textureCold != nullptr && textureCold->ownedImage.image != VK_NULL_HANDLE)
     {
@@ -1991,6 +1999,17 @@ void RenderDevice::createFrameSubmission(uint32_t numFrames)
     frameUserData.gpuCullingUniformBuffer =
         createBuffer(device, m_device.allocator, sizeof(shaderio::GPUCullingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
                      VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+
+    // Wave 8: mirror the per-frame UBO buffers (and the stable transient allocator
+    // buffer) as RHI BufferHandles for ArgumentWrite-based bind-group updates.
+    rebindFrameBufferHandle(frameUserData.lightingBufferRHI, frameUserData.lightingBuffer);
+    rebindFrameBufferHandle(frameUserData.lightCullingBufferRHI, frameUserData.lightCullingBuffer);
+    {
+      rhi::vulkan::BufferRecord transientRec{};
+      transientRec.nativeBuffer = frameUserData.transientAllocator.getBufferOpaque();
+      transientRec.owned        = false;  // TransientAllocator owns the VMA lifetime; registry mirrors only.
+      frameUserData.transientBufferRHI = m_device.resourceTable.registerBuffer(transientRec);
+    }
   }
 
   m_perFrame.frameCounter = 1;
@@ -2796,6 +2815,7 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
   frameUserData.shadowCullingScratchObjects.resize(requiredCapacity);
   frameUserData.shadowCullingScratchDrawData.resize(requiredCapacity);
   rebindFrameBufferHandle(frameUserData.shadowCullingIndirectBufferRHI, frameUserData.shadowCullingIndirectBuffer);
+  rebindFrameBufferHandle(frameUserData.shadowCullingDrawDataBufferRHI, frameUserData.shadowCullingDrawDataBuffer);
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
   updateShadowCullingDescriptorSet(frameIndex);
   updateShadowCullingDrawDataDescriptorSet(frameIndex);
@@ -2851,22 +2871,23 @@ void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
   }
 
   PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-  VkBuffer drawDataBuffer = frameUserData.shadowCullingDrawDataBuffer.buffer;
-  if(drawDataBuffer == VK_NULL_HANDLE)
+  rhi::BufferHandle drawDataBuffer = frameUserData.shadowCullingDrawDataBufferRHI;
+  if(drawDataBuffer.isNull())
   {
-    drawDataBuffer = reinterpret_cast<VkBuffer>(frameUserData.transientAllocator.getBufferOpaque());
+    drawDataBuffer = frameUserData.transientBufferRHI;
   }
-  if(drawDataBuffer == VK_NULL_HANDLE)
+  if(drawDataBuffer.isNull())
   {
     return;
   }
 
-  const VkDescriptorBufferInfo drawDataBufferInfo{
-      .buffer = drawDataBuffer,
-      .offset = 0,
-      .range  = VK_WHOLE_SIZE,
+  const rhi::ArgumentWrite drawDataWrite{
+      .binding = shaderio::LBindDrawModelMdi,
+      .type    = rhi::ArgumentType::storageBuffer,
+      .buffer  = drawDataBuffer,
+      .offset  = 0,
+      .size    = 0,
   };
-
   for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
   {
     const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
@@ -2874,19 +2895,7 @@ void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
     {
       continue;
     }
-
-    const VkDescriptorSet drawDescriptorSet =
-        reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-    const VkWriteDescriptorSet drawDataWrite{
-        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet          = drawDescriptorSet,
-        .dstBinding      = shaderio::LBindDrawModelMdi,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .pBufferInfo     = &drawDataBufferInfo,
-    };
-    vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+    updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
   }
 }
 
@@ -2913,6 +2922,7 @@ void RenderDevice::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserDa
                    VMA_MEMORY_USAGE_CPU_TO_GPU,
                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.gbufferMdiDrawCapacity = requiredCapacity;
+  rebindFrameBufferHandle(frameUserData.gbufferMdiDrawDataBufferRHI, frameUserData.gbufferMdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
   updateGBufferMdiDrawDataDescriptorSet(frameIndex);
@@ -2941,6 +2951,7 @@ void RenderDevice::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& fra
                    VMA_MEMORY_USAGE_CPU_TO_GPU,
                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.mdiDrawCapacity = requiredCapacity;
+  rebindFrameBufferHandle(frameUserData.mdiDrawDataBufferRHI, frameUserData.mdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
   updateMdiDrawDataDescriptorSet(frameIndex);
@@ -2969,6 +2980,7 @@ void RenderDevice::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData
                    VMA_MEMORY_USAGE_CPU_TO_GPU,
                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
   frameUserData.depthMdiDrawCapacity = requiredCapacity;
+  rebindFrameBufferHandle(frameUserData.depthMdiDrawDataBufferRHI, frameUserData.depthMdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
   updateDepthMdiDrawDataDescriptorSet(frameIndex);
@@ -3020,23 +3032,14 @@ void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const VkDescriptorBufferInfo drawDataBufferInfo{
-      .buffer = frameUserData.gbufferMdiDrawDataBuffer.buffer,
-      .offset = 0,
-      .range  = VK_WHOLE_SIZE,
+  const rhi::ArgumentWrite drawDataWrite{
+      .binding = shaderio::LBindDrawModelMdi,
+      .type    = rhi::ArgumentType::storageBuffer,
+      .buffer  = frameUserData.gbufferMdiDrawDataBufferRHI,
+      .offset  = 0,
+      .size    = 0,
   };
-  const VkDescriptorSet drawDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  const VkWriteDescriptorSet drawDataWrite{
-      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet          = drawDescriptorSet,
-      .dstBinding      = shaderio::LBindDrawModelMdi,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo     = &drawDataBufferInfo,
-  };
-  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
 }
 
 void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
@@ -3058,23 +3061,14 @@ void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const VkDescriptorBufferInfo drawDataBufferInfo{
-      .buffer = frameUserData.mdiDrawDataBuffer.buffer,
-      .offset = 0,
-      .range  = VK_WHOLE_SIZE,
+  const rhi::ArgumentWrite drawDataWrite{
+      .binding = shaderio::LBindDrawModelMdi,
+      .type    = rhi::ArgumentType::storageBuffer,
+      .buffer  = frameUserData.mdiDrawDataBufferRHI,
+      .offset  = 0,
+      .size    = 0,
   };
-  const VkDescriptorSet drawDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  const VkWriteDescriptorSet drawDataWrite{
-      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet          = drawDescriptorSet,
-      .dstBinding      = shaderio::LBindDrawModelMdi,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo     = &drawDataBufferInfo,
-  };
-  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
 }
 
 void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
@@ -3096,23 +3090,14 @@ void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const VkDescriptorBufferInfo drawDataBufferInfo{
-      .buffer = frameUserData.depthMdiDrawDataBuffer.buffer,
-      .offset = 0,
-      .range  = VK_WHOLE_SIZE,
+  const rhi::ArgumentWrite drawDataWrite{
+      .binding = shaderio::LBindDrawModelMdi,
+      .type    = rhi::ArgumentType::storageBuffer,
+      .buffer  = frameUserData.depthMdiDrawDataBufferRHI,
+      .offset  = 0,
+      .size    = 0,
   };
-  const VkDescriptorSet drawDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(getBindGroupDescriptorSet(drawBindGroupHandle, BindGroupSetSlot::shaderSpecific));
-  const VkWriteDescriptorSet drawDataWrite{
-      .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet          = drawDescriptorSet,
-      .dstBinding      = shaderio::LBindDrawModelMdi,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo     = &drawDataBufferInfo,
-  };
-  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), 1, &drawDataWrite, 0, nullptr);
+  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
 }
 
 void RenderDevice::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
@@ -3734,13 +3719,8 @@ void RenderDevice::createGPUCullingResources()
   m_device.gpuCullingBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.gpuCullingBindGroups[frameIndex] = registerExternalBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_device.gpuCullingSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex])),
-        .primaryLogicalIndex = 0,
-        .debugName           = "gpu-culling",
-    });
+    m_device.gpuCullingBindGroups[frameIndex] =
+        registerExternalBindGroup(reinterpret_cast<uint64_t>(m_device.gpuCullingDescriptorSets[frameIndex]), "gpu-culling");
   }
 
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
@@ -3789,13 +3769,8 @@ void RenderDevice::createShadowCullingResources()
   m_device.shadowCullingBindGroups.assign(frameCount, BindGroupHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.shadowCullingBindGroups[frameIndex] = registerExternalBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
-        .layout              = new rhi::vulkan::AdoptedBindTableLayout(reinterpret_cast<uint64_t>(m_device.shadowCullingSetLayout)),
-        .table               = new rhi::vulkan::AdoptedBindTable(reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex])),
-        .primaryLogicalIndex = 0,
-        .debugName           = "shadow-culling",
-    });
+    m_device.shadowCullingBindGroups[frameIndex] =
+        registerExternalBindGroup(reinterpret_cast<uint64_t>(m_device.shadowCullingDescriptorSets[frameIndex]), "shadow-culling");
   }
 
   const VkPushConstantRange pushConstantRange{
@@ -5674,100 +5649,34 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         },
     };
 
-    // Create per-frame camera bind groups (each with its own layout)
-    VkDescriptorSetLayout cameraSetLayout = VK_NULL_HANDLE;
+    // One shared camera ArgumentLayout, a per-frame ArgumentTable. Dynamic-ness of the
+    // camera/post-process UBOs comes from the layout (dynamicBindings), so the writes use
+    // the plain uniformBuffer type and updateArgumentTable emits the *_DYNAMIC descriptor.
+    const rhi::ArgumentLayoutHandle cameraLayout = createArgumentLayoutFromEntries(cameraLayoutEntries, "gbuffer-camera");
+    const VkDescriptorSetLayout     cameraSetLayout =
+        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(cameraLayout)));
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
-      auto* cameraLayout = new rhi::vulkan::VulkanBindTableLayout();
-      cameraLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), cameraLayoutEntries);
-      DBG_VK_NAME(cameraLayout->getVkDescriptorSetLayout());
+      PerFrameResources::FrameUserData& fud         = m_perFrame.frameUserData[i];
+      const rhi::ArgumentTableHandle    cameraTable = m_device.device->createArgumentTable(cameraLayout);
+      fud.cameraBindGroup                           = createBindGroup(BindGroupDesc{
+                                    .slot                = BindGroupSetSlot::shaderSpecific,
+                                    .layout              = cameraLayout,
+                                    .table               = cameraTable,
+                                    .primaryLogicalIndex = shaderio::LBindCamera,
+                                    .debugName           = "gbuffer-camera",
+      });
 
-      auto* cameraTable = new rhi::vulkan::VulkanBindTable();
-      cameraTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                        *cameraLayout, 1);
-      DBG_VK_NAME(cameraTable->getVkDescriptorSet());
-
-      BindGroupDesc cameraBindGroupDesc{
-          .slot                = BindGroupSetSlot::shaderSpecific,
-          .layout              = cameraLayout,
-          .table               = cameraTable,
-          .primaryLogicalIndex = shaderio::LBindCamera,
-          .debugName           = "gbuffer-camera",
-      };
-      m_perFrame.frameUserData[i].cameraBindGroup = createBindGroup(cameraBindGroupDesc);
-
-      // Initialize the descriptor to point to this frame's transient allocator buffer
-      // Dynamic offsets will be used at draw time to access specific allocations
-      // For dynamic UBOs, range must be <= maxUniformBufferRange and is the size of the uniform struct
-      VkDescriptorBufferInfo cameraBufferInfo{
-          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
-          .offset = 0,
-          .range  = sizeof(shaderio::CameraUniforms),
-      };
-      VkDescriptorBufferInfo lightingBufferInfo{
-          .buffer = m_perFrame.frameUserData[i].lightingBuffer.buffer,
-          .offset = 0,
-          .range  = sizeof(shaderio::LightingUniforms),
-      };
-      VkDescriptorBufferInfo lightCullingBufferInfo{
-          .buffer = m_perFrame.frameUserData[i].lightCullingBuffer.buffer,
-          .offset = 0,
-          .range  = sizeof(shaderio::LightCullingUniforms),
-      };
-      VkDescriptorBufferInfo postProcessBufferInfo{
-          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
-          .offset = 0,
-          .range  = sizeof(shaderio::PostProcessUniforms),
-      };
-      const std::array<VkWriteDescriptorSet, 4> cameraWrites{{
-          VkWriteDescriptorSet{
-              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet          = cameraTable->getVkDescriptorSet(),
-              .dstBinding      = shaderio::LBindCamera,
-              .dstArrayElement = 0,
-              .descriptorCount = 1,
-              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-              .pBufferInfo     = &cameraBufferInfo,
-          },
-          VkWriteDescriptorSet{
-              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet          = cameraTable->getVkDescriptorSet(),
-              .dstBinding      = shaderio::LBindLighting,
-              .dstArrayElement = 0,
-              .descriptorCount = 1,
-              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-              .pBufferInfo     = &lightingBufferInfo,
-          },
-          VkWriteDescriptorSet{
-              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet          = cameraTable->getVkDescriptorSet(),
-              .dstBinding      = shaderio::LBindLightCulling,
-              .dstArrayElement = 0,
-              .descriptorCount = 1,
-              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-              .pBufferInfo     = &lightCullingBufferInfo,
-          },
-          VkWriteDescriptorSet{
-              .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet          = cameraTable->getVkDescriptorSet(),
-              .dstBinding      = shaderio::LBindPostProcess,
-              .dstArrayElement = 0,
-              .descriptorCount = 1,
-              .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-              .pBufferInfo     = &postProcessBufferInfo,
-          },
+      const std::array<rhi::ArgumentWrite, 4> cameraWrites{{
+          rhi::ArgumentWrite{.binding = shaderio::LBindCamera, .type = rhi::ArgumentType::uniformBuffer, .buffer = fud.transientBufferRHI, .offset = 0, .size = sizeof(shaderio::CameraUniforms)},
+          rhi::ArgumentWrite{.binding = shaderio::LBindLighting, .type = rhi::ArgumentType::uniformBuffer, .buffer = fud.lightingBufferRHI, .offset = 0, .size = sizeof(shaderio::LightingUniforms)},
+          rhi::ArgumentWrite{.binding = shaderio::LBindLightCulling, .type = rhi::ArgumentType::uniformBuffer, .buffer = fud.lightCullingBufferRHI, .offset = 0, .size = sizeof(shaderio::LightCullingUniforms)},
+          rhi::ArgumentWrite{.binding = shaderio::LBindPostProcess, .type = rhi::ArgumentType::uniformBuffer, .buffer = fud.transientBufferRHI, .offset = 0, .size = sizeof(shaderio::PostProcessUniforms)},
       }};
-      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                             static_cast<uint32_t>(cameraWrites.size()), cameraWrites.data(), 0, nullptr);
-
-      // Save the layout handle for pipeline layout creation (use first one, they're all identical)
-      if(i == 0)
-      {
-        cameraSetLayout = cameraLayout->getVkDescriptorSetLayout();
-      }
+      m_device.device->updateArgumentTable(cameraTable, static_cast<uint32_t>(cameraWrites.size()), cameraWrites.data());
     }
 
-    // Set 2: Draw uniform buffer layout (dynamic)
+    // Set 2: Draw uniform buffer (dynamic). One shared ArgumentLayout, per-frame table.
     std::vector<rhi::BindTableLayoutEntry> drawLayoutEntries{
         rhi::BindTableLayoutEntry{
             .logicalIndex    = shaderio::LBindDrawModel,
@@ -5776,55 +5685,27 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
             .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
         },
     };
-
-    // Create per-frame draw bind groups (each with its own layout)
-    VkDescriptorSetLayout drawSetLayout = VK_NULL_HANDLE;
+    const rhi::ArgumentLayoutHandle drawLayout    = createArgumentLayoutFromEntries(drawLayoutEntries, "gbuffer-draw");
+    const VkDescriptorSetLayout     drawSetLayout =
+        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(drawLayout)));
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
-      auto* drawLayout = new rhi::vulkan::VulkanBindTableLayout();
-      drawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), drawLayoutEntries);
-      DBG_VK_NAME(drawLayout->getVkDescriptorSetLayout());
-
-      auto* drawTable = new rhi::vulkan::VulkanBindTable();
-      drawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                      *drawLayout, 1);
-      DBG_VK_NAME(drawTable->getVkDescriptorSet());
-
-      BindGroupDesc drawBindGroupDesc{
-          .slot                = BindGroupSetSlot::shaderSpecific,
-          .layout              = drawLayout,
-          .table               = drawTable,
-          .primaryLogicalIndex = shaderio::LBindDrawModel,
-          .debugName           = "gbuffer-draw",
-      };
-      m_perFrame.frameUserData[i].drawBindGroup = createBindGroup(drawBindGroupDesc);
-
-      // Initialize the descriptor to point to this frame's transient allocator buffer
-      // For dynamic UBOs, range must be <= maxUniformBufferRange and is the size of the uniform struct
-      VkDescriptorBufferInfo drawBufferInfo{
-          .buffer = reinterpret_cast<VkBuffer>(m_perFrame.frameUserData[i].transientAllocator.getBufferOpaque()),
-          .offset = 0,
-          .range  = sizeof(shaderio::DrawUniforms),
-      };
-      VkWriteDescriptorSet drawWrite{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = drawTable->getVkDescriptorSet(),
-          .dstBinding      = shaderio::LBindDrawModel,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-          .pBufferInfo     = &drawBufferInfo,
-      };
-      vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                             1, &drawWrite, 0, nullptr);
-
-      // Save the layout handle for pipeline layout creation (use first one, they're all identical)
-      if(i == 0)
-      {
-        drawSetLayout = drawLayout->getVkDescriptorSetLayout();
-      }
+      PerFrameResources::FrameUserData& fud       = m_perFrame.frameUserData[i];
+      const rhi::ArgumentTableHandle    drawTable = m_device.device->createArgumentTable(drawLayout);
+      fud.drawBindGroup                           = createBindGroup(BindGroupDesc{
+                                    .slot                = BindGroupSetSlot::shaderSpecific,
+                                    .layout              = drawLayout,
+                                    .table               = drawTable,
+                                    .primaryLogicalIndex = shaderio::LBindDrawModel,
+                                    .debugName           = "gbuffer-draw",
+      });
+      const rhi::ArgumentWrite drawWrite{.binding = shaderio::LBindDrawModel, .type = rhi::ArgumentType::uniformBuffer, .buffer = fud.transientBufferRHI, .offset = 0, .size = sizeof(shaderio::DrawUniforms)};
+      m_device.device->updateArgumentTable(drawTable, 1, &drawWrite);
     }
 
+    // MDI draw-data: one shared storage-buffer ArgumentLayout for the three per-frame MDI
+    // variants and all CSM cascades. Descriptor sets are written lazily by the
+    // ensure*MdiDrawDataBuffer / updateShadowCullingDrawDataDescriptorSet paths.
     std::vector<rhi::BindTableLayoutEntry> shadowMdiDrawLayoutEntries{
         rhi::BindTableLayoutEntry{
             .logicalIndex    = shaderio::LBindDrawModelMdi,
@@ -5833,107 +5714,33 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
             .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
         },
     };
-
-    VkDescriptorSetLayout mdiDrawSetLayout = VK_NULL_HANDLE;
-    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
-    {
-      auto* mdiDrawLayout = new rhi::vulkan::VulkanBindTableLayout();
-      mdiDrawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                          shadowMdiDrawLayoutEntries);
-      DBG_VK_NAME(mdiDrawLayout->getVkDescriptorSetLayout());
-
-      auto* mdiDrawTable = new rhi::vulkan::VulkanBindTable();
-      mdiDrawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                         *mdiDrawLayout, 1);
-      DBG_VK_NAME(mdiDrawTable->getVkDescriptorSet());
-
-      BindGroupDesc mdiDrawBindGroupDesc{
+    const rhi::ArgumentLayoutHandle mdiDrawLayout    = createArgumentLayoutFromEntries(shadowMdiDrawLayoutEntries, "mdi-draw");
+    const VkDescriptorSetLayout     mdiDrawSetLayout =
+        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(mdiDrawLayout)));
+    const VkDescriptorSetLayout shadowMdiDrawSetLayout = mdiDrawSetLayout;
+    const auto makeMdiTable = [&](const char* name) {
+      return createBindGroup(BindGroupDesc{
           .slot                = BindGroupSetSlot::shaderSpecific,
           .layout              = mdiDrawLayout,
-          .table               = mdiDrawTable,
+          .table               = m_device.device->createArgumentTable(mdiDrawLayout),
           .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
-          .debugName           = "mdi-draw",
-      };
-      m_perFrame.frameUserData[i].mdiDrawBindGroup = createBindGroup(mdiDrawBindGroupDesc);
-
-      auto* gbufferMdiDrawLayout = new rhi::vulkan::VulkanBindTableLayout();
-      gbufferMdiDrawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                 shadowMdiDrawLayoutEntries);
-      DBG_VK_NAME(gbufferMdiDrawLayout->getVkDescriptorSetLayout());
-
-      auto* gbufferMdiDrawTable = new rhi::vulkan::VulkanBindTable();
-      gbufferMdiDrawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                *gbufferMdiDrawLayout, 1);
-      DBG_VK_NAME(gbufferMdiDrawTable->getVkDescriptorSet());
-
-      BindGroupDesc gbufferMdiDrawBindGroupDesc{
-          .slot                = BindGroupSetSlot::shaderSpecific,
-          .layout              = gbufferMdiDrawLayout,
-          .table               = gbufferMdiDrawTable,
-          .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
-          .debugName           = "gbuffer-mdi-draw",
-      };
-      m_perFrame.frameUserData[i].gbufferMdiDrawBindGroup = createBindGroup(gbufferMdiDrawBindGroupDesc);
-
-      auto* depthMdiDrawLayout = new rhi::vulkan::VulkanBindTableLayout();
-      depthMdiDrawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                               shadowMdiDrawLayoutEntries);
-      DBG_VK_NAME(depthMdiDrawLayout->getVkDescriptorSetLayout());
-
-      auto* depthMdiDrawTable = new rhi::vulkan::VulkanBindTable();
-      depthMdiDrawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                              *depthMdiDrawLayout, 1);
-      DBG_VK_NAME(depthMdiDrawTable->getVkDescriptorSet());
-
-      BindGroupDesc depthMdiDrawBindGroupDesc{
-          .slot                = BindGroupSetSlot::shaderSpecific,
-          .layout              = depthMdiDrawLayout,
-          .table               = depthMdiDrawTable,
-          .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
-          .debugName           = "depth-mdi-draw",
-      };
-      m_perFrame.frameUserData[i].depthMdiDrawBindGroup = createBindGroup(depthMdiDrawBindGroupDesc);
-
-      if(i == 0)
+          .debugName           = name,
+      });
+    };
+    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
+    {
+      PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
+      fud.mdiDrawBindGroup                  = makeMdiTable("mdi-draw");
+      fud.gbufferMdiDrawBindGroup           = makeMdiTable("gbuffer-mdi-draw");
+      fud.depthMdiDrawBindGroup             = makeMdiTable("depth-mdi-draw");
+      for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
       {
-        mdiDrawSetLayout = mdiDrawLayout->getVkDescriptorSetLayout();
+        fud.csmShadowMdiDrawBindGroups[cascadeIndex] = makeMdiTable("csm-shadow-mdi-draw");
       }
 
       updateMdiDrawDataDescriptorSet(i);
       updateGBufferMdiDrawDataDescriptorSet(i);
       updateDepthMdiDrawDataDescriptorSet(i);
-    }
-
-    VkDescriptorSetLayout shadowMdiDrawSetLayout = VK_NULL_HANDLE;
-    for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
-    {
-      for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
-      {
-        auto* shadowMdiDrawLayout = new rhi::vulkan::VulkanBindTableLayout();
-        shadowMdiDrawLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                  shadowMdiDrawLayoutEntries);
-        DBG_VK_NAME(shadowMdiDrawLayout->getVkDescriptorSetLayout());
-
-        auto* shadowMdiDrawTable = new rhi::vulkan::VulkanBindTable();
-        shadowMdiDrawTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                 *shadowMdiDrawLayout, 1);
-        DBG_VK_NAME(shadowMdiDrawTable->getVkDescriptorSet());
-
-        BindGroupDesc shadowMdiDrawBindGroupDesc{
-            .slot                = BindGroupSetSlot::shaderSpecific,
-            .layout              = shadowMdiDrawLayout,
-            .table               = shadowMdiDrawTable,
-            .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
-            .debugName           = "csm-shadow-mdi-draw",
-        };
-        m_perFrame.frameUserData[i].csmShadowMdiDrawBindGroups[cascadeIndex] = createBindGroup(shadowMdiDrawBindGroupDesc);
-
-        if(i == 0 && cascadeIndex == 0)
-        {
-          shadowMdiDrawSetLayout = shadowMdiDrawLayout->getVkDescriptorSetLayout();
-        }
-      }
-
       updateShadowCullingDrawDataDescriptorSet(i);
     }
 
@@ -7217,27 +7024,20 @@ void RenderDevice::createMaterialBindGroup()
   m_materials.materialBindGroups.clear();
   m_materials.materialBindGroups.reserve(frameCount);
   m_materials.materialBindGroupGenerations.assign(frameCount, 0);
-  m_materials.materialDescriptorImageInfos.assign(m_materials.maxTextures, {});
+  m_materials.materialDescriptorViews.assign(m_materials.maxTextures, {});
   m_materials.materialDescriptorValid.assign(m_materials.maxTextures, 0);
   m_materials.materialDescriptorGeneration = 0;
 
+  const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromEntries(layoutEntries, "material-texture-bind-group");
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
-    materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
-
-    auto* materialTable = new rhi::vulkan::VulkanBindTable();
-    materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                        *materialLayout, m_materials.maxTextures);
-
-    BindGroupDesc materialBindGroupDesc{
+    m_materials.materialBindGroups.push_back(createBindGroup(BindGroupDesc{
         .slot                = BindGroupSetSlot::material,
         .layout              = materialLayout,
-        .table               = materialTable,
+        .table               = m_device.device->createArgumentTable(materialLayout),
         .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
         .debugName           = "material-texture-bind-group",
-    };
-    m_materials.materialBindGroups.push_back(createBindGroup(std::move(materialBindGroupDesc)));
+    }));
   }
 
   m_materials.materialBindGroup =
@@ -7258,23 +7058,16 @@ void RenderDevice::createGraphicDescriptorSet()
     const size_t existingCount = m_materials.materialBindGroups.size();
     m_materials.materialBindGroups.reserve(m_perFrame.frameUserData.size());
     m_materials.materialBindGroupGenerations.resize(m_perFrame.frameUserData.size(), 0);
+    const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromEntries(layoutEntries, "material-texture-bind-group");
     for(size_t frameIndex = existingCount; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
     {
-      auto* materialLayout = new rhi::vulkan::VulkanBindTableLayout();
-      materialLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
-
-      auto* materialTable = new rhi::vulkan::VulkanBindTable();
-      materialTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                          *materialLayout, m_materials.maxTextures);
-
-      BindGroupDesc materialBindGroupDesc{
+      m_materials.materialBindGroups.push_back(createBindGroup(BindGroupDesc{
           .slot                = BindGroupSetSlot::material,
           .layout              = materialLayout,
-          .table               = materialTable,
+          .table               = m_device.device->createArgumentTable(materialLayout),
           .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
           .debugName           = "material-texture-bind-group",
-      };
-      m_materials.materialBindGroups.push_back(createBindGroup(std::move(materialBindGroupDesc)));
+      }));
     }
   }
 
@@ -7287,22 +7080,16 @@ void RenderDevice::createGraphicDescriptorSet()
         .visibility      = rhi::ResourceVisibility::allGraphics,
     }};
 
+    const rhi::ArgumentLayoutHandle sceneLayout = createArgumentLayoutFromEntries(layoutEntries, "scene-dynamic-bind-group");
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
-      auto* sceneLayout = new rhi::vulkan::VulkanBindTableLayout();
-      sceneLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutEntries);
-
-      auto* sceneTable = new rhi::vulkan::VulkanBindTable();
-      sceneTable->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), *sceneLayout, 1);
-
-      BindGroupDesc sceneBindGroupDesc{
+      m_perFrame.frameUserData[i].sceneBindGroup = createBindGroup(BindGroupDesc{
           .slot                = BindGroupSetSlot::drawDynamic,
           .layout              = sceneLayout,
-          .table               = sceneTable,
+          .table               = m_device.device->createArgumentTable(sceneLayout),
           .primaryLogicalIndex = kSceneBindlessInfoIndex,
           .debugName           = "scene-dynamic-bind-group",
-      };
-      m_perFrame.frameUserData[i].sceneBindGroup = createBindGroup(std::move(sceneBindGroupDesc));
+      });
     }
   }
 }
@@ -7321,7 +7108,15 @@ void RenderDevice::updateGraphicsDescriptorSet()
   });
   DBG_VK_NAME(sampler);
 
-  std::array<VkDescriptorImageInfo, kDemoMaterialSlotCount> imageInfos{};
+  // Wave 8: register the shared material sampler once for combinedImageSampler ArgumentWrites.
+  if(m_materials.materialSamplerHandle.isNull())
+  {
+    m_materials.materialSamplerHandle = m_device.resourceTable.registerSampler(reinterpret_cast<uint64_t>(sampler));
+  }
+
+  // Demo material slots: cache the per-slot view handles and write them as
+  // combinedImageSampler ArgumentWrites (shared materialSamplerHandle).
+  std::array<rhi::ArgumentWrite, kDemoMaterialSlotCount> materialWrites{};
   for(uint32_t slot = 0; slot < kDemoMaterialSlotCount; ++slot)
   {
     const MaterialHandle                     materialHandle = m_materials.sampleMaterials[slot];
@@ -7335,65 +7130,33 @@ void RenderDevice::updateGraphicsDescriptorSet()
     ASSERT(textureHot->runtimeKind == MaterialResources::TextureRuntimeKind::materialSampled,
            "Material descriptor writes require material-sampled textures");
 
-    imageInfos[material->descriptorIndex] = VkDescriptorImageInfo{
-        .sampler     = sampler,
-        .imageView   = textureHot->sampledImageView,
-        .imageLayout = textureHot->sampledImageLayout,
+    m_materials.materialDescriptorViews[material->descriptorIndex] = textureHot->sampledViewHandle;
+    m_materials.materialDescriptorValid[material->descriptorIndex] = 1;
+    materialWrites[material->descriptorIndex]                      = rhi::ArgumentWrite{
+                             .binding      = kMaterialBindlessTexturesIndex,
+                             .arrayElement = material->descriptorIndex,
+                             .type         = rhi::ArgumentType::combinedImageSampler,
+                             .textureView  = textureHot->sampledViewHandle,
+                             .sampler      = m_materials.materialSamplerHandle,
     };
-  }
-
-  std::vector<rhi::DescriptorImageInfo> descriptorImageInfos(imageInfos.size());
-  for(size_t i = 0; i < imageInfos.size(); ++i)
-  {
-    descriptorImageInfos[i] = rhi::DescriptorImageInfo{
-        .sampler     = reinterpret_cast<uint64_t>(imageInfos[i].sampler),
-        .imageView   = reinterpret_cast<uint64_t>(imageInfos[i].imageView),
-        .imageLayout = static_cast<uint32_t>(imageInfos[i].imageLayout),
-    };
-  }
-
-  const rhi::BindTableWrite materialWrite{
-      .dstIndex        = kMaterialBindlessTexturesIndex,
-      .dstArrayElement = 0,
-      .resourceType    = rhi::BindlessResourceType::sampledTexture,
-      .descriptorCount = static_cast<uint32_t>(descriptorImageInfos.size()),
-      .pImageInfo      = descriptorImageInfos.data(),
-      .visibility      = rhi::ResourceVisibility::allGraphics,
-      .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
-  };
-  for(uint32_t i = 0; i < descriptorImageInfos.size(); ++i)
-  {
-    m_materials.materialDescriptorImageInfos[i] = descriptorImageInfos[i];
-    m_materials.materialDescriptorValid[i]      = 1;
   }
   ++m_materials.materialDescriptorGeneration;
 
   for(uint32_t frameIndex = 0; frameIndex < m_materials.materialBindGroups.size(); ++frameIndex)
   {
-    updateBindGroup(m_materials.materialBindGroups[frameIndex], &materialWrite, 1);
+    updateBindGroup(m_materials.materialBindGroups[frameIndex], materialWrites.data(),
+                    static_cast<uint32_t>(materialWrites.size()));
     m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
   }
 
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
-    const VkDescriptorBufferInfo sceneBufferInfo = {
-        .buffer = reinterpret_cast<VkBuffer>(frameUserData.transientAllocator.getBufferOpaque()),
-        .offset = 0,
-        .range  = sizeof(shaderio::SceneInfo),
-    };
-    const rhi::DescriptorBufferInfo sceneBufferWrite{
-        .buffer = reinterpret_cast<uint64_t>(sceneBufferInfo.buffer),
-        .offset = sceneBufferInfo.offset,
-        .range  = sceneBufferInfo.range,
-    };
-    const rhi::BindTableWrite sceneWrite{
-        .dstIndex        = kSceneBindlessInfoIndex,
-        .dstArrayElement = 0,
-        .resourceType    = rhi::BindlessResourceType::uniformBuffer,
-        .descriptorCount = 1,
-        .pBufferInfo     = &sceneBufferWrite,
-        .visibility      = rhi::ResourceVisibility::allGraphics,
-        .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
+    const rhi::ArgumentWrite sceneWrite{
+        .binding = kSceneBindlessInfoIndex,
+        .type    = rhi::ArgumentType::uniformBuffer,
+        .buffer  = frameUserData.transientBufferRHI,
+        .offset  = 0,
+        .size    = sizeof(shaderio::SceneInfo),
     };
     updateBindGroup(frameUserData.sceneBindGroup, &sceneWrite, 1);
   }
@@ -7411,70 +7174,44 @@ void RenderDevice::syncMaterialBindGroup(uint32_t frameIndex)
     return;
   }
 
-  // Resolve a safe placeholder for invalid/stale descriptor slots so the GPU
-  // never samples a destroyed imageView after scene switches or partial uploads.
-  VkImageView placeholderImageView = VK_NULL_HANDLE;
-  VkImageLayout placeholderImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  // Resolve a safe placeholder view for invalid/stale slots so the GPU never samples a
+  // destroyed view after scene switches or partial uploads.
+  rhi::TextureViewHandle placeholderViewHandle{};
   if(const MaterialResources::MaterialRecord* placeholderMaterial = tryGetMaterial(m_materials.sampleMaterials[0]))
   {
     if(const MaterialResources::TextureHotData* placeholderTexture = tryGetTextureHot(placeholderMaterial->sampledTexture))
     {
-      placeholderImageView   = placeholderTexture->sampledImageView;
-      placeholderImageLayout = placeholderTexture->sampledImageLayout;
+      placeholderViewHandle = placeholderTexture->sampledViewHandle;
     }
   }
 
-  const VkSampler placeholderSampler = m_device.samplerPool.acquireSampler({
-      .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter    = VK_FILTER_LINEAR,
-      .minFilter    = VK_FILTER_LINEAR,
-      .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .maxLod       = VK_LOD_CLAMP_NONE,
-  });
-
-  std::vector<rhi::BindTableWrite> writes;
-  std::vector<rhi::DescriptorImageInfo> imageInfos;
-  writes.reserve(m_materials.materialDescriptorImageInfos.size());
-  imageInfos.reserve(m_materials.materialDescriptorImageInfos.size());
-
-  for(uint32_t index = 0; index < m_materials.materialDescriptorImageInfos.size(); ++index)
+  std::vector<rhi::ArgumentWrite> writes;
+  writes.reserve(m_materials.materialDescriptorViews.size());
+  for(uint32_t index = 0; index < m_materials.materialDescriptorViews.size(); ++index)
   {
+    rhi::TextureViewHandle view;
     if(m_materials.materialDescriptorValid[index] == 0)
     {
-      // Overwrite stale descriptors with a safe placeholder instead of leaving
-      // dangling imageViews that can cause device loss when sampled.
-      if(placeholderImageView != VK_NULL_HANDLE)
+      if(placeholderViewHandle.isNull())
       {
-        imageInfos.push_back(rhi::DescriptorImageInfo{
-            .sampler     = reinterpret_cast<uint64_t>(placeholderSampler),
-            .imageView   = reinterpret_cast<uint64_t>(placeholderImageView),
-            .imageLayout = static_cast<uint32_t>(placeholderImageLayout),
-        });
-        writes.push_back(rhi::BindTableWrite{
-            .dstIndex        = kMaterialBindlessTexturesIndex,
-            .dstArrayElement = index,
-            .resourceType    = rhi::BindlessResourceType::sampledTexture,
-            .descriptorCount = 1,
-            .pImageInfo      = &imageInfos.back(),
-            .visibility      = rhi::ResourceVisibility::allGraphics,
-            .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
-        });
+        continue;
       }
-      continue;
+      view = placeholderViewHandle;  // overwrite stale slots with a safe placeholder view
     }
-
-    imageInfos.push_back(m_materials.materialDescriptorImageInfos[index]);
-    writes.push_back(rhi::BindTableWrite{
-        .dstIndex        = kMaterialBindlessTexturesIndex,
-        .dstArrayElement = index,
-        .resourceType    = rhi::BindlessResourceType::sampledTexture,
-        .descriptorCount = 1,
-        .pImageInfo      = &imageInfos.back(),
-        .visibility      = rhi::ResourceVisibility::allGraphics,
-        .updateFlags     = rhi::BindlessUpdateFlags::immediateVisibility,
+    else
+    {
+      view = m_materials.materialDescriptorViews[index];
+      if(view.isNull())
+      {
+        continue;
+      }
+    }
+    writes.push_back(rhi::ArgumentWrite{
+        .binding      = kMaterialBindlessTexturesIndex,
+        .arrayElement = index,
+        .type         = rhi::ArgumentType::combinedImageSampler,
+        .textureView  = view,
+        .sampler      = m_materials.materialSamplerHandle,
     });
   }
 
@@ -7505,9 +7242,56 @@ BindGroupHandle RenderDevice::getCurrentMaterialBindGroupHandle() const
   return m_materials.materialBindGroups[frameIndex];
 }
 
-rhi::BindGroupLayoutHandle RenderDevice::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
+// Maps a legacy BindlessResourceType to the new ArgumentType + dynamic-offset flag.
+// Note: BindlessResourceType::sampledTexture is a COMBINED_IMAGE_SAMPLER (shaders sample
+// via sampler2D), so it maps to ArgumentType::combinedImageSampler, not sampledTexture.
+static std::pair<rhi::ArgumentType, bool> toArgumentType(rhi::BindlessResourceType type)
 {
-  // Convert BindGroupLayoutDesc to BindTableLayoutEntry format
+  using BR = rhi::BindlessResourceType;
+  using AT = rhi::ArgumentType;
+  switch(type)
+  {
+    case BR::sampler:              return {AT::sampler, false};
+    case BR::sampledTexture:       return {AT::combinedImageSampler, false};
+    case BR::sampledImage:         return {AT::sampledTexture, false};
+    case BR::storageTexture:       return {AT::storageTexture, false};
+    case BR::uniformBuffer:        return {AT::uniformBuffer, false};
+    case BR::storageBuffer:        return {AT::storageBuffer, false};
+    case BR::uniformBufferDynamic: return {AT::uniformBuffer, true};
+    case BR::storageBufferDynamic: return {AT::storageBuffer, true};
+    default:                       return {AT::storageBuffer, false};
+  }
+}
+
+rhi::ArgumentLayoutHandle RenderDevice::createArgumentLayoutFromEntries(const std::vector<rhi::BindTableLayoutEntry>& entries,
+                                                                       const char* debugName)
+{
+  std::vector<rhi::ArgumentBinding> bindings;
+  bindings.reserve(entries.size());
+  for(const rhi::BindTableLayoutEntry& e : entries)
+  {
+    const std::pair<rhi::ArgumentType, bool> mapped = toArgumentType(e.resourceType);
+    bindings.push_back(rhi::ArgumentBinding{
+        .binding       = e.logicalIndex,
+        .type          = mapped.first,
+        .visibility    = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(e.visibility)),
+        .arrayCount    = e.descriptorCount,
+        .bindless      = false,
+        .dynamicOffset = mapped.second,
+    });
+  }
+  const rhi::ArgumentLayoutDesc layoutDesc{
+      .bindings     = bindings.data(),
+      .bindingCount = static_cast<uint32_t>(bindings.size()),
+      .debugName    = debugName,
+  };
+  const rhi::ArgumentLayoutHandle layout = m_device.device->createArgumentLayout(layoutDesc);
+  m_materials.ownedArgumentLayouts.push_back(layout);
+  return layout;
+}
+
+rhi::ArgumentLayoutHandle RenderDevice::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
+{
   std::vector<rhi::BindTableLayoutEntry> tableEntries;
   tableEntries.reserve(desc.entryCount);
   for(uint32_t i = 0; i < desc.entryCount; ++i)
@@ -7519,116 +7303,78 @@ rhi::BindGroupLayoutHandle RenderDevice::createBindGroupLayout(const rhi::BindGr
         .visibility      = static_cast<rhi::ResourceVisibility>(desc.entries[i].visibility),
     });
   }
-
-  auto layout = std::make_unique<rhi::vulkan::VulkanBindTableLayout>();
-  layout->init(reinterpret_cast<void*>(static_cast<uintptr_t>(m_device.device->getNativeDevice())), tableEntries);
-  return m_materials.bindGroupLayoutPool.emplace(std::move(layout));
+  return createArgumentLayoutFromEntries(tableEntries, "bind-group-layout");
 }
 
-rhi::BindGroupHandle RenderDevice::createBindGroup(const rhi::BindGroupDesc& desc)
+void RenderDevice::destroyBindGroup(BindGroupHandle handle)
 {
-  // TODO: Implement BindGroup creation using new RHI interface
-  // This will be implemented in a later task
-  ASSERT(false, "createBindGroup(rhi::BindGroupDesc) not yet implemented");
-  return rhi::BindGroupHandle{};
-}
-
-void RenderDevice::destroyBindGroupLayout(rhi::BindGroupLayoutHandle handle)
-{
-  // TODO: Implement BindGroupLayout destruction
-  // This will be implemented in a later task
-}
-
-void RenderDevice::destroyBindGroup(rhi::BindGroupHandle handle)
-{
-  BindGroupResource* bindGroup = m_materials.bindGroupPool.tryGet(handle);
-  if(bindGroup == nullptr)
+  if(handle.isNull())
   {
     return;
   }
-
-  m_device.resourceTable.unregisterBindGroup(handle);
-  delete bindGroup->desc.table;
-  bindGroup->desc.table = nullptr;
-  delete bindGroup->desc.layout;
-  bindGroup->desc.layout = nullptr;
-
-  m_materials.bindGroupPool.destroy(handle);
+  // Destroy only the ArgumentTable (descriptor set). The layout it was built from is
+  // owned separately (ownedArgumentLayouts) and released in destroyBindGroups(). For
+  // adopted external tables (owned=false) this just unregisters the mirror.
+  m_device.device->destroyArgumentTable(handle);
 }
 
 BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
 {
   ASSERT(isStableBindGroupSetSlot(desc.slot), "BindGroupDesc slot must be one of stable set slots 0..3");
-  ASSERT(desc.layout != nullptr, "BindGroupDesc layout must be valid");
-  ASSERT(desc.table != nullptr, "BindGroupDesc table must be valid");
-  ASSERT(rhi::isValidResourceIndex(desc.primaryLogicalIndex), "BindGroupDesc primaryLogicalIndex must be valid");
-
-  rhi::BindTable* table = desc.table;
-  const BindGroupHandle handle = m_materials.bindGroupPool.emplace(BindGroupResource{.desc = std::move(desc)});
-  m_device.resourceTable.registerBindGroup(handle, table);
-  return handle;
+  ASSERT(desc.table.isValid(), "BindGroupDesc table must be a valid ArgumentTable handle");
+  m_materials.ownedArgumentTables.push_back(desc.table);
+  return desc.table;
 }
 
-BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::BindGroupLayoutHandle layoutHandle,
-                                                       const rhi::BindTableWrite* writes, uint32_t writeCount,
-                                                       uint32_t maxLogicalEntries, BindGroupSetSlot slot,
-                                                       rhi::ResourceIndex primaryLogicalIndex, const char* debugName)
+BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::ArgumentLayoutHandle layoutHandle,
+                                                       const rhi::ArgumentWrite* writes, uint32_t writeCount,
+                                                       BindGroupSetSlot slot, const char* debugName)
 {
-  std::unique_ptr<rhi::BindTableLayout>* layoutSlot = m_materials.bindGroupLayoutPool.tryGet(layoutHandle);
-  ASSERT(layoutSlot != nullptr && *layoutSlot != nullptr, "createTemporaryBindGroup requires a valid layout handle");
-  rhi::BindTableLayout& layout = **layoutSlot;
+  ASSERT(!layoutHandle.isNull(), "createTemporaryBindGroup requires a valid argument layout handle");
+  (void)slot;
+  (void)debugName;
 
-  // Build a backend bind table from the shared layout, allocate+write its set now.
-  auto* table = new rhi::vulkan::VulkanBindTable();
-  table->init(reinterpret_cast<void*>(static_cast<uintptr_t>(m_device.device->getNativeDevice())), layout, maxLogicalEntries);
+  // Allocate a fresh ArgumentTable from the shared layout and write it now. The handle is
+  // recycled (destroyArgumentTable) when this frame index is recorded again.
+  const rhi::ArgumentTableHandle table = m_device.device->createArgumentTable(layoutHandle);
   if(writeCount > 0)
   {
-    table->update(writeCount, writes);
+    m_device.device->updateArgumentTable(table, writeCount, writes);
   }
-
-  // The handle's own layout adapter is a throwaway (destroyBindGroup deletes it); the
-  // shared VulkanBindTableLayout stays owned by the layout pool for reuse next frame.
-  BindGroupDesc desc{
-      .slot                = slot,
-      .layout              = new rhi::vulkan::AdoptedBindTableLayout(layout.getNativeHandle()),
-      .table               = table,
-      .primaryLogicalIndex = primaryLogicalIndex,
-      .debugName           = debugName,
-  };
-  const BindGroupHandle handle = createBindGroup(std::move(desc));
 
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    m_perFrame.frameUserData[frameIndex].transientBindGroups.push_back(handle);
+    m_perFrame.frameUserData[frameIndex].transientBindGroups.push_back(table);
   }
-  return handle;
+  return table;
 }
 
-void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::BindTableWrite* writes, uint32_t writeCount) const
+void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const
 {
-  if(writeCount == 0 || writes == nullptr)
+  if(writeCount == 0 || writes == nullptr || handle.isNull())
   {
     return;
   }
-
-  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
-  ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve before update");
-  bindGroup->desc.table->update(writeCount, writes);
+  m_device.device->updateArgumentTable(handle, writeCount, writes);
 }
 
 void RenderDevice::destroyBindGroups()
 {
-  std::vector<BindGroupHandle> bindGroups;
-  m_materials.bindGroupPool.forEachActive(
-      [&](BindGroupHandle handle, const BindGroupResource&) { bindGroups.push_back(handle); });
-  for(BindGroupHandle handle : bindGroups)
+  for(const rhi::ArgumentTableHandle table : m_materials.ownedArgumentTables)
   {
-    destroyBindGroup(handle);
+    m_device.device->destroyArgumentTable(table);
   }
+  m_materials.ownedArgumentTables.clear();
+  for(const rhi::ArgumentLayoutHandle layout : m_materials.ownedArgumentLayouts)
+  {
+    m_device.device->destroyArgumentLayout(layout);
+  }
+  m_materials.ownedArgumentLayouts.clear();
+
   m_materials.materialBindGroup = kNullBindGroupHandle;
   m_materials.materialBindGroups.clear();
-  m_materials.materialDescriptorImageInfos.clear();
+  m_materials.materialDescriptorViews.clear();
   m_materials.materialDescriptorValid.clear();
   m_materials.materialBindGroupGenerations.clear();
   m_materials.materialDescriptorGeneration = 0;
@@ -7644,39 +7390,31 @@ void RenderDevice::destroyBindGroups()
   }
 }
 
-const BindGroupResource* RenderDevice::tryGetBindGroup(BindGroupHandle handle) const
+BindGroupHandle RenderDevice::registerExternalBindGroup(uint64_t nativeDescriptorSet, const char* debugName)
 {
-  return m_materials.bindGroupPool.tryGet(handle);
+  (void)debugName;
+  // Adopt an externally-owned descriptor set as a non-owned ArgumentTable (no layout;
+  // these sets are written through their own native path, not updateArgumentTable).
+  const rhi::ArgumentTableHandle table =
+      m_device.resourceTable.registerArgumentTable(nativeDescriptorSet, rhi::ArgumentLayoutHandle{}, /*owned=*/false);
+  m_materials.ownedArgumentTables.push_back(table);
+  return table;
 }
 
-uint64_t RenderDevice::getBindGroupLayoutHandleNative(rhi::BindGroupLayoutHandle handle) const
+uint64_t RenderDevice::getBindGroupLayoutHandleNative(rhi::ArgumentLayoutHandle handle) const
 {
-  const std::unique_ptr<rhi::BindTableLayout>* layoutSlot = m_materials.bindGroupLayoutPool.tryGet(handle);
-  return (layoutSlot != nullptr && *layoutSlot != nullptr) ? (*layoutSlot)->getNativeHandle() : 0;
+  return m_device.resourceTable.resolveArgumentLayout(handle);
 }
 
-uint64_t RenderDevice::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
+uint64_t RenderDevice::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot /*expectedSlot*/) const
 {
-  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
-  ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
-  ASSERT(bindGroup->desc.slot == expectedSlot, "BindGroup slot mismatch for requested layout");
-  return bindGroup->desc.layout->getNativeHandle();
+  const rhi::vulkan::ArgumentTableRecord* record = m_device.resourceTable.tryGetArgumentTable(handle);
+  return record != nullptr ? m_device.resourceTable.resolveArgumentLayout(record->layout) : 0;
 }
 
-uint64_t RenderDevice::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
+uint64_t RenderDevice::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot /*expectedSlot*/) const
 {
-  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
-  ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
-  ASSERT(bindGroup->desc.slot == expectedSlot, "BindGroup slot mismatch for requested bind table");
-  return bindGroup->desc.table->getNativeHandle();
-}
-
-rhi::ResourceIndex RenderDevice::getBindGroupPrimaryLogicalIndex(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const
-{
-  const BindGroupResource* bindGroup = tryGetBindGroup(handle);
-  ASSERT(bindGroup != nullptr, "BindGroupHandle must resolve to an active bind-group");
-  ASSERT(bindGroup->desc.slot == expectedSlot, "BindGroup slot mismatch for requested primary logical index");
-  return bindGroup->desc.primaryLogicalIndex;
+  return m_device.resourceTable.resolveArgumentTable(handle);
 }
 
 utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename)
@@ -8352,6 +8090,7 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
             .runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
             .sampledImageView = imageView,
             .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
         },
         .cold = {
             .ownedImage = imageResource,
@@ -8855,6 +8594,7 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
                 .sampledImageView   = imageView,
                 .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
             },
         .cold =
             {
@@ -9292,6 +9032,10 @@ void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
   {
     invalidateBindlessTexture(gltfTextureBaseIndex + static_cast<uint32_t>(textureIndex));
     TextureHandle handle = result.textures[textureIndex];
+    if(const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->sampledViewHandle.isNull())
+    {
+      m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
+    }
     const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
     if(cold && cold->ownedImage.image != VK_NULL_HANDLE)
     {
@@ -9847,9 +9591,23 @@ void RenderDevice::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, 
   ensureGPUDrivenPersistentIndirectStreamBuffer(frameUserData, requiredDrawCount);
 }
 
-rhi::BindGroupHandle RenderDevice::getGlobalBindlessGroup() const
+BindGroupHandle RenderDevice::getGlobalBindlessGroup() const
 {
   return getCurrentMaterialBindGroupHandle();
+}
+
+rhi::BufferHandle RenderDevice::getCurrentTransientBufferHandle() const
+{
+  uint32_t frameIndex = 0;
+  if(m_perFrame.frameContext != nullptr)
+  {
+    frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+  }
+  if(frameIndex >= m_perFrame.frameUserData.size())
+  {
+    return {};
+  }
+  return m_perFrame.frameUserData[frameIndex].transientBufferRHI;
 }
 
 glm::vec4 RenderDevice::getMaterialBaseColorFactor(MaterialHandle handle) const
@@ -9946,45 +9704,24 @@ void RenderDevice::updateBindlessTexture(uint32_t index, TextureHandle textureHa
     return;
   }
 
-  const VkSampler sampler = m_device.samplerPool.acquireSampler({
-      .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter    = VK_FILTER_LINEAR,
-      .minFilter    = VK_FILTER_LINEAR,
-      .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .maxLod       = VK_LOD_CLAMP_NONE,
-  });
-
-  const VkDescriptorImageInfo imageInfo{
-      .sampler     = sampler,
-      .imageView   = textureHot->sampledImageView,
-      .imageLayout = textureHot->sampledImageLayout,
-  };
-
-  const rhi::DescriptorImageInfo descriptorImageInfo{
-      .sampler     = reinterpret_cast<uint64_t>(imageInfo.sampler),
-      .imageView   = reinterpret_cast<uint64_t>(imageInfo.imageView),
-      .imageLayout = static_cast<uint32_t>(imageInfo.imageLayout),
-  };
-
-  if(index < m_materials.materialDescriptorImageInfos.size())
+  // Wave 8: cache the adopted view handle; the shared materialSamplerHandle pairs with it
+  // through combinedImageSampler ArgumentWrites in syncMaterialBindGroup.
+  if(index < m_materials.materialDescriptorViews.size())
   {
-    m_materials.materialDescriptorImageInfos[index] = descriptorImageInfo;
-    m_materials.materialDescriptorValid[index]      = 1;
+    m_materials.materialDescriptorViews[index] = textureHot->sampledViewHandle;
+    m_materials.materialDescriptorValid[index] = 1;
     ++m_materials.materialDescriptorGeneration;
   }
 }
 
 void RenderDevice::invalidateBindlessTexture(uint32_t index)
 {
-  if(index >= m_materials.materialDescriptorImageInfos.size() || index >= m_materials.materialDescriptorValid.size())
+  if(index >= m_materials.materialDescriptorViews.size() || index >= m_materials.materialDescriptorValid.size())
   {
     return;
   }
 
-  m_materials.materialDescriptorImageInfos[index] = {};
+  m_materials.materialDescriptorViews[index] = {};
   if(m_materials.materialDescriptorValid[index] != 0)
   {
     m_materials.materialDescriptorValid[index] = 0;

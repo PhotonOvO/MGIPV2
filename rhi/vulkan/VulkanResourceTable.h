@@ -4,12 +4,8 @@
 #include "../../common/HandlePool.h"
 
 #include <cstdint>
-#include <unordered_map>
 #include <utility>
-
-namespace demo::rhi {
-class BindTable;
-}
+#include <vector>
 
 namespace demo::rhi::vulkan {
 
@@ -69,11 +65,18 @@ struct QueryPoolRecord
 struct ArgumentLayoutRecord
 {
   uint64_t nativeLayout{0};  // VkDescriptorSetLayout
+  // Binding numbers declared with dynamicOffset in the layout. updateArgumentTable
+  // must emit the *_DYNAMIC descriptor type for these so the write matches the layout.
+  std::vector<uint32_t> dynamicBindings;
 };
 
 struct ArgumentTableRecord
 {
-  uint64_t nativeSet{0};  // VkDescriptorSet (allocated from the device argument pool)
+  uint64_t             nativeSet{0};  // VkDescriptorSet (allocated from the device argument pool)
+  ArgumentLayoutHandle layout{};      // source layout, used to resolve per-binding dynamic-ness on update
+  // When false the descriptor set is owned by another subsystem (adopted external set);
+  // the registry resolves it but must not free it back to the device argument pool.
+  bool                 owned{true};
 };
 
 // Backend-owned table mapping opaque RHI handles to native Vulkan objects.
@@ -129,14 +132,6 @@ public:
   // --- Native-object resolution used during command recording ---
   [[nodiscard]] uint64_t resolvePipeline(PipelineHandle handle, uint32_t expectedBindPoint) const;
   [[nodiscard]] uint64_t resolvePipelineLayout(PipelineHandle handle) const;
-  [[nodiscard]] uint64_t resolveBindGroupDescriptorSet(BindGroupHandle handle) const;
-
-  // --- Bind-group descriptor-set mirror ---
-  // The render layer still owns the bind-group pool; only the native descriptor
-  // lookup is mirrored here so the command list can resolve it in-layer. The
-  // BindTable pointer is read live at bind time (its descriptor set may change).
-  void registerBindGroup(BindGroupHandle handle, BindTable* table);
-  void unregisterBindGroup(BindGroupHandle handle);
 
   // --- Buffers (this table owns the handle allocation; native lifetime is the
   // caller's, owned=true for device-created buffers). Pure mapping. ---
@@ -158,13 +153,15 @@ public:
   QueryPoolRecord                  removeQueryPool(QueryPoolHandle handle);
 
   // --- Argument layouts / tables ---
-  ArgumentLayoutHandle             registerArgumentLayout(uint64_t nativeLayout);
-  [[nodiscard]] uint64_t           resolveArgumentLayout(ArgumentLayoutHandle handle) const;
-  ArgumentLayoutRecord             removeArgumentLayout(ArgumentLayoutHandle handle);
+  ArgumentLayoutHandle                       registerArgumentLayout(uint64_t nativeLayout, std::vector<uint32_t> dynamicBindings);
+  [[nodiscard]] uint64_t                     resolveArgumentLayout(ArgumentLayoutHandle handle) const;
+  [[nodiscard]] const ArgumentLayoutRecord*  tryGetArgumentLayout(ArgumentLayoutHandle handle) const;
+  ArgumentLayoutRecord                       removeArgumentLayout(ArgumentLayoutHandle handle);
 
-  ArgumentTableHandle              registerArgumentTable(uint64_t nativeSet);
-  [[nodiscard]] uint64_t           resolveArgumentTable(ArgumentTableHandle handle) const;
-  ArgumentTableRecord              removeArgumentTable(ArgumentTableHandle handle);
+  ArgumentTableHandle                        registerArgumentTable(uint64_t nativeSet, ArgumentLayoutHandle layout, bool owned = true);
+  [[nodiscard]] uint64_t                     resolveArgumentTable(ArgumentTableHandle handle) const;
+  [[nodiscard]] const ArgumentTableRecord*   tryGetArgumentTable(ArgumentTableHandle handle) const;
+  ArgumentTableRecord                        removeArgumentTable(ArgumentTableHandle handle);
 
 private:
   HandlePool<PipelineHandle, PipelineRecord>          m_pipelines;
@@ -175,7 +172,6 @@ private:
   HandlePool<QueryPoolHandle, QueryPoolRecord>        m_queryPools;
   HandlePool<ArgumentLayoutHandle, ArgumentLayoutRecord> m_argumentLayouts;
   HandlePool<ArgumentTableHandle, ArgumentTableRecord>   m_argumentTables;
-  std::unordered_map<uint64_t, BindTable*>            m_bindGroupTables;
 };
 
 }  // namespace demo::rhi::vulkan

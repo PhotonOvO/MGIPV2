@@ -16,6 +16,7 @@ enum class ArgumentType : uint8_t
   sampledTexture,
   storageTexture,
   sampler,
+  combinedImageSampler,
   accelerationStructure,
   indirectCommandBuffer,
 };

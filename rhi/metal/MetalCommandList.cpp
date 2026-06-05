@@ -152,7 +152,7 @@ void MetalCommandList::bindBindTable(PipelineBindPoint bindPoint, uint32_t slot,
   (void)dynamicOffsetCount;
 }
 
-void MetalCommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+void MetalCommandList::bindBindGroup(uint32_t, ArgumentTableHandle, const uint32_t*, uint32_t)
 {
   // TODO: Metal implementation
   // Placeholder - will be properly implemented when needed

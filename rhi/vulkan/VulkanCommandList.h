@@ -45,7 +45,7 @@ public:
 
   void bindPipeline(PipelineBindPoint bindPoint, PipelineHandle pipeline) override;
   void bindBindTable(PipelineBindPoint bindPoint, uint32_t slot, BindTableHandle bindTable, const uint32_t* dynamicOffsets, uint32_t dynamicOffsetCount) override;
-  void bindBindGroup(uint32_t slot, BindGroupHandle bindGroup,
+  void bindBindGroup(uint32_t slot, ArgumentTableHandle bindGroup,
                      const uint32_t* dynamicOffsets,
                      uint32_t dynamicOffsetCount) override;
   void bindVertexBuffers(uint32_t firstBinding, const uint64_t* bufferHandles,

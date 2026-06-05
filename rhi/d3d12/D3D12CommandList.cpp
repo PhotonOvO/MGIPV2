@@ -140,7 +140,7 @@ void D3D12CommandList::bindBindTable(PipelineBindPoint bindPoint, uint32_t slot,
   // 5. Apply dynamic offsets if needed (root constants or root descriptors)
 }
 
-void D3D12CommandList::bindBindGroup(uint32_t, BindGroupHandle, const uint32_t*, uint32_t)
+void D3D12CommandList::bindBindGroup(uint32_t, ArgumentTableHandle, const uint32_t*, uint32_t)
 {
   // TODO: D3D12 implementation
   // Placeholder - will be properly implemented when needed

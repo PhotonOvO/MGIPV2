@@ -7,13 +7,6 @@
 
 namespace demo::rhi::vulkan {
 
-namespace {
-[[nodiscard]] uint64_t packHandle(BindGroupHandle handle)
-{
-  return (static_cast<uint64_t>(handle.index) << 32) | static_cast<uint64_t>(handle.generation);
-}
-}  // namespace
-
 PipelineHandle VulkanResourceTable::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline,
                                                      uint32_t specializationVariant, uint64_t nativeLayout, bool owned)
 {
@@ -102,26 +95,6 @@ uint64_t VulkanResourceTable::resolvePipelineLayout(PipelineHandle handle) const
   return record != nullptr ? record->nativeLayout : 0;
 }
 
-uint64_t VulkanResourceTable::resolveBindGroupDescriptorSet(BindGroupHandle handle) const
-{
-  const auto it = m_bindGroupTables.find(packHandle(handle));
-  if(it == m_bindGroupTables.end() || it->second == nullptr)
-  {
-    return 0;
-  }
-  return it->second->getNativeHandle();
-}
-
-void VulkanResourceTable::registerBindGroup(BindGroupHandle handle, BindTable* table)
-{
-  m_bindGroupTables[packHandle(handle)] = table;
-}
-
-void VulkanResourceTable::unregisterBindGroup(BindGroupHandle handle)
-{
-  m_bindGroupTables.erase(packHandle(handle));
-}
-
 BufferHandle VulkanResourceTable::registerBuffer(const BufferRecord& record)
 {
   ASSERT(record.nativeBuffer != 0, "Buffer registry entries require a valid native buffer");
@@ -199,16 +172,21 @@ QueryPoolRecord VulkanResourceTable::removeQueryPool(QueryPoolHandle handle)
   return copy;
 }
 
-ArgumentLayoutHandle VulkanResourceTable::registerArgumentLayout(uint64_t nativeLayout)
+ArgumentLayoutHandle VulkanResourceTable::registerArgumentLayout(uint64_t nativeLayout, std::vector<uint32_t> dynamicBindings)
 {
   ASSERT(nativeLayout != 0, "Argument layout registry entries require a valid native layout");
-  return m_argumentLayouts.emplace(ArgumentLayoutRecord{.nativeLayout = nativeLayout});
+  return m_argumentLayouts.emplace(ArgumentLayoutRecord{.nativeLayout = nativeLayout, .dynamicBindings = std::move(dynamicBindings)});
 }
 
 uint64_t VulkanResourceTable::resolveArgumentLayout(ArgumentLayoutHandle handle) const
 {
   const ArgumentLayoutRecord* record = m_argumentLayouts.tryGet(handle);
   return record != nullptr ? record->nativeLayout : 0;
+}
+
+const ArgumentLayoutRecord* VulkanResourceTable::tryGetArgumentLayout(ArgumentLayoutHandle handle) const
+{
+  return m_argumentLayouts.tryGet(handle);
 }
 
 ArgumentLayoutRecord VulkanResourceTable::removeArgumentLayout(ArgumentLayoutHandle handle)
@@ -219,29 +197,21 @@ ArgumentLayoutRecord VulkanResourceTable::removeArgumentLayout(ArgumentLayoutHan
   return copy;
 }
 
-ArgumentTableHandle VulkanResourceTable::registerArgumentTable(uint64_t nativeSet)
+ArgumentTableHandle VulkanResourceTable::registerArgumentTable(uint64_t nativeSet, ArgumentLayoutHandle layout, bool owned)
 {
   ASSERT(nativeSet != 0, "Argument table registry entries require a valid native descriptor set");
-  return m_argumentTables.emplace(ArgumentTableRecord{.nativeSet = nativeSet});
+  return m_argumentTables.emplace(ArgumentTableRecord{.nativeSet = nativeSet, .layout = layout, .owned = owned});
+}
+
+const ArgumentTableRecord* VulkanResourceTable::tryGetArgumentTable(ArgumentTableHandle handle) const
+{
+  return m_argumentTables.tryGet(handle);
 }
 
 uint64_t VulkanResourceTable::resolveArgumentTable(ArgumentTableHandle handle) const
 {
   const ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
-  if(record != nullptr)
-  {
-    return record->nativeSet;
-  }
-  // Transitional bridge (removed in Wave 8): migrated passes may pass a legacy
-  // BindGroupHandle's bits as an ArgumentTableHandle; resolve via the bind-group
-  // mirror so pass migration can precede the full ArgumentTable replacement.
-  const uint64_t key = (static_cast<uint64_t>(handle.index) << 32) | static_cast<uint64_t>(handle.generation);
-  const auto     it  = m_bindGroupTables.find(key);
-  if(it != m_bindGroupTables.end() && it->second != nullptr)
-  {
-    return it->second->getNativeHandle();
-  }
-  return 0;
+  return record != nullptr ? record->nativeSet : 0;
 }
 
 ArgumentTableRecord VulkanResourceTable::removeArgumentTable(ArgumentTableHandle handle)

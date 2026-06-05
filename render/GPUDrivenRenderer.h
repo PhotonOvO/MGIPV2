@@ -1084,7 +1084,8 @@ private:
   PipelineHandle                     m_gtaoPipelineHandle{};
   PipelineHandle                     m_aoDenoisePipelineHandle{};
   PipelineHandle                     m_ssrTracePipelineHandle{};
-  rhi::BindGroupLayoutHandle         m_ssrLayoutHandle{};
+  rhi::ArgumentLayoutHandle          m_ssrLayoutHandle{};
+  rhi::TextureViewHandle             m_ssrRawViewHandle{};  // Wave 8: adopted storage-image view for SSR temp ArgumentWrite
   std::vector<BindGroupHandle>       m_aoBindGroups;
   std::vector<BindGroupHandle>       m_aoDenoiseBindGroups;
   utils::ImageResource               m_aoRaw{};
