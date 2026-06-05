@@ -942,7 +942,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     createIBLResources(cmd);
     createGPUCullingResources();
     createShadowCullingResources();
-    createLightCoarseCullingResources();
+    createLightResources();
 
     // Initialize CSM shadow cascade resources
     CSMShadowResources::CreateInfo csmInfo{
@@ -1215,17 +1215,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     m_device.shadowCullingPipelineLayout.reset();
   }
   m_device.shadowCullingBindGroups.clear();
-  if(m_device.lightCoarseCullingPipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(device, m_device.lightCoarseCullingPipelineLayout, nullptr);
-    m_device.lightCoarseCullingPipelineLayout = VK_NULL_HANDLE;
-  }
-  m_device.lightCoarseCullingDescriptorSets.clear();
-  if(m_device.lightCoarseCullingSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.lightCoarseCullingSetLayout, nullptr);
-    m_device.lightCoarseCullingSetLayout = VK_NULL_HANDLE;
-  }
   destroyPassGpuProfileResources();
   m_lightResources.deinit();
   destroyIBLResources();
@@ -1643,11 +1632,6 @@ uint32_t RenderDevice::getShadowCullingMeshCapacity(uint32_t frameIndex) const
     return 0;
   }
   return m_perFrame.frameUserData[frameIndex].shadowCullingMeshCapacity;
-}
-
-PipelineHandle RenderDevice::getLightCullingPipelineHandle() const
-{
-  return m_pointLightCoarseCullingPipeline;
 }
 
 VkImageView RenderDevice::getCurrentSwapchainImageView() const
@@ -3777,78 +3761,14 @@ void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
                                        static_cast<uint32_t>(writes.size()), writes.data());
 }
 
-void RenderDevice::createLightCoarseCullingResources()
+void RenderDevice::createLightResources()
 {
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
-
   m_lightResources.init(*m_device.device, m_device.allocator, LightResources::CreateInfo{
       .maxPointLights = 256,
       .maxSpotLights  = 128,
       .frameCount     = frameCount,
   });
-
-  const std::array<VkDescriptorSetLayoutBinding, 5> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-  }};
-
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.lightCoarseCullingSetLayout));
-  DBG_VK_NAME(m_device.lightCoarseCullingSetLayout);
-
-  std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.lightCoarseCullingSetLayout);
-  m_device.lightCoarseCullingDescriptorSets.resize(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_device.descriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts        = setLayouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.lightCoarseCullingDescriptorSets.data()));
-
-  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
-  {
-    const std::array<VkDescriptorBufferInfo, 5> bufferInfos{{
-        VkDescriptorBufferInfo{m_lightResources.getPointLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getSpotLightBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getPointCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getSpotCoarseBoundsBuffer(frameIndex), 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{m_lightResources.getCoarseCullingUniformBuffer(frameIndex), 0, sizeof(shaderio::LightCoarseCullingUniforms)},
-    }};
-
-    std::array<VkWriteDescriptorSet, 5> writes{};
-    for(uint32_t binding = 0; binding < static_cast<uint32_t>(writes.size()); ++binding)
-    {
-      writes[binding] = VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.lightCoarseCullingDescriptorSets[frameIndex],
-          .dstBinding      = binding,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = binding == 4 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[binding],
-      };
-    }
-    vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-  }
-
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_device.lightCoarseCullingSetLayout,
-      .pushConstantRangeCount = 0,
-      .pPushConstantRanges    = nullptr,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.lightCoarseCullingPipelineLayout));
-  DBG_VK_NAME(m_device.lightCoarseCullingPipelineLayout);
 }
 
 
@@ -4943,7 +4863,6 @@ void RenderDevice::prebuildRequiredPipelineVariants()
   createPrebuiltComputePipelineVariant();
   createGPUCullingPipeline();
   createShadowCullingPipeline();
-  createLightCoarseCullingPipelines();
 }
 
 void RenderDevice::createPrebuiltGraphicsPipelineVariants()
@@ -7051,45 +6970,6 @@ void RenderDevice::createPrebuiltComputePipelineVariant()
   vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), compute, nullptr);
 }
 
-void RenderDevice::createLightCoarseCullingPipelines()
-{
-  if(m_device.lightCoarseCullingPipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-#ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  VkShaderModule shaderModule = utils::createShaderModule(nativeDevice, {shader_light_culling_slang, std::size(shader_light_culling_slang)});
-  DBG_VK_NAME(shaderModule);
-
-  const auto createPipeline = [&](const char* entryPoint, uint32_t specializationVariant) {
-    const VkPipelineShaderStageCreateInfo shaderStage{
-        .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = shaderModule,
-        .pName  = entryPoint,
-    };
-    const VkComputePipelineCreateInfo pipelineInfo{
-        .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage  = shaderStage,
-        .layout = m_device.lightCoarseCullingPipelineLayout,
-    };
-
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-    DBG_VK_NAME(pipeline);
-    return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
-                            reinterpret_cast<uint64_t>(pipeline),
-                            specializationVariant);
-  };
-
-  m_pointLightCoarseCullingPipeline = createPipeline("kernelPointLightCoarseCulling", 8);
-  m_spotLightCoarseCullingPipeline = createPipeline("kernelSpotLightCoarseCulling", 9);
-
-  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
-#endif
-}
 
 
 void RenderDevice::createGPUCullingPipeline()
@@ -7269,8 +7149,6 @@ void RenderDevice::destroyPipelines()
   m_taaResolvePipeline = kNullPipelineHandle;
   m_debugPipeline = kNullPipelineHandle;
   m_gpuCullingDebugPipeline = kNullPipelineHandle;
-  m_pointLightCoarseCullingPipeline = kNullPipelineHandle;
-  m_spotLightCoarseCullingPipeline = kNullPipelineHandle;
 }
 
 const rhi::vulkan::PipelineRecord* RenderDevice::tryGetPipelineRecord(PipelineHandle handle) const

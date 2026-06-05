@@ -140,7 +140,6 @@ public:
   }
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const;
-  PipelineHandle getLightCullingPipelineHandle() const;
   [[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getGPUCullingObjectCount(uint32_t frameIndex) const;
@@ -489,9 +488,6 @@ private:
     std::unique_ptr<rhi::PipelineLayout>       gpuCullingPipelineLayout;
     std::vector<BindGroupHandle>               shadowCullingBindGroups;
     std::unique_ptr<rhi::PipelineLayout>       shadowCullingPipelineLayout;
-    VkDescriptorSetLayout                      lightCoarseCullingSetLayout{nullptr};
-    std::vector<VkDescriptorSet>               lightCoarseCullingDescriptorSets;
-    VkPipelineLayout                           lightCoarseCullingPipelineLayout{nullptr};
     std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
     std::unique_ptr<rhi::PipelineLayout>       debugPipelineLayout;
@@ -654,8 +650,6 @@ private:
   PipelineHandle m_forwardMDIPipeline{};         // Forward MDI pass for transparent
   PipelineHandle m_debugPipeline{};              // Debug line overlay pass
   PipelineHandle m_gpuCullingDebugPipeline{};    // Current-frame GPU culling visualization
-  PipelineHandle m_pointLightCoarseCullingPipeline{};
-  PipelineHandle m_spotLightCoarseCullingPipeline{};
 
   // GBuffer uniform buffer bind groups (per-frame)
   // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public
@@ -809,8 +803,7 @@ private:
   void                 prebuildRequiredPipelineVariants();
   void                 createPrebuiltGraphicsPipelineVariants();
   void                 createPrebuiltComputePipelineVariant();
-  void                 createLightCoarseCullingResources();
-  void                 createLightCoarseCullingPipelines();
+  void                 createLightResources();
   void                 createGPUCullingResources();
   void                 updateGPUCullingDescriptorSet(uint32_t frameIndex);
   void                 createGPUCullingPipeline();
