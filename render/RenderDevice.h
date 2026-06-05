@@ -185,10 +185,7 @@ public:
   [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
   uint64_t       getLightPipelineLayout() const;
-  uint64_t       getLightCullingPipelineLayout() const;
-  uint64_t       getGraphicsPipelineLayout() const;  // Graphics pipeline layout for descriptor binding
-  uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout
-  uint64_t       getMDIPipelineLayout() const;
+  uint64_t       getGBufferPipelineLayout() const;   // GBuffer-specific pipeline layout (CSM fallback)
   uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
   uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
   uint64_t       getGBufferTextureSetLayout() const;      // Layout of the GBuffer texture set

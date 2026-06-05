@@ -8432,24 +8432,9 @@ uint64_t RenderDevice::getLightPipelineLayout() const
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
 }
 
-uint64_t RenderDevice::getLightCullingPipelineLayout() const
-{
-  return 0;
-}
-
-uint64_t RenderDevice::getGraphicsPipelineLayout() const
-{
-  return m_device.graphicPipelineLayout ? m_device.graphicPipelineLayout->getNativeHandle() : 0;
-}
-
 uint64_t RenderDevice::getGBufferPipelineLayout() const
 {
   return m_device.gbufferPipelineLayout ? m_device.gbufferPipelineLayout->getNativeHandle() : 0;
-}
-
-uint64_t RenderDevice::getMDIPipelineLayout() const
-{
-  return m_device.mdiPipelineLayout ? m_device.mdiPipelineLayout->getNativeHandle() : 0;
 }
 
 uint64_t RenderDevice::getGBufferColorDescriptorSet() const

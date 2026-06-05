@@ -465,7 +465,6 @@ public:
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
   [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
-  [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return m_lightCoarseCullingPipelineLayout ? m_lightCoarseCullingPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
   {
     return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
@@ -487,7 +486,6 @@ public:
   [[nodiscard]] VkExtent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
   [[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_gtaoPipeline); }
   [[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoisePipeline); }
-  [[nodiscard]] uint64_t getAOPipelineLayout() const { return m_aoPipelineLayout ? m_aoPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getAORawImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoRaw.image); }
   [[nodiscard]] uint64_t getAODenoisedImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoised.image); }
   [[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
@@ -501,7 +499,6 @@ public:
     return frameIndex < m_aoDenoiseBindGroups.size() ? m_aoDenoiseBindGroups[frameIndex] : BindGroupHandle{};
   }
   [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_ssrTracePipeline); }
-  [[nodiscard]] uint64_t getSSRPipelineLayout() const { return m_ssrPipelineLayout ? m_ssrPipelineLayout->getNativeHandle() : 0; }
   [[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
   [[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
   // Builds the SSR compute set as a per-frame temporary bind group (gbuffer/depth/history
