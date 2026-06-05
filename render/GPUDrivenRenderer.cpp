@@ -3698,41 +3698,27 @@ void GPUDrivenRenderer::initVisibilitySortResources()
   }
 
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
-  const std::array<VkDescriptorPoolSize, 1> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 2u},
-  }};
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = frameCount,
-      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-      .pPoolSizes    = poolSizes.data(),
-  };
-  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_visibilitySortDescriptorPool));
 
-  const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  // 2 storage buffers (key + value), compute. RHI ArgumentLayout + per-frame owned tables.
+  const std::array<rhi::BindGroupLayoutEntry, 2> sortEntries{{
+      {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
   }};
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_visibilitySortSetLayout));
+  m_visibilitySortArgumentLayout = m_renderer.createBindGroupLayout(
+      rhi::BindGroupLayoutDesc{.entries = sortEntries.data(), .entryCount = static_cast<uint32_t>(sortEntries.size())});
 
-  const VkPushConstantRange pushConstantRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset     = 0,
-      .size       = sizeof(shaderio::BitonicSortPushConstants),
-  };
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_visibilitySortSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &pushConstantRange,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_visibilitySortPipelineLayout));
+  {
+    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> mappings{{
+        rhi::vulkan::makePipelineLayoutBindingMapping(0, m_renderer.getBindGroupLayoutHandleNative(m_visibilitySortArgumentLayout)),
+    }};
+    const rhi::vulkan::VulkanPipelineLayoutLowering lowering{.setLayouts = mappings.data(), .setLayoutCount = 1};
+    rhi::PipelineLayoutDesc desc{};
+    desc.debugName = "gpu-driven-visibility-sort";
+    desc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute, .offset = 0, .size = sizeof(shaderio::BitonicSortPushConstants)});
+    auto layout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
+    layout->init(static_cast<void*>(nativeDevice), desc, lowering);
+    m_visibilitySortPipelineLayout = std::move(layout);
+  }
 
 #ifdef USE_SLANG
   VkShaderModule shaderModule =
@@ -3743,35 +3729,24 @@ void GPUDrivenRenderer::initVisibilitySortResources()
       .module = shaderModule,
       .pName  = "bitonicSortMain",
   };
+  const VkPipelineLayout sortLayoutNative = reinterpret_cast<VkPipelineLayout>(m_visibilitySortPipelineLayout->getNativeHandle());
   const VkComputePipelineCreateInfo pipelineInfo{
       .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage  = shaderStage,
-      .layout = m_visibilitySortPipelineLayout,
+      .layout = sortLayoutNative,
   };
   VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_visibilitySortPipeline));
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
   // Phase 6: register the bitonic-sort pipeline (with layout) for cmd->bindPipeline.
   m_visibilitySortPipelineHandle =
-      m_renderer.registerExternalComputePipeline(m_visibilitySortPipeline, m_visibilitySortPipelineLayout, 110u);
+      m_renderer.registerExternalComputePipeline(m_visibilitySortPipeline, sortLayoutNative, 110u);
 #endif
-
-  std::vector<VkDescriptorSetLayout> layouts(frameCount, m_visibilitySortSetLayout);
-  std::vector<VkDescriptorSet> descriptorSets(frameCount, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_visibilitySortDescriptorPool,
-      .descriptorSetCount = frameCount,
-      .pSetLayouts        = layouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, descriptorSets.data()));
 
   m_visibilitySortFrames.resize(frameCount);
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_visibilitySortFrames[frameIndex].descriptorSet = descriptorSets[frameIndex];
-    // Phase 6: adopt the sort set so the visibility-sort pass binds via cmd->bindBindGroup.
     m_visibilitySortFrames[frameIndex].bindGroup =
-        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex]), "gpu-driven-visibility-sort");
+        m_renderer.createPersistentBindGroup(m_visibilitySortArgumentLayout, "gpu-driven-visibility-sort");
   }
 }
 
@@ -3779,13 +3754,19 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
 {
   const VkDevice nativeDevice = getNativeDeviceHandle();
   const VmaAllocator allocator = getAllocatorHandle();
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
   for(VisibilitySortFrameResources& frameResources : m_visibilitySortFrames)
   {
     destroyBuffer(allocator, frameResources.uploadKeyBuffer);
     destroyBuffer(allocator, frameResources.uploadValueBuffer);
     destroyBuffer(allocator, frameResources.keyBuffer);
     destroyBuffer(allocator, frameResources.valueBuffer);
-    frameResources = {};
+    if(resourceTable != nullptr)
+    {
+      if(!frameResources.keyBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.keyBufferHandle);
+      if(!frameResources.valueBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.valueBufferHandle);
+    }
+    frameResources = {};  // owned ArgumentTable freed by RenderDevice::destroyBindGroups
   }
   m_visibilitySortFrames.clear();
 
@@ -3798,22 +3779,13 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
       vkDestroyPipeline(nativeDevice, m_visibilitySortPipeline, nullptr);
       m_visibilitySortPipeline = VK_NULL_HANDLE;
     }
-    if(m_visibilitySortPipelineLayout != VK_NULL_HANDLE)
+    if(m_visibilitySortPipelineLayout)
     {
-      vkDestroyPipelineLayout(nativeDevice, m_visibilitySortPipelineLayout, nullptr);
-      m_visibilitySortPipelineLayout = VK_NULL_HANDLE;
-    }
-    if(m_visibilitySortSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_visibilitySortSetLayout, nullptr);
-      m_visibilitySortSetLayout = VK_NULL_HANDLE;
-    }
-    if(m_visibilitySortDescriptorPool != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorPool(nativeDevice, m_visibilitySortDescriptorPool, nullptr);
-      m_visibilitySortDescriptorPool = VK_NULL_HANDLE;
+      m_visibilitySortPipelineLayout->deinit();
+      m_visibilitySortPipelineLayout.reset();
     }
   }
+  m_visibilitySortArgumentLayout = {};
 }
 
 void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
@@ -4257,37 +4229,38 @@ void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
   VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
-  if(nativeDevice == VK_NULL_HANDLE || frameResources.descriptorSet == VK_NULL_HANDLE
+  if(frameResources.bindGroup.isNull()
      || frameResources.keyBuffer.buffer == VK_NULL_HANDLE || frameResources.valueBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
   }
 
-  const std::array<VkDescriptorBufferInfo, 2> bufferInfos{{
-      VkDescriptorBufferInfo{frameResources.keyBuffer.buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameResources.valueBuffer.buffer, 0, VK_WHOLE_SIZE},
+  // key/value buffers grow on capacity change: register the owned=false mirror once, then
+  // update it in place so the ArgumentTable resolves the current native buffer.
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+  const auto rebind = [&](rhi::BufferHandle& handle, VkBuffer buffer) {
+    const uint64_t native = reinterpret_cast<uint64_t>(buffer);
+    if(handle.isNull())
+    {
+      rhi::vulkan::BufferRecord rec{};
+      rec.nativeBuffer = native;
+      rec.owned        = false;
+      handle           = resourceTable->registerBuffer(rec);
+    }
+    else
+    {
+      resourceTable->updateBuffer(handle, native);
+    }
+  };
+  rebind(frameResources.keyBufferHandle, frameResources.keyBuffer.buffer);
+  rebind(frameResources.valueBufferHandle, frameResources.valueBuffer.buffer);
+
+  const std::array<rhi::ArgumentWrite, 2> writes{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBufferHandle},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.valueBufferHandle},
   }};
-  const std::array<VkWriteDescriptorSet, 2> writes{{
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = frameResources.descriptorSet,
-          .dstBinding      = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[0],
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = frameResources.descriptorSet,
-          .dstBinding      = 1,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo     = &bufferInfos[1],
-      },
-  }};
-  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  m_renderer.updateBindGroup(frameResources.bindGroup, writes.data(), static_cast<uint32_t>(writes.size()));
 }
 
 void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)

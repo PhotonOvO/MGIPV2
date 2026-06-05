@@ -522,7 +522,7 @@ public:
   [[nodiscard]] VisibilitySortDispatch getVisibilitySortDispatch(uint32_t frameIndex) const
   {
     VisibilitySortDispatch info{};
-    if(m_visibilitySortPipeline == VK_NULL_HANDLE || m_visibilitySortPipelineLayout == VK_NULL_HANDLE
+    if(m_visibilitySortPipeline == VK_NULL_HANDLE || !m_visibilitySortPipelineLayout
        || frameIndex >= m_visibilitySortFrames.size())
     {
       return info;
@@ -530,15 +530,12 @@ public:
     const VisibilitySortFrameResources& f = m_visibilitySortFrames[frameIndex];
     info.pipelineHandle     = m_visibilitySortPipelineHandle;
     info.bindGroup          = f.bindGroup;
-    info.pipeline           = reinterpret_cast<uint64_t>(m_visibilitySortPipeline);
-    info.pipelineLayout     = reinterpret_cast<uint64_t>(m_visibilitySortPipelineLayout);
-    info.descriptorSet      = reinterpret_cast<uint64_t>(f.descriptorSet);
     info.uploadKeyBuffer    = reinterpret_cast<uint64_t>(f.uploadKeyBuffer.buffer);
     info.uploadValueBuffer  = reinterpret_cast<uint64_t>(f.uploadValueBuffer.buffer);
     info.keyBuffer          = reinterpret_cast<uint64_t>(f.keyBuffer.buffer);
     info.valueBuffer        = reinterpret_cast<uint64_t>(f.valueBuffer.buffer);
     info.paddedElementCount = f.paddedElementCount;
-    info.valid = f.descriptorSet != VK_NULL_HANDLE && f.paddedElementCount > 1u
+    info.valid = !f.bindGroup.isNull() && f.paddedElementCount > 1u
                  && f.uploadKeyBuffer.buffer != VK_NULL_HANDLE && f.uploadValueBuffer.buffer != VK_NULL_HANDLE;
     return info;
   }
@@ -870,8 +867,9 @@ private:
     utils::Buffer uploadValueBuffer{};
     utils::Buffer keyBuffer{};
     utils::Buffer valueBuffer{};
-    VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
-    BindGroupHandle bindGroup{};
+    BindGroupHandle bindGroup{};         // owned RHI ArgumentTable
+    rhi::BufferHandle keyBufferHandle{};   // owned=false mirror, rebound on realloc
+    rhi::BufferHandle valueBufferHandle{};
     uint32_t capacity{0};
     uint32_t activeElementCount{0};
     uint32_t paddedElementCount{0};
@@ -1001,9 +999,8 @@ private:
   std::vector<uint32_t>              m_opaqueDrawIndices;
   std::vector<uint32_t>              m_alphaTestDrawIndices;
   std::vector<uint32_t>              m_transparentDrawIndices;
-  VkDescriptorPool                   m_visibilitySortDescriptorPool{VK_NULL_HANDLE};
-  VkDescriptorSetLayout              m_visibilitySortSetLayout{VK_NULL_HANDLE};
-  VkPipelineLayout                   m_visibilitySortPipelineLayout{VK_NULL_HANDLE};
+  rhi::ArgumentLayoutHandle          m_visibilitySortArgumentLayout{};
+  std::unique_ptr<rhi::PipelineLayout> m_visibilitySortPipelineLayout;
   VkPipeline                         m_visibilitySortPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_visibilitySortPipelineHandle{};
   std::vector<VisibilitySortFrameResources> m_visibilitySortFrames;
