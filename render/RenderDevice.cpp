@@ -758,6 +758,10 @@ static rhi::TextureFormat toPortableTextureFormat(VkFormat format)
       return rhi::TextureFormat::d24UnormS8;
     case VK_FORMAT_D32_SFLOAT_S8_UINT:
       return rhi::TextureFormat::d32SfloatS8;
+    case VK_FORMAT_R16G16_SFLOAT:
+      return rhi::TextureFormat::rg16Sfloat;
+    case VK_FORMAT_R32_SFLOAT:
+      return rhi::TextureFormat::r32Sfloat;
     default:
       return rhi::TextureFormat::undefined;
   }

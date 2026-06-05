@@ -784,6 +784,33 @@ namespace {
       return VK_COMPONENT_SWIZZLE_IDENTITY;
   }
 }
+
+[[nodiscard]] VkFormat toVkViewFormat(TextureFormat format)
+{
+  switch(format)
+  {
+    case TextureFormat::rgba8Unorm:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::bgra8Unorm:
+      return VK_FORMAT_B8G8R8A8_UNORM;
+    case TextureFormat::rgba16Sfloat:
+      return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case TextureFormat::rg16Sfloat:
+      return VK_FORMAT_R16G16_SFLOAT;
+    case TextureFormat::r32Sfloat:
+      return VK_FORMAT_R32_SFLOAT;
+    case TextureFormat::d16Unorm:
+      return VK_FORMAT_D16_UNORM;
+    case TextureFormat::d32Sfloat:
+      return VK_FORMAT_D32_SFLOAT;
+    case TextureFormat::d24UnormS8:
+      return VK_FORMAT_D24_UNORM_S8_UINT;
+    case TextureFormat::d32SfloatS8:
+      return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    default:
+      return VK_FORMAT_UNDEFINED;
+  }
+}
 }  // namespace
 
 TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
@@ -792,11 +819,14 @@ TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& d
   // Prefer the RHI image handle (business layer holds no VkImage); fall back to the legacy
   // nativeImage seam for call sites that still pass a raw VkImage.
   const uint64_t nativeImage = !desc.image.isNull() ? resolveImageNative(desc.image) : desc.nativeImage;
+  // Prefer the portable format enum; fall back to the legacy raw-VkFormat seam.
+  const VkFormat viewFormat =
+      desc.format != TextureFormat::undefined ? toVkViewFormat(desc.format) : static_cast<VkFormat>(desc.nativeFormat);
   const VkImageViewCreateInfo info{
       .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image      = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),
       .viewType   = toVkImageViewType(desc.viewType),
-      .format     = static_cast<VkFormat>(desc.nativeFormat),
+      .format     = viewFormat,
       .components = {toVkSwizzle(desc.components.r), toVkSwizzle(desc.components.g), toVkSwizzle(desc.components.b),
                      toVkSwizzle(desc.components.a)},
       .subresourceRange = {.aspectMask     = toVkImageAspect(desc.aspect),

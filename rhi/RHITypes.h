@@ -156,6 +156,20 @@ struct ComponentMapping
   ComponentSwizzle a{ComponentSwizzle::identity};
 };
 
+enum class TextureFormat : uint8_t
+{
+  undefined   = 0,
+  rgba8Unorm  = 1,
+  bgra8Unorm  = 2,
+  rgba16Sfloat = 3,
+  d16Unorm    = 4,
+  d32Sfloat   = 5,
+  d24UnormS8  = 6,
+  d32SfloatS8 = 7,
+  rg16Sfloat  = 8,
+  r32Sfloat   = 9,
+};
+
 // Describes a texture view to create through the RHI. The handle returned by
 // RenderDevice::createTextureView is the only thing business/pass code should hold.
 // NOTE (transitional): nativeImage/nativeFormat are native Vulkan values because images
@@ -167,6 +181,9 @@ struct TextureViewCreateDesc
   // still hold a raw VkImage; createTextureView resolves `image` first when it is set.
   TextureHandle    image{};
   uint64_t         nativeImage{0};
+  // Prefer the portable `format` enum. `nativeFormat` (raw VkFormat as uint64) is the legacy
+  // seam; createTextureView uses `format` when it is not `undefined`.
+  TextureFormat    format{TextureFormat::undefined};
   uint64_t         nativeFormat{0};
   ImageViewType    viewType{ImageViewType::e2D};
   TextureAspect    aspect{TextureAspect::color};
@@ -190,18 +207,6 @@ enum class PipelineBindPoint : uint8_t
 {
   graphics = 0,
   compute,
-};
-
-enum class TextureFormat : uint8_t
-{
-  undefined   = 0,
-  rgba8Unorm  = 1,
-  bgra8Unorm  = 2,
-  rgba16Sfloat = 3,
-  d16Unorm    = 4,
-  d32Sfloat   = 5,
-  d24UnormS8  = 6,
-  d32SfloatS8 = 7,
 };
 
 enum class DynamicState : uint8_t

@@ -77,6 +77,10 @@ VkFormat toVkFormat(TextureFormat format)
       return VK_FORMAT_D24_UNORM_S8_UINT;
     case TextureFormat::d32SfloatS8:
       return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    case TextureFormat::rg16Sfloat:
+      return VK_FORMAT_R16G16_SFLOAT;
+    case TextureFormat::r32Sfloat:
+      return VK_FORMAT_R32_SFLOAT;
     default:
       return VK_FORMAT_UNDEFINED;
   }
