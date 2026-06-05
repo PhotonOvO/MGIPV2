@@ -1,6 +1,5 @@
 #include "HiZDepthPyramid.h"
 
-#include "../rhi/vulkan/VulkanCommandList.h"
 
 #include <algorithm>
 #include <array>
