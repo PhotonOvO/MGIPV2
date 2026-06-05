@@ -249,19 +249,13 @@ void VulkanCommandList::end()
 
 VkImageView VulkanCommandList::getVkImageViewFromHandle(TextureViewHandle view) const
 {
-  // Prefer the backend view registry (real handles created via RenderDevice::createTextureView).
-  // Fall back to the legacy pointer-encoded handle (TextureViewHandle::fromNativePtr) for
-  // call sites not yet migrated to the registry. A registry handle is always found here;
-  // a legacy pointer-encoded handle is never registered, so it falls through cleanly.
+  // Texture views are always real registry handles (created via RenderDevice::createTextureView
+  // or registerExternalTextureView). The legacy pointer-encoded fallback was removed in Wave 9.
   if(m_resourceTable != nullptr)
   {
-    const uint64_t nativeView = m_resourceTable->resolveTextureView(view);
-    if(nativeView != 0)
-    {
-      return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(nativeView));
-    }
+    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(view)));
   }
-  return reinterpret_cast<VkImageView>(view.toNativePtr());
+  return VK_NULL_HANDLE;
 }
 
 void VulkanCommandList::beginRenderPass(const RenderPassDesc& desc)

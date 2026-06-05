@@ -639,6 +639,7 @@ public:
   [[nodiscard]] uint32_t getSafePersistentObjectCount() const;
   [[nodiscard]] uint64_t getShadowAtlasImageOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.image); }
   [[nodiscard]] uint64_t getShadowAtlasViewOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.view); }
+  [[nodiscard]] rhi::TextureViewHandle getShadowAtlasViewHandle() const { return m_shadowAtlasViewHandle; }
   [[nodiscard]] VkExtent2D getShadowAtlasExtent() const { return m_shadowAtlasExtent; }
   [[nodiscard]] uint32_t   getShadowAtlasTileSize() const { return m_shadowAtlasTileSize; }
   void                     setShadowAtlasAllocatedTiles(uint32_t tiles) { m_shadowAtlasAllocatedTiles = tiles; }
@@ -1086,6 +1087,7 @@ private:
   PipelineHandle                     m_ssrTracePipelineHandle{};
   rhi::ArgumentLayoutHandle          m_ssrLayoutHandle{};
   rhi::TextureViewHandle             m_ssrRawViewHandle{};  // Wave 8: adopted storage-image view for SSR temp ArgumentWrite
+  rhi::TextureViewHandle             m_shadowAtlasViewHandle{};  // Wave 9: registry handle for the shadow-atlas depth view
   std::vector<BindGroupHandle>       m_aoBindGroups;
   std::vector<BindGroupHandle>       m_aoDenoiseBindGroups;
   utils::ImageResource               m_aoRaw{};

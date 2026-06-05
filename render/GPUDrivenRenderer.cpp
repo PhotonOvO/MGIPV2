@@ -2763,6 +2763,11 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
     m_ssrRawViewHandle = {};
   }
   destroyImage(m_ssrRaw);
+  if(!m_shadowAtlasViewHandle.isNull())
+  {
+    m_renderer.destroyTextureView(m_shadowAtlasViewHandle);
+    m_shadowAtlasViewHandle = {};
+  }
   destroyImage(m_shadowAtlas);
 
   if(nativeDevice != VK_NULL_HANDLE)
@@ -2837,6 +2842,11 @@ void GPUDrivenRenderer::resizePhase7Resources()
     m_ssrRawViewHandle = {};
   }
   destroyOnlyImage(m_ssrRaw);
+  if(!m_shadowAtlasViewHandle.isNull())
+  {
+    m_renderer.destroyTextureView(m_shadowAtlasViewHandle);  // adopted view: unregister only, native freed below
+    m_shadowAtlasViewHandle = {};
+  }
   destroyOnlyImage(m_shadowAtlas);
   m_phase7HalfExtent = halfExtent;
 
@@ -2879,6 +2889,7 @@ void GPUDrivenRenderer::resizePhase7Resources()
                                       m_shadowAtlasExtent,
                                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                                       VK_IMAGE_ASPECT_DEPTH_BIT);
+  m_shadowAtlasViewHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(m_shadowAtlas.view));
 }
 
 void GPUDrivenRenderer::bindPhase7PassResources()

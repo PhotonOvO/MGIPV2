@@ -92,7 +92,7 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   context.cmd->beginEvent("GPUDrivenShadowAtlas");
   const rhi::DepthTargetDesc depthTarget{
       .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
-      .view = rhi::TextureViewHandle::fromNative(reinterpret_cast<VkImageView>(m_renderer->getShadowAtlasViewOpaque())),
+      .view = m_renderer->getShadowAtlasViewHandle(),
       .state = rhi::ResourceState::DepthStencilAttachment,
       .loadOp = rhi::LoadOp::clear,
       .storeOp = rhi::StoreOp::store,
