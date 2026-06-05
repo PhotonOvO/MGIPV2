@@ -866,7 +866,6 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     LOGI("Static buffer upload: host staging to device-local buffers");
   }
 
-  m_device.samplerPool.init(nativeDevice);
 
   m_meshPool.init(nativeDevice, m_device.allocator, &m_device.resourceTable, m_device.staticBufferUploadPolicy);
 
@@ -897,8 +896,20 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   createDescriptorPool();
   initImGui(window);
 
-  const VkSamplerCreateInfo info{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
-  const VkSampler linearSampler = m_device.samplerPool.acquireSampler(info);
+  // Scene sampler: linear mag/min, nearest mip, repeat, maxLod 0 (matches the prior
+  // zero-initialized VkSamplerCreateInfo). Created through the RHI; held as a handle.
+  m_device.sceneLinearSamplerHandle = m_device.device->createSampler(rhi::SamplerDesc{
+      .magFilter    = rhi::Filter::linear,
+      .minFilter    = rhi::Filter::linear,
+      .mipmapMode   = rhi::MipmapMode::nearest,
+      .addressModeU = rhi::AddressMode::repeat,
+      .addressModeV = rhi::AddressMode::repeat,
+      .addressModeW = rhi::AddressMode::repeat,
+      .maxLod       = 0.0f,
+      .debugName    = "SceneLinearSampler",
+  });
+  const VkSampler linearSampler =
+      reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_device.resourceTable.resolveSampler(m_device.sceneLinearSamplerHandle)));
   DBG_VK_NAME(linearSampler);
 
   {
@@ -1160,7 +1171,15 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     vkSwapchain->deinit();
     m_swapchainDependent.swapchain.reset();
   }
-  m_device.samplerPool.deinit();
+  if(m_device.device)
+  {
+    m_device.device->destroySampler(m_device.sceneLinearSamplerHandle);
+    m_device.device->destroySampler(m_device.gbufferLinearSamplerHandle);
+    m_device.device->destroySampler(m_materials.materialSamplerHandle);
+    m_device.sceneLinearSamplerHandle   = {};
+    m_device.gbufferLinearSamplerHandle = {};
+    m_materials.materialSamplerHandle   = {};
+  }
 
   // Destroy bind groups FIRST (they use descriptor pools)
   destroyBindGroups();
@@ -2227,15 +2246,23 @@ void RenderDevice::updateGBufferTextureDescriptorSet()
     return;
   }
 
-  const VkSampler linearSampler = m_device.samplerPool.acquireSampler(VkSamplerCreateInfo{
-      .sType       = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter   = VK_FILTER_LINEAR,
-      .minFilter   = VK_FILTER_LINEAR,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .maxLod      = VK_LOD_CLAMP_NONE,
-  });
+  // GBuffer sampler: linear mag/min, nearest mip, clamp-to-edge, full LOD range. Created
+  // once through the RHI and reused across resizes (this function reruns on swapchain rebuild).
+  if(m_device.gbufferLinearSamplerHandle.isNull())
+  {
+    m_device.gbufferLinearSamplerHandle = m_device.device->createSampler(rhi::SamplerDesc{
+        .magFilter    = rhi::Filter::linear,
+        .minFilter    = rhi::Filter::linear,
+        .mipmapMode   = rhi::MipmapMode::nearest,
+        .addressModeU = rhi::AddressMode::clampToEdge,
+        .addressModeV = rhi::AddressMode::clampToEdge,
+        .addressModeW = rhi::AddressMode::clampToEdge,
+        .maxLod       = VK_LOD_CLAMP_NONE,
+        .debugName    = "GBufferLinearSampler",
+    });
+  }
+  const VkSampler linearSampler =
+      reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_device.resourceTable.resolveSampler(m_device.gbufferLinearSamplerHandle)));
 
   // Write descriptor array for packed GBuffer textures followed by scene depth.
   std::array<VkDescriptorImageInfo, kLightPassTextureCount> imageInfos{};
@@ -6498,22 +6525,20 @@ void RenderDevice::createGraphicDescriptorSet()
 
 void RenderDevice::updateGraphicsDescriptorSet()
 {
-  const VkSampler sampler = m_device.samplerPool.acquireSampler({
-      .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter    = VK_FILTER_LINEAR,
-      .minFilter    = VK_FILTER_LINEAR,
-      .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .maxLod       = VK_LOD_CLAMP_NONE,
-  });
-  DBG_VK_NAME(sampler);
-
-  // Wave 8: register the shared material sampler once for combinedImageSampler ArgumentWrites.
+  // Wave 8: shared material sampler for combinedImageSampler ArgumentWrites, created once
+  // through the RHI (linear mag/min/mip, repeat, full LOD range).
   if(m_materials.materialSamplerHandle.isNull())
   {
-    m_materials.materialSamplerHandle = m_device.resourceTable.registerSampler(reinterpret_cast<uint64_t>(sampler));
+    m_materials.materialSamplerHandle = m_device.device->createSampler(rhi::SamplerDesc{
+        .magFilter    = rhi::Filter::linear,
+        .minFilter    = rhi::Filter::linear,
+        .mipmapMode   = rhi::MipmapMode::linear,
+        .addressModeU = rhi::AddressMode::repeat,
+        .addressModeV = rhi::AddressMode::repeat,
+        .addressModeW = rhi::AddressMode::repeat,
+        .maxLod       = VK_LOD_CLAMP_NONE,
+        .debugName    = "MaterialSampler",
+    });
   }
 
   // Demo material slots: cache the per-slot view handles and write them as

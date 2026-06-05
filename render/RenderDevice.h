@@ -386,72 +386,6 @@ public:
   uint64_t    getPhysicalDeviceOpaque() const { return m_device.device ? m_device.device->getNativePhysicalDevice() : 0; }
 
 private:
-  class SamplerCache
-  {
-  public:
-    SamplerCache() = default;
-    ~SamplerCache() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
-
-    void init(VkDevice device) { m_device = device; }
-    void deinit()
-    {
-      for(const auto& entry : m_samplerMap)
-      {
-        vkDestroySampler(m_device, entry.second, nullptr);
-      }
-      m_samplerMap.clear();
-      m_device = VK_NULL_HANDLE;
-    }
-    VkSampler acquireSampler(const VkSamplerCreateInfo& createInfo)
-    {
-      if(auto it = m_samplerMap.find(createInfo); it != m_samplerMap.end())
-      {
-        return it->second;
-      }
-
-      VkSampler sampler{VK_NULL_HANDLE};
-      VK_CHECK(vkCreateSampler(m_device, &createInfo, nullptr, &sampler));
-      m_samplerMap[createInfo] = sampler;
-      return sampler;
-    }
-
-  private:
-    struct SamplerCreateInfoHash
-    {
-      std::size_t operator()(const VkSamplerCreateInfo& info) const
-      {
-        std::size_t seed{0};
-        seed = utils::hashCombine(seed, info.magFilter);
-        seed = utils::hashCombine(seed, info.minFilter);
-        seed = utils::hashCombine(seed, info.mipmapMode);
-        seed = utils::hashCombine(seed, info.addressModeU);
-        seed = utils::hashCombine(seed, info.addressModeV);
-        seed = utils::hashCombine(seed, info.addressModeW);
-        seed = utils::hashCombine(seed, info.mipLodBias);
-        seed = utils::hashCombine(seed, info.anisotropyEnable);
-        seed = utils::hashCombine(seed, info.maxAnisotropy);
-        seed = utils::hashCombine(seed, info.compareEnable);
-        seed = utils::hashCombine(seed, info.compareOp);
-        seed = utils::hashCombine(seed, info.minLod);
-        seed = utils::hashCombine(seed, info.maxLod);
-        seed = utils::hashCombine(seed, info.borderColor);
-        seed = utils::hashCombine(seed, info.unnormalizedCoordinates);
-        return seed;
-      }
-    };
-
-    struct SamplerCreateInfoEqual
-    {
-      bool operator()(const VkSamplerCreateInfo& lhs, const VkSamplerCreateInfo& rhs) const
-      {
-        return std::memcmp(&lhs, &rhs, sizeof(VkSamplerCreateInfo)) == 0;
-      }
-    };
-
-    VkDevice m_device{VK_NULL_HANDLE};
-    std::unordered_map<VkSamplerCreateInfo, VkSampler, SamplerCreateInfoHash, SamplerCreateInfoEqual> m_samplerMap;
-  };
-
   // Created during RenderDevice::init() after feature negotiation.
   // Destroyed during RenderDevice::shutdown() after vkDeviceWaitIdle.
   // Rebuild trigger: none while device is alive; recreated only on full renderer/device re-init.
@@ -462,7 +396,10 @@ private:
     VmaAllocator                 allocator{nullptr};
     std::vector<utils::Buffer>   stagingBuffers;
     upload::StaticBufferUploadPolicy staticBufferUploadPolicy{};
-    SamplerCache                 samplerPool;
+    // Shared samplers created through the RHI (rhi::Device::createSampler), held as handles.
+    // sceneLinear feeds SceneResources; gbufferLinear feeds the GBuffer descriptor set.
+    rhi::SamplerHandle           sceneLinearSamplerHandle{};
+    rhi::SamplerHandle           gbufferLinearSamplerHandle{};
 
     utils::Buffer                              vertexBuffer;
     utils::Buffer                              pointsBuffer;
