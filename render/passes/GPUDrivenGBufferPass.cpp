@@ -135,13 +135,13 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       if(persistentIndirectBufferHandle != 0)
       {
         const bool opaquePatched = sortedOpaqueCapacity == 0u
-                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmdBuffer,
                                                                                     context.frameIndex,
                                                                                     persistentIndirectBufferHandle,
                                                                                     0x00000000u,
                                                                                     0u);
         const bool alphaPatched = sortedAlphaCapacity == 0u
-                                  || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+                                  || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmdBuffer,
                                                                                    context.frameIndex,
                                                                                    persistentIndirectBufferHandle,
                                                                                    0x40000000u,

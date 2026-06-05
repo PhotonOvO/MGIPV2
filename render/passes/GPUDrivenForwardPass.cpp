@@ -233,7 +233,7 @@ void GPUDrivenForwardPass::execute(const PassContext& context) const
   const uint64_t forwardIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(context.frameIndex);
   const bool transparentPatched =
       forwardIndirectBufferHandle != 0
-      && m_renderer->prepareAndDispatchVisibilityPatch(*context.cmd,
+      && m_renderer->prepareAndDispatchVisibilityPatch(*context.cmdBuffer,
                                                        context.frameIndex,
                                                        forwardIndirectBufferHandle,
                                                        0x80000000u,

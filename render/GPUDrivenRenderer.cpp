@@ -4202,11 +4202,11 @@ uint32_t GPUDrivenRenderer::getPreviousFrameIndex(uint32_t frameIndex) const
   return (frameIndex + frameCount - 1u) % frameCount;
 }
 
-bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
-                                                          uint32_t          frameIndex,
-                                                          uint64_t          targetIndirectBufferHandle,
-                                                          uint32_t          categoryValue,
-                                                          uint32_t          outputOffset)
+bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
+                                                          uint32_t            frameIndex,
+                                                          uint64_t            targetIndirectBufferHandle,
+                                                          uint32_t            categoryValue,
+                                                          uint32_t            outputOffset)
 {
   if(frameIndex >= m_transparentVisibilityPatchFrames.size()
       || frameIndex >= m_visibilitySortFrames.size()
@@ -4246,32 +4246,12 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
     return false;
   }
 
-  const VkCommandBuffer vkCmd = rhi::vulkan::getNativeCommandBuffer(cmd);
-  const VkMemoryBarrier2 computeToComputeBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-  };
-  const VkDependencyInfo computeToComputeDependency{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &computeToComputeBarrier,
-  };
-  const auto barrierComputeToCompute = [&]() {
-    vkCmdPipelineBarrier2(vkCmd, &computeToComputeDependency);
-  };
-
-  vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_transparentVisibilityPatchPipeline);
-  vkCmdBindDescriptorSets(vkCmd,
-                          VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_transparentVisibilityPatchPipelineLayout,
-                          0,
-                          1,
-                          &frameResources.descriptorSets[descriptorSetIndex],
-                          0,
-                          nullptr);
+  const PipelineHandle  pipelineHandle = m_transparentVisibilityPatchPipelineHandle;
+  const BindGroupHandle tableHandle    = frameResources.argumentTables[descriptorSetIndex];
+  if(pipelineHandle.isNull() || tableHandle.isNull())
+  {
+    return false;
+  }
 
   const uint32_t elementCount = sortResources.paddedElementCount;
   const uint32_t groupCount = (elementCount + 63u) / 64u;
@@ -4286,13 +4266,25 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
       .scanBufferIndex = 0u,
       ._padding0 = 0u,
   };
-  vkCmdPushConstants(vkCmd,
-                     m_transparentVisibilityPatchPipelineLayout,
-                     VK_SHADER_STAGE_COMPUTE_BIT,
-                     0,
-                     sizeof(pushConstants),
-                     &pushConstants);
-  vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
+
+  // Each dispatch records in its own compute-pass scope so the inter-dispatch barriers
+  // (which live on the CommandBuffer) can sit between them. The descriptor set is adopted
+  // as a non-owned ArgumentTable; its contents were just refreshed natively above.
+  const auto dispatchPatch = [&](const shaderio::TransparentVisibilityPatchPushConstants& pc) {
+    rhi::ComputeEncoder* enc = cmdBuffer.beginComputePass();
+    enc->setPipeline(pipelineHandle);
+    enc->setArgumentTable(0, tableHandle);
+    enc->setRootConstants(0, &pc, sizeof(pc));
+    enc->dispatch(rhi::DispatchDesc{.groupCountX = groupCount, .groupCountY = 1u, .groupCountZ = 1u});
+    cmdBuffer.endEncoding();
+  };
+  // Ping-pong prefix scan: producer compute writes are made visible to the next compute read
+  // (RAW); write-after-read on the alternate buffer is covered by the execution dependency.
+  const auto barrierComputeToCompute = [&]() {
+    cmdBuffer.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute, rhi::HazardFlags::bufferWrites);
+  };
+
+  dispatchPatch(pushConstants);
   barrierComputeToCompute();
 
   uint32_t scanBufferIndex = 0u;
@@ -4301,13 +4293,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
     pushConstants.mode = 1u;
     pushConstants.scanOffset = scanOffset;
     pushConstants.scanBufferIndex = scanBufferIndex;
-    vkCmdPushConstants(vkCmd,
-                       m_transparentVisibilityPatchPipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT,
-                       0,
-                       sizeof(pushConstants),
-                       &pushConstants);
-    vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
+    dispatchPatch(pushConstants);
     barrierComputeToCompute();
     scanBufferIndex = 1u - scanBufferIndex;
   }
@@ -4315,27 +4301,11 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
   pushConstants.mode = 2u;
   pushConstants.scanOffset = 0u;
   pushConstants.scanBufferIndex = scanBufferIndex;
-  vkCmdPushConstants(vkCmd,
-                     m_transparentVisibilityPatchPipelineLayout,
-                     VK_SHADER_STAGE_COMPUTE_BIT,
-                     0,
-                     sizeof(pushConstants),
-                     &pushConstants);
-  vkCmdDispatch(vkCmd, groupCount, 1u, 1u);
+  dispatchPatch(pushConstants);
 
-  const VkMemoryBarrier2 computeToIndirectBarrier{
-      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-      .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-  };
-  const VkDependencyInfo computeToIndirectDependency{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount = 1,
-      .pMemoryBarriers = &computeToIndirectBarrier,
-  };
-  vkCmdPipelineBarrier2(vkCmd, &computeToIndirectDependency);
+  // Final patched indirect args are consumed by drawIndexedIndirect(Count).
+  cmdBuffer.barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
+                    rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
   return true;
 }
 

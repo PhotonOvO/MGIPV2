@@ -872,11 +872,11 @@ public:
     m_renderer.bindStaticPassResources(m_passExecutor);
   }
   void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }
-  bool prepareAndDispatchVisibilityPatch(rhi::CommandList& cmd,
-                                         uint32_t          frameIndex,
-                                         uint64_t          targetIndirectBufferHandle,
-                                         uint32_t          categoryValue,
-                                         uint32_t          outputOffset);
+  bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
+                                         uint32_t            frameIndex,
+                                         uint64_t            targetIndirectBufferHandle,
+                                         uint32_t            categoryValue,
+                                         uint32_t            outputOffset);
 private:
   struct DirtyRange
   {
