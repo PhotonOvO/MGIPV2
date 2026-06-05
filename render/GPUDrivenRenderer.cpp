@@ -4,7 +4,6 @@
 #include "../common/TracyProfiling.h"
 #include "../loader/Ktx2Loader.h"
 #include "../rhi/vulkan/VulkanCommandList.h"
-#include "../rhi/vulkan/VulkanAdoptedBindGroup.h"
 #include "../rhi/vulkan/VulkanPipelines.h"
 
 #include <algorithm>

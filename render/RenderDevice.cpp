@@ -27,7 +27,6 @@
 #include <unordered_map>
 
 #include "../rhi/vulkan/VulkanCommandList.h"
-#include "../rhi/vulkan/VulkanAdoptedBindGroup.h"
 
 namespace demo {
 
