@@ -940,7 +940,6 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     };
     m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
     createIBLResources(cmd);
-    createDepthPyramidResources();
     createGPUCullingResources();
     createShadowCullingResources();
     createLightCoarseCullingResources();
@@ -1204,18 +1203,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     vkDestroyPipelineLayout(device, m_device.postProcessPipelineLayout, nullptr);
     m_device.postProcessPipelineLayout = VK_NULL_HANDLE;
   }
-  if(m_device.depthPyramidPipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(device, m_device.depthPyramidPipelineLayout, nullptr);
-    m_device.depthPyramidPipelineLayout = VK_NULL_HANDLE;
-  }
-  if(m_device.depthPyramidSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.depthPyramidSetLayout, nullptr);
-    m_device.depthPyramidSetLayout = VK_NULL_HANDLE;
-  }
-  m_device.depthPyramidDescriptorSet = VK_NULL_HANDLE;
-  destroyBuffer(m_device.allocator, m_depthPyramidUniformBuffer);
   if(m_device.gpuCullingPipelineLayout != VK_NULL_HANDLE)
   {
     vkDestroyPipelineLayout(device, m_device.gpuCullingPipelineLayout, nullptr);
@@ -3964,126 +3951,6 @@ void RenderDevice::createLightCoarseCullingResources()
   DBG_VK_NAME(m_device.lightCoarseCullingPipelineLayout);
 }
 
-void RenderDevice::createDepthPyramidResources()
-{
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-
-  m_depthPyramidUniformBuffer = createBuffer(nativeDevice,
-                                             m_device.allocator,
-                                             sizeof(shaderio::DepthPyramidUniforms),
-                                             VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU,
-                                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-  DBG_VK_NAME(m_depthPyramidUniformBuffer.buffer);
-
-  const std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-  }};
-
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &setLayoutInfo, nullptr, &m_device.depthPyramidSetLayout));
-  DBG_VK_NAME(m_device.depthPyramidSetLayout);
-
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_device.descriptorPool,
-      .descriptorSetCount = 1,
-      .pSetLayouts        = &m_device.depthPyramidSetLayout,
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, &m_device.depthPyramidDescriptorSet));
-  DBG_VK_NAME(m_device.depthPyramidDescriptorSet);
-
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_device.depthPyramidSetLayout,
-      .pushConstantRangeCount = 0,
-      .pPushConstantRanges    = nullptr,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice, &pipelineLayoutInfo, nullptr, &m_device.depthPyramidPipelineLayout));
-  DBG_VK_NAME(m_device.depthPyramidPipelineLayout);
-
-  updateDepthPyramidDescriptorSet();
-}
-
-void RenderDevice::updateDepthPyramidDescriptorSet()
-{
-  if(m_device.depthPyramidDescriptorSet == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
-  if(sceneResources.getDepthImageView().isNull() || sceneResources.getDepthPyramidMipCount() == 0)
-  {
-    return;
-  }
-
-  const auto nativeOf = [&](rhi::TextureViewHandle h) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
-  };
-  const VkDescriptorImageInfo sourceDepthInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = nativeOf(sceneResources.getDepthImageView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-
-  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
-  const uint32_t mipCount = sceneResources.getDepthPyramidMipCount();
-  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
-  {
-    pyramidMipInfos[i] = VkDescriptorImageInfo{
-        .sampler     = VK_NULL_HANDLE,
-        .imageView   = nativeOf(sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u))),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-  }
-
-  const VkDescriptorBufferInfo uniformInfo{
-      .buffer = m_depthPyramidUniformBuffer.buffer,
-      .offset = 0,
-      .range  = sizeof(shaderio::DepthPyramidUniforms),
-  };
-
-  const std::array<VkWriteDescriptorSet, 3> writes{{
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.depthPyramidDescriptorSet,
-          .dstBinding      = 0,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &sourceDepthInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.depthPyramidDescriptorSet,
-          .dstBinding      = 1,
-          .dstArrayElement = 0,
-          .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-          .pImageInfo      = pyramidMipInfos.data(),
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = m_device.depthPyramidDescriptorSet,
-          .dstBinding      = 2,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo     = &uniformInfo,
-      },
-  }};
-
-  vkUpdateDescriptorSets(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                         static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-}
 
 void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
 {
@@ -4133,7 +4000,6 @@ void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> 
 
   // Update GBuffer texture descriptor set after potential SceneResources resize
   updateGBufferTextureDescriptorSet();
-  updateDepthPyramidDescriptorSet();
   for(uint32_t frameIndex = 0; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
   {
     updateGPUCullingDescriptorSet(frameIndex);
@@ -5175,7 +5041,6 @@ void RenderDevice::prebuildRequiredPipelineVariants()
 {
   createPrebuiltGraphicsPipelineVariants();
   createPrebuiltComputePipelineVariant();
-  createDepthPyramidPipeline();
   createGPUCullingPipeline();
   createShadowCullingPipeline();
   createLightCoarseCullingPipelines();
@@ -7326,42 +7191,6 @@ void RenderDevice::createLightCoarseCullingPipelines()
 #endif
 }
 
-void RenderDevice::createDepthPyramidPipeline()
-{
-  if(m_device.depthPyramidPipelineLayout == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-#ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  VkShaderModule shaderModule =
-      utils::createShaderModule(nativeDevice, {shader_depth_pyramid_slang, std::size(shader_depth_pyramid_slang)});
-  DBG_VK_NAME(shaderModule);
-
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "depthPyramid",
-  };
-
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStage,
-      .layout = m_device.depthPyramidPipelineLayout,
-  };
-
-  VkPipeline pipeline = VK_NULL_HANDLE;
-  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-  DBG_VK_NAME(pipeline);
-  m_depthPyramidPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
-                                            reinterpret_cast<uint64_t>(pipeline),
-                                            12);
-
-  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
-#endif
-}
 
 void RenderDevice::createGPUCullingPipeline()
 {
@@ -7512,7 +7341,6 @@ void RenderDevice::destroyPipelines()
   m_depthPrepassAlphaTestPipeline = kNullPipelineHandle;
   m_depthPrepassOpaqueMDIPipeline = kNullPipelineHandle;
   m_depthPrepassAlphaTestMDIPipeline = kNullPipelineHandle;
-  m_depthPyramidPipeline = kNullPipelineHandle;
   m_gpuCullingPipeline = kNullPipelineHandle;
   m_shadowCullingPipeline = kNullPipelineHandle;
   m_gbufferOpaquePipeline = kNullPipelineHandle;

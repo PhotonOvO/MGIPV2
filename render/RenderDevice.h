@@ -491,9 +491,6 @@ private:
     std::string                                iblEnvironmentStatus{"Not initialized"};
     VkPipelineLayout                           lightPipelineLayout{nullptr};
     VkPipelineLayout                           postProcessPipelineLayout{nullptr};
-    VkDescriptorSetLayout                      depthPyramidSetLayout{nullptr};
-    VkDescriptorSet                            depthPyramidDescriptorSet{nullptr};
-    VkPipelineLayout                           depthPyramidPipelineLayout{nullptr};
     VkDescriptorSetLayout                      gpuCullingSetLayout{nullptr};
     std::vector<VkDescriptorSet>               gpuCullingDescriptorSets;
     std::vector<BindGroupHandle>               gpuCullingBindGroups;
@@ -641,7 +638,6 @@ private:
   PipelineHandle m_depthPrepassAlphaTestPipeline{};
   PipelineHandle m_depthPrepassOpaqueMDIPipeline{};
   PipelineHandle m_depthPrepassAlphaTestMDIPipeline{};
-  PipelineHandle m_depthPyramidPipeline{};
   PipelineHandle m_gpuCullingPipeline{};
   PipelineHandle m_shadowCullingPipeline{};
   PipelineHandle m_gbufferOpaquePipeline{};      // GBuffer Opaque variant
@@ -814,9 +810,6 @@ private:
   void                 createPrebuiltComputePipelineVariant();
   void                 createLightCoarseCullingResources();
   void                 createLightCoarseCullingPipelines();
-  void                 createDepthPyramidResources();
-  void                 updateDepthPyramidDescriptorSet();
-  void                 createDepthPyramidPipeline();
   void                 createGPUCullingResources();
   void                 updateGPUCullingDescriptorSet(uint32_t frameIndex);
   void                 createGPUCullingPipeline();
@@ -934,7 +927,6 @@ private:
   PerDrawData                 m_perDraw;
   MaterialResources           m_materials;
   LightResources              m_lightResources;
-  utils::Buffer               m_depthPyramidUniformBuffer{};
   std::vector<shaderio::LightData> m_testPointLights;
   std::vector<TestPointLightMotion> m_testPointLightMotions;
   Aabb                     m_testPointLightSceneBounds{};
