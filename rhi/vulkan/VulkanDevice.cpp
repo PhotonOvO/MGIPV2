@@ -1008,6 +1008,24 @@ void VulkanDevice::destroyBuffer(BufferHandle handle)
   }
 }
 
+BufferHandle VulkanDevice::registerExternalBuffer(uint64_t nativeBuffer)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalBuffer");
+  BufferRecord rec{};
+  rec.nativeBuffer = nativeBuffer;
+  rec.owned        = false;
+  return m_resourceTable->registerBuffer(rec);
+}
+
+void VulkanDevice::updateBufferBinding(BufferHandle handle, uint64_t nativeBuffer)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  m_resourceTable->updateBuffer(handle, nativeBuffer);
+}
+
 GpuPtr VulkanDevice::getBufferGpuAddress(BufferHandle handle) const
 {
   if(m_resourceTable == nullptr)

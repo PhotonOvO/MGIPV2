@@ -56,6 +56,8 @@ public:
   // --- Modern GPU interface (Wave 1: buffers / samplers / query pools) ---
   BufferHandle createBuffer(const BufferDesc& desc) override;
   void         destroyBuffer(BufferHandle handle) override;
+  BufferHandle registerExternalBuffer(uint64_t nativeBuffer) override;
+  void         updateBufferBinding(BufferHandle handle, uint64_t nativeBuffer) override;
   GpuPtr       getBufferGpuAddress(BufferHandle handle) const override;
   void*        mapBuffer(BufferHandle handle) override;
   void         unmapBuffer(BufferHandle handle) override;

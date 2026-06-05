@@ -349,7 +349,7 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   m_enableExperimentalMeshletPath = kEnableExperimentalMeshletPath;
   if(m_enableExperimentalMeshletPath)
   {
-    m_meshletBuffer.init(getNativeDeviceHandle(), getAllocatorHandle(), m_renderer.getResourceTable());
+    m_meshletBuffer.init(getNativeDeviceHandle(), getAllocatorHandle(), &m_renderer.getRHIDevice());
   }
   m_hiZDepthPyramid.init(getRHIDevice(), getAllocatorHandle(), getSwapchainImageCount(), getSceneExtent());
 

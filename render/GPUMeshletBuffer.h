@@ -5,8 +5,8 @@
 
 #include <vector>
 
-namespace demo::rhi::vulkan {
-class VulkanResourceTable;
+namespace demo::rhi {
+class Device;
 }
 
 namespace demo {
@@ -14,7 +14,7 @@ namespace demo {
 class GPUMeshletBuffer
 {
 public:
-  void init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable);
+  void init(VkDevice device, VmaAllocator allocator, rhi::Device* device_);
   void deinit();
   void clear();
 
@@ -43,7 +43,7 @@ private:
 
   VkDevice      m_device{VK_NULL_HANDLE};
   VmaAllocator  m_allocator{nullptr};
-  rhi::vulkan::VulkanResourceTable* m_resourceTable{nullptr};
+  rhi::Device* m_rhiDevice{nullptr};
   rhi::BufferHandle m_meshletIndexBufferRHI{};
   utils::Buffer m_meshletDataBuffer{};
   utils::Buffer m_meshletCullObjectBuffer{};

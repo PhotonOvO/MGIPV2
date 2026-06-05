@@ -867,7 +867,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   }
 
 
-  m_meshPool.init(nativeDevice, m_device.allocator, &m_device.resourceTable, m_device.staticBufferUploadPolicy);
+  m_meshPool.init(nativeDevice, m_device.allocator, m_device.device.get(), m_device.staticBufferUploadPolicy);
 
   const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
   ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");

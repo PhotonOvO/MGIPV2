@@ -8,8 +8,8 @@
 #include <cstdint>
 #include <cassert>
 
-namespace demo::rhi::vulkan {
-class VulkanResourceTable;
+namespace demo::rhi {
+class Device;
 }
 
 namespace demo {
@@ -82,7 +82,7 @@ public:
     MeshPool() = default;
     ~MeshPool() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
 
-    void init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable,
+    void init(VkDevice device, VmaAllocator allocator, rhi::Device* rhiDevice,
               upload::StaticBufferUploadPolicy staticUploadPolicy = {});
     void deinit();
 
@@ -140,7 +140,7 @@ private:
 
     VkDevice m_device = VK_NULL_HANDLE;
     VmaAllocator m_allocator = nullptr;
-    rhi::vulkan::VulkanResourceTable* m_resourceTable = nullptr;
+    rhi::Device* m_rhiDevice = nullptr;
     rhi::BufferHandle m_sharedVertexBufferRHI{};
     rhi::BufferHandle m_sharedIndexBufferRHI{};
     upload::StaticBufferUploadPolicy m_staticUploadPolicy{};

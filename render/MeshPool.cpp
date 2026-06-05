@@ -2,7 +2,7 @@
 #include "BatchUploadContext.h"
 #include "../loader/GltfLoader.h"
 #include "../scene/SceneAsset.h"
-#include "../rhi/vulkan/VulkanResourceTable.h"
+#include "../rhi/RHIDevice.h"
 
 #include <array>
 #include <cstring>
@@ -106,11 +106,11 @@ void updateLocalBoundsFromInterleavedVertices(MeshRecord& record, std::span<cons
 
 }  // namespace
 
-void MeshPool::init(VkDevice device, VmaAllocator allocator, rhi::vulkan::VulkanResourceTable* resourceTable,
+void MeshPool::init(VkDevice device, VmaAllocator allocator, rhi::Device* rhiDevice,
                     upload::StaticBufferUploadPolicy staticUploadPolicy) {
     m_device = device;
     m_allocator = allocator;
-    m_resourceTable = resourceTable;
+    m_rhiDevice = rhiDevice;
     m_staticUploadPolicy = staticUploadPolicy;
 }
 
@@ -188,20 +188,17 @@ void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
         // Keep the stable RHI handle bound to the rebuilt arena (Option B: handle is
         // allocated once, its native buffer is rebound on each realloc). owned=false:
         // MeshPool owns the VMA lifetime, the registry only mirrors the native buffer.
-        if(m_resourceTable != nullptr)
+        if(m_rhiDevice != nullptr)
         {
             const uint64_t native = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(newBuffer.buffer));
             const auto     bind   = [&](rhi::BufferHandle& rhiHandle) {
                 if(rhiHandle.isNull())
                 {
-                    rhi::vulkan::BufferRecord rec{};
-                    rec.nativeBuffer = native;
-                    rec.owned        = false;
-                    rhiHandle        = m_resourceTable->registerBuffer(rec);
+                    rhiHandle = m_rhiDevice->registerExternalBuffer(native);
                 }
                 else
                 {
-                    m_resourceTable->updateBuffer(rhiHandle, native);
+                    m_rhiDevice->updateBufferBinding(rhiHandle, native);
                 }
             };
             if(replacingVertexArena) bind(m_sharedVertexBufferRHI);
@@ -493,10 +490,10 @@ void MeshPool::resetSharedBuffers()
     m_sharedVertexBuffer = {};
     m_sharedIndexBuffer = {};
 
-    if(m_resourceTable != nullptr)
+    if(m_rhiDevice != nullptr)
     {
-        if(!m_sharedVertexBufferRHI.isNull()) m_resourceTable->removeBuffer(m_sharedVertexBufferRHI);
-        if(!m_sharedIndexBufferRHI.isNull())  m_resourceTable->removeBuffer(m_sharedIndexBufferRHI);
+        if(!m_sharedVertexBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_sharedVertexBufferRHI);
+        if(!m_sharedIndexBufferRHI.isNull())  m_rhiDevice->destroyBuffer(m_sharedIndexBufferRHI);
     }
     m_sharedVertexBufferRHI = {};
     m_sharedIndexBufferRHI = {};

@@ -122,6 +122,11 @@ public:
   // --- Buffer (wraps the existing device-address path) ---
   virtual BufferHandle createBuffer(const BufferDesc&) { assert(false && "createBuffer not implemented"); return {}; }
   virtual void         destroyBuffer(BufferHandle) { assert(false && "destroyBuffer not implemented"); }
+  // Adopt an externally-owned native buffer (owned=false): the registry only mirrors it so
+  // it can be addressed by handle. updateBufferBinding rebinds the handle to a reallocated
+  // native buffer. destroyBuffer on an owned=false handle only unregisters (no native free).
+  virtual BufferHandle registerExternalBuffer(uint64_t /*nativeBuffer*/) { assert(false && "registerExternalBuffer not implemented"); return {}; }
+  virtual void         updateBufferBinding(BufferHandle, uint64_t /*nativeBuffer*/) { assert(false && "updateBufferBinding not implemented"); }
   virtual GpuPtr       getBufferGpuAddress(BufferHandle) const { assert(false && "getBufferGpuAddress not implemented"); return {}; }
   virtual void*        mapBuffer(BufferHandle) { assert(false && "mapBuffer not implemented"); return nullptr; }
   virtual void         unmapBuffer(BufferHandle) { assert(false && "unmapBuffer not implemented"); }
