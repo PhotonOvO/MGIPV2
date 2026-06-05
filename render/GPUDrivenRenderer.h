@@ -449,12 +449,9 @@ public:
   }
   [[nodiscard]] PipelineHandle getLightCullingPipelineHandle() const { return m_pointLightCoarseCullingPipeline; }
   [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
-  [[nodiscard]] uint64_t getGraphicsScenePipelineLayout() const { return m_renderer.getGraphicsScenePipelineLayout(); }
-  [[nodiscard]] uint64_t getGraphicsMDIPipelineLayout() const { return m_renderer.getGraphicsMDIPipelineLayout(); }
   [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
   [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const { return m_renderer.getGraphicsMaterialBindGroup(); }
   [[nodiscard]] uint64_t getLightPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightPipelineLayout); }
-  [[nodiscard]] uint64_t getPostProcessPipelineLayout() const { return m_renderer.getPostProcessPipelineLayout(); }
   [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
   [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
   void updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t cameraOffset);
@@ -467,9 +464,7 @@ public:
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const { return m_iblEnvironmentPath; }
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
   [[nodiscard]] uint64_t getCSMShadowPipelineLayout() const { return m_renderer.getCSMShadowPipelineLayout(); }
-  [[nodiscard]] uint64_t getDebugPipelineLayout() const { return m_renderer.getDebugPipelineLayout(); }
   [[nodiscard]] uint64_t getShadowCullingPipelineLayout() const { return m_renderer.getShadowCullingPipelineLayout(); }
-  [[nodiscard]] uint64_t getGPUCullingPipelineLayout() const { return m_renderer.getGPUCullingPipelineLayout(); }
   [[nodiscard]] uint64_t getLightCullingPipelineLayout() const { return reinterpret_cast<uint64_t>(m_lightCoarseCullingPipelineLayout); }
   [[nodiscard]] uint64_t getLightCoarseCullingDescriptorSetAt(uint32_t frameIndex) const
   {
@@ -699,7 +694,6 @@ public:
   {
     return m_renderer.getForwardMDIIndirectBuffer(frameIndex);
   }
-  [[nodiscard]] uint64_t getCurrentLightCullingDescriptorSet() const;
   [[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
   [[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_lightResources.getActiveSpotLightCount(); }
   [[nodiscard]] VkExtent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }

@@ -1618,11 +1618,6 @@ uint64_t RenderDevice::getShadowCullingPipelineLayout() const
   return reinterpret_cast<uint64_t>(m_device.shadowCullingPipelineLayout);
 }
 
-uint64_t RenderDevice::getGPUCullingPipelineLayout() const
-{
-  return reinterpret_cast<uint64_t>(m_device.gpuCullingPipelineLayout);
-}
-
 uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
 {
   if(frameIndex >= m_device.shadowCullingDescriptorSets.size())
@@ -8632,19 +8627,9 @@ uint64_t RenderDevice::getLightPipelineLayout() const
   return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
 }
 
-uint64_t RenderDevice::getPostProcessPipelineLayout() const
-{
-  return reinterpret_cast<uint64_t>(m_device.postProcessPipelineLayout);
-}
-
 uint64_t RenderDevice::getLightCullingPipelineLayout() const
 {
   return 0;
-}
-
-uint64_t RenderDevice::getDebugPipelineLayout() const
-{
-  return m_device.debugPipelineLayout ? m_device.debugPipelineLayout->getNativeHandle() : 0;
 }
 
 uint64_t RenderDevice::getGraphicsPipelineLayout() const
@@ -8660,16 +8645,6 @@ uint64_t RenderDevice::getGBufferPipelineLayout() const
 uint64_t RenderDevice::getMDIPipelineLayout() const
 {
   return m_device.mdiPipelineLayout ? m_device.mdiPipelineLayout->getNativeHandle() : 0;
-}
-
-uint64_t RenderDevice::getGraphicsScenePipelineLayout() const
-{
-  return getGBufferPipelineLayout();
-}
-
-uint64_t RenderDevice::getGraphicsMDIPipelineLayout() const
-{
-  return getMDIPipelineLayout();
 }
 
 uint64_t RenderDevice::getGBufferColorDescriptorSet() const
@@ -8726,16 +8701,6 @@ BindGroupHandle RenderDevice::getGraphicsMaterialBindGroup() const
 uint64_t RenderDevice::getLightingInputDescriptorSet() const
 {
   return getGBufferTextureDescriptorSet();
-}
-
-uint64_t RenderDevice::getLightCullingDescriptorSet() const
-{
-  const uint32_t frameIndex = m_perFrame.frameContext != nullptr ? m_perFrame.frameContext->getCurrentFrameIndex() : 0u;
-  if(frameIndex >= m_device.lightCoarseCullingDescriptorSets.size())
-  {
-    return 0;
-  }
-  return reinterpret_cast<uint64_t>(m_device.lightCoarseCullingDescriptorSets[frameIndex]);
 }
 
 bool RenderDevice::getIBLEnvironmentLoaded() const

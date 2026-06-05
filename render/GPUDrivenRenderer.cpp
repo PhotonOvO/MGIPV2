@@ -3204,14 +3204,6 @@ uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) c
              : 0;
 }
 
-uint64_t GPUDrivenRenderer::getCurrentLightCullingDescriptorSet() const
-{
-  const uint32_t frameIndex = getCurrentFrameIndexHint();
-  return frameIndex < m_lightCoarseCullingDescriptorSets.size()
-             ? reinterpret_cast<uint64_t>(m_lightCoarseCullingDescriptorSets[frameIndex])
-             : 0;
-}
-
 BindGroupHandle GPUDrivenRenderer::getCurrentLightCullingBindGroup() const
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
