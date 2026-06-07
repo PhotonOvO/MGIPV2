@@ -7,8 +7,8 @@
 
 namespace demo::rhi {
 
-// Unifies Vulkan descriptor set / DX12 descriptor heap range / Metal 4
-// MTL4ArgumentTable. Writes only accept RHI handles, never native descriptors.
+// Unifies descriptor set, descriptor heap range, and Metal argument-table
+// concepts. Writes only accept RHI handles, never native descriptors.
 enum class ArgumentType : uint8_t
 {
   uniformBuffer = 0,
@@ -19,6 +19,12 @@ enum class ArgumentType : uint8_t
   combinedImageSampler,
   accelerationStructure,
   indirectCommandBuffer,
+};
+
+enum class ArgumentAccessIntent : uint8_t
+{
+  sampledRead = 0,
+  readWrite,
 };
 
 struct ArgumentBinding
@@ -48,10 +54,7 @@ struct ArgumentWrite
   SamplerHandle     sampler{};
   uint64_t          offset{0};
   uint64_t          size{0};  // 0 = entire buffer
-  // Layout a sampledTexture is expected to be in when accessed. Defaults to ShaderRead
-  // (SHADER_READ_ONLY_OPTIMAL); set to General for images kept in VK_IMAGE_LAYOUT_GENERAL
-  // (e.g. storage-written images that are also sampled, like the Hi-Z depth pyramid).
-  ResourceState     imageLayout{ResourceState::ShaderRead};
+  ArgumentAccessIntent accessIntent{ArgumentAccessIntent::sampledRead};
 };
 
 }  // namespace demo::rhi

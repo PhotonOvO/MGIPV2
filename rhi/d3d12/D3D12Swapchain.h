@@ -23,9 +23,9 @@ public:
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
 
-  uint64_t getNativeSwapchain() const override;
-  uint64_t getNativeImageView(uint32_t imageIndex) const override;
-  uint64_t getNativeImage(uint32_t imageIndex) const override;
+  uint64_t getBackendSwapchainHandle() const override;
+  uint64_t getBackendImageViewHandle(uint32_t imageIndex) const override;
+  uint64_t getBackendImageHandle(uint32_t imageIndex) const override;
 
   // D3D12-native accessors (for backend interop)
   // NOTES: Returns opaque handles to D3D12 objects
@@ -53,7 +53,7 @@ private:
   // D3D12 uses IDXGISwapChain3 for presentation:
   //
   // Initialization:
-  // 1. Get DXGI factory from device: ID3D12Device::GetAdapter() → IDXGIAdapter → IDXGIFactory
+  // 1. Get DXGI factory from device: ID3D12Device::GetAdapter() â†’ IDXGIAdapter â†’ IDXGIFactory
   // 2. Create DXGI_SWAP_CHAIN_DESC1:
   //    - Width/Height: 0 (auto from window size)
   //    - Format: DXGI_FORMAT_R8G8B8A8_UNORM

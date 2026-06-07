@@ -1,7 +1,6 @@
 #pragma once
 
-#include "../common/Common.h"
-
+#include "ShaderInterop.h"
 #include <span>
 #include <vector>
 
@@ -18,7 +17,7 @@ public:
   };
 
   void init(uint32_t maxObjects);
-  void buildBatches(VkCommandBuffer cmd, uint32_t visibleCount);
+  void buildBatches(uintptr_t commandBuffer, uint32_t visibleCount);
   void buildBatches(std::span<const uint32_t> opaqueVisibleObjects, std::span<const uint32_t> transparentVisibleObjects);
   void adoptSortedVisibleObjects(std::span<const uint32_t> sortedVisibleObjects,
                                  std::span<const uint32_t> sortedKeys);

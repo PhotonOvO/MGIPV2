@@ -79,14 +79,24 @@ struct TextureBlitDesc
   TextureHandle srcTexture{};
   TextureHandle dstTexture{};
   TextureAspect aspect{TextureAspect::color};
+  uint32_t      srcMipLevel{0};
+  uint32_t      dstMipLevel{0};
+  uint32_t      srcBaseArrayLayer{0};
+  uint32_t      dstBaseArrayLayer{0};
+  uint32_t      layerCount{1};
   Offset3D      srcOffsets[2]{};
   Offset3D      dstOffsets[2]{};
 };
 
-// setRoot*/setDynamicBuffer carry ShaderStage so slot visibility is explicit
-// (aligns with the existing pushConstants(ShaderStage,...) model and future
-// RootBindingSchema). Encoders hold no global mutable state so they remain
-// safe to extend toward multi-threaded recording later.
+// Binding slots are backend-neutral schema slots. Argument table slots are
+// logical PipelineArgumentSlotDesc::slot values. Root slots passed to
+// setRootConstants and setRootPointer are logical RootBindingDesc::slot values,
+// not Vulkan push-constant byte offsets. RenderEncoder::setDynamicBuffer keeps
+// the current signature for this migration wave: its slot is the logical
+// argument-table slot for a dynamic buffer table. Backends lower the table-slot
+// plus binding identity from the pipeline schema instead of relying on backend
+// call order. Encoders hold no global mutable state so they remain safe to
+// extend toward multi-threaded recording later.
 class RenderEncoder
 {
 public:
@@ -109,10 +119,9 @@ public:
 
   virtual void draw(const DrawDesc& desc)                                     = 0;
   virtual void drawIndexed(const DrawIndexedDesc& desc)                       = 0;
-  virtual void drawIndexedIndirect(const DrawIndirectDesc& desc)              = 0;
-  virtual void drawIndexedIndirect(GpuPtr args, uint32_t count, uint32_t stride) = 0;
-  virtual void drawIndexedIndirectCount(const DrawIndirectCountDesc& desc)    = 0;
-  virtual void drawIndirect(const DrawIndirectDesc& desc)                     = 0;
+  virtual void drawIndexedIndirect(const DrawIndirectDesc& desc)           = 0;
+  virtual void drawIndexedIndirectCount(const DrawIndirectCountDesc& desc) = 0;
+  virtual void drawIndirect(const DrawIndirectDesc& desc)                  = 0;
 
   // Mesh shader (capability-gated).
   virtual void drawMeshTasks(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) = 0;
@@ -127,6 +136,8 @@ public:
   virtual ~ComputeEncoder() = default;
 
   // --- compute (stage is implicitly compute; no ShaderStage param) ---
+  // Compute root slots are logical RootBindingDesc::slot values, not byte
+  // offsets into a backend push-constant range.
   virtual void setPipeline(PipelineHandle pipeline)                       = 0;
   virtual void setArgumentTable(uint32_t slot, ArgumentTableHandle table) = 0;
   virtual void setRootConstants(uint32_t slot, const void* data, uint32_t size) = 0;
@@ -134,7 +145,6 @@ public:
 
   virtual void dispatch(const DispatchDesc& desc)                 = 0;
   virtual void dispatchIndirect(const DispatchIndirectDesc& desc) = 0;
-  virtual void dispatchIndirect(GpuPtr args)                      = 0;
 
   // --- copy / blit (command subset) ---
   virtual void copyBuffer(BufferHandle src, uint64_t srcOffset, BufferHandle dst, uint64_t dstOffset, uint64_t size) = 0;

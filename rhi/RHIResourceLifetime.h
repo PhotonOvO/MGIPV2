@@ -36,8 +36,10 @@ enum class ResourceKind : uint8_t
   TextureView,
   BufferView,
   Sampler,
+  QueryPool,
+  ArgumentLayout,
   Pipeline,
-  BindTable,
+  ArgumentTable,
 };
 
 struct ResourceHandle

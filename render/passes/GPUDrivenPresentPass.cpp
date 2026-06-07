@@ -22,31 +22,27 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenPresentPass::getDependenc
 
 void GPUDrivenPresentPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenPresent");
-  const VkExtent2D srcExtent = m_renderer->getSceneViewDepthExtent();
-  const VkExtent2D dstExtent = m_renderer->getSwapchainExtent();
-  const VkImage srcImage = reinterpret_cast<VkImage>(m_renderer->getSceneViewOutputImageOpaque());
-  const VkImage dstImage = m_renderer->getCurrentSwapchainImage();
+  context.commandBuffer->beginEvent("GPUDrivenPresent");
+  const rhi::Extent2D srcExtent = m_renderer->getSceneViewDepthExtent();
+  const rhi::Extent2D dstExtent = m_renderer->getSwapchainExtent();
   // Wave 6: blit through the registry. Both images are color, single mip/layer, so
   // the resourceBarrier aspect/range pitfalls that block depth/array textures do not
-  // apply here. Falls back to the legacy native path if either handle is unresolved.
+  // apply here. If either handle is unresolved, the pass exits without recording a blit.
   const rhi::TextureHandle srcTex = m_renderer->getPassOutputTextureRHIHandle();
   const rhi::TextureHandle dstTex = m_renderer->getCurrentSwapchainTextureRHIHandle();
-  if(srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE || srcTex.isNull() || dstTex.isNull())
+  if(srcTex.isNull() || dstTex.isNull())
   {
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEvent();
     return;
   }
 
   const float srcAspect = static_cast<float>(srcExtent.width) / static_cast<float>(srcExtent.height);
   const float dstAspect = static_cast<float>(dstExtent.width) / static_cast<float>(dstExtent.height);
-  VkOffset3D srcOffset0 = {0, 0, 0};
-  VkOffset3D srcOffset1 = {static_cast<int32_t>(srcExtent.width), static_cast<int32_t>(srcExtent.height), 1};
   int32_t dstY0 = 0;
   int32_t dstY1 = static_cast<int32_t>(dstExtent.height);
   int32_t dstX0 = 0;
@@ -67,39 +63,37 @@ void GPUDrivenPresentPass::execute(const PassContext& context) const
     dstY1 = barHeight + scaledHeight;
   }
 
-  VkOffset3D dstOffset0 = {dstX0, dstY0, 0};
-  VkOffset3D dstOffset1 = {dstX1, dstY1, 1};
-
-  // Output -> TransferSrc, swapchain -> TransferDst (explicit layout, behavior
-  // equivalent to the prior transitionTexture pair; single color mip/layer).
+  // Special resource boundary: present blit needs explicit source/destination
+  // transfer layouts; this is an explicit layout boundary.
   const rhi::TextureSubresourceRange colorRange{rhi::TextureAspect::color, 0, 1, 0, 1};
   const rhi::TextureBarrier toBlit[] = {
       {.texture = srcTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferSrc, .range = colorRange},
       {.texture = dstTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferDst, .range = colorRange},
   };
-  context.cmdBuffer->resourceBarrier(toBlit, 2, nullptr, 0);
+  context.commandBuffer->resourceBarrier(toBlit, 2, nullptr, 0);
 
-  rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
+  rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();
   enc->blitTexture(rhi::TextureBlitDesc{
       .srcTexture = srcTex,
       .dstTexture = dstTex,
       .aspect     = rhi::TextureAspect::color,
-      .srcOffsets = {{srcOffset0.x, srcOffset0.y, srcOffset0.z}, {srcOffset1.x, srcOffset1.y, srcOffset1.z}},
-      .dstOffsets = {{dstOffset0.x, dstOffset0.y, dstOffset0.z}, {dstOffset1.x, dstOffset1.y, dstOffset1.z}},
+      .srcOffsets = {{0, 0, 0}, {static_cast<int32_t>(srcExtent.width), static_cast<int32_t>(srcExtent.height), 1}},
+      .dstOffsets = {{dstX0, dstY0, 0}, {dstX1, dstY1, 1}},
   });
-  context.cmdBuffer->endEncoding();
+  context.commandBuffer->endEncoding();
 
-  // Restore both images to General (swapchain stays General for the ImGui pass).
+  // Special resource boundary: restore blit source/destination to General before
+  // the subsequent ImGui/present path uses the swapchain.
   const rhi::TextureBarrier fromBlit[] = {
       {.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = rhi::ResourceState::General, .range = colorRange},
       {.texture = srcTex, .before = rhi::ResourceState::TransferSrc, .after = rhi::ResourceState::General, .range = colorRange},
   };
-  context.cmdBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
+  context.commandBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
 
   // ImGui UI pass is a native-backend exception: beginPresentPass sets up dynamic
-  // rendering to the swapchain through the legacy CommandList for the ImGui draw path.
-  m_renderer->beginPresentPass(*context.cmd);
-  context.cmdBuffer->endEvent();
+  // rendering to the swapchain for the ImGui draw path.
+  m_renderer->beginPresentPass(*context.commandBuffer);
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

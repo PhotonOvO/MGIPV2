@@ -2,17 +2,16 @@
 
 #include "../common/Common.h"
 #include "../common/ProfilerMarkers.h"
-#include "../common/TracyProfiling.h"
 
 #ifdef _WIN32
 #include <windows.h>
+#include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #endif
 
 #include "../render/RendererFacade.h"
 #include "../rhi/RHISurface.h"
-#include "../rhi/vulkan/VulkanSurface.h"
 #include "../loader/GltfLoader.h"
 #include "../loader/SceneCacheSerializer.h"
 #include "../render/AsyncLoadingCoordinator.h"
@@ -30,15 +29,12 @@
 #include <array>
 #include <algorithm>
 
-#include "../rhi/vulkan/VulkanCommandList.h"
-
 class MinimalLatestApp
 {
 public:
-  MinimalLatestApp(VkExtent2D size = {800, 600})
+  MinimalLatestApp(demo::rhi::Extent2D size = {800, 600})
       : m_windowSize(size)
   {
-    VK_CHECK(volkInitialize());
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 #ifdef USE_SLANG
     const char* windowTitle = "Minimal Demo (Slang)";
@@ -46,7 +42,7 @@ public:
     const char* windowTitle = "Minimal Demo (GLSL)";
 #endif
     m_window  = glfwCreateWindow(m_windowSize.width, m_windowSize.height, windowTitle, nullptr, nullptr);
-    m_surface = std::make_unique<demo::rhi::vulkan::VulkanSurface>();
+    m_surface = m_renderer.createSurface();
     m_renderer.init(m_window, *m_surface, m_vSync);
     m_selectedMaterial = m_renderer.getMaterialHandle(0);
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
@@ -88,7 +84,6 @@ public:
       framePhase = "PollEvents";
       {
         demo::profiling::ScopedCpuRange pollEventsRange("AppPreRecord.PollEvents");
-        TRACY_ZONE_SCOPED("App::PollEvents");
         glfwPollEvents();
       }
 
@@ -96,14 +91,12 @@ public:
       framePhase = "UpdateAsyncLoading";
       {
         demo::profiling::ScopedCpuRange asyncLoadingRange("AppPreRecord.UpdateAsyncLoading");
-        TRACY_ZONE_SCOPED("App::UpdateAsyncLoading");
         updateAsyncLoading();
       }
 
       // Camera input handling
       {
           demo::profiling::ScopedCpuRange inputCameraRange("AppPreRecord.InputCamera");
-          TRACY_ZONE_SCOPED("App::InputCamera");
           // Keyboard movement
           glm::vec3 moveDir{0.0f};
           if(glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) moveDir.z += 1.0f;
@@ -189,20 +182,15 @@ public:
       {
       demo::profiling::ScopedCpuRange appPreRecordRange("AppPreRecord");
 
-      framePhase = "ImGuiVulkanNewFrame";
+      framePhase = "ImGuiNewFrame";
       {
         demo::profiling::ScopedCpuRange imguiNewFrameRange("AppPreRecord.ImGuiNewFrame");
-        TRACY_ZONE_SCOPED("App::ImGuiNewFrame");
-        ImGui_ImplVulkan_NewFrame();
-        framePhase = "ImGuiGlfwNewFrame";
-        ImGui_ImplGlfw_NewFrame();
+        m_renderer.beginUiFrame();
         framePhase = "ImGuiFrameBegin";
-        ImGui::NewFrame();
       }
       framePhase = "RuntimeProfiler";
       {
         demo::profiling::ScopedCpuRange runtimeProfilerRange("AppPreRecord.RuntimeProfiler");
-        TRACY_ZONE_SCOPED("App::UpdateRuntimeProfiler");
         if(!m_runtimeProfilerDisabled)
         {
           updateRuntimeProfiler();
@@ -211,7 +199,6 @@ public:
 
       {
         demo::profiling::ScopedCpuRange dockspaceRange("AppPreRecord.ImGuiDockspace");
-        TRACY_ZONE_SCOPED("App::Dockspace");
         const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
         ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
         if(!ImGui::DockBuilderGetNode(dockID)->IsSplitNode() && !ImGui::FindWindowByName("Viewport"))
@@ -225,7 +212,6 @@ public:
 
       {
         demo::profiling::ScopedCpuRange mainMenuRange("AppPreRecord.ImGuiMainMenu");
-        TRACY_ZONE_SCOPED("App::MainMenu");
         if(ImGui::BeginMainMenuBar())
         {
           if(ImGui::BeginMenu("File"))
@@ -246,7 +232,6 @@ public:
       glm::vec4 viewportImageRect{0.0f};
       {
         demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.ViewportPanel");
-        TRACY_ZONE_SCOPED("App::ViewportPanel");
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::Begin("Viewport");
         ImVec2              viewportContentSize = ImGui::GetContentRegionAvail();
@@ -276,7 +261,6 @@ public:
       if(ImGui::Begin("Settings"))
       {
         demo::profiling::ScopedCpuRange settingsPanelRange("AppPreRecord.SettingsPanel");
-        TRACY_ZONE_SCOPED("App::SettingsPanel");
         // Camera coordinates display
         ImGui::Separator();
         ImGui::Text("Camera Position:");
@@ -440,7 +424,6 @@ public:
         // CSM Shadow debug panel
         {
           demo::profiling::ScopedCpuRange csmDebugPanelRange("AppPreRecord.CSMDebugPanel");
-          TRACY_ZONE_SCOPED("App::CSMDebugPanel");
           drawCSMDebugPanel();
         }
 
@@ -481,7 +464,6 @@ public:
         ImGui::Text("Renderer Backend: %s", m_renderer.getBackendName());
         {
           demo::profiling::ScopedCpuRange runtimeProfilerPanelRange("AppPreRecord.RuntimeProfilerPanel");
-          TRACY_ZONE_SCOPED("App::RuntimeProfilerPanel");
           drawRuntimeProfilerPanel();
         }
         if(m_renderer.getBackend() == demo::RendererBackend::gpuDriven)
@@ -555,23 +537,6 @@ public:
           ImGui::Text("  Lighting: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.lightingResources));
           ImGui::Text("  Shadows: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.shadowResources));
           ImGui::Text("  Materials: %s", ownershipLabel(gpuDrivenStats.resourceOwnership.materialDescriptors));
-          const auto vkFormatLabel = [](VkFormat format) -> const char* {
-            switch(format)
-            {
-              case VK_FORMAT_B8G8R8A8_UNORM:
-                return "B8G8R8A8_UNORM";
-              case VK_FORMAT_R8G8B8A8_UNORM:
-                return "R8G8B8A8_UNORM";
-              case VK_FORMAT_R8G8B8A8_SRGB:
-                return "R8G8B8A8_SRGB";
-              case VK_FORMAT_R16G16B16A16_SFLOAT:
-                return "R16G16B16A16_SFLOAT";
-              case VK_FORMAT_UNDEFINED:
-                return "Undefined";
-              default:
-                return "Other";
-            }
-          };
           if(ImGui::TreeNode("GPU Pass Ownership"))
           {
             for(const demo::GPUDrivenPassDiagnostic& passDiagnostic : gpuDrivenStats.passDiagnostics)
@@ -665,9 +630,9 @@ public:
             ImGui::Text("Output: %u x %u",
                         postDiagnostics.outputWidth,
                         postDiagnostics.outputHeight);
-            ImGui::Text("Output Format: %s", vkFormatLabel(postDiagnostics.outputFormat));
-            ImGui::Text("Scene Color: %s", vkFormatLabel(postDiagnostics.sceneColorFormat));
-            ImGui::Text("Recommended HDR: %s", vkFormatLabel(postDiagnostics.recommendedHdrFormat));
+            ImGui::Text("Output Format: %s", postDiagnostics.outputFormatName.c_str());
+            ImGui::Text("Scene Color: %s", postDiagnostics.sceneColorFormatName.c_str());
+            ImGui::Text("Recommended HDR: %s", postDiagnostics.recommendedHdrFormatName.c_str());
             ImGui::Text("HDR Scene Color Active: %s",
                         postDiagnostics.hdrSceneColorActive ? "Yes" : "No");
             ImGui::Text("Tone Map Location: %s",
@@ -734,7 +699,7 @@ public:
             ImGui::Text("Source: %s", iblDiagnostics.path.empty() ? "<none>" : iblDiagnostics.path.c_str());
             ImGui::Text("Mode: %s", iblDiagnostics.sourceMode.empty() ? "<unset>" : iblDiagnostics.sourceMode.c_str());
             ImGui::Text("Status: %s", iblDiagnostics.status.c_str());
-            ImGui::Text("Format: %s", vkFormatLabel(iblDiagnostics.format));
+            ImGui::Text("Format: %s", iblDiagnostics.formatName.c_str());
             ImGui::Text("Size/Mips: %u x %u / %u",
                         iblDiagnostics.width,
                         iblDiagnostics.height,
@@ -824,19 +789,16 @@ public:
 
       {
         demo::profiling::ScopedCpuRange modelLoaderUiRange("AppPreRecord.ModelLoaderUI");
-        TRACY_ZONE_SCOPED("App::ModelLoaderUI");
         drawModelLoaderUI();
       }
       {
         demo::profiling::ScopedCpuRange sceneGraphUiRange("AppPreRecord.SceneGraphUI");
-        TRACY_ZONE_SCOPED("App::SceneGraphUI");
         drawSceneGraphUI();
       }
 
       framePhase = "Render";
       {
         demo::profiling::ScopedCpuRange buildRenderParamsRange("AppPreRecord.BuildRenderParams");
-        TRACY_ZONE_SCOPED("App::BuildRenderParams");
         frameParams.viewportSize   = m_viewportSize;
         frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
         frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
@@ -864,11 +826,9 @@ public:
         frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
         frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
         frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
-        frameParams.recordUi       = [](demo::rhi::CommandList& cmd) {
+        frameParams.recordUi       = []() {
           demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
-          TRACY_ZONE_SCOPED("App::RenderImGuiDrawData");
           ImGui::Render();
-          ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
         };
       }
       }
@@ -877,19 +837,21 @@ public:
       if(!freezeRenderingForStreamingUpload)
       {
         demo::profiling::ScopedCpuRange rendererFacadeRange("App.RendererFacadeRender");
-        TRACY_ZONE_SCOPED("App::RendererFacade::render");
         m_renderer.render(frameParams);
+        if(!m_loggedFirstFrame)
+        {
+          LOGI("GPU smoke: first frame rendered");
+          m_loggedFirstFrame = true;
+        }
       }
 
       {
         demo::profiling::ScopedCpuRange imguiEndFrameRange("AppPostRecord.ImGuiEndFrame");
-        TRACY_ZONE_SCOPED("App::ImGuiEndFrame");
         ImGui::EndFrame();
       }
       if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
       {
         demo::profiling::ScopedCpuRange platformWindowsRange("AppPostRecord.ImGuiPlatformWindows");
-        TRACY_ZONE_SCOPED("App::ImGuiPlatformWindows");
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
       }
@@ -937,11 +899,12 @@ private:
   }
 
   GLFWwindow*                                       m_window{};
-  std::unique_ptr<demo::rhi::vulkan::VulkanSurface> m_surface;
-  VkExtent2D                                        m_windowSize{800, 600};
+  std::unique_ptr<demo::rhi::Surface>               m_surface;
+  demo::rhi::Extent2D                               m_windowSize{800, 600};
   demo::rhi::Extent2D                               m_viewportSize{800, 600};
   demo::RendererFacade                              m_renderer;
   bool                       m_vSync{false};
+  bool                       m_loggedFirstFrame{false};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
 
@@ -1610,7 +1573,7 @@ inline void MinimalLatestApp::updateAsyncLoading()
              batch.materialIndices.size(),
              batch.meshIndices.size());
         m_loadStatus = batch.criticalBatch ? "Uploading critical scene assets..." : "Streaming remaining scene assets...";
-        m_renderer.executeUploadCommand([this, batch](VkCommandBuffer cmd) {
+        m_renderer.executeUploadCommand([this, batch](demo::rhi::CommandBuffer& cmd) {
           m_renderer.uploadGltfModelBatch(*m_sceneModel,
                                           batch.textureIndices,
                                           batch.materialIndices,
@@ -1672,7 +1635,7 @@ inline void MinimalLatestApp::updateAsyncLoading()
     {
       m_loadStatus = "Committing SceneUploadPlan...";
       m_loadProgress = 0.75f;
-      m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
+      m_renderer.executeUploadCommand([this](demo::rhi::CommandBuffer& cmd) {
         *m_currentModel = m_renderer.commitSceneUploadPlan(*m_sceneAsset, *m_sceneUploadPlan, cmd);
       });
       m_renderer.waitForIdle();

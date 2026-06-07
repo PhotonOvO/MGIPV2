@@ -1,10 +1,3 @@
-#define VMA_IMPLEMENTATION
-#define VMA_LEAK_LOG_FORMAT(format, ...)                                                                               \
-  {                                                                                                                    \
-    printf((format), __VA_ARGS__);                                                                                     \
-    printf("\n");                                                                                                      \
-  }
-
 #include "MinimalLatestApp.h"
 
 #ifdef _WIN32

@@ -13,7 +13,7 @@ void GPUBatchBuilder::init(uint32_t maxObjects)
   m_batchRanges.clear();
 }
 
-void GPUBatchBuilder::buildBatches(VkCommandBuffer, uint32_t visibleCount)
+void GPUBatchBuilder::buildBatches(uintptr_t, uint32_t visibleCount)
 {
   m_stats.visibleCount = visibleCount;
   m_stats.batchCount = visibleCount;

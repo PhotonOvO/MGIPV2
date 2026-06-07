@@ -25,16 +25,16 @@ struct TextureViewTag;
 struct BufferViewTag;
 struct ResourceViewTag;
 struct BindLayoutTag;
-struct BindGroupLayoutTag;
-struct BindTableTag;
-struct BindGroupTag;
 struct SwapchainTag;
 struct TimelineTag;
 struct FenceTag;
 struct ArgumentLayoutTag;
 struct ArgumentTableTag;
 struct QueryPoolTag;
+struct DescriptorHeapTag;
 struct ResidencySetTag;
+struct ShaderLibraryTag;
+struct PipelineCompilerTag;
 
 using BufferHandle       = Handle<BufferTag>;
 using TextureHandle      = Handle<TextureTag>;
@@ -51,15 +51,15 @@ struct TextureViewHandle : Handle<TextureViewTag>
 using BufferViewHandle   = Handle<BufferViewTag>;
 using ResourceViewHandle = Handle<ResourceViewTag>;
 using BindLayoutHandle   = Handle<BindLayoutTag>;
-using BindGroupLayoutHandle = Handle<BindGroupLayoutTag>;
-using BindTableHandle    = Handle<BindTableTag>;
-using BindGroupHandle    = Handle<BindGroupTag>;
 using SwapchainHandle    = Handle<SwapchainTag>;
 using TimelineHandle     = Handle<TimelineTag>;
 using FenceHandle        = Handle<FenceTag>;
 using ArgumentLayoutHandle = Handle<ArgumentLayoutTag>;
 using ArgumentTableHandle  = Handle<ArgumentTableTag>;
 using QueryPoolHandle      = Handle<QueryPoolTag>;
+using DescriptorHeapHandle = Handle<DescriptorHeapTag>;
 using ResidencySetHandle   = Handle<ResidencySetTag>;
+using ShaderLibraryHandle  = Handle<ShaderLibraryTag>;
+using PipelineCompilerHandle = Handle<PipelineCompilerTag>;
 
 }  // namespace demo::rhi

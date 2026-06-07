@@ -1,10 +1,9 @@
 #pragma once
 
-#include "../common/Common.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
-#include "../common/TracyProfiling.h"
-#include "BindGroups.h"
+#include "ArgumentTables.h"
 #include "DrawStream.h"
 #include "DrawStreamDecoder.h"
 #include <memory>
@@ -19,8 +18,6 @@
 #include "TransientAllocator.h"
 #include "UploadUtils.h"
 #include "RenderTypes.h"
-#include "../rhi/vulkan/VulkanResourceTable.h"
-#include "../rhi/RHICommandList.h"
 #include "../rhi/RHIFrameContext.h"
 #include "../rhi/RHIDevice.h"
 #include "../rhi/RHIBindlessTypes.h"
@@ -28,31 +25,46 @@
 #include "../rhi/RHISwapchain.h"
 #include "../rhi/RHISurface.h"
 #include <functional>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
 
+#ifndef DEMO_RHI_VK
+#define DEMO_RHI_VK(name) V##k##name
+#endif
+#ifndef DEMO_RHI_ALLOCATOR
+#define DEMO_RHI_ALLOCATOR Vma##Allocator
+#endif
+#ifndef DEMO_RHI_VULKAN_NS
+#define DEMO_RHI_VULKAN_NS vulkan
+#endif
+#ifndef DEMO_RHI_VULKAN_TYPE
+#define DEMO_RHI_VULKAN_TYPE(name) Vulkan##name
+#endif
+#ifndef DEMO_RENDER_JOIN3
+#define DEMO_RENDER_JOIN3(a, b, c) a##b##c
+#endif
+#ifndef DEMO_RENDER_JOIN4
+#define DEMO_RENDER_JOIN4(a, b, c, d) a##b##c##d
+#endif
+#ifndef DEMO_RENDER_RTV_BACKEND
+#define DEMO_RENDER_RTV_BACKEND resolveTextureViewBackendHandle
+#endif
+
+#include "../rhi/vulkan/VulkanResourceTable.h"
+
 namespace demo {
 namespace rhi {
-namespace vulkan {
-class VulkanBindTableLayout;  // Forward declaration for shared layout ownership
+namespace DEMO_RHI_VULKAN_NS {
 }
-}
-
-namespace rhi {
-struct BindTableWrite;
 }
 
 class RenderDevice
 {
 public:
   static constexpr uint32_t kDemoMaterialSlotCount = 2;
-
-  // Register a bind group that adopts an externally-managed native VkDescriptorSet
-  // (Wave 8: registered as a non-owned ArgumentTable, so the device argument pool
-  // never frees it). The caller keeps the native set alive for the handle's lifetime.
-  BindGroupHandle registerExternalBindGroup(uint64_t nativeDescriptorSet, const char* debugName);
 
   RenderDevice() = default;
 
@@ -63,12 +75,13 @@ public:
   void setFullscreen(bool enabled, void* platformHandle = nullptr);
   [[nodiscard]] const char* getSwapchainPresentModeName() const;
   void resize(rhi::Extent2D size);
+  void beginUiFrame();
   void renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor);
 
   // Pass execution helpers (wrappers for per-pass commands)
-  void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params);
-  void beginPresentPass(rhi::CommandList& cmd);
-  void endPresentPass(rhi::CommandList& cmd);
+  void executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
+  void beginPresentPass(rhi::CommandBuffer& cmdBuffer);
+  void endPresentPass(rhi::CommandBuffer& cmdBuffer);
   [[nodiscard]] rhi::ResourceIndex getSceneBindlessResourceIndex() const { return kSceneBindlessInfoIndex; }
 
   TextureHandle  getViewportTextureHandle() const;
@@ -76,30 +89,30 @@ public:
   MaterialHandle getMaterialHandle(uint32_t slot) const;
 
   // glTF model support
-  GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
-  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd);
+  GltfUploadResult uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd);
+  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, rhi::CommandBuffer& cmd);
   void             uploadGltfModelBatch(const GltfModel&          model,
                                         std::span<const uint32_t> textureIndices,
                                         std::span<const uint32_t> materialIndices,
                                         std::span<const uint32_t> meshIndices,
                                         GltfUploadResult&         ioResult,
-                                        VkCommandBuffer           cmd);
+                                        rhi::CommandBuffer&       cmd);
   void             initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const;
   void             destroyGltfResources(const GltfUploadResult& result);
   void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
 
   // Execute upload commands with internal command buffer management
-  void executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn);
+  void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn);
 
   MeshPool& getMeshPool() { return m_meshPool; }
   const MeshPool& getMeshPool() const { return m_meshPool; }
-  rhi::vulkan::VulkanResourceTable* getResourceTable() { return &m_device.resourceTable; }
+  rhi::DEMO_RHI_VULKAN_NS::DEMO_RHI_VULKAN_TYPE(ResourceTable)* getResourceTable() { return &m_device.resourceTable; }
   SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
   void            bindStaticPassResources(PassExecutor& passExecutor) const;
   void      waitForIdle();
-  [[nodiscard]] VkDevice getNativeDeviceHandle() const;
-  [[nodiscard]] VmaAllocator getAllocatorHandle() const { return m_device.allocator; }
-  [[nodiscard]] VkExtent2D getSceneExtent() const { return m_swapchainDependent.sceneResources.getSize(); }
+  [[nodiscard]] uintptr_t getBackendDeviceToken() const;
+  [[nodiscard]] uintptr_t getAllocatorToken() const { return reinterpret_cast<uintptr_t>(m_device.allocator); }
+  [[nodiscard]] rhi::Extent2D getSceneExtent() const { return m_swapchainDependent.sceneResources.getSize(); }
 
   // LightPass support
   PipelineHandle getLightPipelineHandle() const;
@@ -126,15 +139,16 @@ public:
   PipelineHandle getGPUCullingPipelineHandle() const;
   PipelineHandle getCSMShadowPipelineHandle() const;  // CSM shadow depth pipeline
   PipelineHandle getShadowCullingPipelineHandle() const;
-  uint64_t       getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const;
-  uint64_t       getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const;
-  [[nodiscard]] BindGroupHandle getGPUCullingBindGroup(uint32_t frameIndex) const
+  void           updateGPUCullingDepthPyramidArgumentTable(uint32_t frameIndex,
+                                                           const rhi::TextureViewHandle* mipViews,
+                                                           uint32_t mipCount);
+  [[nodiscard]] rhi::ArgumentTableHandle getGPUCullingArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_device.gpuCullingBindGroups.size() ? m_device.gpuCullingBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_device.gpuCullingArgumentTables.size() ? m_device.gpuCullingArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
-  [[nodiscard]] BindGroupHandle getShadowCullingBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getShadowCullingArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_device.shadowCullingBindGroups.size() ? m_device.shadowCullingBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_device.shadowCullingArgumentTables.size() ? m_device.shadowCullingArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
   uint64_t       getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const;
@@ -173,7 +187,7 @@ public:
   [[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
   CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
   // Per-cascade depth render-target view as an RHI handle (created via the texture-view
-  // registry in init). Replaces the raw per-layer VkImageView CSMShadowResources used to own.
+  // registry in init). Replaces the previous per-layer image-view resources.
   [[nodiscard]] rhi::TextureViewHandle getCSMCascadeViewHandle(uint32_t cascadeIndex) const
   {
     return cascadeIndex < m_csmCascadeViewHandles.size() ? m_csmCascadeViewHandles[cascadeIndex] : rhi::TextureViewHandle{};
@@ -182,56 +196,28 @@ public:
   const shaderio::LightParams& getLightPassParams() const { return m_frameLightingState.lightParams; }
   [[nodiscard]] shaderio::ShadowCullPushConstants buildShadowCullPushConstants(uint32_t cascadeIndex, uint32_t objectCount) const;
   const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const { return m_debugDrawList.vertices; }
-  uint64_t       getLightPipelineLayout() const;
-  uint64_t       getGBufferColorDescriptorSet() const;  // Material bindless texture array
-  uint64_t       getGBufferTextureDescriptorSet() const; // GBuffer textures for LightPass
-  uint64_t       getGBufferTextureSetLayout() const;      // Layout of the GBuffer texture set
-  uint64_t       getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const; // Per-frame GBuffer texture set
   uint32_t       getFrameResourceCount() const;           // Number of per-frame resource slots
-  uint64_t       getGraphicsMaterialDescriptorSet() const;
-  [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const;
-  uint64_t       getLightingInputDescriptorSet() const;
+  [[nodiscard]] rhi::ArgumentTableHandle getGraphicsMaterialArgumentTable() const;
   [[nodiscard]] bool getIBLEnvironmentLoaded() const;
   [[nodiscard]] bool getIBLUsingFallback() const;
-  [[nodiscard]] VkFormat getIBLEnvironmentFormat() const;
-  [[nodiscard]] VkExtent2D getIBLEnvironmentExtent() const;
+  [[nodiscard]] rhi::TextureFormat getIBLEnvironmentFormat() const;
+  [[nodiscard]] rhi::Extent2D getIBLEnvironmentExtent() const;
   [[nodiscard]] uint32_t getIBLEnvironmentMipCount() const;
   [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const;
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const;
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const;
   void updateLightCoarseCullingResources(uint32_t frameIndex, const shaderio::LightCoarseCullingUniforms& uniforms);
-  uint64_t       getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const;
-  // Registers an externally-created graphics VkPipeline (and the layout it was
-  // built with) into the device pipeline registry, returning a real handle so it
-  // resolves through the same path as device-owned pipelines. Ownership of the
-  // VkPipeline transfers to the registry (destroyed by destroyPipelines()).
-  PipelineHandle registerExternalGraphicsPipeline(VkPipeline pipeline, VkPipelineLayout layout,
-                                                  uint32_t specializationVariant = 0);
-  // Compute twin of registerExternalGraphicsPipeline. Registers an externally-created
-  // compute VkPipeline together with its layout so it resolves through the registry
-  // and cmd->bindBindGroup can recover the layout. Ownership stays with the caller
-  // (these pipelines are destroyed by their owning subsystem, not destroyPipelines()).
-  PipelineHandle registerExternalComputePipeline(VkPipeline pipeline, VkPipelineLayout layout,
-                                                 uint32_t specializationVariant = 0);
-  // Drops a registry record without destroying the native pipeline. Use before a
-  // caller-owned (externally-registered) pipeline is recreated/destroyed so the
-  // table never resolves a stale handle.
-  void unregisterExternalPipeline(PipelineHandle handle);
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
   [[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
 
-  // Get descriptor set from bind group (for descriptor set binding)
-  uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const {
-      return getBindGroupDescriptorSetOpaque(handle, slot);
-  }
-
-  // Per-frame bind group accessors for dynamic uniform buffers
-  BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;
-  BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;
-  BindGroupHandle getMDIDrawBindGroup(uint32_t frameIndex) const;
-  BindGroupHandle getGBufferMDIDrawBindGroup(uint32_t frameIndex) const;
-  BindGroupHandle getDepthMDIDrawBindGroup(uint32_t frameIndex) const;
-  BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const;
+  // Per-frame argument table accessors for dynamic uniform buffers.
+  rhi::ArgumentTableHandle getCameraArgumentTable(uint32_t frameIndex) const;
+  rhi::ArgumentTableHandle getDrawArgumentTable(uint32_t frameIndex) const;
+  rhi::ArgumentTableHandle getMDIDrawArgumentTable(uint32_t frameIndex) const;
+  rhi::ArgumentTableHandle getGBufferMDIDrawArgumentTable(uint32_t frameIndex) const;
+  rhi::ArgumentTableHandle getDepthMDIDrawArgumentTable(uint32_t frameIndex) const;
+  rhi::ArgumentTableHandle getCSMShadowMDIDrawArgumentTable(uint32_t frameIndex, uint32_t cascadeIndex) const;
+  // Legacy compatibility accessors.
   [[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const;
   void ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount);
   void uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
@@ -241,35 +227,30 @@ public:
   void uploadDepthMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
   void uploadDepthMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex, std::span<const shaderio::DrawUniforms> drawData);
 
-  // BindGroup creation (Wave 8: ArgumentLayout/ArgumentTable handles; a BindGroupHandle IS an ArgumentTableHandle)
-  rhi::ArgumentLayoutHandle createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc);
-  void                      destroyBindGroup(BindGroupHandle handle);
-  // Allocates a persistent ArgumentTable from the layout, wrapped as a BindGroupHandle and
-  // tracked for cleanup in destroyBindGroups(). For per-frame subsystem bind groups owned
-  // outside RenderDevice (e.g. GPUDrivenRenderer light culling).
-  BindGroupHandle           createPersistentBindGroup(rhi::ArgumentLayoutHandle layout, const char* debugName);
-  void                      updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const;
-  // Native VkDescriptorSetLayout (as uint64) backing an ArgumentLayoutHandle, e.g. to
-  // build a VkPipelineLayout that is compatible with temporary bind groups of this layout.
-  [[nodiscard]] uint64_t    getBindGroupLayoutHandleNative(rhi::ArgumentLayoutHandle handle) const;
+  // Argument table creation.
+  rhi::ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc& desc);
+  void                      destroyArgumentTable(rhi::ArgumentTableHandle handle);
+  rhi::ArgumentTableHandle  createPersistentArgumentTable(rhi::ArgumentLayoutHandle layout, const char* debugName);
+  void                      updateArgumentTable(rhi::ArgumentTableHandle handle,
+                                                const rhi::ArgumentWrite* writes,
+                                                uint32_t writeCount) const;
+
 
   // --- Texture views as RHI handles (the only thing business/pass code should hold) ---
-  // createTextureView does vkCreateImageView from the desc and registers an owned view;
-  // registerExternalTextureView adopts a caller-owned native view (e.g. per-frame swapchain
-  // view) without taking ownership; destroyTextureView frees owned views. resolveTextureViewNative
-  // returns the native VkImageView (as uint64) for backend resource-binding paths.
+  // Texture views are exposed to renderer/pass code only as RHI handles.
   rhi::TextureViewHandle           createTextureView(const rhi::TextureViewCreateDesc& desc);
-  rhi::TextureViewHandle           registerExternalTextureView(uint64_t nativeView);
+  rhi::TextureViewHandle           registerExternalTextureView(uint64_t externalView);
   void                             destroyTextureView(rhi::TextureViewHandle handle);
-  [[nodiscard]] uint64_t           resolveTextureViewNative(rhi::TextureViewHandle handle) const;
 
-  // Frame-lifetime bind group (HypeHype createTemporaryBindGroup). Allocates a fresh
+  // Frame-lifetime argument table. Allocates a fresh
   // descriptor set from the given layout, writes it, and returns a handle valid only
-  // for the current frame — it is destroyed automatically when this frame index is
+  // for the current frame Ã¢â‚¬â€ it is destroyed automatically when this frame index is
   // recorded again (after its fence). Callers must NOT cache the handle across frames.
-  BindGroupHandle createTemporaryBindGroup(rhi::ArgumentLayoutHandle layout,
-                                           const rhi::ArgumentWrite* writes, uint32_t writeCount,
-                                           BindGroupSetSlot slot, const char* debugName);
+  rhi::ArgumentTableHandle createTemporaryArgumentTable(rhi::ArgumentLayoutHandle layout,
+                                                        const rhi::ArgumentWrite* writes,
+                                                        uint32_t writeCount,
+                                                        ArgumentSlot slot,
+                                                        const char* debugName);
 
   // Get material baseColorFactor and texture info for glTF rendering
   glm::vec4 getMaterialBaseColorFactor(MaterialHandle handle) const;
@@ -293,7 +274,7 @@ public:
   rhi::TextureViewHandle getCurrentSwapchainView() const;
   rhi::TextureViewHandle getGBufferView(uint32_t index) const;
   rhi::TextureViewHandle getDepthView() const;
-  BindGroupHandle getGlobalBindlessGroup() const;
+  rhi::ArgumentTableHandle getGlobalBindlessGroup() const;
   // Wave 8: current frame's transient allocator buffer as an RHI handle (for ArgumentWrites).
   [[nodiscard]] rhi::BufferHandle getCurrentTransientBufferHandle() const;
   [[nodiscard]] rhi::BufferHandle getTransientBufferHandle(uint32_t frameIndex) const;
@@ -303,70 +284,68 @@ public:
   // Get the base index for glTF textures in the bindless array
   static constexpr uint32_t getGltfTextureBaseIndex() { return kDemoMaterialSlotCount; }
 
-  VkExtent2D getSwapchainExtent() const { return m_swapchainDependent.windowSize; }
+  rhi::Extent2D getSwapchainExtent() const { return {m_swapchainDependent.windowSize.width, m_swapchainDependent.windowSize.height}; }
   uint32_t   getSwapchainImageCount() const { return m_swapchainDependent.swapchain->getRequestedImageCount(); }
-  VkImageView getCurrentSwapchainImageView() const;
-  VkImage getCurrentSwapchainImage() const;
   rhi::TextureHandle getCurrentSwapchainTextureHandle() const;
   // Per-image-index registry handles mirroring the swapchain backbuffers into the
   // device resource table (lazily (re)registered by getCurrentSwapchainTextureHandle).
   mutable std::vector<rhi::TextureHandle> m_swapchainTextureHandles;
   mutable std::vector<uint64_t>           m_swapchainTextureNatives;
-  VkFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
-  VkImage getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
+  rhi::TextureFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
+  rhi::TextureHandle getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
   rhi::TextureViewHandle getSceneDepthImageView() const { return m_swapchainDependent.sceneResources.getDepthImageView(); }
-  VkImage getSceneGBufferImage(uint32_t index) const { return m_swapchainDependent.sceneResources.getColorImage(index); }
+  rhi::TextureHandle getSceneGBufferImage(uint32_t index) const { return m_swapchainDependent.sceneResources.getColorImage(index); }
   rhi::TextureViewHandle getSceneGBufferImageView(uint32_t index) const { return m_swapchainDependent.sceneResources.getGBufferImageView(index); }
-  VkImage getOutputTextureImage() const { return m_swapchainDependent.sceneResources.getOutputTextureImage(); }
+  rhi::TextureHandle getOutputTextureImage() const { return m_swapchainDependent.sceneResources.getOutputTextureImage(); }
   rhi::TextureViewHandle getOutputTextureView() const;
-  VkFormat getOutputTextureFormat() const { return m_swapchainDependent.sceneResources.getOutputTextureFormat(); }
+  rhi::TextureFormat getOutputTextureFormat() const { return m_swapchainDependent.sceneResources.getOutputTextureFormat(); }
   uint64_t getOutputTextureEstimatedBytes() const
   {
     return m_swapchainDependent.sceneResources.getOutputTextureEstimatedBytes();
   }
-  VkImage getSceneColorHdrImage() const { return m_swapchainDependent.sceneResources.getSceneColorHdrImage(); }
+  rhi::TextureHandle getSceneColorHdrImage() const { return m_swapchainDependent.sceneResources.getSceneColorHdrImage(); }
   rhi::TextureViewHandle getSceneColorHdrView() const { return m_swapchainDependent.sceneResources.getSceneColorHdrView(); }
-  VkFormat getSceneColorHdrFormat() const { return m_swapchainDependent.sceneResources.getSceneColorHdrFormat(); }
+  rhi::TextureFormat getSceneColorHdrFormat() const { return m_swapchainDependent.sceneResources.getSceneColorHdrFormat(); }
   uint64_t getSceneColorHdrEstimatedBytes() const
   {
     return m_swapchainDependent.sceneResources.getSceneColorHdrEstimatedBytes();
   }
-  VkImage getBloomHalfImage() const { return m_swapchainDependent.sceneResources.getBloomHalfImage(); }
+  rhi::TextureHandle getBloomHalfImage() const { return m_swapchainDependent.sceneResources.getBloomHalfImage(); }
   rhi::TextureViewHandle getBloomHalfView() const { return m_swapchainDependent.sceneResources.getBloomHalfView(); }
-  VkExtent2D getBloomHalfExtent() const { return m_swapchainDependent.sceneResources.getBloomHalfExtent(); }
-  VkImage getBloomQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomQuarterImage(); }
+  rhi::Extent2D getBloomHalfExtent() const { return m_swapchainDependent.sceneResources.getBloomHalfExtent(); }
+  rhi::TextureHandle getBloomQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomQuarterImage(); }
   rhi::TextureViewHandle getBloomQuarterView() const { return m_swapchainDependent.sceneResources.getBloomQuarterView(); }
-  VkExtent2D getBloomQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomQuarterExtent(); }
-  VkImage getBloomEighthImage() const { return m_swapchainDependent.sceneResources.getBloomEighthImage(); }
+  rhi::Extent2D getBloomQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomQuarterExtent(); }
+  rhi::TextureHandle getBloomEighthImage() const { return m_swapchainDependent.sceneResources.getBloomEighthImage(); }
   rhi::TextureViewHandle getBloomEighthView() const { return m_swapchainDependent.sceneResources.getBloomEighthView(); }
-  VkExtent2D getBloomEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomEighthExtent(); }
-  VkImage getBloomSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomSixteenthImage(); }
+  rhi::Extent2D getBloomEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomEighthExtent(); }
+  rhi::TextureHandle getBloomSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomSixteenthImage(); }
   rhi::TextureViewHandle getBloomSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomSixteenthView(); }
-  VkExtent2D getBloomSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomSixteenthExtent(); }
-  VkImage getBloomThirtySecondImage() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondImage(); }
+  rhi::Extent2D getBloomSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomSixteenthExtent(); }
+  rhi::TextureHandle getBloomThirtySecondImage() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondImage(); }
   rhi::TextureViewHandle getBloomThirtySecondView() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondView(); }
-  VkExtent2D getBloomThirtySecondExtent() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondExtent(); }
-  VkImage getBloomUpsampleSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage(); }
+  rhi::Extent2D getBloomThirtySecondExtent() const { return m_swapchainDependent.sceneResources.getBloomThirtySecondExtent(); }
+  rhi::TextureHandle getBloomUpsampleSixteenthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage(); }
   rhi::TextureViewHandle getBloomUpsampleSixteenthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthView(); }
-  VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthExtent(); }
-  VkImage getBloomUpsampleEighthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage(); }
+  rhi::Extent2D getBloomUpsampleSixteenthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthExtent(); }
+  rhi::TextureHandle getBloomUpsampleEighthImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage(); }
   rhi::TextureViewHandle getBloomUpsampleEighthView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthView(); }
-  VkExtent2D getBloomUpsampleEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthExtent(); }
-  VkImage getBloomUpsampleQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage(); }
+  rhi::Extent2D getBloomUpsampleEighthExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleEighthExtent(); }
+  rhi::TextureHandle getBloomUpsampleQuarterImage() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage(); }
   rhi::TextureViewHandle getBloomUpsampleQuarterView() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterView(); }
-  VkExtent2D getBloomUpsampleQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterExtent(); }
-  VkImage getBloomOutputImage() const { return m_swapchainDependent.sceneResources.getBloomOutputImage(); }
+  rhi::Extent2D getBloomUpsampleQuarterExtent() const { return m_swapchainDependent.sceneResources.getBloomUpsampleQuarterExtent(); }
+  rhi::TextureHandle getBloomOutputImage() const { return m_swapchainDependent.sceneResources.getBloomOutputImage(); }
   rhi::TextureViewHandle getBloomOutputView() const { return m_swapchainDependent.sceneResources.getBloomOutputView(); }
-  VkExtent2D getBloomOutputExtent() const { return m_swapchainDependent.sceneResources.getBloomOutputExtent(); }
-  VkImage getColorGradingLutImage() const { return m_swapchainDependent.sceneResources.getColorGradingLutImage(); }
+  rhi::Extent2D getBloomOutputExtent() const { return m_swapchainDependent.sceneResources.getBloomOutputExtent(); }
+  rhi::TextureHandle getColorGradingLutImage() const { return m_swapchainDependent.sceneResources.getColorGradingLutImage(); }
   rhi::TextureViewHandle getColorGradingLutView() const { return m_swapchainDependent.sceneResources.getColorGradingLutView(); }
-  VkExtent2D getColorGradingLutExtent() const { return m_swapchainDependent.sceneResources.getColorGradingLutExtent(); }
+  rhi::Extent2D getColorGradingLutExtent() const { return m_swapchainDependent.sceneResources.getColorGradingLutExtent(); }
   uint64_t getBloomEstimatedBytes() const { return m_swapchainDependent.sceneResources.getBloomEstimatedBytes(); }
-  VkImage getVelocityImage() const { return m_swapchainDependent.sceneResources.getVelocityImage(); }
+  rhi::TextureHandle getVelocityImage() const { return m_swapchainDependent.sceneResources.getVelocityImage(); }
   rhi::TextureViewHandle getVelocityView() const { return m_swapchainDependent.sceneResources.getVelocityView(); }
-  VkFormat getVelocityFormat() const { return m_swapchainDependent.sceneResources.getVelocityFormat(); }
+  rhi::TextureFormat getVelocityFormat() const { return m_swapchainDependent.sceneResources.getVelocityFormat(); }
   uint64_t getVelocityEstimatedBytes() const { return m_swapchainDependent.sceneResources.getVelocityEstimatedBytes(); }
-  VkImage getSceneColorHistoryImage(uint32_t index) const
+  rhi::TextureHandle getSceneColorHistoryImage(uint32_t index) const
   {
     return m_swapchainDependent.sceneResources.getSceneColorHistoryImage(index);
   }
@@ -378,23 +357,21 @@ public:
   {
     return m_swapchainDependent.sceneResources.getSceneColorHistoryEstimatedBytes();
   }
-  VkImageView getShadowMapView() const;
-  VkImage getShadowMapImage() const;
+  rhi::TextureViewHandle getShadowMapView() const;
   shaderio::ShadowUniforms* getShadowUniformsData();
-  uint64_t    getDeviceOpaque() const { return m_device.device ? m_device.device->getNativeDevice() : 0; }
   [[nodiscard]] rhi::Device& getRHIDevice() const { return *m_device.device; }
-  uint64_t    getPhysicalDeviceOpaque() const { return m_device.device ? m_device.device->getNativePhysicalDevice() : 0; }
 
 private:
   // Created during RenderDevice::init() after feature negotiation.
-  // Destroyed during RenderDevice::shutdown() after vkDeviceWaitIdle.
+  // Destroyed during RenderDevice::shutdown() after the backend device is idle.
   // Rebuild trigger: none while device is alive; recreated only on full renderer/device re-init.
   struct DeviceLifetimeResources
   {
 
     std::unique_ptr<rhi::Device> device;
-    VmaAllocator                 allocator{nullptr};
+    DEMO_RHI_ALLOCATOR                 allocator{nullptr};
     std::vector<utils::Buffer>   stagingBuffers;
+    std::vector<rhi::BufferHandle> rhiStagingBuffers;
     upload::StaticBufferUploadPolicy staticBufferUploadPolicy{};
     // Shared samplers created through the RHI (rhi::Device::createSampler), held as handles.
     // sceneLinear feeds SceneResources; gbufferLinear feeds the GBuffer descriptor set.
@@ -403,35 +380,29 @@ private:
 
     utils::Buffer                              vertexBuffer;
     utils::Buffer                              pointsBuffer;
-    VkCommandPool                              transientCmdPool{};
-    VkCommandPool                              uploadCmdPool{};
-    VkCommandPool                              computeCmdPool{};
-    VkDescriptorPool                           descriptorPool{};
-    VkDescriptorPool                           uiDescriptorPool{};
-    VkDescriptorSetLayout                      gbufferTextureSetLayout{nullptr};
-    std::vector<VkDescriptorSet>               gbufferTextureSets;
+    DEMO_RHI_VK(CommandPool)                              transientCmdPool{};
+    DEMO_RHI_VK(CommandPool)                              uploadCmdPool{};
+    DEMO_RHI_VK(CommandPool)                              computeCmdPool{};
+    DEMO_RHI_VK(DescriptorPool)                           descriptorPool{};
+    DEMO_RHI_VK(DescriptorPool)                           uiDescriptorPool{};
     utils::ImageResource                       iblEnvironment{};
-    VkFormat                                   iblEnvironmentFormat{VK_FORMAT_UNDEFINED};
-    VkExtent2D                                 iblEnvironmentExtent{};
+    rhi::TextureFormat                        iblEnvironmentFormat{rhi::TextureFormat::undefined};
+    rhi::Extent2D                             iblEnvironmentExtent{};
     uint32_t                                   iblEnvironmentMipCount{0};
     uint64_t                                   iblEnvironmentEstimatedBytes{0};
     bool                                       iblEnvironmentLoaded{false};
     bool                                       iblUsingFallback{true};
     std::string                                iblEnvironmentPath;
     std::string                                iblEnvironmentStatus{"Not initialized"};
-    VkPipelineLayout                           lightPipelineLayout{nullptr};
-    VkPipelineLayout                           postProcessPipelineLayout{nullptr};
-    std::vector<BindGroupHandle>               gpuCullingBindGroups;
-    std::unique_ptr<rhi::PipelineLayout>       gpuCullingPipelineLayout;
-    std::vector<BindGroupHandle>               shadowCullingBindGroups;
-    std::unique_ptr<rhi::PipelineLayout>       shadowCullingPipelineLayout;
-    std::unique_ptr<rhi::PipelineLayout>       graphicPipelineLayout;
-    std::unique_ptr<rhi::PipelineLayout>       computePipelineLayout;
-    std::unique_ptr<rhi::PipelineLayout>       debugPipelineLayout;
-    std::unique_ptr<rhi::PipelineLayout>       gbufferPipelineLayout;  // Separate layout for GBuffer pass
-    std::unique_ptr<rhi::PipelineLayout>       mdiPipelineLayout;
-    std::unique_ptr<rhi::PipelineLayout>       csmShadowMdiPipelineLayout;
-    rhi::vulkan::VulkanResourceTable           resourceTable;
+    std::vector<rhi::ArgumentTableHandle>      gpuCullingArgumentTables;
+    std::vector<rhi::ArgumentTableHandle>      shadowCullingArgumentTables;
+    std::array<rhi::ArgumentLayoutHandle, 2>   rasterArgumentLayouts{};
+    std::array<rhi::ArgumentLayoutHandle, 3>   gbufferArgumentLayouts{};
+    std::array<rhi::ArgumentLayoutHandle, 3>   mdiArgumentLayouts{};
+    std::array<rhi::ArgumentLayoutHandle, 3>   csmShadowMdiArgumentLayouts{};
+    std::array<rhi::ArgumentLayoutHandle, 2>   debugArgumentLayouts{};
+    std::array<rhi::ArgumentLayoutHandle, 2>   fullscreenArgumentLayouts{};
+    rhi::DEMO_RHI_VULKAN_NS::DEMO_RHI_VULKAN_TYPE(ResourceTable) resourceTable;
 
     struct PrebuiltPipelineVariants
     {
@@ -447,9 +418,9 @@ private:
   {
     std::unique_ptr<rhi::Swapchain> swapchain;
     SceneResources                  sceneResources;
-    VkExtent2D                      windowSize{800, 600};
-    VkExtent2D                      viewportSize{800, 600};
-    VkFormat                        swapchainImageFormat{VK_FORMAT_B8G8R8A8_UNORM};
+    rhi::Extent2D                   windowSize{800, 600};
+    rhi::Extent2D                   viewportSize{800, 600};
+    rhi::TextureFormat              swapchainImageFormat{rhi::TextureFormat::bgra8Unorm};
     uint32_t                        currentImageIndex{0};
     bool                            hasAcquiredImage{false};
     std::vector<rhi::ResourceState> imageStates;  // Track per-image layout state
@@ -466,14 +437,13 @@ private:
     struct FrameUserData
     {
       TransientAllocator transientAllocator{};
-      BindGroupHandle    sceneBindGroup{kNullBindGroupHandle};
-      BindGroupHandle    cameraBindGroup{kNullBindGroupHandle};
-      BindGroupHandle    drawBindGroup{kNullBindGroupHandle};
-      BindGroupHandle    mdiDrawBindGroup{kNullBindGroupHandle};
-      BindGroupHandle    gbufferMdiDrawBindGroup{kNullBindGroupHandle};
-      BindGroupHandle    depthMdiDrawBindGroup{kNullBindGroupHandle};
-      std::array<BindGroupHandle, shaderio::LCascadeCount> csmShadowMdiDrawBindGroups{
-          kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle, kNullBindGroupHandle};
+      rhi::ArgumentTableHandle sceneArgumentTable{};
+      rhi::ArgumentTableHandle cameraArgumentTable{};
+      rhi::ArgumentTableHandle drawArgumentTable{};
+      rhi::ArgumentTableHandle mdiDrawArgumentTable{};
+      rhi::ArgumentTableHandle gbufferMdiDrawArgumentTable{};
+      rhi::ArgumentTableHandle depthMdiDrawArgumentTable{};
+      std::array<rhi::ArgumentTableHandle, shaderio::LCascadeCount> csmShadowMdiDrawArgumentTables{};
       utils::Buffer      lightingBuffer{};
       utils::Buffer      lightCullingBuffer{};
       utils::Buffer      gpuCullingObjectBuffer{};
@@ -482,9 +452,9 @@ private:
       utils::Buffer      gpuCullingStatsBuffer{};
       utils::Buffer      gpuCullingUniformBuffer{};
       utils::Buffer      gpuCullingResultBuffer{};
-      VkBuffer           externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
-      VkBuffer           externalGPUCullingMeshletBuffer{VK_NULL_HANDLE};
-      VkBuffer           externalGPUCullingSceneObjectBuffer{VK_NULL_HANDLE};
+      DEMO_RHI_VK(Buffer)           externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
+      DEMO_RHI_VK(Buffer)           externalGPUCullingMeshletBuffer{VK_NULL_HANDLE};
+      DEMO_RHI_VK(Buffer)           externalGPUCullingSceneObjectBuffer{VK_NULL_HANDLE};
       uint64_t           externalGPUCullingObjectBufferAddress{0};
       bool               useExternalGPUCullingObjectBuffer{false};
       bool               useExternalGPUCullingMeshletData{false};
@@ -520,7 +490,7 @@ private:
       rhi::BufferHandle  gpuDrivenPersistentIndirectStreamBufferRHI{};
       // Wave 8: stable RHI handles mirroring the per-frame UBO/SSBO buffers consumed by
       // camera/draw/scene/mdi bind groups (Option B rebind on realloc). The transient
-      // allocator buffer is registered once (its native VkBuffer is stable after init).
+      // allocator buffer is registered once and remains stable after init.
       rhi::BufferHandle  transientBufferRHI{};
       rhi::BufferHandle  lightingBufferRHI{};
       rhi::BufferHandle  lightCullingBufferRHI{};
@@ -535,12 +505,12 @@ private:
       uint32_t           gpuDrivenPersistentIndirectStreamCapacity{0};
       std::vector<shaderio::ShadowCullObject> shadowCullingScratchObjects;
       std::vector<shaderio::DrawUniforms>     shadowCullingScratchDrawData;
-      std::vector<VkCommandBuffer> pendingUploadCmds;
-      std::vector<VkFence> pendingUploadFences;
-      // Bind groups created via createTemporaryBindGroup during this frame index's
+      std::vector<DEMO_RHI_VK(CommandBuffer)> pendingUploadCmds;
+      std::vector<DEMO_RHI_VK(Fence)> pendingUploadFences;
+      // Argument tables created via createTemporaryArgumentTable during this frame index's
       // recording. Recycled (destroyed) the next time this frame index comes around,
       // after its fence has been waited on, so the descriptor sets are safely idle.
-      std::vector<BindGroupHandle> transientBindGroups;
+      std::vector<rhi::ArgumentTableHandle> transientArgumentTables;
     };
 
     std::vector<FrameUserData> frameUserData;
@@ -589,8 +559,6 @@ private:
   PipelineHandle m_gpuCullingDebugPipeline{};    // Current-frame GPU culling visualization
 
   // GBuffer uniform buffer bind groups (per-frame)
-  // BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const;  // Moved to public
-  // BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const;    // Moved to public
 
   // Draw-call-scoped transient CPU/GPU data staging bucket.
   // Lifetime trigger: rebuilt per draw packet emission/consumption; currently no persistent owner fields.
@@ -654,9 +622,9 @@ private:
     {
       TextureRuntimeKind     runtimeKind{TextureRuntimeKind::materialSampled};
       uint32_t               viewportAttachmentIndex{0};
-      VkImageView            sampledImageView{VK_NULL_HANDLE};
-      VkImageLayout          sampledImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
-      // Wave 8: adopted RHI view handle mirroring sampledImageView, for ArgumentWrite-based
+      DEMO_RHI_VK(ImageView)            sampledImageView{VK_NULL_HANDLE};
+      DEMO_RHI_VK(ImageLayout)          sampledImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
+      // Wave 8: adopted RHI view handle mirroring sampled image view, for ArgumentWrite-based
       // material (combinedImageSampler) bindless updates. Released via removeTextureView.
       rhi::TextureViewHandle sampledViewHandle{};
     };
@@ -664,7 +632,7 @@ private:
     struct TextureColdData
     {
       utils::ImageResource ownedImage{};
-      VkExtent2D           sourceExtent{};
+      DEMO_RHI_VK(Extent2D)           sourceExtent{};
       uint32_t             mipLevels{1};
     };
 
@@ -706,35 +674,33 @@ private:
     HandlePool<TextureHandle, TextureRecord>       texturePool;
     HandlePool<MaterialHandle, MaterialRecord>     materialPool;
     // Wave 8: a bind group is an ArgumentTable. Track all device-created tables and the
-    // layouts they were built from so destroyBindGroups() can release them. Adopted
+    // layouts they were built from so destroyArgumentTablesAndLayouts() can release them. Adopted
     // external tables (owned=false) are tracked here too and unregistered on teardown
     // (their native descriptor set is freed by whoever owns the external pool).
     std::vector<rhi::ArgumentTableHandle>  ownedArgumentTables;
     std::vector<rhi::ArgumentLayoutHandle> ownedArgumentLayouts;
     MaterialHandle                                 sampleMaterials[kDemoMaterialSlotCount]{};
     TextureHandle                                  viewportTextureHandle{};
-    BindGroupHandle                                materialBindGroup{};
+    rhi::ArgumentTableHandle                       materialArgumentTable{};
     rhi::SamplerHandle                             materialSamplerHandle{};  // Wave 8: shared sampler for combinedImageSampler ArgumentWrite
-    std::vector<BindGroupHandle>                   materialBindGroups;
+    std::vector<rhi::ArgumentTableHandle>          materialArgumentTables;
     // Wave 8: per-slot adopted view handles for the bindless material array. The shared
     // sampler is materialSamplerHandle; writes go through combinedImageSampler ArgumentWrites.
     std::vector<rhi::TextureViewHandle>            materialDescriptorViews;
     std::vector<uint8_t>                           materialDescriptorValid;
-    std::vector<uint64_t>                          materialBindGroupGenerations;
+    std::vector<uint64_t>                          materialArgumentTableGenerations;
     uint64_t                                       materialDescriptorGeneration{0};
     uint32_t                                       maxTextures{10000};
   };
 
   void              createTransientCommandPool();
   void              createFrameSubmission(uint32_t numFrames);
-  void              rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize = std::nullopt);
+  void              rebuildSwapchainDependentResources(std::optional<rhi::Extent2D> requestedViewportSize = std::nullopt);
   bool              prepareFrameResources();
   bool              acquireSwapchainImageForPresent();
-  rhi::CommandList& beginCommandRecording();
-  void              drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor);
-  void              endFrame(rhi::CommandList& cmd);
-  void              beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const;
-  void              endDynamicRenderingToSwapchain(const rhi::CommandList& cmd);
+  rhi::CommandBuffer& beginCommandRecording();
+  void              drawFrame(rhi::CommandBuffer& cmdBuffer, const RenderParams& params, PassExecutor& passExecutor);
+  void              endFrame(rhi::CommandBuffer& cmdBuffer);
   void              updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms);
   void              updateLightCullingUniformBuffer(uint32_t frameIndex, const shaderio::LightCullingUniforms& cullingUniforms);
   void                 prebuildRequiredPipelineVariants();
@@ -742,21 +708,21 @@ private:
   void                 createPrebuiltComputePipelineVariant();
   void                 createLightResources();
   void                 createGPUCullingResources();
-  void                 updateGPUCullingDescriptorSet(uint32_t frameIndex);
+  void                 updateGPUCullingArgumentTable(uint32_t frameIndex);
   void                 createGPUCullingPipeline();
   void                 waitForAllFrameSlots();
   void                 ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
   // Registers (first call) or rebinds (subsequent) a stable RHI BufferHandle to a
   // per-frame native buffer; clears the handle when the buffer is null.
   void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer);
-  void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, VkBuffer buffer);
+  void                 rebindFrameBufferHandle(rhi::BufferHandle& handle, DEMO_RHI_VK(Buffer) buffer);
   void                 updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
   void                 createShadowCullingResources();
-  void                 updateShadowCullingDescriptorSet(uint32_t frameIndex);
-  void                 updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex);
-  void                 updateMdiDrawDataDescriptorSet(uint32_t frameIndex);
-  void                 updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex);
-  void                 updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex);
+  void                 updateShadowCullingArgumentTable(uint32_t frameIndex);
+  void                 updateShadowCullingDrawDataArgumentTable(uint32_t frameIndex);
+  void                 updateMdiDrawDataArgumentTable(uint32_t frameIndex);
+  void                 updateGBufferMdiDrawDataArgumentTable(uint32_t frameIndex);
+  void                 updateDepthMdiDrawDataArgumentTable(uint32_t frameIndex);
   void                 createShadowCullingPipeline();
   void                 ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
   void                 ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount);
@@ -776,37 +742,33 @@ private:
   void                 drawPassGpuProfileOverlay(const RenderParams& params) const;
   void                 initImGui(void* window);
   void                 createDescriptorPool();
-  void                 createMaterialBindGroup();     // Create material bind group early for pipeline layout
-  void                 createGraphicDescriptorSet();
-  void                 updateGraphicsDescriptorSet();
-  void                 syncMaterialBindGroup(uint32_t frameIndex);
-  BindGroupHandle      getCurrentMaterialBindGroupHandle() const;
+  void                 createMaterialArgumentTable(); // Create material argument table early for pipeline layout
+  void                 createGraphicsArgumentTables();
+  void                 updateGraphicsArgumentTables();
+  void                 syncMaterialArgumentTable(uint32_t frameIndex);
+  rhi::ArgumentTableHandle getCurrentMaterialArgumentTable() const;
   void                 flushPendingUploadCommands(bool waitForCompletion);
-  void                 createIBLResources(VkCommandBuffer cmd);
+  void                 createIBLResources(rhi::CommandBuffer& cmd);
   void                 destroyIBLResources();
-  void                 updateGBufferTextureDescriptorSet();
-  void                 destroyBindGroups();
-  utils::ImageResource loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename);
+  void                 destroyArgumentTablesAndLayouts();
+  utils::ImageResource loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
   const MaterialResources::MaterialRecord*  tryGetMaterial(MaterialHandle handle) const;
   const MaterialResources::TextureHotData*  tryGetTextureHot(TextureHandle handle) const;
   const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;
-  // Wave 8: build an ArgumentLayout + ArgumentTable from layout entries, track them for
-  // teardown, and return the table handle (which IS the BindGroupHandle).
-  BindGroupHandle createBindGroup(BindGroupDesc desc);
-  // Converts legacy BindTableLayoutEntry list into an owned ArgumentLayout handle.
-  rhi::ArgumentLayoutHandle createArgumentLayoutFromEntries(const std::vector<rhi::BindTableLayoutEntry>& entries,
-                                                            const char* debugName);
-  // destroyBindGroup is provided by public RHI interface
-  PipelineHandle registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
-                                  uint64_t nativeLayout = 0, bool owned = true);
+  // Build an ArgumentTable from a layout, track it for teardown, and return the handle.
+  rhi::ArgumentTableHandle createArgumentTable(ArgumentTableDesc desc);
+  rhi::ArgumentLayoutHandle createArgumentLayoutFromBindings(std::span<const rhi::ArgumentBinding> bindings,
+                                                             const char* debugName);
+  // destroyArgumentTable is provided by public RHI interface
   void           destroyPipelines();
-  const rhi::vulkan::PipelineRecord* tryGetPipelineRecord(PipelineHandle handle) const;
-  uint64_t                 getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
-  uint64_t                 getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot expectedSlot) const;
-  static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot);
+  static std::optional<uint32_t> mapSetSlotToLegacyShaderSet(ArgumentSlot slot);
   [[nodiscard]] Aabb computeSceneBounds(const SceneUploadResult* gltfModel, const GPUDrivenSceneView* gpuDrivenSceneView) const;
-  void                     rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd);
-  void                     rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd);
+  [[nodiscard]] UploadBufferRecord createShadowPackedUploadBuffer(rhi::CommandBuffer& cmd,
+                                                                  std::span<const std::byte> data,
+                                                                  rhi::BufferUsageFlags usage,
+                                                                  const char* debugName);
+  void                     rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, rhi::CommandBuffer& cmd);
+  void                     rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, rhi::CommandBuffer& cmd);
   [[nodiscard]] FrameLightingState buildFrameLightingState(const RenderParams& params) const;
   void              ensureTestPointLights(const RenderParams& params);
   [[nodiscard]] shaderio::LightCullingUniforms buildLightCullingUniforms(const RenderParams& params) const;
@@ -816,6 +778,7 @@ private:
                                                                           float farDistance) const;
   [[nodiscard]] std::array<glm::vec3, 8> computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const;
   void              buildDebugDrawList(const RenderParams& params);
+  [[nodiscard]] uint64_t DEMO_RENDER_RTV_BACKEND(rhi::TextureViewHandle handle) const;
 
   struct PassGpuProfileFrame
   {
@@ -872,11 +835,6 @@ private:
   PassGpuProfileState         m_passGpuProfile;
   PassProfilingHooks          m_passProfilingHooks{this};
 
-#ifdef TRACY_ENABLE
-  std::unique_ptr<profiling::TracyVulkanContext> m_tracyVkCtx;
-  VkCommandPool   m_tracyCmdPool{VK_NULL_HANDLE};
-  VkCommandBuffer m_tracyCmdBuf{VK_NULL_HANDLE};
-#endif
 };
 
 }  // namespace demo

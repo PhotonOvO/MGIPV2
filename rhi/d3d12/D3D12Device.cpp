@@ -35,7 +35,7 @@ void D3D12Device::deinit()
   // 5. Release adapter and factory
 }
 
-uint64_t D3D12Device::getNativeInstance() const
+uint64_t D3D12Device::getBackendInstanceHandle() const
 {
   // TODO: D3D12 implementation
   // NOTES: D3D12 doesn't have a separate instance like Vulkan
@@ -43,14 +43,14 @@ uint64_t D3D12Device::getNativeInstance() const
   return 0;
 }
 
-uint64_t D3D12Device::getNativePhysicalDevice() const
+uint64_t D3D12Device::getBackendPhysicalDeviceHandle() const
 {
   // TODO: D3D12 implementation
   // NOTES: Return DXGI adapter handle
   return reinterpret_cast<uint64_t>(m_dxgiAdapter);
 }
 
-uint64_t D3D12Device::getNativeDevice() const
+uint64_t D3D12Device::getBackendDeviceHandle() const
 {
   // TODO: D3D12 implementation
   // NOTES: Return ID3D12Device handle

@@ -1,5 +1,7 @@
 #include "HiZDepthPyramid.h"
 
+#include "../rhi/RHICommandBuffer.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <array>
@@ -79,7 +81,7 @@ void HiZDepthPyramid::init(rhi::Device& device, VmaAllocator allocator, uint32_t
   shutdown();
 
   m_rhiDevice = &device;
-  m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getNativeDevice()));
+  m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getBackendDeviceHandle()));
   m_allocator = allocator;
   m_frameCount = std::max(frameCount, 1u);
   m_mobilePolicy = MobilePolicy{
@@ -102,71 +104,40 @@ void HiZDepthPyramid::init(rhi::Device& device, VmaAllocator allocator, uint32_t
   for(PerFrameResources& frameResources : m_perFrame)
   {
     frameResources.uniformBuffer = createUniformBuffer(m_allocator);
+    frameResources.uniformBufferHandle =
+        m_rhiDevice->registerExternalBuffer(reinterpret_cast<uint64_t>(frameResources.uniformBuffer.buffer));
   }
 
-  const VkDescriptorPoolSize poolSizes[] = {
-      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, m_frameCount},
-      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips * m_frameCount},
-      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, m_frameCount},
-  };
-
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets       = m_frameCount,
-      .poolSizeCount = static_cast<uint32_t>(std::size(poolSizes)),
-      .pPoolSizes    = poolSizes,
-  };
-  VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool));
-
-  const std::array<VkDescriptorSetLayoutBinding, 3> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+  const std::array<rhi::ArgumentBinding, 3> bindings{{
+      rhi::ArgumentBinding{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .visibility = rhi::ShaderStage::compute, .arrayCount = 1},
+      rhi::ArgumentBinding{.binding = 1, .type = rhi::ArgumentType::storageTexture, .visibility = rhi::ShaderStage::compute, .arrayCount = shaderio::LDepthPyramidMaxMips},
+      rhi::ArgumentBinding{.binding = 2, .type = rhi::ArgumentType::uniformBuffer, .visibility = rhi::ShaderStage::compute, .arrayCount = 1},
   }};
-
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+  m_argumentLayout = m_rhiDevice->createArgumentLayout(rhi::ArgumentLayoutDesc{
+      .bindings     = bindings.data(),
       .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings    = bindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(m_device, &setLayoutInfo, nullptr, &m_descriptorSetLayout));
-
-  VkDescriptorSetAllocateInfo allocInfo{
-      .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool     = m_descriptorPool,
-      .descriptorSetCount = m_frameCount,
-  };
-  std::vector<VkDescriptorSetLayout> setLayouts(m_frameCount, m_descriptorSetLayout);
-  allocInfo.pSetLayouts = setLayouts.data();
-  std::vector<VkDescriptorSet> descriptorSets(m_frameCount, VK_NULL_HANDLE);
-  VK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, descriptorSets.data()));
+      .debugName    = "hiz-depth-pyramid",
+  });
   for(uint32_t frameIndex = 0; frameIndex < m_frameCount; ++frameIndex)
   {
-    m_perFrame[frameIndex].descriptorSet = descriptorSets[frameIndex];
+    m_perFrame[frameIndex].argumentTable = m_rhiDevice->createArgumentTable(m_argumentLayout);
   }
-
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts    = &m_descriptorSetLayout,
-  };
-  VK_CHECK(vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout));
 
   const VkShaderModule shaderModule =
       utils::createShaderModule(m_device, {shader_depth_pyramid_slang, std::size(shader_depth_pyramid_slang)});
-  const VkPipelineShaderStageCreateInfo shaderStageInfo{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "depthPyramid",
+  const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_argumentLayout}};
+  const rhi::ComputePipelineDesc pipelineDesc{
+      .shaderStage =
+          rhi::PipelineShaderStageDesc{
+              .stage        = rhi::ShaderStage::compute,
+              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .entryPoint   = "depthPyramid",
+          },
+      .argumentLayouts = argumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+      .specializationVariant = 0x7101u,
   };
-
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStageInfo,
-      .layout = m_pipelineLayout,
-  };
-  VK_CHECK(vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline));
+  m_pipeline = m_rhiDevice->createComputePipeline(pipelineDesc);
   vkDestroyShaderModule(m_device, shaderModule, nullptr);
 
   recreateResources();
@@ -176,39 +147,38 @@ void HiZDepthPyramid::shutdown()
 {
   destroyImageResources();
 
-  if(m_pipeline != VK_NULL_HANDLE)
+  if(!m_pipeline.isNull() && m_rhiDevice != nullptr)
   {
-    vkDestroyPipeline(m_device, m_pipeline, nullptr);
-    m_pipeline = VK_NULL_HANDLE;
-  }
-  if(m_pipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-    m_pipelineLayout = VK_NULL_HANDLE;
-  }
-  if(m_descriptorPool != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
-    m_descriptorPool = VK_NULL_HANDLE;
-  }
-  if(m_descriptorSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
-    m_descriptorSetLayout = VK_NULL_HANDLE;
+    m_rhiDevice->destroyPipeline(m_pipeline);
+    m_pipeline = {};
   }
   for(PerFrameResources& frameResources : m_perFrame)
   {
+    if(!frameResources.argumentTable.isNull() && m_rhiDevice != nullptr)
+    {
+      m_rhiDevice->destroyArgumentTable(frameResources.argumentTable);
+      frameResources.argumentTable = {};
+    }
+    if(!frameResources.uniformBufferHandle.isNull() && m_rhiDevice != nullptr)
+    {
+      m_rhiDevice->destroyBuffer(frameResources.uniformBufferHandle);
+      frameResources.uniformBufferHandle = {};
+    }
     if(frameResources.uniformBuffer.buffer != VK_NULL_HANDLE)
     {
       vmaDestroyBuffer(m_allocator, frameResources.uniformBuffer.buffer, frameResources.uniformBuffer.allocation);
       frameResources.uniformBuffer = {};
     }
-    frameResources.descriptorSet = VK_NULL_HANDLE;
+  }
+  if(!m_argumentLayout.isNull() && m_rhiDevice != nullptr)
+  {
+    m_rhiDevice->destroyArgumentLayout(m_argumentLayout);
+    m_argumentLayout = {};
   }
   m_perFrame.clear();
 
   m_sourceDepth = {};
-  m_lastBoundSet = VK_NULL_HANDLE;
+  m_lastBoundArgumentTable = {};
   m_lastBoundBinding = 0;
   m_generationCount = 0;
   m_estimatedMemoryBytes = 0;
@@ -275,11 +245,11 @@ void HiZDepthPyramid::resize(VkExtent2D sourceSize)
 }
 
 void HiZDepthPyramid::generate(uint32_t frameIndex,
-                               VkCommandBuffer cmd,
+                               rhi::CommandBuffer& rhiCmd,
                                VkExtent2D sourceSize,
-                               VkImage sourceDepthImage,
                                rhi::TextureViewHandle sourceDepthView,
-                               TextureHandle sourceDepth)
+                               TextureHandle sourceDepth,
+                               rhi::TextureHandle sourceDepthRHI)
 {
   m_sourceDepth = sourceDepth;
   if(frameIndex >= m_perFrame.size())
@@ -288,8 +258,8 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
     return;
   }
   const PerFrameResources& frameResources = m_perFrame[frameIndex];
-  if(cmd == VK_NULL_HANDLE || sourceDepthImage == VK_NULL_HANDLE || sourceDepthView.isNull()
-     || m_pipeline == VK_NULL_HANDLE || m_pipelineLayout == VK_NULL_HANDLE || frameResources.descriptorSet == VK_NULL_HANDLE)
+  if(sourceDepthRHI.isNull() || sourceDepthView.isNull()
+     || m_pipeline.isNull() || frameResources.argumentTable.isNull())
   {
     m_valid = false;
     return;
@@ -301,7 +271,7 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
     return;
   }
 
-  updateDescriptorSet(frameIndex, sourceDepthView);
+  updateArgumentTable(frameIndex, sourceDepthView);
 
   const shaderio::DepthPyramidUniforms uniforms{
       .sourceWidth   = sourceSize.width,
@@ -319,120 +289,52 @@ void HiZDepthPyramid::generate(uint32_t frameIndex,
 
   if(!m_layoutInitialized)
   {
-    const VkImageMemoryBarrier2 initPyramidBarrier{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .image = m_image,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = m_mipCount,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
+    const rhi::TextureBarrier initPyramidBarrier{
+        .texture = m_imageHandle,
+        .before = rhi::ResourceState::Undefined,
+        .after = rhi::ResourceState::General,
+        .range = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = m_mipCount, .baseArrayLayer = 0, .layerCount = 1},
     };
-    const VkDependencyInfo initPyramidDependency{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &initPyramidBarrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &initPyramidDependency);
+    rhiCmd.resourceBarrier(&initPyramidBarrier, 1, nullptr, 0);
     m_layoutInitialized = true;
   }
 
-  const VkImageMemoryBarrier2 sourceBarrier{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-      .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .image = sourceDepthImage,
-      .subresourceRange = {
-          .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-          .baseMipLevel = 0,
-          .levelCount = 1,
-          .baseArrayLayer = 0,
-          .layerCount = 1,
-      },
+  const rhi::TextureBarrier sourceBarrier{
+      .texture = sourceDepthRHI,
+      .before = rhi::ResourceState::ShaderRead,
+      .after = rhi::ResourceState::ShaderRead,
+      .range = {.aspect = rhi::TextureAspect::depth, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
   };
+  rhiCmd.resourceBarrier(&sourceBarrier, 1, nullptr, 0);
 
-  const VkDependencyInfo dependencyInfo{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers = &sourceBarrier,
-  };
-  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+  rhi::ComputeEncoder* encoder = rhiCmd.beginComputePass();
+  if(encoder == nullptr)
+  {
+    m_valid = false;
+    return;
+  }
+  encoder->setPipeline(m_pipeline);
+  encoder->setArgumentTable(0, frameResources.argumentTable);
+  encoder->dispatch(rhi::DispatchDesc{.groupCountX = (m_size.width + 7u) / 8u,
+                                      .groupCountY = (m_size.height + 7u) / 8u,
+                                      .groupCountZ = 1u});
+  rhiCmd.endEncoding();
 
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, &frameResources.descriptorSet, 0, nullptr);
-  vkCmdDispatch(cmd, (m_size.width + 7u) / 8u, (m_size.height + 7u) / 8u, 1u);
-
-  const VkImageMemoryBarrier2 pyramidBarrier{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .image = m_image,
-      .subresourceRange = {
-          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel = 0,
-          .levelCount = std::min<uint32_t>(m_mipCount, shaderio::LDepthPyramidMaxMips),
-          .baseArrayLayer = 0,
-          .layerCount = 1,
-      },
+  const rhi::TextureBarrier pyramidBarrier{
+      .texture = m_imageHandle,
+      .before = rhi::ResourceState::General,
+      .after = rhi::ResourceState::General,
+      .range = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = std::min<uint32_t>(m_mipCount, shaderio::LDepthPyramidMaxMips), .baseArrayLayer = 0, .layerCount = 1},
   };
-  const VkDependencyInfo pyramidDependency{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers = &pyramidBarrier,
-  };
-  vkCmdPipelineBarrier2(cmd, &pyramidDependency);
+  rhiCmd.resourceBarrier(&pyramidBarrier, 1, nullptr, 0);
 
   ++m_generationCount;
 }
 
-void HiZDepthPyramid::bindForCulling(VkDescriptorSet set, uint32_t binding)
+void HiZDepthPyramid::markBoundForCulling(rhi::ArgumentTableHandle table, uint32_t binding)
 {
-  m_lastBoundSet = set;
+  m_lastBoundArgumentTable = table;
   m_lastBoundBinding = binding;
-  if(m_device == VK_NULL_HANDLE || set == VK_NULL_HANDLE || m_mipViews.empty())
-  {
-    return;
-  }
-
-  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
-  };
-  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
-  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
-  {
-    pyramidMipInfos[i] = VkDescriptorImageInfo{
-        .sampler = VK_NULL_HANDLE,
-        .imageView = nativeOf(m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))]),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-  }
-
-  const VkWriteDescriptorSet write{
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = set,
-      .dstBinding = binding,
-      .dstArrayElement = 0,
-      .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
-      .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-      .pImageInfo = pyramidMipInfos.data(),
-  };
-  vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
 rhi::TextureViewHandle HiZDepthPyramid::getMipView(uint32_t mipLevel) const
@@ -444,72 +346,43 @@ rhi::TextureViewHandle HiZDepthPyramid::getMipView(uint32_t mipLevel) const
   return m_mipViews[mipLevel];
 }
 
-void HiZDepthPyramid::updateDescriptorSet(uint32_t frameIndex, rhi::TextureViewHandle sourceDepthView)
+void HiZDepthPyramid::updateArgumentTable(uint32_t frameIndex, rhi::TextureViewHandle sourceDepthView)
 {
   if(frameIndex >= m_perFrame.size() || sourceDepthView.isNull() || m_mipViews.empty())
   {
     return;
   }
   const PerFrameResources& frameResources = m_perFrame[frameIndex];
-  if(frameResources.descriptorSet == VK_NULL_HANDLE)
+  if(frameResources.argumentTable.isNull() || frameResources.uniformBufferHandle.isNull())
   {
     return;
   }
 
-  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewNative(handle)));
+  std::array<rhi::ArgumentWrite, shaderio::LDepthPyramidMaxMips + 2> writes{};
+  uint32_t writeCount = 0;
+  writes[writeCount++] = rhi::ArgumentWrite{
+      .binding = 0,
+      .type = rhi::ArgumentType::sampledTexture,
+      .textureView = sourceDepthView,
+      .accessIntent = rhi::ArgumentAccessIntent::sampledRead,
   };
-
-  const VkDescriptorImageInfo sourceDepthInfo{
-      .sampler = VK_NULL_HANDLE,
-      .imageView = nativeOf(sourceDepthView),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-
-  std::array<VkDescriptorImageInfo, shaderio::LDepthPyramidMaxMips> pyramidMipInfos{};
-  for(uint32_t i = 0; i < static_cast<uint32_t>(pyramidMipInfos.size()); ++i)
+  for(uint32_t i = 0; i < shaderio::LDepthPyramidMaxMips; ++i)
   {
-    pyramidMipInfos[i] = VkDescriptorImageInfo{
-        .sampler = VK_NULL_HANDLE,
-        .imageView = nativeOf(m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))]),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    writes[writeCount++] = rhi::ArgumentWrite{
+        .binding = 1,
+        .arrayElement = i,
+        .type = rhi::ArgumentType::storageTexture,
+        .textureView = m_mipViews[std::min<uint32_t>(i, static_cast<uint32_t>(m_mipViews.size() - 1u))],
+        .accessIntent = rhi::ArgumentAccessIntent::readWrite,
     };
   }
-
-  const VkDescriptorBufferInfo uniformInfo{
-      .buffer = frameResources.uniformBuffer.buffer,
-      .offset = 0,
-      .range = sizeof(shaderio::DepthPyramidUniforms),
+  writes[writeCount++] = rhi::ArgumentWrite{
+      .binding = 2,
+      .type = rhi::ArgumentType::uniformBuffer,
+      .buffer = frameResources.uniformBufferHandle,
+      .size = sizeof(shaderio::DepthPyramidUniforms),
   };
-
-  const std::array<VkWriteDescriptorSet, 3> writes{{
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
-          .dstBinding = 0,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo = &sourceDepthInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
-          .dstBinding = 1,
-          .descriptorCount = static_cast<uint32_t>(pyramidMipInfos.size()),
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-          .pImageInfo = pyramidMipInfos.data(),
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSet,
-          .dstBinding = 2,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          .pBufferInfo = &uniformInfo,
-      },
-  }};
-
-  vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  m_rhiDevice->updateArgumentTable(frameResources.argumentTable, writeCount, writes.data());
 }
 
 void HiZDepthPyramid::recreateResources()
@@ -542,20 +415,19 @@ void HiZDepthPyramid::recreateResources()
   VmaAllocationCreateInfo allocationInfo{};
   allocationInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
   VK_CHECK(vmaCreateImage(m_allocator, &imageInfo, &allocationInfo, &m_image, &m_imageAllocation, nullptr));
+  m_imageHandle = m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(m_image));
 
   m_mipViews.resize(m_mipCount);
   for(uint32_t mipLevel = 0; mipLevel < m_mipCount; ++mipLevel)
   {
-    const rhi::TextureHandle mipImageHandle = m_rhiDevice->registerExternalTexture(reinterpret_cast<uint64_t>(m_image));
     rhi::TextureViewCreateDesc mipViewDesc{};
-    mipViewDesc.image         = mipImageHandle;
+    mipViewDesc.image         = m_imageHandle;
     mipViewDesc.format        = rhi::TextureFormat::r32Sfloat;
     mipViewDesc.viewType      = rhi::ImageViewType::e2D;
     mipViewDesc.aspect        = rhi::TextureAspect::color;
     mipViewDesc.baseMipLevel  = mipLevel;
     mipViewDesc.levelCount    = 1;
     m_mipViews[mipLevel] = m_rhiDevice->createTextureView(mipViewDesc);
-    m_rhiDevice->destroyImage(mipImageHandle);
   }
 
   m_valid = true;
@@ -571,6 +443,12 @@ void HiZDepthPyramid::destroyImageResources()
     }
   }
   m_mipViews.clear();
+
+  if(m_rhiDevice != nullptr && !m_imageHandle.isNull())
+  {
+    m_rhiDevice->destroyImage(m_imageHandle);
+  }
+  m_imageHandle = {};
 
   if(m_image != VK_NULL_HANDLE)
   {

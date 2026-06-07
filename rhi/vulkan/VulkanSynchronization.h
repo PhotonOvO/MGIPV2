@@ -28,7 +28,7 @@ public:
 
   bool isSignaled() const override;
 
-  uint64_t getNativeHandle() const override;
+  uint64_t getBackendHandle() const override;
 
   VkFence nativeFence() const { return m_fence; }
 
@@ -51,7 +51,7 @@ public:
 
   uint64_t getCurrentValue() const override;
 
-  uint64_t getNativeHandle() const override;
+  uint64_t getBackendHandle() const override;
 
   VkSemaphore nativeSemaphore() const { return m_semaphore; }
 

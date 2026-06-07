@@ -1,9 +1,6 @@
 #include "VulkanCommandPool.h"
 
-#include "../../common/Common.h"
-#include "VulkanCommandList.h"
-
-#include <cstddef>
+#include "internal/VulkanCommon.h"
 
 namespace demo {
 namespace rhi {
@@ -46,32 +43,11 @@ void VulkanCommandPool::deinit()
 {
   if(m_device == VK_NULL_HANDLE)
   {
-    m_records.clear();
     m_pool             = VK_NULL_HANDLE;
     m_queueClass       = QueueClass::graphics;
     m_queueFamilyIndex = ~0U;
     return;
   }
-
-  if(!m_records.empty() && m_pool != VK_NULL_HANDLE)
-  {
-    std::vector<VkCommandBuffer> commandBuffers;
-    commandBuffers.reserve(m_records.size());
-    for(const CommandListRecord& record : m_records)
-    {
-      if(record.commandBuffer != VK_NULL_HANDLE)
-      {
-        commandBuffers.push_back(record.commandBuffer);
-      }
-    }
-
-    if(!commandBuffers.empty())
-    {
-      vkFreeCommandBuffers(m_device, m_pool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
-    }
-  }
-
-  m_records.clear();
 
   if(m_pool != VK_NULL_HANDLE)
   {
@@ -91,10 +67,10 @@ void VulkanCommandPool::reset()
   VK_CHECK(vkResetCommandPool(m_device, m_pool, 0));
 }
 
-CommandList* VulkanCommandPool::allocateCommandList()
+VkCommandBuffer VulkanCommandPool::allocateNativeCommandBuffer()
 {
-  ASSERT(m_device != VK_NULL_HANDLE, "VulkanCommandPool::allocateCommandList requires VkDevice");
-  ASSERT(m_pool != VK_NULL_HANDLE, "VulkanCommandPool::allocateCommandList requires VkCommandPool");
+  ASSERT(m_device != VK_NULL_HANDLE, "VulkanCommandPool::allocateNativeCommandBuffer requires VkDevice");
+  ASSERT(m_pool != VK_NULL_HANDLE, "VulkanCommandPool::allocateNativeCommandBuffer requires VkCommandPool");
 
   VkCommandBuffer                   commandBuffer = VK_NULL_HANDLE;
   const VkCommandBufferAllocateInfo allocateInfo{
@@ -104,71 +80,23 @@ CommandList* VulkanCommandPool::allocateCommandList()
       .commandBufferCount = 1,
   };
   VK_CHECK(vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer));
-
-  CommandListRecord record;
-  record.commandBuffer = commandBuffer;
-  record.commandList   = std::make_unique<VulkanCommandList>();
-  record.commandList->setCommandBuffer(commandBuffer);
-  VulkanCommandList* rawCommandList = record.commandList.get();
-  m_records.push_back(std::move(record));
-  return rawCommandList;
+  return commandBuffer;
 }
 
-void VulkanCommandPool::freeCommandList(CommandList* cmdList)
+void VulkanCommandPool::freeNativeCommandBuffer(VkCommandBuffer commandBuffer)
 {
-  if(cmdList == nullptr)
+  if(commandBuffer == VK_NULL_HANDLE)
   {
     return;
   }
-
-  ASSERT(m_device != VK_NULL_HANDLE, "VulkanCommandPool::freeCommandList requires VkDevice");
-  ASSERT(m_pool != VK_NULL_HANDLE, "VulkanCommandPool::freeCommandList requires VkCommandPool");
-
-  const size_t recordIndex = findRecordIndex(cmdList);
-  ASSERT(recordIndex < m_records.size(), "VulkanCommandPool::freeCommandList received unmanaged command list");
-
-  const VkCommandBuffer commandBuffer = m_records[recordIndex].commandBuffer;
-  if(commandBuffer != VK_NULL_HANDLE)
-  {
-    vkFreeCommandBuffers(m_device, m_pool, 1, &commandBuffer);
-  }
-  m_records.erase(m_records.begin() + static_cast<std::ptrdiff_t>(recordIndex));
+  ASSERT(m_device != VK_NULL_HANDLE, "VulkanCommandPool::freeNativeCommandBuffer requires VkDevice");
+  ASSERT(m_pool != VK_NULL_HANDLE, "VulkanCommandPool::freeNativeCommandBuffer requires VkCommandPool");
+  vkFreeCommandBuffers(m_device, m_pool, 1, &commandBuffer);
 }
 
-void VulkanCommandPool::allocateCommandLists(uint32_t count, CommandList** cmdLists)
-{
-  ASSERT(count == 0 || cmdLists != nullptr, "VulkanCommandPool::allocateCommandLists requires output array");
-  for(uint32_t i = 0; i < count; ++i)
-  {
-    cmdLists[i] = allocateCommandList();
-  }
-}
-
-void VulkanCommandPool::freeCommandLists(uint32_t count, CommandList** cmdLists)
-{
-  ASSERT(count == 0 || cmdLists != nullptr, "VulkanCommandPool::freeCommandLists requires input array");
-  for(uint32_t i = 0; i < count; ++i)
-  {
-    freeCommandList(cmdLists[i]);
-    cmdLists[i] = nullptr;
-  }
-}
-
-uint64_t VulkanCommandPool::getNativeHandle() const
+uint64_t VulkanCommandPool::getBackendHandle() const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(m_pool));
-}
-
-size_t VulkanCommandPool::findRecordIndex(const CommandList* cmdList) const
-{
-  for(size_t i = 0; i < m_records.size(); ++i)
-  {
-    if(m_records[i].commandList.get() == cmdList)
-    {
-      return i;
-    }
-  }
-  return m_records.size();
 }
 
 }  // namespace vulkan

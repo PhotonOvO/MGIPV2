@@ -1,14 +1,17 @@
 #include "VulkanResourceTable.h"
 
-#include "../RHIDescriptor.h"
-#include "../../common/Common.h"
+#include "internal/VulkanCommon.h"
 
 #include <cassert>
+#include <utility>
 
 namespace demo::rhi::vulkan {
 
 PipelineHandle VulkanResourceTable::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline,
-                                                     uint32_t specializationVariant, uint64_t nativeLayout, bool owned)
+                                                     uint32_t specializationVariant, uint64_t nativeLayout,
+                                                     std::vector<PipelineRecord::RootBindingLowering> rootBindings,
+                                                     bool owned,
+                                                     bool ownsLayout)
 {
   ASSERT(nativePipeline != 0, "Pipeline registry entries require a valid native pipeline");
   return m_pipelines.emplace(PipelineRecord{
@@ -16,6 +19,8 @@ PipelineHandle VulkanResourceTable::registerPipeline(uint32_t bindPoint, uint64_
       .nativePipeline        = nativePipeline,
       .specializationVariant = specializationVariant,
       .nativeLayout          = nativeLayout,
+      .rootBindings          = std::move(rootBindings),
+      .ownsLayout            = ownsLayout,
       .owned                 = owned,
   });
 }

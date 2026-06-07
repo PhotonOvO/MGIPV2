@@ -36,7 +36,6 @@ public:
   void draw(const DrawDesc& desc) override;
   void drawIndexed(const DrawIndexedDesc& desc) override;
   void drawIndexedIndirect(const DrawIndirectDesc& desc) override;
-  void drawIndexedIndirect(GpuPtr args, uint32_t count, uint32_t stride) override;
   void drawIndexedIndirectCount(const DrawIndirectCountDesc& desc) override;
   void drawIndirect(const DrawIndirectDesc& desc) override;
   void drawMeshTasks(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override;
@@ -61,7 +60,6 @@ public:
   void setRootPointer(uint32_t slot, GpuPtr ptr) override;
   void dispatch(const DispatchDesc& desc) override;
   void dispatchIndirect(const DispatchIndirectDesc& desc) override;
-  void dispatchIndirect(GpuPtr args) override;
 
   // copy / blit (command subset)
   void copyBuffer(BufferHandle src, uint64_t srcOffset, BufferHandle dst, uint64_t dstOffset, uint64_t size) override;
@@ -89,6 +87,9 @@ public:
   void barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards) override;
   void resourceBarrier(const TextureBarrier* textures, uint32_t textureCount,
                        const BufferBarrier* buffers, uint32_t bufferCount) override;
+  void clearColorTexture(TextureHandle texture,
+                         const TextureSubresourceRange& range,
+                         const ClearColorValue& clearColor) override;
 
   void beginEvent(const char* name) override;
   void endEvent() override;
@@ -96,7 +97,7 @@ public:
   void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) override;
   void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) override;
 
-  void* getNativeHandle() const override { return m_cmd; }
+  void* getBackendHandle() const override { return m_cmd; }
 
 private:
   enum class EncoderKind : uint8_t

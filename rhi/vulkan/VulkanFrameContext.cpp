@@ -1,8 +1,6 @@
 #include "VulkanFrameContext.h"
 #include "VulkanSwapchain.h"
-#include "VulkanCommandList.h"
-#include "../../common/Common.h"
-#include "../../common/TracyProfiling.h"
+#include "internal/VulkanCommon.h"
 
 #include <array>
 #include <cassert>
@@ -10,15 +8,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
-
-namespace demo {
-namespace rhi {
-class CommandList;
-namespace vulkan {
-VkCommandBuffer getNativeCommandBuffer(demo::rhi::CommandList& commandList);
-}
-}  // namespace rhi
-}  // namespace demo
 
 namespace demo {
 namespace rhi {
@@ -70,10 +59,9 @@ void VulkanFrameContext::init(void* nativeDevice, uint32_t queueFamilyIndex, uin
     FrameSlot& slot  = m_frames[i];
     slot.commandPool = std::make_unique<VulkanCommandPool>();
     slot.commandPool->init(m_device, QueueClass::graphics, queueFamilyIndex);
-    slot.commandList     = slot.commandPool->allocateCommandList();
+    slot.commandBuffer   = slot.commandPool->allocateNativeCommandBuffer();
     slot.lastSignalValue = 0;
 
-    m_frameData[i].commandList     = slot.commandList;
     m_frameData[i].lastSignalValue = 0;
     m_frameData[i].userData        = nullptr;
   }
@@ -91,10 +79,10 @@ void VulkanFrameContext::deinit()
   {
     if(slot.commandPool != nullptr)
     {
-      if(slot.commandList != nullptr)
+      if(slot.commandBuffer != VK_NULL_HANDLE)
       {
-        slot.commandPool->freeCommandList(slot.commandList);
-        slot.commandList = nullptr;
+        slot.commandPool->freeNativeCommandBuffer(slot.commandBuffer);
+        slot.commandBuffer = VK_NULL_HANDLE;
       }
       slot.commandPool->deinit();
       slot.commandPool.reset();
@@ -128,27 +116,23 @@ void VulkanFrameContext::beginFrame()
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];
   assert((frame.commandPool != nullptr) && "VulkanFrameContext::beginFrame missing command pool");
-  assert((frame.commandList != nullptr) && "VulkanFrameContext::beginFrame missing command list");
+  assert((frame.commandBuffer != VK_NULL_HANDLE) && "VulkanFrameContext::beginFrame missing command buffer");
 
   frame.commandPool->reset();
 
-  // Clear tracked resource states from previous frame
-  static_cast<VulkanCommandList*>(frame.commandList)->clearResourceStates();
-
-  const VkCommandBuffer          commandBuffer = getNativeCommandBuffer(*frame.commandList);
   const VkCommandBufferBeginInfo beginInfo{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
   };
-  checkVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "VulkanFrameContext::beginFrame vkBeginCommandBuffer failed");
+  checkVk(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo), "VulkanFrameContext::beginFrame vkBeginCommandBuffer failed");
 }
 
-SubmissionReceipt VulkanFrameContext::endFrame(CommandList* cmdList)
+SubmissionReceipt VulkanFrameContext::endFrame(CommandBuffer* cmdBuffer)
 {
-  assert((cmdList != nullptr) && "VulkanFrameContext::endFrame requires command list");
+  assert((cmdBuffer != nullptr) && "VulkanFrameContext::endFrame requires command buffer");
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::endFrame invalid frame index");
 
-  const SubmissionReceipt receipt = submitCurrentFrame(*cmdList);
+  const SubmissionReceipt receipt = submitCurrentFrame(*cmdBuffer);
   advanceToNextFrame();
   return receipt;
 }
@@ -158,12 +142,12 @@ void VulkanFrameContext::setSwapchain(Swapchain* swapchain)
   m_swapchain = swapchain;
 }
 
-SubmissionReceipt VulkanFrameContext::submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount)
+SubmissionReceipt VulkanFrameContext::submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount)
 {
-  assert((requests != nullptr) && "VulkanFrameContext::submitCommandLists requires request list");
-  assert((requestCount > 0) && "VulkanFrameContext::submitCommandLists requires non-zero request count");
-  assert((requests[0].commandList != nullptr) && "VulkanFrameContext::submitCommandLists requires command list");
-  return submitCurrentFrame(*requests[0].commandList);
+  assert((requests != nullptr) && "VulkanFrameContext::submitCommandBuffers requires request list");
+  assert((requestCount > 0) && "VulkanFrameContext::submitCommandBuffers requires non-zero request count");
+  assert((requests[0].commandBuffer != nullptr) && "VulkanFrameContext::submitCommandBuffers requires command buffer");
+  return submitCurrentFrame(*requests[0].commandBuffer);
 }
 
 void VulkanFrameContext::waitForSubmission(SubmissionReceipt receipt)
@@ -282,14 +266,10 @@ VkCommandBuffer VulkanFrameContext::nativeCommandBuffer(uint32_t frameIndex) con
   {
     return VK_NULL_HANDLE;
   }
-  if(m_frames[frameIndex].commandList == nullptr)
-  {
-    return VK_NULL_HANDLE;
-  }
-  return getNativeCommandBuffer(*m_frames[frameIndex].commandList);
+  return m_frames[frameIndex].commandBuffer;
 }
 
-SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandList)
+SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandBuffer& commandBuffer)
 {
   assert((m_graphicsQueue != VK_NULL_HANDLE) && "VulkanFrameContext::submitCurrentFrame requires graphics queue");
   assert((m_timelineSemaphore != nullptr) && "VulkanFrameContext::submitCurrentFrame requires timeline semaphore");
@@ -300,10 +280,12 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
   const auto signalSemaphore = vkSwapchain->renderFinishedSemaphoreForCurrentImage();
 
   FrameSlot& frame = m_frames[m_currentFrameIndex];
-  assert((frame.commandList == &commandList) && "VulkanFrameContext::submitCurrentFrame command list mismatch");
+  assert((frame.commandBuffer != VK_NULL_HANDLE) && "VulkanFrameContext::submitCurrentFrame missing frame command buffer");
 
-  const VkCommandBuffer commandBuffer = getNativeCommandBuffer(commandList);
-  checkVk(vkEndCommandBuffer(commandBuffer), "VulkanFrameContext::submitCurrentFrame vkEndCommandBuffer failed");
+  const VkCommandBuffer nativeCommandBuffer = static_cast<VkCommandBuffer>(commandBuffer.getBackendHandle());
+  assert((nativeCommandBuffer == frame.commandBuffer)
+         && "VulkanFrameContext::submitCurrentFrame command buffer mismatch");
+  checkVk(vkEndCommandBuffer(nativeCommandBuffer), "VulkanFrameContext::submitCurrentFrame vkEndCommandBuffer failed");
 
   std::array<VkSemaphoreSubmitInfo, 1> waitInfos{};
   uint32_t                             waitCount = 0;
@@ -344,7 +326,7 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
 
   const VkCommandBufferSubmitInfo commandBufferInfo{
       .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-      .commandBuffer = commandBuffer,
+      .commandBuffer = nativeCommandBuffer,
   };
 
   const VkSubmitInfo2 submitInfo{
@@ -358,7 +340,6 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandList& commandLis
   };
 
   {
-    TRACY_ZONE_SCOPED("vkQueueSubmit2");
     checkVk(vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE), "VulkanFrameContext::submitCurrentFrame vkQueueSubmit2 failed");
   }
   return SubmissionReceipt{.timelineValue = signalValue};

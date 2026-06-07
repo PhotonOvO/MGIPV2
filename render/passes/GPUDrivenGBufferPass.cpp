@@ -1,35 +1,19 @@
 #include "GPUDrivenGBufferPass.h"
 
+#include "../ArgumentTables.h"
+
 #include "../ClipSpaceConvention.h"
 #include "../GPUDrivenRenderer.h"
+#include "../DrawStreamRecorder.h"
 #include "../MeshPool.h"
 #include "../PassExecutor.h"
-#include "../../common/TracyProfiling.h"
 #include "../../shaders/shader_io.h"
 
 #include <array>
 #include <cstddef>
 #include <cstring>
-#include <vector>
 
 namespace demo {
-
-namespace {
-
-[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
-{
-  switch(format)
-  {
-    case VK_FORMAT_D16_UNORM_S8_UINT:
-    case VK_FORMAT_D24_UNORM_S8_UINT:
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-      return rhi::TextureAspect::depthStencil;
-    default:
-      return rhi::TextureAspect::depth;
-  }
-}
-
-}  // namespace
 
 GPUDrivenGBufferPass::GPUDrivenGBufferPass(GPUDrivenRenderer* renderer)
     : m_renderer(renderer)
@@ -47,7 +31,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenGBufferPass::getDependenc
       PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::write, rhi::ShaderStage::fragment,
                                       rhi::ResourceState::ColorAttachment),
       PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
-                                      rhi::ResourceState::DepthStencilAttachment),
+                                      rhi::ResourceState::DepthStencilReadOnly),
   };
   return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 }
@@ -55,28 +39,17 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenGBufferPass::getDependenc
 void GPUDrivenGBufferPass::execute(const PassContext& context) const
 {
   if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
-     || context.cmdBuffer == nullptr || context.executor == nullptr)
+     || context.commandBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenGBufferPass");
-
-  const auto transitionGB = [&](uint64_t nativeImage, rhi::TextureAspect aspect, rhi::ResourceState before,
-                                rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = context.executor->resolveBarrierTexture(nativeImage),
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = aspect, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
+  context.commandBuffer->beginEvent("GPUDrivenGBufferPass");
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || sceneView->sceneDepthView.isNull())
   {
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEvent();
     return;
   }
   const rhi::Extent2D extent = {sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
@@ -84,9 +57,6 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
   std::array<rhi::RenderTargetDesc, kPackedGBufferTargetCount> colorTargets{};
   for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
   {
-    transitionGB(reinterpret_cast<uint64_t>(sceneView->gbufferImages[i]), rhi::TextureAspect::color,
-                 rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
-
     colorTargets[i] = {
         .texture    = {},
         .view       = sceneView->gbufferViews[i],
@@ -100,14 +70,11 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
   const rhi::DepthTargetDesc depthTarget{
       .texture    = {},
       .view       = sceneView->sceneDepthView,
-      .state      = rhi::ResourceState::DepthStencilAttachment,
+      .state      = rhi::ResourceState::DepthStencilReadOnly,
       .loadOp     = rhi::LoadOp::load,
       .storeOp    = rhi::StoreOp::store,
       .clearValue = {0.0f, 0},
   };
-
-  transitionGB(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
-               rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
   uint64_t sortedIndirectBufferHandle = 0;
   uint64_t sortedCountBufferHandle = 0;
@@ -128,13 +95,13 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       if(persistentIndirectBufferHandle != 0)
       {
         const bool opaquePatched = sortedOpaqueCapacity == 0u
-                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmdBuffer,
+                                   || m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
                                                                                     context.frameIndex,
                                                                                     persistentIndirectBufferHandle,
                                                                                     0x00000000u,
                                                                                     0u);
         const bool alphaPatched = sortedAlphaCapacity == 0u
-                                  || m_renderer->prepareAndDispatchVisibilityPatch(*context.cmdBuffer,
+                                  || m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
                                                                                    context.frameIndex,
                                                                                    persistentIndirectBufferHandle,
                                                                                    0x40000000u,
@@ -157,7 +124,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
       .colorTargetCount = static_cast<uint32_t>(colorTargets.size()),
       .depthTarget      = &depthTarget,
   };
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);
   enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
   enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
@@ -175,21 +142,21 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
 
     if(!context.cameraAllocValid)
     {
-      context.cmdBuffer->endEncoding();
-      context.cmdBuffer->endEvent();
+      context.commandBuffer->endEncoding();
+      context.commandBuffer->endEvent();
       return;
     }
     const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 
-    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-    const BindGroupHandle drawBindGroupHandle = m_renderer->getDrawBindGroup(context.frameIndex);
+    const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(context.frameIndex);
+    const rhi::ArgumentTableHandle drawTable = m_renderer->getDrawArgumentTable(context.frameIndex);
 
-    if(indirectBufferHandle != 0 && !drawBindGroupHandle.isNull())
+    if(indirectBufferHandle != 0 && !drawTable.isNull())
     {
-      const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex).isNull();
+      const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawArgumentTable(context.frameIndex).isNull();
       if(useMdi)
       {
-        const BindGroupHandle mdiDrawBindGroupHandle = m_renderer->getGBufferMDIDrawBindGroup(context.frameIndex);
+        const rhi::ArgumentTableHandle mdiDrawTable = m_renderer->getGBufferMDIDrawArgumentTable(context.frameIndex);
 
         const auto pickRepresentativeMesh = [&]() -> const MeshRecord* {
           for(uint32_t drawIndex : m_renderer->getOpaqueDrawIndices())
@@ -220,8 +187,8 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         const MeshRecord* representativeMesh = pickRepresentativeMesh();
         if(representativeMesh == nullptr)
         {
-          context.cmdBuffer->endEncoding();
-          context.cmdBuffer->endEvent();
+          context.commandBuffer->endEncoding();
+          context.commandBuffer->endEvent();
           return;
         }
 
@@ -231,15 +198,14 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
                                                       : meshPool.getSharedIndexBufferRHIHandle();
         if(vertexBufferRHI.isNull() || indexBufferRHI.isNull())
         {
-          context.cmdBuffer->endEncoding();
-          context.cmdBuffer->endEvent();
+          context.commandBuffer->endEncoding();
+          context.commandBuffer->endEvent();
           return;
         }
         const uint64_t vertexOffset = 0;
         enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
         enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
-        TRACY_ZONE_SCOPED("GPUDrivenGBufferPass::drawLoopMDI");
         const uint64_t opaqueCommandOffset = sortedIndirectBufferHandle != 0
                                                 ? 0u
                                                 : static_cast<uint64_t>(currentIndirectObjectCount) * indirectCommandStride;
@@ -259,19 +225,16 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         const rhi::BufferHandle countBufferRHI = m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex);
 
         enc->setPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle());
-        const BindGroupHandle materialBindGroup = m_renderer->getGraphicsMaterialBindGroup();
-        enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                              rhi::ArgumentTableHandle{materialBindGroup.index, materialBindGroup.generation});  // bridge (Wave 8)
-        if(!cameraBindGroupHandle.isNull())
+        const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
+        enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
+        if(!cameraTable.isNull())
         {
-          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
-          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
-          enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                                rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
+          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, cameraAlloc.offset, 0);
+          enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, 0, 0);
+          enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraTable);
         }
-        enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
-                              rhi::ArgumentTableHandle{mdiDrawBindGroupHandle.index, mdiDrawBindGroupHandle.generation});  // bridge
-        enc->drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
+        enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw, mdiDrawTable);
+        DrawStreamRecorder::recordIndexedIndirectCount(*enc, DrawStreamRecorder::IndexedIndirectCountRecordDesc{
             .argsBuffer        = indirectBufferRHI,
             .argsOffset        = opaqueCommandOffset,
             .countBuffer       = countBufferRHI,
@@ -281,7 +244,7 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
         });
 
         enc->setPipeline(m_renderer->getGBufferAlphaTestMDIPipelineHandle());
-        enc->drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
+        DrawStreamRecorder::recordIndexedIndirectCount(*enc, DrawStreamRecorder::IndexedIndirectCountRecordDesc{
             .argsBuffer        = indirectBufferRHI,
             .argsOffset        = alphaCommandOffset,
             .countBuffer       = countBufferRHI,
@@ -293,18 +256,9 @@ void GPUDrivenGBufferPass::execute(const PassContext& context) const
     }
   }
 
-  context.cmdBuffer->endEncoding();
+  context.commandBuffer->endEncoding();
 
-  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
-  {
-    transitionGB(reinterpret_cast<uint64_t>(sceneView->gbufferImages[i]), rhi::TextureAspect::color,
-                 rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
-  }
-
-  transitionGB(reinterpret_cast<uint64_t>(sceneView->sceneDepthImage), sceneDepthAspect(sceneView->sceneDepthFormat),
-               rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
-
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

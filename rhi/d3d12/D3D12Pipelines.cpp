@@ -2,39 +2,15 @@
 
 namespace demo::rhi::d3d12 {
 
-D3D12PipelineLayout::~D3D12PipelineLayout()
-{
-  deinit();
-}
-
-void D3D12PipelineLayout::init(void* nativeDevice, const PipelineLayoutDesc& desc)
-{
-  // TODO: D3D12 implementation
-  // NOTES:
-  // 1. Store device handle and desc
-  // 2. Calculate push constant size from desc
-  // 3. Create D3D12_ROOT_PARAMETER array:
-  //    - Root constant for push constants (if any)
-  //    - Descriptor table for each bind table
-  // 4. Create D3D12_DESCRIPTOR_RANGE for each descriptor table
-  // 5. Create D3D12_ROOT_SIGNATURE_DESC
-  // 6. Serialize: D3D12SerializeRootSignature(..., blob, error)
-  // 7. Create: device->CreateRootSignature(blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature))
-}
-
-void D3D12PipelineLayout::deinit()
-{
-  // TODO: D3D12 implementation
-  // NOTES:
-  // Release root signature: m_rootSignature->Release()
-}
-
 void* createGraphicsPipeline(void* nativeDevice, const GraphicsPipelineCreateInfo& createInfo)
 {
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Create D3D12_GRAPHICS_PIPELINE_STATE_DESC:
-  //    - pRootSignature: from pipeline layout
+  //    - pRootSignature: backend-lowered from PipelineBindingSchemaDesc
+  //      (descriptor tables for argument slots, root constants for constant
+  //      slots, root descriptors/GPU VAs for GpuPtr slots, explicit dynamic
+  //      buffer bindings)
   //    - VS, PS: shader byte code
   //    - BlendState: D3D12_BLEND_DESC
   //    - RasterizerState: D3D12_RASTERIZER_DESC
@@ -53,7 +29,7 @@ void* createComputePipeline(void* nativeDevice, const ComputePipelineCreateInfo&
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Create D3D12_COMPUTE_PIPELINE_STATE_DESC:
-  //    - pRootSignature: from pipeline layout
+  //    - pRootSignature: backend-lowered from PipelineBindingSchemaDesc
   //    - CS: shader byte code
   // 2. Create PSO: device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso))
   // 3. Return pso handle

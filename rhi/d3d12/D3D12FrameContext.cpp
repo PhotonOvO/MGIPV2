@@ -15,7 +15,7 @@ void D3D12FrameContext::init(void* nativeDevice, uint32_t queueFamilyIndex, uint
   // 2. Resize m_frames to frameCount
   // 3. For each frame:
   //    - Create command allocator: device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-  //    - Create command list: device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr)
+  //    - Create graphics command buffer from the D3D12 device
   //    - Create fence: device->CreateFence(0, D3D12_FENCE_FLAG_NONE)
   //    - Create fence event: CreateEvent(nullptr, FALSE, FALSE, nullptr)
   // 4. Resize m_frameData to frameCount
@@ -29,7 +29,7 @@ void D3D12FrameContext::deinit()
   // 2. For each frame:
   //    - Close fence event
   //    - Release fence
-  //    - Release command list
+  //    - Release graphics command buffer
   //    - Release command allocator
 }
 
@@ -39,17 +39,17 @@ void D3D12FrameContext::beginFrame()
   // NOTES:
   // 1. Get current frame: m_frames[m_currentFrameIndex]
   // 2. Reset command allocator: allocator->Reset()
-  // 3. Reset command list: commandList->Reset(allocator, nullptr)
-  // 4. Update FrameData commandList pointer
+  // 3. Reset graphics command buffer: commandBuffer->Reset(allocator, nullptr)
 }
 
-SubmissionReceipt D3D12FrameContext::endFrame(CommandList* cmdList)
+SubmissionReceipt D3D12FrameContext::endFrame(CommandBuffer* cmdBuffer)
 {
   // TODO: D3D12 implementation
   // NOTES:
-  // 1. Close command list: commandList->Close()
+  // 1. Close graphics command buffer: commandBuffer->Close()
   // 2. Submit to queue via submitCurrentFrame
   // 3. Return receipt
+  (void)cmdBuffer;
   return SubmissionReceipt{};
 }
 
@@ -61,14 +61,14 @@ void D3D12FrameContext::setSwapchain(Swapchain* swapchain)
   m_swapchain = swapchain;
 }
 
-SubmissionReceipt D3D12FrameContext::submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount)
+SubmissionReceipt D3D12FrameContext::submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount)
 {
   // TODO: D3D12 implementation
   // NOTES:
   // 1. For each request:
-  //    - Get D3D12 command list from request
-  //    - Add to command list array
-  // 2. Execute command lists: queue->ExecuteCommandLists(count, lists)
+  //    - Get native graphics command buffer from request
+  //    - Add to command buffer array
+  // 2. Execute command buffers on the queue
   // 3. Signal fence with ++m_frameCounter
   // 4. Return receipt
   return SubmissionReceipt{};

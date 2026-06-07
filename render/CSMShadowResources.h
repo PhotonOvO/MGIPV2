@@ -1,10 +1,15 @@
 #pragma once
 
-#include "../common/Common.h"
-#include "../shaders/shader_io.h"
+#include "../common/Handles.h"
+#include "../rhi/RHICommandBuffer.h"
+#include "../rhi/RHIDevice.h"
+#include "../rhi/RHITypes.h"
 #include "ClipSpaceConvention.h"
+#include "ShaderInterop.h"
 
 #include <array>
+#include <cassert>
+#include <glm/glm.hpp>
 
 namespace demo {
 
@@ -50,15 +55,15 @@ public:
   {
     uint32_t                          cascadeCount{4};
     uint32_t                          cascadeResolution{1024};  // Per cascade
-    VkFormat                          shadowFormat{VK_FORMAT_D32_SFLOAT};
+    rhi::TextureFormat                shadowFormat{rhi::TextureFormat::d32Sfloat};
     clipspace::ProjectionConvention   projectionConvention{
         clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan)};
   };
 
   CSMShadowResources() = default;
-  ~CSMShadowResources() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+  ~CSMShadowResources() { assert(m_device == nullptr && "Missing deinit()"); }
 
-  void init(VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo);
+  void init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo);
   void deinit();
 
   void updateCascadeMatrices(const shaderio::CameraUniforms& camera, const glm::vec3& lightDir);
@@ -74,21 +79,21 @@ public:
 
   // Texture2DArray image access (all cascades). The sampling array view + per-cascade
   // render-target views are owned by the RHI texture-view registry (RenderDevice), not here.
-  [[nodiscard]] VkImage getCascadeImage() const { return m_cascadeArray.image; }
+  [[nodiscard]] rhi::TextureHandle getCascadeImage() const { return m_cascadeArray; }
 
   // Per-cascade render-target views are owned by the RHI texture-view registry
   // (RenderDevice::getCSMCascadeViewHandle), not by this subsystem.
 
   [[nodiscard]] uint32_t getCascadeCount() const { return m_cascadeCount; }
   [[nodiscard]] uint32_t getCascadeResolution() const { return m_cascadeResolution; }
-  [[nodiscard]] VkFormat getShadowFormat() const { return m_shadowFormat; }
-  [[nodiscard]] VkExtent2D getCascadeExtent() const
+  [[nodiscard]] rhi::TextureFormat getShadowFormat() const { return m_shadowFormat; }
+  [[nodiscard]] rhi::Extent2D getCascadeExtent() const
   {
     return {m_cascadeResolution, m_cascadeResolution};
   }
 
   // Uniform buffer access
-  [[nodiscard]] VkBuffer getShadowUniformBuffer() const { return m_shadowUniformBuffer.buffer; }
+  [[nodiscard]] rhi::BufferHandle getShadowUniformBuffer() const { return m_shadowUniformBuffer; }
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return &m_shadowUniformsData; }
   [[nodiscard]] const shaderio::ShadowUniforms* getShadowUniformsData() const { return &m_shadowUniformsData; }
   [[nodiscard]] const FrameData& getFrameData() const { return m_frameData; }
@@ -99,21 +104,20 @@ public:
   }
 
 private:
-  VkDevice                        m_device{VK_NULL_HANDLE};
-  VmaAllocator                    m_allocator{nullptr};
+  rhi::Device*                    m_device{nullptr};
   clipspace::ProjectionConvention m_projectionConvention{
       clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan)};
 
-  utils::Image             m_cascadeArray{};  // Texture2DArray (arrayLayers = cascadeCount)
+  rhi::TextureHandle       m_cascadeArray{};  // Texture2DArray (arrayLayers = cascadeCount)
 
-  utils::Buffer            m_shadowUniformBuffer{};
+  rhi::BufferHandle        m_shadowUniformBuffer{};
   shaderio::ShadowUniforms m_shadowUniformsData{};
   FrameData                m_frameData{};
   void*                    m_shadowUniformMapped{nullptr};
 
   uint32_t m_cascadeCount{4};
   uint32_t m_cascadeResolution{1024};
-  VkFormat m_shadowFormat{VK_FORMAT_D32_SFLOAT};
+  rhi::TextureFormat m_shadowFormat{rhi::TextureFormat::d32Sfloat};
 };
 
 }  // namespace demo

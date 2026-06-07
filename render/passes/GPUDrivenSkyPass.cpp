@@ -1,4 +1,6 @@
 #include "GPUDrivenSkyPass.h"
+
+#include "../ArgumentTables.h"
 #include "../GPUDrivenRenderer.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
@@ -16,7 +18,8 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyPass::getDependencies(
 {
   static const std::array<PassResourceDependency, 3> dependencies = {
       PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment),
-      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
+      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+                                      rhi::ResourceState::ShaderRead),
       PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
   };
   return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
@@ -24,13 +27,13 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyPass::getDependencies(
 
 void GPUDrivenSkyPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || sceneView->outputImage == VK_NULL_HANDLE || sceneView->outputView.isNull()
+  if(sceneView == nullptr || sceneView->outputImage.isNull() || sceneView->outputView.isNull()
      || sceneView->sceneDepthExtent.width == 0 || sceneView->sceneDepthExtent.height == 0)
   {
     return;
@@ -42,20 +45,7 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenSkyPass");
-
-  const rhi::TextureHandle outputBarrierTex =
-      context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->outputImage));
-  const auto transitionOutput = [&](rhi::ResourceState before, rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = outputBarrierTex,
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
-  transitionOutput(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
+  context.commandBuffer->beginEvent("GPUDrivenSkyPass");
 
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
@@ -66,7 +56,7 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
   };
 
   const rhi::Extent2D extent{sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
@@ -77,27 +67,23 @@ void GPUDrivenSkyPass::execute(const PassContext& context) const
   enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   enc->setPipeline(skyPipeline);
-  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
-  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                        rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
+  const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
   if(context.cameraAllocValid)
   {
-    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-    if(!cameraBindGroupHandle.isNull())
+    const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(context.frameIndex);
+    if(!cameraTable.isNull())
     {
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                            rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge (Wave 8)
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, context.cameraAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraTable);
     }
   }
 
   enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
-  context.cmdBuffer->endEncoding();
+  context.commandBuffer->endEncoding();
 
-  transitionOutput(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
-
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

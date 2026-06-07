@@ -1,5 +1,7 @@
 #include "GPUDrivenFinalColorPass.h"
 
+#include "../ArgumentTables.h"
+
 #include "../GPUDrivenRenderer.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
@@ -28,31 +30,20 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenFinalColorPass::getDepend
 
 void GPUDrivenFinalColorPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  const VkImage outputImage = m_renderer->getOutputTextureImage();
+  const rhi::TextureHandle outputImage = m_renderer->getOutputTextureImage();
   const rhi::TextureViewHandle outputView = m_renderer->getOutputTextureView();
-  const VkExtent2D outputExtent = m_renderer->getSceneExtent();
-  if(outputImage == VK_NULL_HANDLE || outputView.isNull() || outputExtent.width == 0u || outputExtent.height == 0u)
+  const rhi::Extent2D outputExtent = m_renderer->getSceneExtent();
+  if(outputImage.isNull() || outputView.isNull() || outputExtent.width == 0u || outputExtent.height == 0u)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenFinalColor");
-  const rhi::TextureHandle outputBarrierTex = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(outputImage));
-  const auto transitionOutput = [&](rhi::ResourceState before, rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = outputBarrierTex,
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
-  const auto restoreOutputState = [&]() { transitionOutput(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General); };
+  context.commandBuffer->beginEvent("GPUDrivenFinalColor");
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
       .view = outputView,
@@ -62,32 +53,27 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  transitionOutput(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
-
-  const rhi::Extent2D extent{outputExtent.width, outputExtent.height};
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
-      .renderArea = {{0, 0}, extent},
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
+      .renderArea = {{0, 0}, outputExtent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
-  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
+  enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(outputExtent.width), static_cast<float>(outputExtent.height), 0.0f, 1.0f});
+  enc->setScissor(rhi::Rect2D{{0, 0}, outputExtent});
 
   const PipelineHandle pipelineHandle = m_renderer->getFinalColorPipelineHandle();
   if(pipelineHandle.isNull())
   {
-    context.cmdBuffer->endEncoding();
-    restoreOutputState();
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEncoding();
+    context.commandBuffer->endEvent();
     return;
   }
-  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
-  if(!pipelineHandle.isNull() && !inputBindGroup.isNull())
+  const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+  if(!pipelineHandle.isNull() && !inputTable.isNull())
   {
     enc->setPipeline(pipelineHandle);
-    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                          rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
     const float exposure = context.params->debugOptions.enablePostProcessing
                                ? std::max(context.params->debugOptions.postExposure, 0.01f)
@@ -142,23 +128,18 @@ void GPUDrivenFinalColorPass::execute(const PassContext& context) const
         context.transientAllocator->allocate(sizeof(postProcessUniforms), 256);
     std::memcpy(postProcessAlloc.cpuPtr, &postProcessUniforms, sizeof(postProcessUniforms));
     context.transientAllocator->flushAllocation(postProcessAlloc, sizeof(postProcessUniforms));
-    m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                                 context.transientAllocator->getBufferOpaque(),
-                                                 context.cameraAlloc.offset);
-    const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
-    if(!sceneBindGroup.isNull())
+    const rhi::ArgumentTableHandle sceneTable = m_renderer->getLightingSceneArgumentTable(context.frameIndex);
+    if(!sceneTable.isNull())
     {
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, postProcessAlloc.offset, 0);
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                            rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, context.cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, postProcessAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, sceneTable);
       enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
     }
   }
 
-  context.cmdBuffer->endEncoding();
-  restoreOutputState();
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEncoding();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

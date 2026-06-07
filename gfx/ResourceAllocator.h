@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../common/Common.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../rhi/RHIResourceLifetime.h"
 
 namespace utils {

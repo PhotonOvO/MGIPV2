@@ -1,7 +1,13 @@
 #pragma once
 
-#include "../common/Common.h"
+#include "../common/Handles.h"
+#include "../rhi/RHICommandBuffer.h"
+#include "../rhi/RHIDevice.h"
+#include "../rhi/RHIEncoder.h"
+#include "UploadUtils.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -13,25 +19,25 @@ public:
   struct Slice
   {
     void*        cpuPtr{nullptr};
-    VkDeviceSize offset{0};
-    VkDeviceSize size{0};
+    uint64_t offset{0};
+    uint64_t size{0};
   };
 
-  void init(VkDevice device, VmaAllocator allocator, VkDeviceSize totalSize);
-  [[nodiscard]] bool isInitialized() const { return m_stagingBuffer.buffer != VK_NULL_HANDLE; }
-  [[nodiscard]] VkDeviceSize usedBytes() const { return m_head; }
-  [[nodiscard]] VkDeviceSize capacityBytes() const { return m_capacity; }
-  [[nodiscard]] Slice allocate(VkDeviceSize size, VkDeviceSize alignment);
-  [[nodiscard]] std::vector<Slice> allocateSlices(const std::vector<VkDeviceSize>& sizes, VkDeviceSize alignment);
-  [[nodiscard]] Slice mapReservedSlice(VkDeviceSize offset, VkDeviceSize size) const;
-  [[nodiscard]] std::vector<Slice> reserveSlices(const std::vector<VkDeviceSize>& sizes, VkDeviceSize alignment);
+  void init(rhi::Device& device, uint64_t totalSize);
+  [[nodiscard]] bool isInitialized() const { return !m_stagingBuffer.isNull(); }
+  [[nodiscard]] uint64_t usedBytes() const { return m_head; }
+  [[nodiscard]] uint64_t capacityBytes() const { return m_capacity; }
+  [[nodiscard]] Slice allocate(uint64_t size, uint64_t alignment);
+  [[nodiscard]] std::vector<Slice> allocateSlices(const std::vector<uint64_t>& sizes, uint64_t alignment);
+  [[nodiscard]] Slice mapReservedSlice(uint64_t offset, uint64_t size) const;
+  [[nodiscard]] std::vector<Slice> reserveSlices(const std::vector<uint64_t>& sizes, uint64_t alignment);
   void copyToSlices(std::span<const Slice> slices, std::span<const std::span<const std::byte>> sources);
 
-  void recordTextureUpload(const Slice& slice, VkImage dstImage, const VkBufferImageCopy& region);
-  void recordBufferUpload(const Slice& slice, VkBuffer dstBuffer, const VkBufferCopy& region);
-  void executeUploads(VkCommandBuffer cmd) const;
+  void recordTextureUpload(const Slice& slice, rhi::TextureHandle dstImage, const rhi::BufferTextureCopyDesc& region);
+  void recordBufferUpload(const Slice& slice, rhi::BufferHandle dstBuffer, uint64_t dstOffset, uint64_t size);
+  void executeUploads(rhi::CommandBuffer& cmd) const;
 
-  [[nodiscard]] utils::Buffer releaseStagingBuffer();
+  [[nodiscard]] rhi::BufferHandle releaseStagingBuffer();
   void destroy();
 
 private:
@@ -44,17 +50,18 @@ private:
   struct UploadOperation
   {
     UploadType        type{UploadType::buffer};
-    VkBuffer          dstBuffer{VK_NULL_HANDLE};
-    VkImage           dstImage{VK_NULL_HANDLE};
-    VkBufferCopy      bufferRegion{};
-    VkBufferImageCopy imageRegion{};
+    rhi::BufferHandle dstBuffer{};
+    rhi::TextureHandle dstImage{};
+    uint64_t dstOffset{0};
+    uint64_t size{0};
+    rhi::BufferTextureCopyDesc imageRegion{};
   };
 
-  VkDevice            m_device{VK_NULL_HANDLE};
-  VmaAllocator        m_allocator{nullptr};
-  utils::Buffer       m_stagingBuffer{};
-  VkDeviceSize        m_capacity{0};
-  VkDeviceSize        m_head{0};
+  rhi::Device*        m_device{nullptr};
+  rhi::BufferHandle   m_stagingBuffer{};
+  void*               m_mappedData{nullptr};
+  uint64_t            m_capacity{0};
+  uint64_t            m_head{0};
   std::vector<UploadOperation> m_pendingUploads;
 };
 

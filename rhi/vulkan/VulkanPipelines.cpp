@@ -278,90 +278,12 @@ VkDynamicState toVkDynamicState(DynamicState dynamicState)
 
 }  // namespace
 
-void VulkanPipelineLayout::init(void* nativeDevice, const PipelineLayoutDesc& desc)
-{
-  VulkanPipelineLayoutLowering lowering{};
-  init(nativeDevice, desc, lowering);
-}
-
-void VulkanPipelineLayout::init(void* nativeDevice, const PipelineLayoutDesc& desc, const VulkanPipelineLayoutLowering& lowering)
-{
-  deinit();
-  m_device = static_cast<VkDevice>(nativeDevice);
-  m_desc   = desc;
-
-  std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
-  descriptorSetLayouts.reserve(lowering.setLayoutCount);
-  uint32_t maxLogicalSet = 0;
-  bool     hasEntries    = false;
-  for(const PipelineLayoutEntry& entry : m_desc.entries)
-  {
-    maxLogicalSet = (std::max)(maxLogicalSet, entry.logicalSet);
-    hasEntries    = true;
-  }
-
-  if(hasEntries)
-  {
-    descriptorSetLayouts.assign(maxLogicalSet + 1u, VK_NULL_HANDLE);
-    for(uint32_t i = 0; i < lowering.setLayoutCount; ++i)
-    {
-      const VulkanPipelineLayoutBindingMapping& mapping = lowering.setLayouts[i];
-      if(mapping.logicalSet < descriptorSetLayouts.size())
-      {
-        descriptorSetLayouts[mapping.logicalSet] = mapping.descriptorSetLayout;
-      }
-    }
-
-    while(!descriptorSetLayouts.empty() && descriptorSetLayouts.back() == VK_NULL_HANDLE)
-    {
-      descriptorSetLayouts.pop_back();
-    }
-  }
-  else
-  {
-    for(uint32_t i = 0; i < lowering.setLayoutCount; ++i)
-    {
-      descriptorSetLayouts.push_back(lowering.setLayouts[i].descriptorSetLayout);
-    }
-  }
-
-  std::vector<VkPushConstantRange> pushConstantRanges;
-  pushConstantRanges.reserve(m_desc.pushConstantRanges.size());
-  for(const PipelinePushConstantRange& range : m_desc.pushConstantRanges)
-  {
-    pushConstantRanges.push_back(VkPushConstantRange{
-        .stageFlags = toVkShaderStageMask(range.stages),
-        .offset     = range.offset,
-        .size       = range.size,
-    });
-  }
-
-  const VkPipelineLayoutCreateInfo createInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = static_cast<uint32_t>(descriptorSetLayouts.size()),
-      .pSetLayouts            = descriptorSetLayouts.data(),
-      .pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size()),
-      .pPushConstantRanges    = pushConstantRanges.data(),
-  };
-  VK_CHECK(vkCreatePipelineLayout(m_device, &createInfo, nullptr, &m_layout));
-}
-
-void VulkanPipelineLayout::deinit()
-{
-  if(m_device != VK_NULL_HANDLE && m_layout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(m_device, m_layout, nullptr);
-  }
-  m_layout = VK_NULL_HANDLE;
-  m_desc   = PipelineLayoutDesc{};
-}
-
 VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateInfo& createInfo)
 {
-  const GraphicsPipelineDesc& desc = createInfo.desc;
-  ASSERT(desc.layout != nullptr, "GraphicsPipelineDesc requires a valid PipelineLayout");
-
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(desc.layout->getNativeHandle());
+  ASSERT(createInfo.desc != nullptr, "Graphics pipeline creation requires a desc");
+  ASSERT(createInfo.layout != VK_NULL_HANDLE, "Graphics pipeline creation requires a backend-private layout");
+  const GraphicsPipelineDesc& desc = *createInfo.desc;
+  const VkPipelineLayout layout = createInfo.layout;
 
   std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
   shaderStages.reserve(desc.shaderStageCount);
@@ -543,10 +465,10 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
 
 VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInfo& createInfo)
 {
-  const ComputePipelineDesc& desc = createInfo.desc;
-  ASSERT(desc.layout != nullptr, "ComputePipelineDesc requires a valid PipelineLayout");
-
-  const VkPipelineLayout layout = reinterpret_cast<VkPipelineLayout>(desc.layout->getNativeHandle());
+  ASSERT(createInfo.desc != nullptr, "Compute pipeline creation requires a desc");
+  ASSERT(createInfo.layout != VK_NULL_HANDLE, "Compute pipeline creation requires a backend-private layout");
+  const ComputePipelineDesc& desc = *createInfo.desc;
+  const VkPipelineLayout layout = createInfo.layout;
 
   std::vector<VkSpecializationMapEntry> mapEntries;
   mapEntries.reserve(desc.shaderStage.specializationConstantCount);

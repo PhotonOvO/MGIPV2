@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../common/Common.h"  // VkFormat
+#include "../rhi/vulkan/internal/VulkanCommon.h"  // VkFormat
 #include "../rhi/RHITypes.h"    // rhi::TextureFormat
 
 namespace demo {
@@ -33,6 +33,11 @@ namespace demo {
     default:
       return rhi::TextureFormat::undefined;
   }
+}
+
+[[nodiscard]] inline rhi::TextureFormat toPortableTextureFormat(rhi::TextureFormat format)
+{
+  return format;
 }
 
 }  // namespace demo

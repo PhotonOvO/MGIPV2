@@ -53,6 +53,7 @@ enum class ResourceState : uint8_t
   General,
   ColorAttachment,
   DepthStencilAttachment,
+  DepthStencilReadOnly,
   ShaderRead,
   ShaderWrite,
   TransferSrc,
@@ -63,6 +64,7 @@ enum class ResourceState : uint8_t
   general         = General,
   colorAttachment = ColorAttachment,
   depthAttachment = DepthStencilAttachment,
+  depthReadOnly   = DepthStencilReadOnly,
   shaderRead      = ShaderRead,
   shaderWrite     = ShaderWrite,
   transferSrc     = TransferSrc,
@@ -394,6 +396,13 @@ struct Extent2D
   uint32_t height{0};
 };
 
+struct Extent3D
+{
+  uint32_t width{0};
+  uint32_t height{0};
+  uint32_t depth{1};
+};
+
 struct Offset2D
 {
   int32_t x{0};
@@ -446,8 +455,8 @@ struct TimelinePoint
 // Modern GPU interface additions (Wave 0). Semantic usage flags (NOT
 // bit-transparent to any backend), GpuPtr (typed buffer device address),
 // buffer/sampler descs, and the render-pass descs relocated from
-// RHICommandList.h so the new Encoder/CommandBuffer headers do not depend on
-// the (to-be-removed) CommandList header.
+// the retired command-list header so the new Encoder/CommandBuffer headers do
+// not depend on the legacy recording API.
 // ---------------------------------------------------------------------------
 
 // Typed wrapper over a buffer GPU address. Only represents addressable buffer
@@ -521,6 +530,19 @@ struct BufferDesc
   const char*      debugName{nullptr};
 };
 
+struct TextureDesc
+{
+  TextureDimension   dimension{TextureDimension::e2D};
+  TextureFormat      format{TextureFormat::undefined};
+  TextureUsageFlags  usage{TextureUsageFlags::none};
+  Extent3D           extent{};
+  uint32_t           mipLevels{1};
+  uint32_t           arrayLayers{1};
+  SampleCount        sampleCount{SampleCount::count1};
+  MemoryUsage        memoryUsage{MemoryUsage::gpuOnly};
+  const char*        debugName{nullptr};
+};
+
 enum class Filter : uint8_t
 {
   nearest = 0,
@@ -559,7 +581,7 @@ struct SamplerDesc
   const char* debugName{nullptr};
 };
 
-// --- Render-pass descs (relocated from RHICommandList.h) ---
+// --- Render-pass descs (relocated from the retired command-list API) ---
 
 struct RenderTargetDesc
 {

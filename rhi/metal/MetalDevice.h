@@ -15,9 +15,9 @@ public:
   void init(const DeviceCreateInfo& createInfo) override;
   void deinit() override;
 
-  uint64_t getNativeInstance() const override;
-  uint64_t getNativePhysicalDevice() const override;
-  uint64_t getNativeDevice() const override;
+  uint64_t getBackendInstanceHandle() const override;
+  uint64_t getBackendPhysicalDeviceHandle() const override;
+  uint64_t getBackendDeviceHandle() const override;
 
   uint32_t                  getApiVersion() const override;
   const char*               getDeviceName() const override;
@@ -69,7 +69,7 @@ private:
   void detectMetalCapabilities();
   void validateMetalCapabilities();
 
-  // NOTES: Metal Feature Set → RHI Capability Mapping
+  // NOTES: Metal Feature Set â†’ RHI Capability Mapping
   // Timeline Semaphore: Not natively supported
   //   - Use MTLCommandBuffer completion handlers instead
   //   - Track completion with MTLSharedEvent (when available)

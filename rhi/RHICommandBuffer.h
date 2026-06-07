@@ -28,8 +28,11 @@ public:
   // resource layout / queue ownership / present / aliasing transitions.
   virtual void resourceBarrier(const TextureBarrier* textures, uint32_t textureCount,
                                const BufferBarrier* buffers, uint32_t bufferCount) = 0;
+  virtual void clearColorTexture(TextureHandle texture,
+                                 const TextureSubresourceRange& range,
+                                 const ClearColorValue& clearColor) = 0;
 
-  // Debug markers (RenderDoc / PIX / Tracy).
+  // Debug markers (RenderDoc / PIX).
   virtual void beginEvent(const char* name) = 0;
   virtual void endEvent()                   = 0;
 
@@ -38,11 +41,9 @@ public:
   virtual void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) = 0;
   virtual void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) = 0;
 
-  // Escape hatch for backend-specific profiling/interop only (e.g. Tracy GPU zones,
-  // which take the native command buffer). Returns the backend command-buffer object
-  // (VkCommandBuffer / ID3D12GraphicsCommandList* / id<MTLCommandBuffer>). Not for
-  // recording commands — use the encoders/verbs above for that.
-  virtual void* getNativeHandle() const = 0;
+  // Escape hatch for backend-specific profiling/interop only. Returns an opaque backend command object. Not for
+  // recording commands â€” use the encoders/verbs above for that.
+  virtual void* getBackendHandle() const = 0;
 };
 
 }  // namespace demo::rhi

@@ -1,11 +1,21 @@
+#define VMA_IMPLEMENTATION
+#define VMA_LEAK_LOG_FORMAT(format, ...)                                                                               \
+  {                                                                                                                    \
+    printf((format), __VA_ARGS__);                                                                                     \
+    printf("\n");                                                                                                      \
+  }
+
 #include "VulkanDevice.h"
-#include "../../common/Common.h"
+#include "internal/VulkanCommon.h"
+#include "VulkanFrameContext.h"
+#include "VulkanPipelines.h"
 #include "VulkanResourceTable.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(__linux__) || defined(__ANDROID__)
@@ -93,6 +103,7 @@ void VulkanDevice::deinit()
   if(m_device != VK_NULL_HANDLE)
   {
     vkDeviceWaitIdle(m_device);
+    drainRetirements();
     if(m_argumentPool != VK_NULL_HANDLE)
     {
       vkDestroyDescriptorPool(m_device, m_argumentPool, nullptr);
@@ -140,19 +151,21 @@ void VulkanDevice::deinit()
   m_accelerationStructureFeatures = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
   m_rayTracingPipelineFeatures    = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   m_initialized                   = false;
+  m_frameContext                  = nullptr;
+  m_pendingRetirements.clear();
 }
 
-uint64_t VulkanDevice::getNativeInstance() const
+uint64_t VulkanDevice::getBackendInstanceHandle() const
 {
   return asNativeU64(m_instance);
 }
 
-uint64_t VulkanDevice::getNativePhysicalDevice() const
+uint64_t VulkanDevice::getBackendPhysicalDeviceHandle() const
 {
   return asNativeU64(m_physicalDevice);
 }
 
-uint64_t VulkanDevice::getNativeDevice() const
+uint64_t VulkanDevice::getBackendDeviceHandle() const
 {
   return asNativeU64(m_device);
 }
@@ -227,12 +240,130 @@ void VulkanDevice::waitIdle()
   if(m_device != VK_NULL_HANDLE)
   {
     vkDeviceWaitIdle(m_device);
+    drainRetirements();
+  }
+}
+
+uint64_t VulkanDevice::retirementTimelineValue() const
+{
+  if(m_frameContext == nullptr)
+  {
+    return 0;
+  }
+
+  return m_frameContext->getCurrentFrameValue() + m_frameContext->getFrameCount();
+}
+
+void VulkanDevice::enqueueRetirement(NativeRetirement retirement)
+{
+  if(!retirement.owned && !retirement.ownsSecondary)
+  {
+    return;
+  }
+
+  retirement.retireTimelineValue = retirementTimelineValue();
+  m_pendingRetirements.push_back(retirement);
+}
+
+uint32_t VulkanDevice::processRetirements(uint64_t completedTimelineValue)
+{
+  uint32_t destroyed = 0;
+  auto it = std::remove_if(m_pendingRetirements.begin(), m_pendingRetirements.end(),
+                           [this, completedTimelineValue, &destroyed](const NativeRetirement& retirement) {
+                             if(!hasReachedRetirementPoint(completedTimelineValue, retirement.retireTimelineValue))
+                             {
+                               return false;
+                             }
+
+                             destroyRetiredResource(retirement);
+                             ++destroyed;
+                             return true;
+                           });
+  m_pendingRetirements.erase(it, m_pendingRetirements.end());
+  return destroyed;
+}
+
+void VulkanDevice::drainRetirements()
+{
+  for(const NativeRetirement& retirement : m_pendingRetirements)
+  {
+    destroyRetiredResource(retirement);
+  }
+  m_pendingRetirements.clear();
+}
+
+void VulkanDevice::destroyRetiredResource(const NativeRetirement& retirement)
+{
+  if(m_device == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  switch(retirement.resource.kind)
+  {
+    case ResourceKind::TextureView:
+      if(retirement.owned && retirement.nativeObject != 0)
+      {
+        vkDestroyImageView(m_device, reinterpret_cast<VkImageView>(static_cast<uintptr_t>(retirement.nativeObject)), nullptr);
+      }
+      break;
+    case ResourceKind::Texture:
+      if(retirement.owned && retirement.nativeObject != 0 && m_allocator != nullptr)
+      {
+        vmaDestroyImage(m_allocator, reinterpret_cast<VkImage>(static_cast<uintptr_t>(retirement.nativeObject)),
+                        reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(retirement.nativeAllocation)));
+      }
+      break;
+    case ResourceKind::Buffer:
+      if(retirement.owned && retirement.nativeObject != 0 && m_allocator != nullptr)
+      {
+        vmaDestroyBuffer(m_allocator, reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(retirement.nativeObject)),
+                         reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(retirement.nativeAllocation)));
+      }
+      break;
+    case ResourceKind::Sampler:
+      if(retirement.owned && retirement.nativeObject != 0)
+      {
+        vkDestroySampler(m_device, reinterpret_cast<VkSampler>(static_cast<uintptr_t>(retirement.nativeObject)), nullptr);
+      }
+      break;
+    case ResourceKind::QueryPool:
+      if(retirement.owned && retirement.nativeObject != 0)
+      {
+        vkDestroyQueryPool(m_device, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(retirement.nativeObject)), nullptr);
+      }
+      break;
+    case ResourceKind::ArgumentLayout:
+      if(retirement.owned && retirement.nativeObject != 0)
+      {
+        vkDestroyDescriptorSetLayout(m_device, reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(retirement.nativeObject)), nullptr);
+      }
+      break;
+    case ResourceKind::ArgumentTable:
+      if(retirement.owned && retirement.nativeObject != 0 && m_argumentPool != VK_NULL_HANDLE)
+      {
+        VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(retirement.nativeObject));
+        vkFreeDescriptorSets(m_device, m_argumentPool, 1, &set);
+      }
+      break;
+    case ResourceKind::Pipeline:
+      if(retirement.owned && retirement.nativeObject != 0)
+      {
+        vkDestroyPipeline(m_device, reinterpret_cast<VkPipeline>(static_cast<uintptr_t>(retirement.nativeObject)), nullptr);
+      }
+      if(retirement.ownsSecondary && retirement.secondaryNativeObject != 0)
+      {
+        vkDestroyPipelineLayout(m_device, reinterpret_cast<VkPipelineLayout>(static_cast<uintptr_t>(retirement.secondaryNativeObject)), nullptr);
+      }
+      break;
+    default:
+      break;
   }
 }
 
 QueueInfo VulkanDevice::NativeQueueInfo::toRhi() const
 {
-  return QueueInfo{.familyIndex = familyIndex, .queueIndex = queueIndex, .queueCount = queueCount, .nativeHandle = asNativeU64(queue)};
+  return QueueInfo{.familyIndex = familyIndex, .queueIndex = queueIndex, .queueCount = queueCount, .backendHandle = asNativeU64(queue)};
 }
 
 void VulkanDevice::initInstance()
@@ -816,7 +947,7 @@ namespace {
 TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTextureView");
-  const uint64_t nativeImage = resolveImageNative(desc.image);
+  const uint64_t nativeImage = resolveTextureBackendHandle(desc.image);
   const VkImageViewCreateInfo info{
       .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image      = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),
@@ -835,10 +966,10 @@ TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& d
   return m_resourceTable->registerTextureView(reinterpret_cast<uint64_t>(view), /*owned=*/true);
 }
 
-TextureViewHandle VulkanDevice::registerExternalTextureView(uint64_t nativeView)
+TextureViewHandle VulkanDevice::registerExternalTextureView(uint64_t externalView)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalTextureView");
-  return m_resourceTable->registerTextureView(nativeView, /*owned=*/false);
+  return m_resourceTable->registerTextureView(externalView, /*owned=*/false);
 }
 
 void VulkanDevice::destroyTextureView(TextureViewHandle handle)
@@ -850,11 +981,15 @@ void VulkanDevice::destroyTextureView(TextureViewHandle handle)
   const TextureViewRecord record = m_resourceTable->removeTextureView(handle);
   if(record.owned && record.nativeView != 0)
   {
-    vkDestroyImageView(m_device, reinterpret_cast<VkImageView>(static_cast<uintptr_t>(record.nativeView)), nullptr);
+    enqueueRetirement(NativeRetirement{
+        .resource     = ResourceHandle{ResourceKind::TextureView, handle.index, handle.generation},
+        .nativeObject = record.nativeView,
+        .owned        = true,
+    });
   }
 }
 
-uint64_t VulkanDevice::resolveTextureViewNative(TextureViewHandle handle) const
+uint64_t VulkanDevice::resolveTextureViewBackendHandle(TextureViewHandle handle) const
 {
   return m_resourceTable != nullptr ? m_resourceTable->resolveTextureView(handle) : 0;
 }
@@ -863,6 +998,25 @@ namespace {
 [[nodiscard]] VkImageType toVkImageType(TextureDimension dim)
 {
   return dim == TextureDimension::e3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+}
+
+[[nodiscard]] VkImageCreateFlags toVkImageCreateFlags(TextureDimension dim)
+{
+  return dim == TextureDimension::eCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+}
+
+[[nodiscard]] VkImageUsageFlags toVkImageUsage(TextureUsageFlags flags)
+{
+  VkImageUsageFlags usage = 0;
+  const auto        has   = [&](TextureUsageFlags bit) { return static_cast<uint32_t>(flags & bit) != 0; };
+  if(has(TextureUsageFlags::sampled))         usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+  if(has(TextureUsageFlags::storage))         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+  if(has(TextureUsageFlags::colorAttachment)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  if(has(TextureUsageFlags::depthAttachment)) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  if(has(TextureUsageFlags::transferSrc))     usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  if(has(TextureUsageFlags::transferDst))     usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  if(has(TextureUsageFlags::inputAttachment)) usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+  return usage;
 }
 
 [[nodiscard]] VkSampleCountFlagBits toVkSamples(SampleCount count)
@@ -879,12 +1033,57 @@ namespace {
       return VK_SAMPLE_COUNT_1_BIT;
   }
 }
+
+[[nodiscard]] VmaMemoryUsage toVmaMemoryUsage(MemoryUsage usage);
 }  // namespace
 
-TextureHandle VulkanDevice::registerExternalTexture(uint64_t nativeImage)
+TextureHandle VulkanDevice::createTexture(const TextureDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTexture");
+  assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createTexture");
+  assert(desc.extent.width > 0 && desc.extent.height > 0 && desc.extent.depth > 0);
+  assert(desc.mipLevels > 0);
+  assert(desc.arrayLayers > 0);
+
+  const VkImageCreateInfo info{
+      .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .flags         = toVkImageCreateFlags(desc.dimension),
+      .imageType     = toVkImageType(desc.dimension),
+      .format        = toVkViewFormat(desc.format),
+      .extent        = {.width = desc.extent.width,
+                        .height = desc.extent.height,
+                        .depth = desc.dimension == TextureDimension::e3D ? desc.extent.depth : 1u},
+      .mipLevels     = desc.mipLevels,
+      .arrayLayers   = desc.dimension == TextureDimension::e3D ? 1u : desc.arrayLayers,
+      .samples       = toVkSamples(desc.sampleCount),
+      .tiling        = VK_IMAGE_TILING_OPTIMAL,
+      .usage         = toVkImageUsage(desc.usage),
+      .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+
+  VkImage               image      = VK_NULL_HANDLE;
+  VmaAllocation         allocation = nullptr;
+  VmaAllocationCreateInfo allocInfo{.usage = toVmaMemoryUsage(desc.memoryUsage)};
+  VK_CHECK(vmaCreateImage(m_allocator, &info, &allocInfo, &image, &allocation, nullptr));
+  if(desc.debugName != nullptr)
+  {
+    utils::DebugUtil::getInstance().setObjectName(image, desc.debugName);
+  }
+
+  return m_resourceTable->registerTexture(reinterpret_cast<uint64_t>(image), reinterpret_cast<uint64_t>(allocation),
+                                          /*owned=*/true);
+}
+
+void VulkanDevice::destroyTexture(TextureHandle handle)
+{
+  destroyImage(handle);
+}
+
+TextureHandle VulkanDevice::registerExternalTexture(uint64_t externalImage)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalTexture");
-  return m_resourceTable->registerTexture(nativeImage, /*nativeAllocation=*/0, /*owned=*/false);
+  return m_resourceTable->registerTexture(externalImage, /*nativeAllocation=*/0, /*owned=*/false);
 }
 
 void VulkanDevice::destroyImage(TextureHandle handle)
@@ -896,12 +1095,16 @@ void VulkanDevice::destroyImage(TextureHandle handle)
   const TextureRecord record = m_resourceTable->removeTexture(handle);
   if(record.owned && record.nativeImage != 0)
   {
-    vmaDestroyImage(m_allocator, reinterpret_cast<VkImage>(static_cast<uintptr_t>(record.nativeImage)),
-                    reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(record.nativeAllocation)));
+    enqueueRetirement(NativeRetirement{
+        .resource         = ResourceHandle{ResourceKind::Texture, handle.index, handle.generation},
+        .nativeObject     = record.nativeImage,
+        .nativeAllocation = record.nativeAllocation,
+        .owned            = true,
+    });
   }
 }
 
-uint64_t VulkanDevice::resolveImageNative(TextureHandle handle) const
+uint64_t VulkanDevice::resolveTextureBackendHandle(TextureHandle handle) const
 {
   return m_resourceTable != nullptr ? m_resourceTable->resolveTexture(handle) : 0;
 }
@@ -1003,27 +1206,31 @@ void VulkanDevice::destroyBuffer(BufferHandle handle)
   const BufferRecord record = m_resourceTable->removeBuffer(handle);
   if(record.owned && record.nativeBuffer != 0)
   {
-    vmaDestroyBuffer(m_allocator, reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(record.nativeBuffer)),
-                     reinterpret_cast<VmaAllocation>(static_cast<uintptr_t>(record.nativeAllocation)));
+    enqueueRetirement(NativeRetirement{
+        .resource         = ResourceHandle{ResourceKind::Buffer, handle.index, handle.generation},
+        .nativeObject     = record.nativeBuffer,
+        .nativeAllocation = record.nativeAllocation,
+        .owned            = true,
+    });
   }
 }
 
-BufferHandle VulkanDevice::registerExternalBuffer(uint64_t nativeBuffer)
+BufferHandle VulkanDevice::registerExternalBuffer(uint64_t externalBuffer)
 {
   assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before registerExternalBuffer");
   BufferRecord rec{};
-  rec.nativeBuffer = nativeBuffer;
+  rec.nativeBuffer = externalBuffer;
   rec.owned        = false;
   return m_resourceTable->registerBuffer(rec);
 }
 
-void VulkanDevice::updateBufferBinding(BufferHandle handle, uint64_t nativeBuffer)
+void VulkanDevice::updateBufferBinding(BufferHandle handle, uint64_t externalBuffer)
 {
   if(handle.isNull() || m_resourceTable == nullptr)
   {
     return;
   }
-  m_resourceTable->updateBuffer(handle, nativeBuffer);
+  m_resourceTable->updateBuffer(handle, externalBuffer);
 }
 
 GpuPtr VulkanDevice::getBufferGpuAddress(BufferHandle handle) const
@@ -1088,8 +1295,17 @@ void VulkanDevice::destroySampler(SamplerHandle handle)
   const SamplerRecord record = m_resourceTable->removeSampler(handle);
   if(record.nativeSampler != 0)
   {
-    vkDestroySampler(m_device, reinterpret_cast<VkSampler>(static_cast<uintptr_t>(record.nativeSampler)), nullptr);
+    enqueueRetirement(NativeRetirement{
+        .resource     = ResourceHandle{ResourceKind::Sampler, handle.index, handle.generation},
+        .nativeObject = record.nativeSampler,
+        .owned        = true,
+    });
   }
+}
+
+uint64_t VulkanDevice::resolveSamplerBackendHandle(SamplerHandle handle) const
+{
+  return m_resourceTable != nullptr ? m_resourceTable->resolveSampler(handle) : 0;
 }
 
 QueryPoolHandle VulkanDevice::createQueryPool(uint32_t queryCount)
@@ -1114,7 +1330,11 @@ void VulkanDevice::destroyQueryPool(QueryPoolHandle handle)
   const QueryPoolRecord record = m_resourceTable->removeQueryPool(handle);
   if(record.nativePool != 0)
   {
-    vkDestroyQueryPool(m_device, reinterpret_cast<VkQueryPool>(static_cast<uintptr_t>(record.nativePool)), nullptr);
+    enqueueRetirement(NativeRetirement{
+        .resource     = ResourceHandle{ResourceKind::QueryPool, handle.index, handle.generation},
+        .nativeObject = record.nativePool,
+        .owned        = true,
+    });
   }
 }
 
@@ -1224,7 +1444,11 @@ void VulkanDevice::destroyArgumentLayout(ArgumentLayoutHandle handle)
   const ArgumentLayoutRecord record = m_resourceTable->removeArgumentLayout(handle);
   if(record.nativeLayout != 0)
   {
-    vkDestroyDescriptorSetLayout(m_device, reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(record.nativeLayout)), nullptr);
+    enqueueRetirement(NativeRetirement{
+        .resource     = ResourceHandle{ResourceKind::ArgumentLayout, handle.index, handle.generation},
+        .nativeObject = record.nativeLayout,
+        .owned        = true,
+    });
   }
 }
 
@@ -1276,8 +1500,11 @@ void VulkanDevice::destroyArgumentTable(ArgumentTableHandle handle)
   const ArgumentTableRecord record = m_resourceTable->removeArgumentTable(handle);
   if(record.owned && record.nativeSet != 0 && m_argumentPool != VK_NULL_HANDLE)
   {
-    VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(record.nativeSet));
-    vkFreeDescriptorSets(m_device, m_argumentPool, 1, &set);
+    enqueueRetirement(NativeRetirement{
+        .resource     = ResourceHandle{ResourceKind::ArgumentTable, handle.index, handle.generation},
+        .nativeObject = record.nativeSet,
+        .owned        = true,
+    });
   }
 }
 
@@ -1334,9 +1561,8 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
       case ArgumentType::storageTexture:
         imageInfos[i] = VkDescriptorImageInfo{
             .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
-            // storageTexture is always GENERAL; sampledTexture defaults to SHADER_READ_ONLY_OPTIMAL
-            // but honors w.imageLayout == General for images sampled while kept in GENERAL.
-            .imageLayout = (w.type == ArgumentType::storageTexture || w.imageLayout == ResourceState::General)
+            .imageLayout = (w.type == ArgumentType::storageTexture
+                            || w.accessIntent == ArgumentAccessIntent::readWrite)
                                ? VK_IMAGE_LAYOUT_GENERAL
                                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
@@ -1350,10 +1576,8 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
         imageInfos[i] = VkDescriptorImageInfo{
             .sampler     = reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_resourceTable->resolveSampler(w.sampler))),
             .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_resourceTable->resolveTextureView(w.textureView))),
-            // Defaults to SHADER_READ_ONLY_OPTIMAL; honors w.imageLayout == General for images
-            // sampled while kept in VK_IMAGE_LAYOUT_GENERAL (e.g. the GPU-driven lighting inputs).
-            .imageLayout = (w.imageLayout == ResourceState::General) ? VK_IMAGE_LAYOUT_GENERAL
-                                                                     : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = (w.accessIntent == ArgumentAccessIntent::readWrite) ? VK_IMAGE_LAYOUT_GENERAL
+                                                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
         out.pImageInfo = &imageInfos[i];
         break;
@@ -1368,6 +1592,234 @@ void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t write
     }
   }
   vkUpdateDescriptorSets(m_device, writeCount, vkWrites.data(), 0, nullptr);
+}
+
+uint64_t VulkanDevice::resolveArgumentLayoutNative(ArgumentLayoutHandle layout) const
+{
+  return m_resourceTable != nullptr ? m_resourceTable->resolveArgumentLayout(layout) : 0;
+}
+
+uint64_t VulkanDevice::resolveArgumentTableNative(ArgumentTableHandle table) const
+{
+  return m_resourceTable != nullptr ? m_resourceTable->resolveArgumentTable(table) : 0;
+}
+
+namespace {
+[[nodiscard]] uint32_t alignRootBindingOffset(uint32_t offset, uint32_t alignment)
+{
+  const uint32_t safeAlignment = alignment == 0 ? 4u : alignment;
+  return (offset + safeAlignment - 1u) & ~(safeAlignment - 1u);
+}
+
+struct VulkanPipelineLayoutBuildResult
+{
+  VkPipelineLayout layout{VK_NULL_HANDLE};
+  std::vector<PipelineRecord::RootBindingLowering> rootBindings;
+};
+
+VulkanPipelineLayoutBuildResult makePipelineLayoutFromPipelineDesc(
+    VkDevice device, const VulkanResourceTable& resourceTable, const PipelineBindingSchemaDesc& bindingSchema,
+    const ArgumentLayoutHandle* legacyLayouts, uint32_t legacyLayoutCount,
+    const PipelinePushConstantRange* legacyPushConstantRanges, uint32_t legacyPushConstantRangeCount)
+{
+  const PipelineBindingSchemaValidationResult validation = validatePipelineBindingSchema(bindingSchema);
+  ASSERT(validation.valid(), "Pipeline binding schema must be valid before Vulkan layout lowering");
+
+  uint32_t maxSetSlot = 0;
+  bool     hasSetSlot = false;
+  if(bindingSchema.argumentSlotCount > 0)
+  {
+    for(uint32_t i = 0; i < bindingSchema.argumentSlotCount; ++i)
+    {
+      maxSetSlot = (std::max)(maxSetSlot, bindingSchema.argumentSlots[i].slot);
+      hasSetSlot = true;
+    }
+  }
+  else if(legacyLayoutCount > 0)
+  {
+    maxSetSlot = legacyLayoutCount - 1u;
+    hasSetSlot = true;
+  }
+
+  std::vector<VkDescriptorSetLayout> setLayouts(hasSetSlot ? maxSetSlot + 1u : 0u, VK_NULL_HANDLE);
+  if(bindingSchema.argumentSlotCount > 0)
+  {
+    for(uint32_t i = 0; i < bindingSchema.argumentSlotCount; ++i)
+    {
+      const PipelineArgumentSlotDesc& slot = bindingSchema.argumentSlots[i];
+      const uint64_t nativeLayout = resourceTable.resolveArgumentLayout(slot.layout);
+      ASSERT(nativeLayout != 0, "Pipeline argument slot layout must resolve to a native descriptor set layout");
+      setLayouts[slot.slot] = reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(nativeLayout));
+    }
+  }
+  else
+  {
+    for(uint32_t i = 0; i < legacyLayoutCount; ++i)
+    {
+      const uint64_t nativeLayout = resourceTable.resolveArgumentLayout(legacyLayouts[i]);
+      ASSERT(nativeLayout != 0, "Pipeline argument layout must resolve to a native descriptor set layout");
+      setLayouts[i] = reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(nativeLayout));
+    }
+  }
+
+  while(!setLayouts.empty() && setLayouts.back() == VK_NULL_HANDLE)
+  {
+    setLayouts.pop_back();
+  }
+
+  std::vector<VkPushConstantRange> vkPushConstants;
+  std::vector<PipelineRecord::RootBindingLowering> rootLowering;
+  if(bindingSchema.rootBindingCount > 0)
+  {
+    vkPushConstants.reserve(bindingSchema.rootBindingCount);
+    rootLowering.reserve(bindingSchema.rootBindingCount);
+    uint32_t nextOffset = 0;
+    for(uint32_t i = 0; i < bindingSchema.rootBindingCount; ++i)
+    {
+      const RootBindingDesc& binding = bindingSchema.rootBindings[i];
+      if(binding.kind == RootBindingKind::dynamicBuffer)
+      {
+        rootLowering.push_back(PipelineRecord::RootBindingLowering{
+            .slot   = binding.slot,
+            .offset = 0,
+            .size   = 0,
+            .kind   = static_cast<uint32_t>(binding.kind),
+            .stages = static_cast<uint32_t>(binding.visibility),
+        });
+        continue;
+      }
+
+      const uint32_t offset = alignRootBindingOffset(nextOffset, binding.alignment);
+      vkPushConstants.push_back(VkPushConstantRange{
+          .stageFlags = toVkShaderStageFlags(binding.visibility),
+          .offset     = offset,
+          .size       = binding.size,
+      });
+      rootLowering.push_back(PipelineRecord::RootBindingLowering{
+          .slot   = binding.slot,
+          .offset = offset,
+          .size   = binding.size,
+          .kind   = static_cast<uint32_t>(binding.kind),
+          .stages = static_cast<uint32_t>(binding.visibility),
+      });
+      nextOffset = offset + binding.size;
+    }
+  }
+  else
+  {
+    vkPushConstants.resize(legacyPushConstantRangeCount);
+    for(uint32_t i = 0; i < legacyPushConstantRangeCount; ++i)
+    {
+      vkPushConstants[i] = VkPushConstantRange{
+          .stageFlags = toVkShaderStageFlags(legacyPushConstantRanges[i].stages),
+          .offset     = legacyPushConstantRanges[i].offset,
+          .size       = legacyPushConstantRanges[i].size,
+      };
+      rootLowering.push_back(PipelineRecord::RootBindingLowering{
+          .slot   = legacyPushConstantRanges[i].offset,
+          .offset = legacyPushConstantRanges[i].offset,
+          .size   = legacyPushConstantRanges[i].size,
+          .kind   = static_cast<uint32_t>(RootBindingKind::constants),
+          .stages = static_cast<uint32_t>(legacyPushConstantRanges[i].stages),
+      });
+    }
+  }
+
+  const VkPipelineLayoutCreateInfo createInfo{
+      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount         = static_cast<uint32_t>(setLayouts.size()),
+      .pSetLayouts            = setLayouts.empty() ? nullptr : setLayouts.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(vkPushConstants.size()),
+      .pPushConstantRanges    = vkPushConstants.empty() ? nullptr : vkPushConstants.data(),
+  };
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VK_CHECK(vkCreatePipelineLayout(device, &createInfo, nullptr, &layout));
+  return VulkanPipelineLayoutBuildResult{.layout = layout, .rootBindings = std::move(rootLowering)};
+}
+
+[[nodiscard]] VulkanPipelineLayoutBuildResult makePipelineLayoutFromGraphicsDesc(
+    VkDevice device, const VulkanResourceTable& resourceTable, const GraphicsPipelineDesc& desc)
+{
+  return makePipelineLayoutFromPipelineDesc(device,
+                                            resourceTable,
+                                            desc.bindingSchema,
+                                            desc.argumentLayouts,
+                                            desc.argumentLayoutCount,
+                                            desc.pushConstantRanges,
+                                            desc.pushConstantRangeCount);
+}
+
+[[nodiscard]] VulkanPipelineLayoutBuildResult makePipelineLayoutFromComputeDesc(
+    VkDevice device, const VulkanResourceTable& resourceTable, const ComputePipelineDesc& desc)
+{
+  return makePipelineLayoutFromPipelineDesc(device,
+                                            resourceTable,
+                                            desc.bindingSchema,
+                                            desc.argumentLayouts,
+                                            desc.argumentLayoutCount,
+                                            desc.pushConstantRanges,
+                                            desc.pushConstantRangeCount);
+}
+}  // namespace
+
+PipelineHandle VulkanDevice::createGraphicsPipeline(const GraphicsPipelineDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createGraphicsPipeline");
+
+  VulkanPipelineLayoutBuildResult ownedLayout{};
+  ownedLayout = makePipelineLayoutFromGraphicsDesc(m_device, *m_resourceTable, desc);
+  VkPipelineLayout nativeLayout = ownedLayout.layout;
+
+  const GraphicsPipelineCreateInfo createInfo{.desc = &desc, .layout = nativeLayout};
+  const VkPipeline pipeline = vulkan::createGraphicsPipeline(m_device, createInfo);
+  const PipelineHandle handle = m_resourceTable->registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
+                                                                  reinterpret_cast<uint64_t>(pipeline),
+                                                                  desc.specializationVariant,
+                                                                  reinterpret_cast<uint64_t>(nativeLayout),
+                                                                  std::move(ownedLayout.rootBindings),
+                                                                  true,
+                                                                  true);
+  return handle;
+}
+
+PipelineHandle VulkanDevice::createComputePipeline(const ComputePipelineDesc& desc)
+{
+  assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createComputePipeline");
+
+  VulkanPipelineLayoutBuildResult ownedLayout{};
+  ownedLayout = makePipelineLayoutFromComputeDesc(m_device, *m_resourceTable, desc);
+  VkPipelineLayout nativeLayout = ownedLayout.layout;
+
+  const ComputePipelineCreateInfo createInfo{.desc = &desc, .layout = nativeLayout, .pipelineFlags = desc.pipelineFlags};
+  const VkPipeline pipeline = vulkan::createComputePipeline(m_device, createInfo);
+  const PipelineHandle handle = m_resourceTable->registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
+                                                                  reinterpret_cast<uint64_t>(pipeline),
+                                                                  desc.specializationVariant,
+                                                                  reinterpret_cast<uint64_t>(nativeLayout),
+                                                                  std::move(ownedLayout.rootBindings),
+                                                                  true,
+                                                                  true);
+  return handle;
+}
+
+void VulkanDevice::destroyPipeline(PipelineHandle handle)
+{
+  if(handle.isNull() || m_resourceTable == nullptr)
+  {
+    return;
+  }
+  const PipelineRecord* record = m_resourceTable->tryGetPipeline(handle);
+  if(record != nullptr)
+  {
+    enqueueRetirement(NativeRetirement{
+        .resource              = ResourceHandle{ResourceKind::Pipeline, handle.index, handle.generation},
+        .nativeObject          = record->nativePipeline,
+        .secondaryNativeObject = record->nativeLayout,
+        .owned                 = record->owned,
+        .ownsSecondary         = record->ownsLayout,
+    });
+  }
+  m_resourceTable->destroyPipeline(handle);
 }
 
 }  // namespace demo::rhi::vulkan

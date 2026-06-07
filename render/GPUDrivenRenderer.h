@@ -29,7 +29,6 @@
 #include "passes/GPUDrivenPresentPass.h"
 #include "passes/GPUDrivenVisibilitySortPass.h"
 #include "RenderDevice.h"
-#include "../rhi/RHIDescriptor.h"
 
 #include <array>
 #include <memory>
@@ -131,9 +130,12 @@ struct GPUDrivenPostProcessDiagnostics
   uint32_t internalHeight{0};
   uint32_t outputWidth{0};
   uint32_t outputHeight{0};
-  VkFormat outputFormat{VK_FORMAT_UNDEFINED};
-  VkFormat sceneColorFormat{VK_FORMAT_UNDEFINED};
-  VkFormat recommendedHdrFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
+  rhi::TextureFormat outputFormat{rhi::TextureFormat::undefined};
+  rhi::TextureFormat sceneColorFormat{rhi::TextureFormat::undefined};
+  rhi::TextureFormat recommendedHdrFormat{rhi::TextureFormat::rgba16Sfloat};
+  std::string outputFormatName;
+  std::string sceneColorFormatName;
+  std::string recommendedHdrFormatName;
   uint64_t outputMemoryBytes{0};
   uint64_t sceneColorMemoryBytes{0};
   uint64_t recommendedHdrMemoryBytes{0};
@@ -175,7 +177,8 @@ struct GPUDrivenIBLDiagnostics
   uint32_t width{0};
   uint32_t height{0};
   uint32_t mipCount{0};
-  VkFormat format{VK_FORMAT_UNDEFINED};
+  rhi::TextureFormat format{rhi::TextureFormat::undefined};
+  std::string formatName;
   uint64_t estimatedMemoryBytes{0};
   float    intensity{0.0f};
   bool     enabled{false};
@@ -279,6 +282,7 @@ public:
   [[nodiscard]] const char* getSwapchainPresentModeName() const { return m_renderer.getSwapchainPresentModeName(); }
   [[nodiscard]] uint32_t getSwapchainImageCount() const { return m_renderer.getSwapchainImageCount(); }
   void resize(rhi::Extent2D size);
+  void beginUiFrame() { m_renderer.beginUiFrame(); }
   void render(const RenderParams& params);
   void setSceneRenderingSuspended(bool suspended) { m_suspendSceneRendering = suspended; }
   [[nodiscard]] bool isSceneRenderingSuspended() const { return m_suspendSceneRendering; }
@@ -286,14 +290,14 @@ public:
   TextureHandle  getViewportTextureHandle() const { return m_renderer.getViewportTextureHandle(); }
   ImTextureID    getViewportTextureID(TextureHandle handle) const { return m_renderer.getViewportTextureID(handle); }
   MaterialHandle getMaterialHandle(uint32_t slot) const { return m_renderer.getMaterialHandle(slot); }
-  GltfUploadResult uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd);
-  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd);
+  GltfUploadResult uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd);
+  SceneUploadResult commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, rhi::CommandBuffer& cmd);
   void             uploadGltfModelBatch(const GltfModel&          model,
                                         std::span<const uint32_t> textureIndices,
                                         std::span<const uint32_t> materialIndices,
                                         std::span<const uint32_t> meshIndices,
                                         GltfUploadResult&         ioResult,
-                                        VkCommandBuffer           cmd);
+                                        rhi::CommandBuffer&       cmd);
   void             initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const
   {
     m_renderer.initializeGltfUploadResult(model, outResult);
@@ -301,7 +305,7 @@ public:
   void             destroyGltfResources(const GltfUploadResult& result);
   void             updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
   void             updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
-  void             executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn) { m_renderer.executeUploadCommand(std::move(uploadFn)); }
+  void             executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn) { m_renderer.executeUploadCommand(std::move(uploadFn)); }
   void             waitForIdle() { m_renderer.waitForIdle(); }
 
   [[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const { return m_renderer.getLastGPUCullingStats(); }
@@ -322,6 +326,10 @@ public:
   [[nodiscard]] const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const
   {
     return m_renderer.getDebugLineVertices();
+  }
+  [[nodiscard]] rhi::BufferHandle getTransientBufferHandle(uint32_t frameIndex) const
+  {
+    return m_renderer.getTransientBufferHandle(frameIndex);
   }
   [[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return m_renderer.getShadowUniformsData(); }
   [[nodiscard]] CSMShadowResources& getCSMShadowResources() { return m_renderer.getCSMShadowResources(); }
@@ -348,7 +356,7 @@ public:
   // when the active upload result changes). Consumed by CSM / shadow-atlas passes.
   [[nodiscard]] rhi::BufferHandle    getShadowPackedVertexBufferRHIHandle() const { return m_shadowPackedVertexBufferRHI; }
   [[nodiscard]] rhi::BufferHandle    getShadowPackedIndexBufferRHIHandle() const { return m_shadowPackedIndexBufferRHI; }
-  [[nodiscard]] VkBuffer             getMeshletDataBuffer() const
+  [[nodiscard]] uintptr_t            getMeshletDataBuffer() const
   {
     return m_meshletBuffer.getMeshletDataBuffer();
   }
@@ -439,38 +447,38 @@ public:
   {
     return m_renderer.getGPUCullingPipelineHandle();
   }
-  [[nodiscard]] BindGroupHandle getGPUCullingBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getGPUCullingArgumentTable(uint32_t frameIndex) const
   {
-    return m_renderer.getGPUCullingBindGroup(frameIndex);
+    return m_renderer.getGPUCullingArgumentTable(frameIndex);
   }
-  [[nodiscard]] BindGroupHandle getShadowCullingBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getShadowCullingArgumentTable(uint32_t frameIndex) const
   {
-    return m_renderer.getShadowCullingBindGroup(frameIndex);
+    return m_renderer.getShadowCullingArgumentTable(frameIndex);
   }
   [[nodiscard]] PipelineHandle getLightCullingPipelineHandle() const { return m_pointLightCoarseCullingPipeline; }
   [[nodiscard]] PipelineHandle getSpotLightCullingPipelineHandle() const { return m_spotLightCoarseCullingPipeline; }
-  [[nodiscard]] uint64_t getGraphicsMaterialDescriptorSet() const { return m_renderer.getGraphicsMaterialDescriptorSet(); }
-  [[nodiscard]] BindGroupHandle getGraphicsMaterialBindGroup() const { return m_renderer.getGraphicsMaterialBindGroup(); }
-  [[nodiscard]] uint64_t getLightingInputDescriptorSet() const;
-  [[nodiscard]] uint64_t getLightingSceneDescriptorSet(uint32_t frameIndex) const;
-  void updateLightingSceneDescriptorSet(uint32_t frameIndex, uint64_t transientBufferOpaque, uint32_t cameraOffset);
+  [[nodiscard]] rhi::ArgumentTableHandle getGraphicsMaterialArgumentTable() const { return m_renderer.getGraphicsMaterialArgumentTable(); }
   [[nodiscard]] bool getIBLEnvironmentLoaded() const { return m_iblEnvironmentLoaded; }
   [[nodiscard]] bool getIBLUsingFallback() const { return m_iblUsingFallback; }
-  [[nodiscard]] VkFormat getIBLEnvironmentFormat() const { return m_iblEnvironmentFormat; }
-  [[nodiscard]] VkExtent2D getIBLEnvironmentExtent() const { return m_iblEnvironmentExtent; }
+  [[nodiscard]] rhi::TextureFormat getIBLEnvironmentFormat() const;
+  [[nodiscard]] rhi::Extent2D getIBLEnvironmentExtent() const
+  {
+    return rhi::Extent2D{m_iblEnvironmentExtent.width, m_iblEnvironmentExtent.height};
+  }
   [[nodiscard]] uint32_t getIBLEnvironmentMipCount() const { return m_iblEnvironmentMipCount; }
   [[nodiscard]] uint64_t getIBLEnvironmentEstimatedBytes() const { return m_iblEnvironmentEstimatedBytes; }
   [[nodiscard]] const std::string& getIBLEnvironmentPath() const { return m_iblEnvironmentPath; }
   [[nodiscard]] const std::string& getIBLEnvironmentStatus() const { return m_iblEnvironmentStatus; }
-  [[nodiscard]] BindGroupHandle getLightCoarseCullingBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getLightCoarseCullingArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_lightCoarseCullingArgumentTables.size() ? m_lightCoarseCullingArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
-  [[nodiscard]] BindGroupHandle getCurrentLightCullingBindGroup() const;
+  [[nodiscard]] rhi::ArgumentTableHandle getCurrentLightCullingArgumentTable() const;
   [[nodiscard]] PipelineHandle getClusteredLightCullingPipelineHandle() const { return m_clusteredLightCullingPipeline; }
   [[nodiscard]] uint64_t getClusterStatsBufferOpaque(uint32_t frameIndex) const
   {
-    return reinterpret_cast<uint64_t>(m_lightResources.getClusterStatsBuffer(frameIndex));
+    const rhi::BufferHandle handle = m_lightResources.getClusterStatsBuffer(frameIndex);
+    return (static_cast<uint64_t>(handle.generation) << 32u) | handle.index;
   }
   // Stats buffer (binding 8) registered as owned=false handle alongside the coarse-culling table.
   [[nodiscard]] rhi::BufferHandle getClusterStatsBufferHandle(uint32_t frameIndex) const
@@ -478,37 +486,43 @@ public:
     const size_t idx = static_cast<size_t>(frameIndex) * 9u + 8u;
     return idx < m_lightCoarseCullingBufferHandles.size() ? m_lightCoarseCullingBufferHandles[idx] : rhi::BufferHandle{};
   }
-  [[nodiscard]] VkExtent2D getPhase7HalfExtent() const { return m_phase7HalfExtent; }
-  [[nodiscard]] uint64_t   getSceneViewOutputImageOpaque() const { return reinterpret_cast<uint64_t>(m_sceneView.outputImage); }
-  [[nodiscard]] VkExtent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
-  [[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_gtaoPipeline); }
-  [[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoisePipeline); }
+  [[nodiscard]] rhi::Extent2D getPhase7HalfExtent() const
+  {
+    return rhi::Extent2D{m_phase7HalfExtent.width, m_phase7HalfExtent.height};
+  }
+  [[nodiscard]] uint64_t   getSceneViewOutputImageOpaque() const
+  {
+    return (static_cast<uint64_t>(m_sceneView.outputImage.generation) << 32u) | m_sceneView.outputImage.index;
+  }
+  [[nodiscard]] rhi::Extent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
+  [[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return 0; }
+  [[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return 0; }
   [[nodiscard]] uint64_t getAORawImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoRaw.image); }
   [[nodiscard]] uint64_t getAODenoisedImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoDenoised.image); }
   [[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
   [[nodiscard]] PipelineHandle getAODenoisePipelineHandle() const { return m_aoDenoisePipelineHandle; }
-  [[nodiscard]] BindGroupHandle getAOBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getAOArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_aoBindGroups.size() ? m_aoBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_aoArgumentTables.size() ? m_aoArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
-  [[nodiscard]] BindGroupHandle getAODenoiseBindGroup(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getAODenoiseArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_aoDenoiseBindGroups.size() ? m_aoDenoiseBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_aoDenoiseArgumentTables.size() ? m_aoDenoiseArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
-  [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return reinterpret_cast<uint64_t>(m_ssrTracePipeline); }
+  [[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return 0; }
   [[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
   [[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
-  // Builds the SSR compute set as a per-frame temporary bind group (gbuffer/depth/history
+  // Builds the SSR compute set as a per-frame temporary argument table (gbuffer/depth/history
   // sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
   // frame-lifetime handle; do not cache it across frames.
-  [[nodiscard]] BindGroupHandle acquireSSRTempBindGroup(uint64_t cameraBuffer, uint32_t cameraOffset);
+  [[nodiscard]] rhi::ArgumentTableHandle acquireSSRTempArgumentTable(uint64_t cameraBuffer, uint32_t cameraOffset);
 
   // Opaque snapshot of the per-frame bitonic visibility-sort resources, so the
   // visibility-sort pass can record without reaching into renderer internals.
   struct VisibilitySortDispatch
   {
     PipelineHandle    pipelineHandle{};
-    BindGroupHandle   bindGroup{};
+    rhi::ArgumentTableHandle argumentTable{};
     rhi::BufferHandle uploadKeyBufferHandle{};
     rhi::BufferHandle uploadValueBufferHandle{};
     rhi::BufferHandle keyBufferHandle{};
@@ -519,49 +533,37 @@ public:
   [[nodiscard]] VisibilitySortDispatch getVisibilitySortDispatch(uint32_t frameIndex) const
   {
     VisibilitySortDispatch info{};
-    if(m_visibilitySortPipeline == VK_NULL_HANDLE || !m_visibilitySortPipelineLayout
-       || frameIndex >= m_visibilitySortFrames.size())
+    if(m_visibilitySortPipelineHandle.isNull() || frameIndex >= m_visibilitySortFrames.size())
     {
       return info;
     }
     const VisibilitySortFrameResources& f = m_visibilitySortFrames[frameIndex];
     info.pipelineHandle          = m_visibilitySortPipelineHandle;
-    info.bindGroup               = f.bindGroup;
+    info.argumentTable           = f.argumentTable;
     info.uploadKeyBufferHandle   = f.uploadKeyBufferHandle;
     info.uploadValueBufferHandle = f.uploadValueBufferHandle;
     info.keyBufferHandle         = f.keyBufferHandle;
     info.valueBufferHandle       = f.valueBufferHandle;
     info.paddedElementCount = f.paddedElementCount;
-    info.valid = !f.bindGroup.isNull() && f.paddedElementCount > 1u
-                 && f.uploadKeyBuffer.buffer != VK_NULL_HANDLE && f.uploadValueBuffer.buffer != VK_NULL_HANDLE;
+    info.valid = !f.argumentTable.isNull() && f.paddedElementCount > 1u
+                 && reinterpret_cast<uintptr_t>(f.uploadKeyBuffer.buffer) != 0
+                 && reinterpret_cast<uintptr_t>(f.uploadValueBuffer.buffer) != 0;
     return info;
   }
-  [[nodiscard]] uint64_t getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getCSMShadowMDIDrawArgumentTable(uint32_t frameIndex, uint32_t cascadeIndex) const
   {
-    return m_renderer.getShadowCullingDescriptorSetOpaque(frameIndex);
+    return m_renderer.getCSMShadowMDIDrawArgumentTable(frameIndex, cascadeIndex);
   }
-  [[nodiscard]] uint64_t getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getCameraArgumentTable(uint32_t frameIndex) const { return m_renderer.getCameraArgumentTable(frameIndex); }
+  [[nodiscard]] rhi::ArgumentTableHandle getDrawArgumentTable(uint32_t frameIndex) const { return m_renderer.getDrawArgumentTable(frameIndex); }
+  [[nodiscard]] rhi::ArgumentTableHandle getMDIDrawArgumentTable(uint32_t frameIndex) const { return m_renderer.getMDIDrawArgumentTable(frameIndex); }
+  [[nodiscard]] rhi::ArgumentTableHandle getGBufferMDIDrawArgumentTable(uint32_t frameIndex) const
   {
-    return m_renderer.getGPUCullingDescriptorSetOpaque(frameIndex);
+    return m_renderer.getGBufferMDIDrawArgumentTable(frameIndex);
   }
-  [[nodiscard]] BindGroupHandle getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const
+  [[nodiscard]] rhi::ArgumentTableHandle getDepthMDIDrawArgumentTable(uint32_t frameIndex) const
   {
-    return m_renderer.getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
-  }
-  [[nodiscard]] BindGroupHandle getCameraBindGroup(uint32_t frameIndex) const { return m_renderer.getCameraBindGroup(frameIndex); }
-  [[nodiscard]] BindGroupHandle getDrawBindGroup(uint32_t frameIndex) const { return m_renderer.getDrawBindGroup(frameIndex); }
-  [[nodiscard]] BindGroupHandle getMDIDrawBindGroup(uint32_t frameIndex) const { return m_renderer.getMDIDrawBindGroup(frameIndex); }
-  [[nodiscard]] BindGroupHandle getGBufferMDIDrawBindGroup(uint32_t frameIndex) const
-  {
-    return m_renderer.getGBufferMDIDrawBindGroup(frameIndex);
-  }
-  [[nodiscard]] BindGroupHandle getDepthMDIDrawBindGroup(uint32_t frameIndex) const
-  {
-    return m_renderer.getDepthMDIDrawBindGroup(frameIndex);
-  }
-  [[nodiscard]] uint64_t getBindGroupDescriptorSet(BindGroupHandle handle, BindGroupSetSlot slot) const
-  {
-    return m_renderer.getBindGroupDescriptorSet(handle, slot);
+    return m_renderer.getDepthMDIDrawArgumentTable(frameIndex);
   }
   [[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
   {
@@ -615,7 +617,10 @@ public:
   [[nodiscard]] uint64_t getShadowAtlasImageOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.image); }
   [[nodiscard]] uint64_t getShadowAtlasViewOpaque() const { return reinterpret_cast<uint64_t>(m_shadowAtlas.view); }
   [[nodiscard]] rhi::TextureViewHandle getShadowAtlasViewHandle() const { return m_shadowAtlasViewHandle; }
-  [[nodiscard]] VkExtent2D getShadowAtlasExtent() const { return m_shadowAtlasExtent; }
+  [[nodiscard]] rhi::Extent2D getShadowAtlasExtent() const
+  {
+    return rhi::Extent2D{m_shadowAtlasExtent.width, m_shadowAtlasExtent.height};
+  }
   [[nodiscard]] uint32_t   getShadowAtlasTileSize() const { return m_shadowAtlasTileSize; }
   void                     setShadowAtlasAllocatedTiles(uint32_t tiles) { m_shadowAtlasAllocatedTiles = tiles; }
   [[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
@@ -676,67 +681,67 @@ public:
   }
   [[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
   [[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_lightResources.getActiveSpotLightCount(); }
-  [[nodiscard]] VkExtent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }
-  [[nodiscard]] VkFormat getSceneDepthFormat() const { return m_renderer.getSceneDepthFormat(); }
-  [[nodiscard]] VkImage getSceneDepthImage() const { return m_renderer.getSceneDepthImage(); }
+  [[nodiscard]] rhi::Extent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }
+  [[nodiscard]] rhi::TextureFormat getSceneDepthFormat() const { return m_renderer.getSceneDepthFormat(); }
+  [[nodiscard]] rhi::TextureHandle getSceneDepthImage() const { return m_renderer.getSceneDepthImage(); }
   [[nodiscard]] rhi::TextureViewHandle getSceneDepthImageView() const { return m_renderer.getSceneDepthImageView(); }
-  [[nodiscard]] VkImage getSceneGBufferImage(uint32_t index) const { return m_renderer.getSceneGBufferImage(index); }
+  [[nodiscard]] rhi::TextureHandle getSceneGBufferImage(uint32_t index) const { return m_renderer.getSceneGBufferImage(index); }
   [[nodiscard]] rhi::TextureViewHandle getSceneGBufferImageView(uint32_t index) const
   {
     return m_renderer.getSceneGBufferImageView(index);
   }
-  [[nodiscard]] VkImage getOutputTextureImage() const { return m_renderer.getOutputTextureImage(); }
+  [[nodiscard]] rhi::TextureHandle getOutputTextureImage() const { return m_renderer.getOutputTextureImage(); }
   [[nodiscard]] rhi::TextureViewHandle getOutputTextureView() const { return m_renderer.getOutputTextureView(); }
-  [[nodiscard]] VkFormat getOutputTextureFormat() const { return m_renderer.getOutputTextureFormat(); }
+  [[nodiscard]] rhi::TextureFormat getOutputTextureFormat() const { return m_renderer.getOutputTextureFormat(); }
   [[nodiscard]] uint64_t getOutputTextureEstimatedBytes() const
   {
     return m_renderer.getOutputTextureEstimatedBytes();
   }
-  [[nodiscard]] VkImage getSceneColorHdrImage() const { return m_renderer.getSceneColorHdrImage(); }
+  [[nodiscard]] rhi::TextureHandle getSceneColorHdrImage() const { return m_renderer.getSceneColorHdrImage(); }
   [[nodiscard]] rhi::TextureViewHandle getSceneColorHdrView() const { return m_renderer.getSceneColorHdrView(); }
-  [[nodiscard]] VkFormat getSceneColorHdrFormat() const { return m_renderer.getSceneColorHdrFormat(); }
+  [[nodiscard]] rhi::TextureFormat getSceneColorHdrFormat() const { return m_renderer.getSceneColorHdrFormat(); }
   [[nodiscard]] uint64_t getSceneColorHdrEstimatedBytes() const
   {
     return m_renderer.getSceneColorHdrEstimatedBytes();
   }
-  [[nodiscard]] VkImage getBloomHalfImage() const { return m_renderer.getBloomHalfImage(); }
+  [[nodiscard]] rhi::TextureHandle getBloomHalfImage() const { return m_renderer.getBloomHalfImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomHalfView() const { return m_renderer.getBloomHalfView(); }
-  [[nodiscard]] VkExtent2D getBloomHalfExtent() const { return m_renderer.getBloomHalfExtent(); }
-  [[nodiscard]] VkImage getBloomQuarterImage() const { return m_renderer.getBloomQuarterImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomHalfExtent() const { return m_renderer.getBloomHalfExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomQuarterImage() const { return m_renderer.getBloomQuarterImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomQuarterView() const { return m_renderer.getBloomQuarterView(); }
-  [[nodiscard]] VkExtent2D getBloomQuarterExtent() const { return m_renderer.getBloomQuarterExtent(); }
-  [[nodiscard]] VkImage getBloomEighthImage() const { return m_renderer.getBloomEighthImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomQuarterExtent() const { return m_renderer.getBloomQuarterExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomEighthImage() const { return m_renderer.getBloomEighthImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomEighthView() const { return m_renderer.getBloomEighthView(); }
-  [[nodiscard]] VkExtent2D getBloomEighthExtent() const { return m_renderer.getBloomEighthExtent(); }
-  [[nodiscard]] VkImage getBloomSixteenthImage() const { return m_renderer.getBloomSixteenthImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomEighthExtent() const { return m_renderer.getBloomEighthExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomSixteenthImage() const { return m_renderer.getBloomSixteenthImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomSixteenthView() const { return m_renderer.getBloomSixteenthView(); }
-  [[nodiscard]] VkExtent2D getBloomSixteenthExtent() const { return m_renderer.getBloomSixteenthExtent(); }
-  [[nodiscard]] VkImage getBloomThirtySecondImage() const { return m_renderer.getBloomThirtySecondImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomSixteenthExtent() const { return m_renderer.getBloomSixteenthExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomThirtySecondImage() const { return m_renderer.getBloomThirtySecondImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomThirtySecondView() const { return m_renderer.getBloomThirtySecondView(); }
-  [[nodiscard]] VkExtent2D getBloomThirtySecondExtent() const { return m_renderer.getBloomThirtySecondExtent(); }
-  [[nodiscard]] VkImage getBloomUpsampleSixteenthImage() const { return m_renderer.getBloomUpsampleSixteenthImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomThirtySecondExtent() const { return m_renderer.getBloomThirtySecondExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleSixteenthImage() const { return m_renderer.getBloomUpsampleSixteenthImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleSixteenthView() const { return m_renderer.getBloomUpsampleSixteenthView(); }
-  [[nodiscard]] VkExtent2D getBloomUpsampleSixteenthExtent() const { return m_renderer.getBloomUpsampleSixteenthExtent(); }
-  [[nodiscard]] VkImage getBloomUpsampleEighthImage() const { return m_renderer.getBloomUpsampleEighthImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleSixteenthExtent() const { return m_renderer.getBloomUpsampleSixteenthExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleEighthImage() const { return m_renderer.getBloomUpsampleEighthImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleEighthView() const { return m_renderer.getBloomUpsampleEighthView(); }
-  [[nodiscard]] VkExtent2D getBloomUpsampleEighthExtent() const { return m_renderer.getBloomUpsampleEighthExtent(); }
-  [[nodiscard]] VkImage getBloomUpsampleQuarterImage() const { return m_renderer.getBloomUpsampleQuarterImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleEighthExtent() const { return m_renderer.getBloomUpsampleEighthExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleQuarterImage() const { return m_renderer.getBloomUpsampleQuarterImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleQuarterView() const { return m_renderer.getBloomUpsampleQuarterView(); }
-  [[nodiscard]] VkExtent2D getBloomUpsampleQuarterExtent() const { return m_renderer.getBloomUpsampleQuarterExtent(); }
-  [[nodiscard]] VkImage getBloomOutputImage() const { return m_renderer.getBloomOutputImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleQuarterExtent() const { return m_renderer.getBloomUpsampleQuarterExtent(); }
+  [[nodiscard]] rhi::TextureHandle getBloomOutputImage() const { return m_renderer.getBloomOutputImage(); }
   [[nodiscard]] rhi::TextureViewHandle getBloomOutputView() const { return m_renderer.getBloomOutputView(); }
-  [[nodiscard]] VkExtent2D getBloomOutputExtent() const { return m_renderer.getBloomOutputExtent(); }
-  [[nodiscard]] VkImage getColorGradingLutImage() const { return m_renderer.getColorGradingLutImage(); }
+  [[nodiscard]] rhi::Extent2D getBloomOutputExtent() const { return m_renderer.getBloomOutputExtent(); }
+  [[nodiscard]] rhi::TextureHandle getColorGradingLutImage() const { return m_renderer.getColorGradingLutImage(); }
   [[nodiscard]] rhi::TextureViewHandle getColorGradingLutView() const { return m_renderer.getColorGradingLutView(); }
-  [[nodiscard]] VkExtent2D getColorGradingLutExtent() const { return m_renderer.getColorGradingLutExtent(); }
+  [[nodiscard]] rhi::Extent2D getColorGradingLutExtent() const { return m_renderer.getColorGradingLutExtent(); }
   [[nodiscard]] uint64_t getBloomEstimatedBytes() const { return m_renderer.getBloomEstimatedBytes(); }
-  [[nodiscard]] VkImage getVelocityImage() const { return m_renderer.getVelocityImage(); }
+  [[nodiscard]] rhi::TextureHandle getVelocityImage() const { return m_renderer.getVelocityImage(); }
   [[nodiscard]] rhi::TextureViewHandle getVelocityView() const { return m_renderer.getVelocityView(); }
-  [[nodiscard]] VkFormat getVelocityFormat() const { return m_renderer.getVelocityFormat(); }
+  [[nodiscard]] rhi::TextureFormat getVelocityFormat() const { return m_renderer.getVelocityFormat(); }
   [[nodiscard]] uint64_t getVelocityEstimatedBytes() const { return m_renderer.getVelocityEstimatedBytes(); }
   [[nodiscard]] glm::vec2 getCurrentTAAJitterUv() const { return m_currentTAAJitterUv; }
   [[nodiscard]] glm::vec2 getPreviousTAAJitterUv() const { return m_previousTAAJitterUv; }
-  [[nodiscard]] VkImage getSceneColorHistoryImage(uint32_t index) const
+  [[nodiscard]] rhi::TextureHandle getSceneColorHistoryImage(uint32_t index) const
   {
     return m_renderer.getSceneColorHistoryImage(index);
   }
@@ -748,28 +753,22 @@ public:
   {
     return m_renderer.getSceneColorHistoryEstimatedBytes();
   }
-  [[nodiscard]] VkExtent2D getSwapchainExtent() const { return m_renderer.getSwapchainExtent(); }
-  [[nodiscard]] VkImage getCurrentSwapchainImage() const { return m_renderer.getCurrentSwapchainImage(); }
+  [[nodiscard]] rhi::Extent2D getSwapchainExtent() const { return m_renderer.getSwapchainExtent(); }
   [[nodiscard]] rhi::TextureHandle getCurrentSwapchainTextureRHIHandle() const { return m_renderer.getCurrentSwapchainTextureHandle(); }
   [[nodiscard]] rhi::TextureHandle getPassOutputTextureRHIHandle() const { return m_passExecutor.getTextureRHIHandle(kPassOutputHandle); }
   [[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
-  [[nodiscard]] VkDevice getNativeDeviceHandle() const { return m_renderer.getNativeDeviceHandle(); }
+  [[nodiscard]] uintptr_t getBackendDeviceToken() const;
   [[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }
-  [[nodiscard]] VmaAllocator getAllocatorHandle() const { return m_renderer.getAllocatorHandle(); }
-  [[nodiscard]] uint64_t getNativeComputePipeline(PipelineHandle pipelineHandle) const
+  [[nodiscard]] uintptr_t getAllocatorToken() const;
+  // ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
+  [[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
   {
-    return m_renderer.getPipelineOpaque(pipelineHandle, static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE));
+    return frameIndex < m_lightingSceneArgumentTables.size() ? m_lightingSceneArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
-  // BindGroup wrapping the per-frame lighting-scene descriptor set (set LSetScene),
-  // so GPUDriven fullscreen passes can bind it through cmd->bindBindGroup.
-  [[nodiscard]] BindGroupHandle getLightingSceneBindGroup(uint32_t frameIndex) const
+  // ArgumentTable wrapping the GBuffer/lighting-input texture set (set LSetTextures).
+  [[nodiscard]] rhi::ArgumentTableHandle getLightingInputArgumentTable(uint32_t frameIndex) const
   {
-    return frameIndex < m_lightingSceneBindGroups.size() ? m_lightingSceneBindGroups[frameIndex] : BindGroupHandle{};
-  }
-  // BindGroup wrapping the GBuffer/lighting-input texture set (set LSetTextures).
-  [[nodiscard]] BindGroupHandle getLightingInputBindGroup(uint32_t frameIndex) const
-  {
-    return frameIndex < m_lightingInputBindGroups.size() ? m_lightingInputBindGroups[frameIndex] : BindGroupHandle{};
+    return frameIndex < m_lightingInputArgumentTables.size() ? m_lightingInputArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
   }
 
   // rhi-typed render targets for the fullscreen screen-space passes (skybox, etc.),
@@ -787,16 +786,18 @@ public:
   [[nodiscard]] ScreenPassTargets getScreenColorDepthTargets() const
   {
     ScreenPassTargets targets{};
-    const bool ready = m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE && !m_sceneView.sceneColorHdrView.isNull()
-                       && m_sceneView.sceneDepthImage != VK_NULL_HANDLE && !m_sceneView.sceneDepthView.isNull()
+    const bool ready = !m_sceneView.sceneColorHdrImage.isNull() && !m_sceneView.sceneColorHdrView.isNull()
+                       && !m_sceneView.sceneDepthImage.isNull() && !m_sceneView.sceneDepthView.isNull()
                        && m_sceneView.sceneDepthExtent.width != 0u && m_sceneView.sceneDepthExtent.height != 0u;
     if(!ready)
     {
       return targets;
     }
-    targets.colorImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHdrImage);
+    targets.colorImage  = (static_cast<uint64_t>(m_sceneView.sceneColorHdrImage.generation) << 32u)
+                         | m_sceneView.sceneColorHdrImage.index;
     targets.colorView   = m_sceneView.sceneColorHdrView;
-    targets.depthImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneDepthImage);
+    targets.depthImage  = (static_cast<uint64_t>(m_sceneView.sceneDepthImage.generation) << 32u)
+                         | m_sceneView.sceneDepthImage.index;
     targets.depthView   = m_sceneView.sceneDepthView;
     targets.depthAspect = depthAspectForFormat(m_sceneView.sceneDepthFormat);
     targets.extent      = {m_sceneView.sceneDepthExtent.width, m_sceneView.sceneDepthExtent.height};
@@ -804,13 +805,12 @@ public:
     return targets;
   }
 
-  [[nodiscard]] static rhi::TextureAspect depthAspectForFormat(VkFormat format)
+  [[nodiscard]] static rhi::TextureAspect depthAspectForFormat(rhi::TextureFormat format)
   {
     switch(format)
     {
-      case VK_FORMAT_D16_UNORM_S8_UINT:
-      case VK_FORMAT_D24_UNORM_S8_UINT:
-      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      case rhi::TextureFormat::d24UnormS8:
+      case rhi::TextureFormat::d32SfloatS8:
         return rhi::TextureAspect::depthStencil;
       default:
         return rhi::TextureAspect::depth;
@@ -833,9 +833,9 @@ public:
     m_renderer.ensureGPUDrivenPersistentIndirectStream(frameIndex, requiredDrawCount);
   }
   void executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
-  void beginPresentPass(rhi::CommandList& cmd) { m_renderer.beginPresentPass(cmd); }
-  void endPresentPass(rhi::CommandList& cmd) { m_renderer.endPresentPass(cmd); }
-  void executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params) { m_renderer.executeImGuiPass(cmd, params); }
+  void beginPresentPass(rhi::CommandBuffer& cmdBuffer) { m_renderer.beginPresentPass(cmdBuffer); }
+  void endPresentPass(rhi::CommandBuffer& cmdBuffer) { m_renderer.endPresentPass(cmdBuffer); }
+  void executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params) { m_renderer.executeImGuiPass(cmdBuffer, params); }
   void bindStaticPassResources()
   {
     m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
@@ -860,7 +860,7 @@ private:
     utils::Buffer uploadValueBuffer{};
     utils::Buffer keyBuffer{};
     utils::Buffer valueBuffer{};
-    BindGroupHandle bindGroup{};         // owned RHI ArgumentTable
+    rhi::ArgumentTableHandle argumentTable{};  // owned RHI ArgumentTable
     rhi::BufferHandle keyBufferHandle{};   // owned=false mirror, rebound on realloc
     rhi::BufferHandle valueBufferHandle{};
     rhi::BufferHandle uploadKeyBufferHandle{};    // owned=false mirror of staging buffer
@@ -872,16 +872,18 @@ private:
 
   struct TransparentVisibilityFrameResources
   {
-    std::array<utils::Buffer, 2>   prefixBuffers{};
-    std::array<VkDescriptorSet, 2> descriptorSets{VK_NULL_HANDLE, VK_NULL_HANDLE};
-    std::array<BindGroupHandle, 2> argumentTables{};  // Wave 9: adopted ArgumentTable handles for descriptorSets[0/1]
-    std::array<uint64_t, 2>        boundSortKeyHandles{0, 0};
-    std::array<uint64_t, 2>        boundSortValueHandles{0, 0};
-    std::array<uint64_t, 2>        boundSourceIndirectHandles{0, 0};
-    std::array<uint64_t, 2>        boundTargetIndirectHandles{0, 0};
-    std::array<uint64_t, 2>        boundPrefixAHandles{0, 0};
-    std::array<uint64_t, 2>        boundPrefixBHandles{0, 0};
-    uint32_t                       prefixCapacity{0};
+    std::array<utils::Buffer, 2>             prefixBuffers{};
+    std::array<rhi::ArgumentTableHandle, 2>  argumentTables{};
+    std::array<rhi::BufferHandle, 2>         prefixBufferHandles{};
+    std::array<rhi::BufferHandle, 2>         sourceIndirectBufferHandles{};
+    std::array<rhi::BufferHandle, 2>         targetIndirectBufferHandles{};
+    std::array<uint64_t, 2>                  boundSortKeyHandles{0, 0};
+    std::array<uint64_t, 2>                  boundSortValueHandles{0, 0};
+    std::array<uint64_t, 2>                  boundSourceIndirectHandles{0, 0};
+    std::array<uint64_t, 2>                  boundTargetIndirectHandles{0, 0};
+    std::array<uint64_t, 2>                  boundPrefixAHandles{0, 0};
+    std::array<uint64_t, 2>                  boundPrefixBHandles{0, 0};
+    uint32_t                                 prefixCapacity{0};
   };
 
   struct SortedBootstrapFrameState
@@ -896,21 +898,21 @@ private:
   void            initVisibilitySortResources();
   void            shutdownVisibilitySortResources();
   void            ensureVisibilitySortCapacity(uint32_t frameIndex, uint32_t requiredCount);
-  void            updateVisibilitySortDescriptorSet(uint32_t frameIndex);
+  void            updateVisibilitySortArgumentTable(uint32_t frameIndex);
   void            prepareVisibilitySortInputs(uint32_t frameIndex);
   void            initTransparentVisibilityPatchResources();
   void            shutdownTransparentVisibilityPatchResources();
-  void            updateTransparentVisibilityPatchDescriptorSet(uint32_t frameIndex,
-                                                               uint64_t sortKeyBufferHandle,
-                                                               uint64_t sortValueBufferHandle,
-                                                               uint64_t sourceIndirectBufferHandle,
-                                                               uint64_t targetIndirectBufferHandle);
+  void            updateTransparentVisibilityPatchArgumentTable(uint32_t frameIndex,
+                                                                uint64_t sortKeyBufferHandle,
+                                                                uint64_t sortValueBufferHandle,
+                                                                uint64_t sourceIndirectBufferHandle,
+                                                                uint64_t targetIndirectBufferHandle);
   [[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
-  void            rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd);
+  void            rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, rhi::CommandBuffer& cmd);
   void            rebuildGPUDrivenScene(const SceneAsset& asset,
                                         const SceneUploadPlan& plan,
                                         const SceneUploadResult& uploadResult,
-                                        VkCommandBuffer cmd);
+                                        rhi::CommandBuffer& cmd);
   void            appendSceneObjectDraw(uint64_t meshKey, MeshHandle meshHandle, uint32_t drawIndex, SceneDrawBucket bucket);
   void            clearGPUDrivenScene();
   void            flushPendingSceneUploads();
@@ -927,7 +929,7 @@ private:
   void            initIBLResources();
   void            shutdownIBLResources();
   void            updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex);
-  void            updateLightingDescriptorSet(uint32_t frameIndex);
+  void            updateLightingArgumentTable(uint32_t frameIndex);
   void            initLightingPipelines();
   void            shutdownLightingPipelines();
   void            initPhase7Resources();
@@ -995,15 +997,10 @@ private:
   std::vector<uint32_t>              m_alphaTestDrawIndices;
   std::vector<uint32_t>              m_transparentDrawIndices;
   rhi::ArgumentLayoutHandle          m_visibilitySortArgumentLayout{};
-  std::unique_ptr<rhi::PipelineLayout> m_visibilitySortPipelineLayout;
-  VkPipeline                         m_visibilitySortPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_visibilitySortPipelineHandle{};
   std::vector<VisibilitySortFrameResources> m_visibilitySortFrames;
-  VkDescriptorPool                   m_transparentVisibilityPatchDescriptorPool{VK_NULL_HANDLE};
-  VkDescriptorSetLayout              m_transparentVisibilityPatchSetLayout{VK_NULL_HANDLE};
-  VkPipelineLayout                   m_transparentVisibilityPatchPipelineLayout{VK_NULL_HANDLE};
-  VkPipeline                         m_transparentVisibilityPatchPipeline{VK_NULL_HANDLE};
-  PipelineHandle                     m_transparentVisibilityPatchPipelineHandle{};  // Wave 9: adopted compute pipeline handle
+  PipelineHandle                     m_transparentVisibilityPatchPipelineHandle{};
+  rhi::ArgumentLayoutHandle          m_transparentVisibilityPatchArgumentLayout{};
   std::vector<TransparentVisibilityFrameResources> m_transparentVisibilityPatchFrames;
   // Wave 9: lighting-input (set LSetTextures) and lighting-scene (set LSetScene) are RHI
   // ArgumentLayouts + owned ArgumentTables. The coarse-culling set (point/spot + clustered)
@@ -1014,25 +1011,23 @@ private:
   std::vector<rhi::BufferHandle>     m_lightCoarseCullingBufferHandles;
   // Stable light-resource buffer handles (owned=false) consumed by the lighting-input set.
   std::vector<rhi::BufferHandle>     m_lightingInputBufferHandles;
-  std::vector<BindGroupHandle>       m_lightCoarseCullingBindGroups;
-  std::vector<BindGroupHandle>       m_lightingSceneBindGroups;
-  std::vector<BindGroupHandle>       m_lightingInputBindGroups;
-  VkSampler                          m_linearClampSampler{VK_NULL_HANDLE};
+  std::vector<rhi::ArgumentTableHandle> m_lightCoarseCullingArgumentTables;
+  std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
+  std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
+  uintptr_t                          m_linearClampSampler{0};
   rhi::SamplerHandle                 m_linearClampSamplerHandle{};
   rhi::SamplerHandle                 m_iblCubeSamplerHandle{};
   rhi::SamplerHandle                 m_iblLutSamplerHandle{};
-  // Adopted (owned=false) RHI view handles for the per-frame native VkImageViews fed into
-  // the lighting-input set; re-registered when the underlying native view changes.
-  rhi::TextureViewHandle             m_iblEnvViewHandle{};      VkImageView m_iblEnvViewNative{VK_NULL_HANDLE};
-  rhi::TextureViewHandle             m_aoViewHandle{};          VkImageView m_aoViewNative{VK_NULL_HANDLE};
-  rhi::TextureViewHandle             m_ssrViewHandle{};         VkImageView m_ssrViewNative{VK_NULL_HANDLE};
-  rhi::TextureViewHandle             m_shadowMapViewHandle{};   VkImageView m_shadowMapViewNative{VK_NULL_HANDLE};
-  std::unique_ptr<rhi::PipelineLayout> m_lightCoarseCullingPipelineLayout;
-  std::unique_ptr<rhi::PipelineLayout> m_lightPipelineLayout;
+  // Adopted (owned=false) RHI view handles for per-frame backend views fed into
+  // the lighting-input set; re-registered when the underlying backend token changes.
+  rhi::TextureViewHandle             m_iblEnvViewHandle{};      uintptr_t m_iblEnvViewToken{0};
+  rhi::TextureViewHandle             m_aoViewHandle{};          uintptr_t m_aoViewToken{0};
+  rhi::TextureViewHandle             m_ssrViewHandle{};         uintptr_t m_ssrViewToken{0};
+  std::array<rhi::ArgumentLayoutHandle, 2> m_lightPipelineArgumentLayouts{};
   PipelineHandle                     m_pointLightCoarseCullingPipeline{};
   PipelineHandle                     m_spotLightCoarseCullingPipeline{};
   // Fullscreen graphics pipelines now live in the device pipeline registry; only
-  // their handles are tracked here. The native VkPipeline is owned by the registry.
+  // their handles are tracked here.
   PipelineHandle                     m_gpuDrivenLightHdrPipeline{};
   PipelineHandle                     m_gpuDrivenSkyboxPipeline{};
   PipelineHandle                     m_gpuDrivenTAAResolvePipeline{};
@@ -1041,40 +1036,31 @@ private:
   PipelineHandle                     m_gpuDrivenBloomUpsamplePipeline{};
   PipelineHandle                     m_gpuDrivenFinalColorPipeline{};
   PipelineHandle                     m_gpuDrivenVelocityPipeline{};
-  VkPipeline                         m_pointLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_spotLightCoarseCullingVkPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_clusteredLightCullingVkPipeline{VK_NULL_HANDLE};
   PipelineHandle                     m_clusteredLightCullingPipeline{};
-  // Wave 9: AO set is an RHI ArgumentLayout + owned ArgumentTables; AO/SSR pipeline
-  // layouts are RHI VulkanPipelineLayouts (SSR set layout comes from m_ssrLayoutHandle).
+  // Wave 9: AO/SSR sets are RHI ArgumentLayouts + owned/temporary ArgumentTables.
   rhi::ArgumentLayoutHandle          m_aoArgumentLayout{};
-  std::unique_ptr<rhi::PipelineLayout> m_aoPipelineLayout;
-  std::unique_ptr<rhi::PipelineLayout> m_ssrPipelineLayout;
-  VkPipeline                         m_gtaoPipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_aoDenoisePipeline{VK_NULL_HANDLE};
-  VkPipeline                         m_ssrTracePipeline{VK_NULL_HANDLE};
   // Adopted (owned=false) view handles for the AO raw / denoised storage images, fed into
-  // the AO ArgumentTables; re-registered when the native view changes.
-  rhi::TextureViewHandle             m_aoRawViewHandle{};       VkImageView m_aoRawViewNative{VK_NULL_HANDLE};
-  rhi::TextureViewHandle             m_aoDenoisedViewHandle{};  VkImageView m_aoDenoisedViewNative{VK_NULL_HANDLE};
+  // the AO ArgumentTables; re-registered when the backend view token changes.
+  rhi::TextureViewHandle             m_aoRawViewHandle{};       uintptr_t m_aoRawViewToken{0};
+  rhi::TextureViewHandle             m_aoDenoisedViewHandle{};  uintptr_t m_aoDenoisedViewToken{0};
   // Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
-  // so the AO/SSR passes record through cmd-> verbs instead of raw vkCmd*. AO uses
+  // so the AO/SSR passes record through CommandBuffer verbs instead of raw vkCmd*. AO uses
   // persistent adopted sets; SSR builds a per-frame temporary bind group from
-  // m_ssrLayoutHandle (see acquireSSRTempBindGroup).
+  // m_ssrLayoutHandle (see acquireSSRTempArgumentTable).
   PipelineHandle                     m_gtaoPipelineHandle{};
   PipelineHandle                     m_aoDenoisePipelineHandle{};
   PipelineHandle                     m_ssrTracePipelineHandle{};
   rhi::ArgumentLayoutHandle          m_ssrLayoutHandle{};
   rhi::TextureViewHandle             m_ssrRawViewHandle{};  // Wave 8: adopted storage-image view for SSR temp ArgumentWrite
   rhi::TextureViewHandle             m_shadowAtlasViewHandle{};  // Wave 9: registry handle for the shadow-atlas depth view
-  std::vector<BindGroupHandle>       m_aoBindGroups;
-  std::vector<BindGroupHandle>       m_aoDenoiseBindGroups;
+  std::vector<rhi::ArgumentTableHandle> m_aoArgumentTables;
+  std::vector<rhi::ArgumentTableHandle> m_aoDenoiseArgumentTables;
   utils::ImageResource               m_aoRaw{};
   utils::ImageResource               m_aoDenoised{};
   utils::ImageResource               m_ssrRaw{};
   utils::ImageResource               m_shadowAtlas{};
-  VkExtent2D                         m_phase7HalfExtent{};
-  VkExtent2D                         m_shadowAtlasExtent{2048u, 2048u};
+  rhi::Extent2D                      m_phase7HalfExtent{};
+  rhi::Extent2D                      m_shadowAtlasExtent{2048u, 2048u};
   uint32_t                           m_shadowAtlasTileSize{512u};
   uint32_t                           m_shadowAtlasAllocatedTiles{0};
   std::vector<shaderio::LightData>   m_gpuDrivenPointLights;
@@ -1082,8 +1068,9 @@ private:
   utils::ImageResource               m_iblEnvironment{};
   IBLResources                       m_iblResources{};
   std::vector<utils::Buffer>         m_gpuDrivenStagingBuffers;
-  VkFormat                           m_iblEnvironmentFormat{VK_FORMAT_UNDEFINED};
-  VkExtent2D                         m_iblEnvironmentExtent{};
+  std::vector<rhi::BufferHandle>     m_gpuDrivenRhiStagingBuffers;
+  rhi::TextureFormat                 m_iblEnvironmentFormat{rhi::TextureFormat::undefined};
+  rhi::Extent2D                      m_iblEnvironmentExtent{};
   uint32_t                           m_iblEnvironmentMipCount{0};
   uint64_t                           m_iblEnvironmentEstimatedBytes{0};
   bool                               m_iblEnvironmentLoaded{false};

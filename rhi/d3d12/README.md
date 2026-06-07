@@ -53,8 +53,8 @@ D3D12 provides separate heap types for different descriptor kinds:
 
 | RHI Concept | D3D12 Implementation |
 |-------------|---------------------|
-| BindTableLayout | Root signature descriptor table parameters |
-| BindTable | Offset into global descriptor heap |
+| DescriptorTableLayout | Root signature descriptor table parameters |
+| DescriptorTable | Offset into global descriptor heap |
 | Logical Index | Offset within descriptor table |
 | Update | Copy descriptors to heap using CopyDescriptorsSimple |
 
@@ -82,20 +82,20 @@ cmdList->SetGraphicsRootDescriptorTable(0, heapStartHandle);
 
 ## Command Recording Architecture
 
-### Command Allocator and Command List
+### Command Allocator and Command Buffer
 
 D3D12 uses a two-level system for command recording:
 
 ```
 ID3D12CommandQueue
   └─ ID3D12CommandAllocator (manages command memory per frame)
-      └─ ID3D12GraphicsCommandList (records commands)
+      └─ D3D12 graphics command buffer (records commands)
 ```
 
 ### Key Differences from Vulkan
 
 1. **Command allocators**: Each frame-in-flight needs its own allocator
-2. **No explicit begin/end**: Command lists are reset with `Reset(allocator, pso)`
+2. **No explicit begin/end**: D3D12 graphics command buffers are reset with `Reset(allocator, pso)`
 3. **No render passes**: Use `OMSetRenderTargets()` to set render targets
 4. **Implicit synchronization**: No explicit barriers needed (but ResourceBarrier is available)
 
@@ -104,24 +104,24 @@ ID3D12CommandQueue
 ```cpp
 // Begin frame
 commandAllocator->Reset();
-commandList->Reset(commandAllocator, nullptr);
+graphicsCommands->Reset(commandAllocator, nullptr);
 
 // Set render targets (no beginRenderPass)
 D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[] = { rtvHandle };
-commandList->OMSetRenderTargets(1, rtvHandles, FALSE, nullptr);
+graphicsCommands->OMSetRenderTargets(1, rtvHandles, FALSE, nullptr);
 
 // Clear render target
 float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+graphicsCommands->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
 // Record commands
-commandList->SetGraphicsRootSignature(rootSignature);
-commandList->SetPipelineState(pipelineState);
-commandList->DrawInstanced(3, 1, 0, 0);
+graphicsCommands->SetGraphicsRootSignature(rootSignature);
+graphicsCommands->SetPipelineState(pipelineState);
+graphicsCommands->DrawInstanced(3, 1, 0, 0);
 
 // End frame
-commandList->Close();
-commandQueue->ExecuteCommandLists(1, &commandList);
+graphicsCommands->Close();
+commandQueue->ExecutegraphicsCommandss(1, &graphicsCommands);
 ```
 
 ## Presentation Architecture
@@ -169,7 +169,7 @@ D3D12 doesn't have timeline semaphores, but `ID3D12Fence` provides similar behav
 uint64_t frameCounter = 0;
 
 // Submit work
-commandQueue->ExecuteCommandLists(1, &commandList);
+commandQueue->ExecutegraphicsCommandss(1, &graphicsCommands);
 commandQueue->Signal(fence, ++frameCounter);
 
 // Wait for frame
@@ -194,7 +194,7 @@ barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
 
 // Insert barrier
-commandList->ResourceBarrier(1, &barrier);
+graphicsCommands->ResourceBarrier(1, &barrier);
 ```
 
 ## Pipeline Creation
@@ -329,7 +329,7 @@ D3D12 uses root constants (limited to 256 bytes):
 rootParameters[0].InitAsConstants(pushConstantSize / 4, 0, 0, D3D12_SHADER_VISIBILITY_ALL);
 
 // Set during rendering
-commandList->SetGraphicsRoot32BitConstants(0, pushConstantSize / 4, data, 0);
+graphicsCommands->SetGraphicsRoot32BitConstants(0, pushConstantSize / 4, data, 0);
 ```
 
 ## Dynamic State

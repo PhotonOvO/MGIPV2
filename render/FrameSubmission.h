@@ -4,6 +4,14 @@
 #include "../rhi/RHIFrameContext.h"
 #include "../rhi/RHISwapchain.h"
 
+#ifndef __ANDROID__
+#include <GLFW/glfw3.h>
+#endif
+
+#ifdef _WIN32
+#include <timeapi.h>
+#endif
+
 namespace utils {
 
 class FramePacer
@@ -94,7 +102,7 @@ static double getMonitorsMinRefreshRate()
 namespace demo {
 
 bool                   acquireSwapchainImage(rhi::Swapchain& swapchain, uint32_t& imageIndexOut);
-rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandList& commandList);
+rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandBuffer& commandBuffer);
 rhi::PresentResult     presentFrame(rhi::Swapchain& swapchain);
 
 }  // namespace demo

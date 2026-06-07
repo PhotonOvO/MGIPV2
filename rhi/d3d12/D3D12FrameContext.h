@@ -17,10 +17,10 @@ public:
   void deinit() override;
 
   void              beginFrame() override;
-  SubmissionReceipt endFrame(CommandList* cmdList) override;
+  SubmissionReceipt endFrame(CommandBuffer* cmdBuffer) override;
   void              setSwapchain(Swapchain* swapchain) override;
 
-  SubmissionReceipt submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount) override;
+  SubmissionReceipt submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount) override;
   void              waitForSubmission(SubmissionReceipt receipt) override;
 
   FrameData& getCurrentFrame() override;
@@ -44,12 +44,11 @@ public:
 private:
   struct FrameSlot
   {
-    void*        commandAllocator{nullptr};  // ID3D12CommandAllocator
-    void*        commandList{nullptr};       // ID3D12GraphicsCommandList
-    void*        fence{nullptr};             // ID3D12Fence
-    void*        fenceEvent{nullptr};        // HANDLE
-    uint64_t     fenceValue{0};
-    CommandList* commandListWrapper{nullptr};
+    void*    commandAllocator{nullptr};  // ID3D12CommandAllocator
+    void*    commandBuffer{nullptr};     // D3D12 graphics command buffer
+    void*    fence{nullptr};             // ID3D12Fence
+    void*    fenceEvent{nullptr};        // HANDLE
+    uint64_t fenceValue{0};
   };
 
   // NOTES: D3D12 Frame Synchronization Strategy
@@ -63,9 +62,9 @@ private:
   //
   // Frame Flow:
   // 1. beginFrame(): Reset command allocator for current frame
-  // 2. Record commands into command list
+  // 2. Record commands into the graphics command buffer
   // 3. endFrame():
-  //    - Close command list
+  //    - Close graphics command buffer
   //    - Signal fence with ++m_frameCounter
   //    - Execute command list on queue
   // 4. nextFrame():
@@ -77,7 +76,7 @@ private:
   // - WaitForSingleObject(event, timeout)
   // - Or poll: fence->GetCompletedValue() >= waitValue
 
-  SubmissionReceipt submitCurrentFrame(CommandList& commandList);
+  SubmissionReceipt submitCurrentFrame(CommandBuffer& commandBuffer);
 
   void* m_device{nullptr};        // ID3D12Device
   void* m_commandQueue{nullptr};  // ID3D12CommandQueue

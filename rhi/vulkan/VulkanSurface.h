@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../common/Common.h"
+#include "internal/VulkanCommon.h"
 #include "../RHISurface.h"
 
 namespace demo {
@@ -15,9 +15,9 @@ public:
   void                init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window) override;
   void                deinit() override;
   SurfaceCapabilities queryCapabilities() const override;
-  uint64_t            getNativeHandle() const override;
+  uint64_t            getBackendHandle() const override;
 
-  [[nodiscard]] VkSurfaceKHR nativeHandle() const { return m_surface; }
+  [[nodiscard]] VkSurfaceKHR backendHandle() const { return m_surface; }
 
 private:
   VkInstance       m_instance{VK_NULL_HANDLE};

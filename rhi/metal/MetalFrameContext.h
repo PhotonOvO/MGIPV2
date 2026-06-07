@@ -17,10 +17,10 @@ public:
   void deinit() override;
 
   void              beginFrame() override;
-  SubmissionReceipt endFrame(CommandList* cmdList) override;
+  SubmissionReceipt endFrame(CommandBuffer* cmdBuffer) override;
   void              setSwapchain(Swapchain* swapchain) override;
 
-  SubmissionReceipt submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount) override;
+  SubmissionReceipt submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount) override;
   void              waitForSubmission(SubmissionReceipt receipt) override;
 
   FrameData& getCurrentFrame() override;
@@ -44,10 +44,9 @@ public:
 private:
   struct FrameSlot
   {
-    CommandList* commandList{nullptr};
-    uint64_t     lastSignalValue{0};
-    void*        commandBuffer{nullptr};      // id<MTLCommandBuffer>
-    void*        completionHandler{nullptr};  // Tracking object for completion
+    uint64_t lastSignalValue{0};
+    void*    commandBuffer{nullptr};      // id<MTLCommandBuffer>
+    void*    completionHandler{nullptr};  // Tracking object for completion
   };
 
   // NOTES: Metal Frame Synchronization Strategy
@@ -68,7 +67,7 @@ private:
   // NOTES: Metal's synchronization is implicit and event-driven
   // No explicit timeline semaphores, but we can simulate the behavior
 
-  SubmissionReceipt submitCurrentFrame(CommandList& commandList);
+  SubmissionReceipt submitCurrentFrame(CommandBuffer& commandBuffer);
 
   void* m_device{nullptr};  // id<MTLDevice>
   void* m_queue{nullptr};   // id<MTLCommandQueue>

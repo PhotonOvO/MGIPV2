@@ -18,7 +18,8 @@ GPUDrivenLightCullingPass::GPUDrivenLightCullingPass(GPUDrivenRenderer* renderer
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightCullingPass::getDependencies() const
 {
   static const std::array<PassResourceDependency, 7> dependencies = {
-      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
+                                      rhi::ResourceState::ShaderRead),
       PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute),
       PassResourceDependency::buffer(kPassPointLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::compute),
       PassResourceDependency::buffer(kPassSpotLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::compute),
@@ -31,38 +32,38 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightCullingPass::getDepe
 
 void GPUDrivenLightCullingPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenLightCulling");
+  context.commandBuffer->beginEvent("GPUDrivenLightCulling");
 
-  const BindGroupHandle bindGroup = m_renderer->getCurrentLightCullingBindGroup();
-  if(context.params->cameraUniforms != nullptr && !bindGroup.isNull())
+  const rhi::ArgumentTableHandle argumentTable = m_renderer->getCurrentLightCullingArgumentTable();
+  if(context.params->cameraUniforms != nullptr && !argumentTable.isNull())
   {
-    rhi::ComputeEncoder* enc = context.cmdBuffer->beginComputePass();
-    const rhi::ArgumentTableHandle argTable{bindGroup.index, bindGroup.generation};  // bridge (Wave 8)
+    rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();
     const auto dispatchLightKernel = [&](PipelineHandle handle, uint32_t lightCount) {
       if(handle.isNull() || lightCount == 0u)
       {
         return;
       }
       enc->setPipeline(handle);
-      enc->setArgumentTable(0, argTable);
+      enc->setArgumentTable(0, argumentTable);
       enc->dispatch(rhi::DispatchDesc{(lightCount + kLightCoarseCullingThreadCount - 1u) / kLightCoarseCullingThreadCount, 1u, 1u});
     };
 
     dispatchLightKernel(m_renderer->getLightCullingPipelineHandle(), m_renderer->getActivePointLightCount());
     dispatchLightKernel(m_renderer->getSpotLightCullingPipelineHandle(), m_renderer->getActiveSpotLightCount());
-    context.cmdBuffer->endEncoding();
+    context.commandBuffer->endEncoding();
 
-    // Coarse bounds are consumed by the clustered-culling compute pass and the lighting fragment stage.
-    context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
+    // Local output barrier: point/spot light kernels write coarse bounds consumed
+    // by later culling/lighting paths through resources outside this execute body.
+    context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
                                rhi::HazardFlags::bufferWrites);
   }
 
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

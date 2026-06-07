@@ -38,11 +38,6 @@ else()
 endif()
 
 option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
-option(TRACY_ENABLE "Enable Tracy profiler integration" ON)
-if(ANDROID AND TRACY_ENABLE)
-  message(STATUS "Tracy profiler: disabled for Android")
-  set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiler integration" FORCE)
-endif()
 
 include(FetchContent)
 
@@ -172,23 +167,6 @@ else()
   target_link_libraries(imgui_demo PUBLIC glfw)
 endif()
 
-#====================================================================================
-# Tracy Profiler - CPU/GPU profiling
-#====================================================================================
-if(TRACY_ENABLE)
-  set(TRACY_STATIC ON CACHE BOOL "" FORCE)
-  FetchContent_Declare(
-    tracy
-    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-    GIT_TAG v0.13.1
-    EXCLUDE_FROM_ALL
-  )
-  FetchContent_MakeAvailable(tracy)
-
-  # Tracy provides TracyClient target with proper dependencies
-  target_compile_definitions(TracyClient PUBLIC TRACY_ENABLE)
-endif()
-
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
 set(STB_IMAGE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
 if(NOT EXISTS "${STB_IMAGE_PATH}")
@@ -248,12 +226,10 @@ add_library(demo_core STATIC
   rhi/RHIArgumentTable.h
   rhi/RHIEncoder.h
   rhi/RHICommandBuffer.h
-  rhi/RHICommandList.h
   rhi/RHICommandPool.h
   rhi/RHISynchronization.h
   rhi/RHISwapchain.h
   rhi/RHIDevice.h
-  rhi/RHIDescriptor.h
   rhi/RHISurface.h
   rhi/RHIQueue.h
   rhi/RHIFrameContext.h
@@ -267,8 +243,6 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanDevice.cpp
   rhi/vulkan/VulkanFrameContext.h
   rhi/vulkan/VulkanFrameContext.cpp
-  rhi/vulkan/VulkanCommandList.h
-  rhi/vulkan/VulkanCommandList.cpp
   rhi/vulkan/VulkanCommandBuffer.h
   rhi/vulkan/VulkanCommandBuffer.cpp
   rhi/vulkan/VulkanResourceTable.h
@@ -277,8 +251,6 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanCommandPool.cpp
   rhi/vulkan/VulkanSynchronization.h
   rhi/vulkan/VulkanSynchronization.cpp
-  rhi/vulkan/VulkanDescriptor.h
-  rhi/vulkan/VulkanDescriptor.cpp
   rhi/vulkan/VulkanFrameOps.h
   rhi/vulkan/VulkanFrameOps.cpp
   rhi/vulkan/VulkanPipelines.h
@@ -352,7 +324,7 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenImguiPass.cpp
   render/passes/GPUDrivenVisibilitySortPass.h
   render/passes/GPUDrivenVisibilitySortPass.cpp
-  render/BindGroups.h
+  render/ArgumentTables.h
   render/Pass.h
   render/TransientAllocator.cpp
   render/TransientAllocator.h
@@ -369,6 +341,8 @@ add_library(demo_core STATIC
   render/DrawStream.h
   render/DrawStreamDecoder.cpp
   render/DrawStreamDecoder.h
+  render/DrawStreamRecorder.cpp
+  render/DrawStreamRecorder.h
   render/DrawStreamWriter.cpp
   render/DrawStreamWriter.h
   render/BatchUploadContext.cpp
@@ -381,7 +355,6 @@ add_library(demo_core STATIC
   common/Handles.h
   common/HandlePool.h
   common/ProfilerMarkers.h
-  common/TracyProfiling.h
   loader/GltfLoader.h
   loader/GltfLoader.cpp
   loader/Ktx2Loader.h
@@ -420,10 +393,6 @@ if(NOT ANDROID)
     rhi/metal/MetalDevice.cpp
     rhi/metal/MetalSwapchain.h
     rhi/metal/MetalSwapchain.cpp
-    rhi/metal/MetalCommandList.h
-    rhi/metal/MetalCommandList.cpp
-    rhi/metal/MetalDescriptor.h
-    rhi/metal/MetalDescriptor.cpp
     rhi/metal/MetalPipelines.h
     rhi/metal/MetalPipelines.cpp
     rhi/metal/MetalFrameContext.h
@@ -432,10 +401,6 @@ if(NOT ANDROID)
     rhi/d3d12/D3D12Device.cpp
     rhi/d3d12/D3D12Swapchain.h
     rhi/d3d12/D3D12Swapchain.cpp
-    rhi/d3d12/D3D12CommandList.h
-    rhi/d3d12/D3D12CommandList.cpp
-    rhi/d3d12/D3D12Descriptor.h
-    rhi/d3d12/D3D12Descriptor.cpp
     rhi/d3d12/D3D12Pipelines.h
     rhi/d3d12/D3D12Pipelines.cpp
     rhi/d3d12/D3D12FrameContext.h
@@ -458,9 +423,6 @@ if(USE_SLANG)
 endif()
 if(VK_SEMAPHORE_DEBUG)
   target_compile_definitions(demo_core PUBLIC NVVK_SEMAPHORE_DEBUG=1)
-endif()
-if(TRACY_ENABLE)
-  target_compile_definitions(demo_core PUBLIC TRACY_ENABLE)
 endif()
 
 target_include_directories(demo_core
@@ -520,10 +482,6 @@ if(ANDROID)
   target_link_libraries(demo_core PUBLIC android log native_app_glue)
 else()
   target_link_libraries(demo_core PUBLIC glfw)
-endif()
-
-if(TRACY_ENABLE)
-  target_link_libraries(demo_core PUBLIC TracyClient)
 endif()
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)

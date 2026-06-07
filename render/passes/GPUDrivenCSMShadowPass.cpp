@@ -1,6 +1,8 @@
 #include "GPUDrivenCSMShadowPass.h"
 
+#include "../ArgumentTables.h"
 #include "../GPUDrivenRenderer.h"
+#include "../DrawStreamRecorder.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
 
@@ -26,15 +28,15 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenCSMShadowPass::getDepende
 void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
 {
   if(m_renderer == nullptr || context.params == nullptr || context.transientAllocator == nullptr
-     || context.cmdBuffer == nullptr || context.executor == nullptr)
+     || context.commandBuffer == nullptr || context.executor == nullptr)
   {
     return;
   }
 
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
   if(sceneView == nullptr || !sceneView->usePersistentCullingObjects || sceneView->shadowPackedMeshes == nullptr
-     || sceneView->shadowPackedMeshCount == 0 || sceneView->shadowPackedVertexBuffer == VK_NULL_HANDLE
-     || sceneView->shadowPackedIndexBuffer == VK_NULL_HANDLE)
+     || sceneView->shadowPackedMeshCount == 0 || sceneView->shadowPackedVertexBuffer == 0
+     || sceneView->shadowPackedIndexBuffer == 0)
   {
     return;
   }
@@ -51,45 +53,35 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenCSMShadow");
+  context.commandBuffer->beginEvent("GPUDrivenCSMShadow");
 
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
   const uint32_t cascadeCount = csm.getCascadeCount();
-  const auto transitionCascade = [&](rhi::ResourceState before, rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(csm.getCascadeImage())),
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = rhi::TextureAspect::depth, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
-  transitionCascade(rhi::ResourceState::General, rhi::ResourceState::DepthStencilAttachment);
 
   const uint32_t frameIndex = context.frameIndex;
   const bool hasShadowIndirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(frameIndex) != 0;
-  const bool hasDrawBindGroups = !m_renderer->getCSMShadowMDIDrawBindGroup(frameIndex, 0).isNull();
+  const bool hasDrawArgumentTables = !m_renderer->getCSMShadowMDIDrawArgumentTable(frameIndex, 0).isNull();
   const uint32_t shadowIndirectCapacity = m_renderer->getShadowCullingMeshCapacity(frameIndex);
-  if(!hasShadowIndirectBuffer || !hasDrawBindGroups
+  if(!hasShadowIndirectBuffer || !hasDrawArgumentTables
      || shadowIndirectCapacity < sceneView->shadowPackedMeshCount)
   {
-    if(hasShadowIndirectBuffer && hasDrawBindGroups
+    if(hasShadowIndirectBuffer && hasDrawArgumentTables
        && shadowIndirectCapacity < sceneView->shadowPackedMeshCount)
     {
       LOGW("Skipping GPUDrivenCSMShadow: indirect capacity %u smaller than shadow mesh count %u",
            shadowIndirectCapacity,
            sceneView->shadowPackedMeshCount);
     }
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEvent();
     return;
   }
 
   const bool useShadowCulling = !m_renderer->getShadowCullingPipelineHandle().isNull()
-                                && m_renderer->getShadowCullingDescriptorSetOpaque(frameIndex) != 0;
+                                && !m_renderer->getShadowCullingArgumentTable(frameIndex).isNull();
   if(!useShadowCulling)
   {
     LOGW("Skipping GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEvent();
     return;
   }
 
@@ -98,31 +90,31 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     if(useShadowCulling)
     {
       const PipelineHandle computePipeline = m_renderer->getShadowCullingPipelineHandle();
-      const BindGroupHandle computeBindGroup = m_renderer->getShadowCullingBindGroup(frameIndex);
+      const rhi::ArgumentTableHandle computeTable = m_renderer->getShadowCullingArgumentTable(frameIndex);
       const uint64_t indirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(frameIndex);
-      if(!computePipeline.isNull() && !computeBindGroup.isNull() && indirectBuffer != 0)
+      if(!computePipeline.isNull() && !computeTable.isNull() && indirectBuffer != 0)
       {
         const shaderio::ShadowCullPushConstants pushConstants =
             m_renderer->buildShadowCullPushConstants(cascadeIndex, sceneView->shadowPackedMeshCount);
-        rhi::ComputeEncoder* cenc = context.cmdBuffer->beginComputePass();
+        rhi::ComputeEncoder* cenc = context.commandBuffer->beginComputePass();
         cenc->setPipeline(computePipeline);
-        cenc->setArgumentTable(0, rhi::ArgumentTableHandle{computeBindGroup.index, computeBindGroup.generation});  // bridge (Wave 8)
-        cenc->setRootConstants(0, &pushConstants, sizeof(pushConstants));
+        cenc->setArgumentTable(0, computeTable);
+        cenc->setRootConstants(kPrimaryRootConstantsSlot, &pushConstants, sizeof(pushConstants));
         cenc->dispatch(rhi::DispatchDesc{(sceneView->shadowPackedMeshCount + shaderio::LGPUCullingThreadCount - 1u)
                                              / shaderio::LGPUCullingThreadCount,
                                          1u, 1u});
-        context.cmdBuffer->endEncoding();
+        context.commandBuffer->endEncoding();
 
-        // Per-cascade indirect draw args are consumed by drawIndexedIndirect below.
-        context.cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput, rhi::HazardFlags::drawArguments);
+        // Same-pass barrier: per-cascade culling writes indirect draw arguments
+        // consumed by drawIndexedIndirect below inside the same cascade pass.
+        context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput, rhi::HazardFlags::drawArguments);
       }
     }
 
-    const VkExtent2D cascadeExtent = csm.getCascadeExtent();
-    const rhi::Extent2D extent{cascadeExtent.width, cascadeExtent.height};
+    const rhi::Extent2D extent = csm.getCascadeExtent();
 
     const rhi::DepthTargetDesc depthTarget{
-        .texture = {},
+        .texture = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
         .view = m_renderer->getCSMCascadeViewHandle(cascadeIndex),
         .state = rhi::ResourceState::DepthStencilAttachment,
         .loadOp = rhi::LoadOp::clear,
@@ -136,15 +128,14 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
         .colorTargetCount = 0,
         .depthTarget = &depthTarget,
     };
-    rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(passDesc);
+    rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);
     enc->setViewport(
         rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
     enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
     enc->setPipeline(csmPipeline);
-    const BindGroupHandle materialBindGroup = m_renderer->getGraphicsMaterialBindGroup();
-    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                          rhi::ArgumentTableHandle{materialBindGroup.index, materialBindGroup.generation});  // bridge (Wave 8)
+    const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
 
     shaderio::CameraUniforms cascadeCamera{};
     cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
@@ -169,40 +160,36 @@ void GPUDrivenCSMShadowPass::execute(const PassContext& context) const
     cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
     const TransientAllocator::Allocation cameraAlloc = context.transientAllocator->allocateAndWrite(cascadeCamera, 256);
 
-    const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(frameIndex);
-    if(!cameraBindGroupHandle.isNull())
+    const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(frameIndex);
+    if(!cameraTable.isNull())
     {
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                            rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, 0, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraTable);
     }
 
-    const BindGroupHandle drawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
-    if(!drawBindGroupHandle.isNull())
+    const rhi::ArgumentTableHandle drawTable = m_renderer->getCSMShadowMDIDrawArgumentTable(frameIndex, cascadeIndex);
+    if(!drawTable.isNull())
     {
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
-                            rhi::ArgumentTableHandle{drawBindGroupHandle.index, drawBindGroupHandle.generation});  // bridge
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw, drawTable);
 
       const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
       const rhi::BufferHandle indexBufferRHI  = m_renderer->getShadowPackedIndexBufferRHIHandle();
       constexpr uint64_t vertexOffset = 0;
       enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
       enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
-      enc->drawIndexedIndirect(rhi::DrawIndirectDesc{
+      DrawStreamRecorder::recordIndexedIndirect(*enc, DrawStreamRecorder::IndexedIndirectRecordDesc{
           .argsBuffer = m_renderer->getShadowCullingIndirectBufferRHIHandle(frameIndex),
           .offset     = 0,
           .drawCount  = sceneView->shadowPackedMeshCount,
-          .stride     = sizeof(VkDrawIndexedIndirectCommand),
+          .stride     = 0,
       });
     }
 
-    context.cmdBuffer->endEncoding();
+    context.commandBuffer->endEncoding();
   }
 
-  transitionCascade(rhi::ResourceState::DepthStencilAttachment, rhi::ResourceState::General);
-
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

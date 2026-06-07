@@ -1,7 +1,6 @@
 #pragma once
 
 #include "RHICommandBuffer.h"
-#include "RHICommandList.h"
 #include "RHIResourceLifetime.h"
 #include "RHISwapchain.h"
 #include "RHISynchronization.h"
@@ -14,7 +13,6 @@ namespace rhi {
 
 struct FrameData
 {
-  CommandList* commandList{nullptr};
   uint64_t     lastSignalValue{0};
   void*        userData{nullptr};
 };
@@ -28,7 +26,7 @@ public:
   virtual void deinit()                                                                 = 0;
 
   virtual void              beginFrame()                       = 0;
-  virtual SubmissionReceipt endFrame(CommandList* cmdList)     = 0;
+  virtual SubmissionReceipt endFrame(CommandBuffer* cmdBuffer)  = 0;
   virtual void              setSwapchain(Swapchain* swapchain) = 0;
 
   virtual FrameData& getCurrentFrame()    = 0;
@@ -50,8 +48,6 @@ public:
   virtual DeferredDestructionQueue&       getDestructionQueue()       = 0;
   virtual const DeferredDestructionQueue& getDestructionQueue() const = 0;
 
-  // One-shot recording facade for the current frame's native command buffer
-  // (Wave 0 contract). Default asserts; Vulkan implements it in Wave 1.
   virtual CommandBuffer* getCommandBuffer() { assert(false && "getCommandBuffer not implemented"); return nullptr; }
 };
 

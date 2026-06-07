@@ -1,10 +1,8 @@
 #include "PassExecutor.h"
 #include "../common/ProfilerMarkers.h"
-#include "../common/TracyProfiling.h"
 #include "../rhi/RHIDevice.h"
 
 #include <cassert>
-#include <unordered_map>
 
 namespace demo {
 
@@ -13,20 +11,20 @@ namespace {
 class ScopedCommandEvent
 {
 public:
-  ScopedCommandEvent(rhi::CommandList* cmd, const char* name)
-      : m_cmd(cmd)
+  ScopedCommandEvent(rhi::CommandBuffer* commandBuffer, const char* name)
+      : m_commandBuffer(commandBuffer)
   {
-    if(m_cmd != nullptr)
+    if(m_commandBuffer != nullptr)
     {
-      m_cmd->beginEvent(name);
+      m_commandBuffer->beginEvent(name);
     }
   }
 
   ~ScopedCommandEvent()
   {
-    if(m_cmd != nullptr)
+    if(m_commandBuffer != nullptr)
     {
-      m_cmd->endEvent();
+      m_commandBuffer->endEvent();
     }
   }
 
@@ -34,27 +32,8 @@ public:
   ScopedCommandEvent& operator=(const ScopedCommandEvent&) = delete;
 
 private:
-  rhi::CommandList* m_cmd{nullptr};
+  rhi::CommandBuffer* m_commandBuffer{nullptr};
 };
-
-rhi::PipelineStage toPipelineStage(demo::rhi::ShaderStage stageMask)
-{
-  const uint32_t     mask   = static_cast<uint32_t>(stageMask);
-  rhi::PipelineStage result = rhi::PipelineStage::None;
-  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::vertex)) != 0)
-  {
-    result |= rhi::PipelineStage::VertexShader;
-  }
-  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::fragment)) != 0)
-  {
-    result |= rhi::PipelineStage::FragmentShader;
-  }
-  if((mask & static_cast<uint32_t>(demo::rhi::ShaderStage::compute)) != 0)
-  {
-    result |= rhi::PipelineStage::Compute;
-  }
-  return rhi::any(result) ? result : rhi::PipelineStage::TopOfPipe;
-}
 
 // Wave 7: map the declarative ShaderStage mask to the StageFlags used by the
 // stage-barrier main path (CommandBuffer::barrier -> VkMemoryBarrier2).
@@ -68,6 +47,20 @@ rhi::StageFlags toStageFlags(demo::rhi::ShaderStage stageMask)
   return result == rhi::StageFlags::none ? rhi::StageFlags::all : result;
 }
 
+[[nodiscard]] rhi::StageFlags dependencyStages(const PassResourceDependency& dependency)
+{
+  return dependency.stages == rhi::StageFlags::none ? toStageFlags(dependency.stageMask) : dependency.stages;
+}
+
+[[nodiscard]] rhi::HazardFlags dependencyHazards(const PassResourceDependency& dependency)
+{
+  if(dependency.hazards != rhi::HazardFlags::none)
+  {
+    return dependency.hazards;
+  }
+  return dependency.type == PassResourceType::texture ? rhi::HazardFlags::textureWrites : rhi::HazardFlags::bufferWrites;
+}
+
 [[nodiscard]] uint64_t toHandleKey(BufferHandle handle)
 {
   return (static_cast<uint64_t>(handle.generation) << 32u) | static_cast<uint64_t>(handle.index);
@@ -76,30 +69,6 @@ rhi::StageFlags toStageFlags(demo::rhi::ShaderStage stageMask)
 [[nodiscard]] uint64_t toHandleKey(TextureHandle handle)
 {
   return (static_cast<uint64_t>(handle.generation) << 32u) | static_cast<uint64_t>(handle.index);
-}
-
-rhi::BufferHandle toRhiHandle(BufferHandle handle)
-{
-  return rhi::BufferHandle{handle.index, handle.generation};
-}
-
-rhi::TextureHandle toRhiHandle(TextureHandle handle)
-{
-  return rhi::TextureHandle{handle.index, handle.generation};
-}
-
-rhi::ResourceAccess toRhiAccess(ResourceAccess access)
-{
-  switch(access)
-  {
-    case ResourceAccess::write:
-      return rhi::ResourceAccess::write;
-    case ResourceAccess::readWrite:
-      return rhi::ResourceAccess::readWrite;
-    case ResourceAccess::read:
-    default:
-      return rhi::ResourceAccess::read;
-  }
 }
 
 rhi::ResourceState requiredStateForTexture(const PassExecutor::TextureBinding& binding, ResourceAccess access)
@@ -133,18 +102,10 @@ rhi::ResourceState resolveRequiredTextureState(const PassExecutor::TextureBindin
   return !(previous == ResourceAccess::read && next == ResourceAccess::read);
 }
 
-struct BufferUsageState
+[[nodiscard]] bool requiresResourceBoundary(rhi::ResourceState previous, rhi::ResourceState next)
 {
-  rhi::ShaderStage stageMask{rhi::ShaderStage::none};
-  ResourceAccess   access{ResourceAccess::read};
-};
-
-struct TextureUsageState
-{
-  rhi::ShaderStage   stageMask{rhi::ShaderStage::none};
-  ResourceAccess     access{ResourceAccess::read};
-  rhi::ResourceState state{rhi::ResourceState::Undefined};
-};
+  return previous != next;
+}
 
 }  // namespace
 
@@ -169,21 +130,21 @@ rhi::TextureHandle PassExecutor::getTextureRHIHandle(TextureHandle handle) const
   return binding != nullptr ? binding->rhiTexture : rhi::TextureHandle{};
 }
 
-rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t nativeImage) const
+rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t backendImageToken) const
 {
-  if(nativeImage == 0 || m_device == nullptr)
+  if(backendImageToken == 0 || m_device == nullptr)
   {
     return rhi::TextureHandle{};
   }
   for(const auto& [image, handle] : m_barrierTextureCache)
   {
-    if(image == nativeImage)
+    if(image == backendImageToken)
     {
       return handle;
     }
   }
-  const rhi::TextureHandle handle = m_device->registerExternalTexture(nativeImage);
-  m_barrierTextureCache.emplace_back(nativeImage, handle);
+  const rhi::TextureHandle handle = m_device->registerExternalTexture(backendImageToken);
+  m_barrierTextureCache.emplace_back(backendImageToken, handle);
   return handle;
 }
 
@@ -210,16 +171,18 @@ void PassExecutor::clearResourceBindings()
   m_barrierTextureCache.clear();
   m_textureBindings.clear();
   m_bufferBindings.clear();
+  m_executionTextureStates.clear();
+  m_executionBufferStates.clear();
 }
 
 void PassExecutor::bindTexture(TextureBinding binding)
 {
-  // Mirror the native image into the backend registry so the Wave 7 resourceBarrier
-  // path can resolve this attachment as a TextureHandle (owned=false: SceneResources
-  // own the VMA lifetime, the registry only mirrors the native image).
-  if(m_device != nullptr && binding.nativeImage != 0)
+  // Mirror the externally owned image into the backend registry so explicit resourceBarrier
+  // boundaries can resolve this attachment as a TextureHandle. SceneResources owns
+  // the allocation lifetime; the registry only mirrors the backend token.
+  if(m_device != nullptr && binding.backendImageToken != 0)
   {
-    binding.rhiTexture = m_device->registerExternalTexture(binding.nativeImage);
+    binding.rhiTexture = m_device->registerExternalTexture(binding.backendImageToken);
   }
 
   // Update existing binding if handle already bound, otherwise add new
@@ -236,6 +199,7 @@ void PassExecutor::bindTexture(TextureBinding binding)
     }
   }
   m_textureBindings.push_back(binding);
+  m_executionTextureStates.reserve(m_textureBindings.size());
 }
 
 void PassExecutor::bindBuffer(BufferBinding binding)
@@ -250,6 +214,7 @@ void PassExecutor::bindBuffer(BufferBinding binding)
     }
   }
   m_bufferBindings.push_back(binding);
+  m_executionBufferStates.reserve(m_bufferBindings.size());
 }
 
 const PassExecutor::TextureBinding* PassExecutor::findTextureBinding(TextureHandle handle) const
@@ -276,6 +241,30 @@ const PassExecutor::BufferBinding* PassExecutor::findBufferBinding(BufferHandle 
   return nullptr;
 }
 
+PassExecutor::BufferUsageState* PassExecutor::findBufferExecutionState(uint64_t key) const
+{
+  for(BufferExecutionState& record : m_executionBufferStates)
+  {
+    if(record.key == key)
+    {
+      return &record.state;
+    }
+  }
+  return nullptr;
+}
+
+PassExecutor::TextureUsageState* PassExecutor::findTextureExecutionState(uint64_t key) const
+{
+  for(TextureExecutionState& record : m_executionTextureStates)
+  {
+    if(record.key == key)
+    {
+      return &record.state;
+    }
+  }
+  return nullptr;
+}
+
 size_t PassExecutor::getPassCount() const
 {
   return m_passes.size();
@@ -286,28 +275,23 @@ const PassNode* PassExecutor::getPass(size_t index) const
   return index < m_passes.size() ? m_passes[index] : nullptr;
 }
 
-void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks,
-                           profiling::TracyVulkanContext* tracyVkCtx) const
+void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks) const
 {
-  std::unordered_map<uint64_t, BufferUsageState>  bufferStates;
-  std::unordered_map<uint64_t, TextureUsageState> textureStates;
+  m_executionBufferStates.clear();
+  m_executionTextureStates.clear();
 
   for(const TextureBinding& binding : m_textureBindings)
   {
-    textureStates[toHandleKey(binding.handle)] = TextureUsageState{
-        .stageMask = rhi::ShaderStage::none,
-        .access    = ResourceAccess::read,
-        .state     = binding.initialState,
-    };
-
-    context.cmd->setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, binding.handle.index, binding.handle.generation},
-                                  binding.initialState);
+    m_executionTextureStates.push_back(TextureExecutionState{
+        .key   = toHandleKey(binding.handle),
+        .state = TextureUsageState{
+             .stages    = rhi::StageFlags::none,
+             .hazards   = rhi::HazardFlags::none,
+             .access    = ResourceAccess::read,
+             .state     = binding.initialState,
+        },
+    });
   }
-
-#ifdef TRACY_ENABLE
-  const VkCommandBuffer vkCmd =
-      (tracyVkCtx && context.cmdBuffer != nullptr) ? static_cast<VkCommandBuffer>(context.cmdBuffer->getNativeHandle()) : VK_NULL_HANDLE;
-#endif
 
   for(uint32_t passIndex = 0; passIndex < m_passes.size(); ++passIndex)
   {
@@ -326,71 +310,75 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
       if(dependency.type == PassResourceType::buffer)
       {
         const BufferBinding* binding = findBufferBinding(dependency.bufferHandle);
-        if(binding == nullptr || binding->nativeBuffer == 0)
+        if(binding == nullptr || binding->backendBufferToken == 0)
         {
           continue;
         }
 
         const uint64_t key = toHandleKey(dependency.bufferHandle);
-        const auto     it  = bufferStates.find(key);
-        if(it != bufferStates.end() && requiresBarrier(it->second.access, dependency.access) && context.cmdBuffer != nullptr)
+        BufferUsageState* previousState = findBufferExecutionState(key);
+        if(previousState != nullptr && requiresBarrier(previousState->access, dependency.access) && context.commandBuffer != nullptr)
         {
           // Wave 7 dual-barrier model: buffer producer->consumer sync goes through the
           // stage-barrier main path (global VkMemoryBarrier2). Buffers carry no image
           // layout, so a memory barrier is sufficient; the hazard covers both shader
           // buffer writes and indirect-argument reads.
-          context.cmdBuffer->barrier(toStageFlags(it->second.stageMask),
-                                     toStageFlags(dependency.stageMask),
-                                     rhi::HazardFlags::bufferWrites | rhi::HazardFlags::drawArguments);
+          context.commandBuffer->barrier(previousState->stages,
+                                         dependencyStages(dependency),
+                                         previousState->hazards | dependencyHazards(dependency));
         }
 
-        bufferStates[key] = BufferUsageState{
-            .stageMask = dependency.stageMask,
-            .access    = dependency.access,
-        };
+        if(previousState == nullptr)
+        {
+          m_executionBufferStates.push_back(BufferExecutionState{.key = key});
+          previousState = &m_executionBufferStates.back().state;
+        }
+        previousState->stages    = dependencyStages(dependency);
+        previousState->hazards   = dependencyHazards(dependency);
+        previousState->access    = dependency.access;
         continue;
       }
 
       const TextureBinding* binding = findTextureBinding(dependency.textureHandle);
-      if(binding == nullptr || binding->nativeImage == 0)
+      if(binding == nullptr || binding->backendImageToken == 0)
       {
         continue;
       }
 
       const uint64_t key            = toHandleKey(dependency.textureHandle);
-      auto           textureStateIt = textureStates.find(key);
-      if(textureStateIt == textureStates.end())
+      TextureUsageState* textureState = findTextureExecutionState(key);
+      if(textureState == nullptr)
       {
-        textureStateIt = textureStates
-                             .emplace(key,
-                                      TextureUsageState{
-                                          .stageMask = rhi::ShaderStage::none,
-                                          .access    = ResourceAccess::read,
-                                          .state     = binding->initialState,
-                                      })
-                             .first;
+        m_executionTextureStates.push_back(TextureExecutionState{
+            .key   = key,
+            .state = TextureUsageState{
+                 .stages    = rhi::StageFlags::none,
+                 .hazards   = rhi::HazardFlags::none,
+                 .access    = ResourceAccess::read,
+                 .state     = binding->initialState,
+            },
+        });
+        textureState = &m_executionTextureStates.back().state;
       }
 
       const rhi::ResourceState requiredState = resolveRequiredTextureState(*binding, dependency);
-      const rhi::ResourceState currentState  = textureStateIt->second.state;
+      const rhi::ResourceState currentState  = textureState->state;
 
-      const bool needsBarrier =
-          currentState != requiredState || requiresBarrier(textureStateIt->second.access, dependency.access);
-      if(needsBarrier)
+      const bool needsMemoryBarrier = requiresBarrier(textureState->access, dependency.access);
+      if(needsMemoryBarrier && context.commandBuffer != nullptr)
       {
-        if(context.cmdBuffer != nullptr && !binding->rhiTexture.isNull())
+        context.commandBuffer->barrier(textureState->stages,
+                                       dependencyStages(dependency),
+                                       textureState->hazards | dependencyHazards(dependency));
+      }
+
+      if(requiresResourceBoundary(currentState, requiredState))
+      {
+        if(context.commandBuffer != nullptr && !binding->rhiTexture.isNull())
         {
-          // Wave 7 dual-barrier model: explicit image layout via resourceBarrier over
-          // the whole subresource range. The before-layout comes from the command
-          // list's actual tracked state (shared with the passes' own transitions), not
-          // from this executor's local map, which does not see those transitions.
-          const rhi::ResourceState before = context.cmd->getTrackedState(
-              rhi::ResourceHandle{rhi::ResourceKind::Texture, dependency.textureHandle.index,
-                                  dependency.textureHandle.generation},
-              currentState);
           const rhi::TextureBarrier textureBarrier{
               .texture = binding->rhiTexture,
-              .before  = before,
+              .before  = currentState,
               .after   = requiredState,
               .range   = {.aspect         = binding->aspect,
                           .baseMipLevel   = 0,
@@ -398,64 +386,29 @@ void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hoo
                           .baseArrayLayer = 0,
                           .layerCount     = ~0u},
           };
-          context.cmdBuffer->resourceBarrier(&textureBarrier, 1, nullptr, 0);
+          context.commandBuffer->resourceBarrier(&textureBarrier, 1, nullptr, 0);
         }
         else
         {
-          // Fallback: attachment not mirrored into the registry — keep the legacy
-          // native transition (e.g. when no resource table was set).
-          context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-              .texture     = toRhiHandle(dependency.textureHandle),
-              .nativeImage = binding->nativeImage,
-              .aspect      = binding->aspect,
-              .srcStage    = toPipelineStage(textureStateIt->second.stageMask),
-              .dstStage    = toPipelineStage(dependency.stageMask),
-              .srcAccess   = toRhiAccess(textureStateIt->second.access),
-              .dstAccess   = toRhiAccess(dependency.access),
-              .oldState    = currentState,
-              .newState    = requiredState,
-              .isSwapchain = binding->isSwapchain,
-          });
+          // Contract failure: attachment not mirrored into the registry; explicit
+          // resource boundary requires a resource table.
+          ASSERT(false, "PassExecutor explicit texture boundaries require registry-backed RHI texture handles");
         }
       }
 
-      textureStateIt->second.stageMask = dependency.stageMask;
-      textureStateIt->second.access    = dependency.access;
-      textureStateIt->second.state     = requiredState;
+      textureState->stages    = dependencyStages(dependency);
+      textureState->hazards   = dependencyHazards(dependency);
+      textureState->access    = dependency.access;
+      textureState->state     = requiredState;
 
-      context.cmd->setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, dependency.textureHandle.index,
-                                                        dependency.textureHandle.generation},
-                                    requiredState);
     }
-
-    // Tracy GPU zone for each pass - scoped zone must surround pass->execute()
-#ifdef TRACY_ENABLE
-    // Create Tracy GPU zone variable that stays alive during pass->execute()
-    tracy::VkCtxScope* tracy_gpu_zone = nullptr;
-    if(tracyVkCtx && vkCmd != VK_NULL_HANDLE)
-    {
-      tracy_gpu_zone = new tracy::VkCtxScope(tracyVkCtx->context(), TracyLine, TracyFile, strlen(TracyFile),
-                                             TracyFunction, strlen(TracyFunction), pass->getName(),
-                                             strlen(pass->getName()), vkCmd, true);
-    }
-#endif
 
     PassContext scopedContext = context;
     scopedContext.passIndex   = passIndex;
 
-    // CPU Tracy zone for pass execution (pass-specific zones inside execute() provide breakdown)
     demo::profiling::ScopedCpuRange passCpuRange(pass->getName());
-    ScopedCommandEvent              passCommandEvent(context.cmd, pass->getName());
-    TRACY_ZONE_SCOPED("PassExecutor::executePass");
+    ScopedCommandEvent              passCommandEvent(context.commandBuffer, pass->getName());
     pass->execute(scopedContext);
-
-#ifdef TRACY_ENABLE
-    // Delete Tracy GPU zone (destructor writes end timestamp)
-    if(tracy_gpu_zone)
-    {
-      delete tracy_gpu_zone;
-    }
-#endif
 
     if(hooks != nullptr)
     {

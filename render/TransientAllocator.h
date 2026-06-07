@@ -25,7 +25,7 @@ public:
     rhi::GpuPtr  gpu{};  // FrameGpuAllocator: GPU address of this region (0 if buffer has no device address)
   };
 
-  void                     init(rhi::Device& device, VmaAllocator allocator, uint32_t bufferSize);
+  void                     init(rhi::Device& device, uint32_t bufferSize);
   [[nodiscard]] Allocation allocate(uint32_t size, uint32_t alignment);
   void                     flushAllocation(const Allocation& allocation, uint32_t size) const;
 
@@ -72,16 +72,14 @@ public:
     return rhi::RetirementPolicy::frameCount(1);
   }
 
-  [[nodiscard]] uint64_t getBufferOpaque() const { return reinterpret_cast<uint64_t>(m_buffer.buffer); }
+  [[nodiscard]] rhi::BufferHandle getBufferHandle() const { return m_buffer; }
   [[nodiscard]] uint32_t getCapacity() const { return m_capacity; }
   [[nodiscard]] uint64_t getLastLogicalReleaseTimeline() const { return m_lastLogicalReleaseTimeline; }
 
 private:
-  VkDevice      m_device{VK_NULL_HANDLE};
-  VmaAllocator  m_allocator{nullptr};
-  utils::Buffer m_buffer{};
+  rhi::Device*  m_device{nullptr};
+  rhi::BufferHandle m_buffer{};
   void*         m_mappedData{nullptr};
-  bool          m_isHostCoherent{false};
   uint32_t      m_capacity{0};
   uint32_t      m_head{0};
   uint64_t      m_lastLogicalReleaseTimeline{0};

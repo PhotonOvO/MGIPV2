@@ -26,10 +26,10 @@ public:
   void deinit() override;
 
   void              beginFrame() override;
-  SubmissionReceipt endFrame(CommandList* cmdList) override;
+  SubmissionReceipt endFrame(CommandBuffer* cmdBuffer) override;
   void              setSwapchain(Swapchain* swapchain) override;
 
-  SubmissionReceipt submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount) override;
+  SubmissionReceipt submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount) override;
   void              waitForSubmission(SubmissionReceipt receipt) override;
 
   FrameData& getCurrentFrame() override;
@@ -64,11 +64,11 @@ private:
   struct FrameSlot
   {
     std::unique_ptr<VulkanCommandPool> commandPool;
-    CommandList*                       commandList{nullptr};
+    VkCommandBuffer                    commandBuffer{nullptr};
     uint64_t                           lastSignalValue{0};
   };
 
-  SubmissionReceipt submitCurrentFrame(CommandList& commandList);
+  SubmissionReceipt submitCurrentFrame(CommandBuffer& commandBuffer);
 
   VkDevice                                 m_device{nullptr};
   uint32_t                                 m_queueFamilyIndex{~0U};

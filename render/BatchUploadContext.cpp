@@ -1,6 +1,7 @@
 #include "BatchUploadContext.h"
 
-#include "UploadUtils.h"
+#include "../common/Common.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <cstring>
@@ -11,21 +12,20 @@ namespace demo {
 
 namespace {
 
-[[nodiscard]] VkDeviceSize alignUp(VkDeviceSize value, VkDeviceSize alignment)
+[[nodiscard]] uint64_t alignUp(uint64_t value, uint64_t alignment)
 {
-  const VkDeviceSize safeAlignment = alignment == 0 ? 1 : alignment;
-  const VkDeviceSize mask          = safeAlignment - 1;
+  const uint64_t safeAlignment = alignment == 0 ? 1 : alignment;
+  const uint64_t mask          = safeAlignment - 1;
   return (value + mask) & ~mask;
 }
 
 }  // namespace
 
-void BatchUploadContext::init(VkDevice device, VmaAllocator allocator, VkDeviceSize totalSize)
+void BatchUploadContext::init(rhi::Device& device, uint64_t totalSize)
 {
   destroy();
 
-  m_device     = device;
-  m_allocator  = allocator;
+  m_device     = &device;
   m_capacity   = totalSize;
   m_head       = 0;
 
@@ -34,16 +34,17 @@ void BatchUploadContext::init(VkDevice device, VmaAllocator allocator, VkDeviceS
     return;
   }
 
-  m_stagingBuffer = upload::createMappedUploadStagingBuffer(device, allocator, totalSize);
+  m_stagingBuffer = upload::createMappedUploadStagingBuffer(device, totalSize);
+  m_mappedData    = device.mapBuffer(m_stagingBuffer);
 }
 
-BatchUploadContext::Slice BatchUploadContext::allocate(VkDeviceSize size, VkDeviceSize alignment)
+BatchUploadContext::Slice BatchUploadContext::allocate(uint64_t size, uint64_t alignment)
 {
-  const VkDeviceSize offset = alignUp(m_head, alignment);
+  const uint64_t offset = alignUp(m_head, alignment);
   ASSERT(offset + size <= m_capacity, "BatchUploadContext staging allocation exceeded capacity");
 
   Slice slice{};
-  slice.cpuPtr = static_cast<std::byte*>(m_stagingBuffer.mapped) + offset;
+  slice.cpuPtr = static_cast<std::byte*>(m_mappedData) + offset;
   slice.offset = offset;
   slice.size   = size;
 
@@ -51,33 +52,33 @@ BatchUploadContext::Slice BatchUploadContext::allocate(VkDeviceSize size, VkDevi
   return slice;
 }
 
-std::vector<BatchUploadContext::Slice> BatchUploadContext::allocateSlices(const std::vector<VkDeviceSize>& sizes,
-                                                                          VkDeviceSize alignment)
+std::vector<BatchUploadContext::Slice> BatchUploadContext::allocateSlices(const std::vector<uint64_t>& sizes,
+                                                                          uint64_t alignment)
 {
   return reserveSlices(sizes, alignment);
 }
 
-BatchUploadContext::Slice BatchUploadContext::mapReservedSlice(VkDeviceSize offset, VkDeviceSize size) const
+BatchUploadContext::Slice BatchUploadContext::mapReservedSlice(uint64_t offset, uint64_t size) const
 {
   ASSERT(offset + size <= m_capacity, "BatchUploadContext reserved slice exceeded capacity");
 
   Slice slice{};
-  slice.cpuPtr = static_cast<std::byte*>(m_stagingBuffer.mapped) + offset;
+  slice.cpuPtr = static_cast<std::byte*>(m_mappedData) + offset;
   slice.offset = offset;
   slice.size = size;
   return slice;
 }
 
-std::vector<BatchUploadContext::Slice> BatchUploadContext::reserveSlices(const std::vector<VkDeviceSize>& sizes,
-                                                                         VkDeviceSize alignment)
+std::vector<BatchUploadContext::Slice> BatchUploadContext::reserveSlices(const std::vector<uint64_t>& sizes,
+                                                                         uint64_t alignment)
 {
   std::vector<Slice> slices;
   slices.reserve(sizes.size());
 
-  VkDeviceSize cursor = m_head;
-  for(const VkDeviceSize size : sizes)
+  uint64_t cursor = m_head;
+  for(const uint64_t size : sizes)
   {
-    const VkDeviceSize offset = alignUp(cursor, alignment);
+    const uint64_t offset = alignUp(cursor, alignment);
     ASSERT(offset + size <= m_capacity, "BatchUploadContext staging reservation exceeded capacity");
     slices.push_back(mapReservedSlice(offset, size));
     cursor = offset + size;
@@ -106,84 +107,65 @@ void BatchUploadContext::copyToSlices(std::span<const Slice> slices,
   });
 }
 
-void BatchUploadContext::recordTextureUpload(const Slice& slice, VkImage dstImage, const VkBufferImageCopy& region)
+void BatchUploadContext::recordTextureUpload(const Slice& slice,
+                                             rhi::TextureHandle dstImage,
+                                             const rhi::BufferTextureCopyDesc& region)
 {
   ASSERT(region.bufferOffset <= slice.size, "Texture upload region offset exceeds reserved slice size");
   UploadOperation op{};
   op.type      = UploadType::image;
   op.dstImage  = dstImage;
   op.imageRegion = region;
+  op.imageRegion.texture = dstImage;
   op.imageRegion.bufferOffset += slice.offset;
+  op.imageRegion.buffer = m_stagingBuffer;
   m_pendingUploads.push_back(op);
 }
 
-void BatchUploadContext::recordBufferUpload(const Slice& slice, VkBuffer dstBuffer, const VkBufferCopy& region)
+void BatchUploadContext::recordBufferUpload(const Slice& slice, rhi::BufferHandle dstBuffer, uint64_t dstOffset, uint64_t size)
 {
   UploadOperation op{};
   op.type         = UploadType::buffer;
   op.dstBuffer    = dstBuffer;
-  op.bufferRegion = region;
-  op.bufferRegion.srcOffset += slice.offset;
+  op.dstOffset    = dstOffset;
+  op.size         = size;
+  op.imageRegion.bufferOffset = slice.offset;
+  ASSERT(size <= slice.size, "Buffer upload region exceeds reserved slice size");
   m_pendingUploads.push_back(op);
 }
 
-void BatchUploadContext::executeUploads(VkCommandBuffer cmd) const
+void BatchUploadContext::executeUploads(rhi::CommandBuffer& cmd) const
 {
-  if(m_stagingBuffer.buffer == VK_NULL_HANDLE)
+  if(m_stagingBuffer.isNull())
   {
     return;
   }
 
-  std::vector<VkImageMemoryBarrier2> imageBarriers;
-  imageBarriers.reserve(m_pendingUploads.size());
-
+  rhi::ComputeEncoder* copy = cmd.beginComputePass();
   for(const UploadOperation& op : m_pendingUploads)
   {
     if(op.type == UploadType::buffer)
     {
-      vkCmdCopyBuffer(cmd, m_stagingBuffer.buffer, op.dstBuffer, 1, &op.bufferRegion);
+      copy->copyBuffer(m_stagingBuffer, op.imageRegion.bufferOffset, op.dstBuffer, op.dstOffset, op.size);
     }
     else
     {
-      vkCmdCopyBufferToImage(cmd, m_stagingBuffer.buffer, op.dstImage, VK_IMAGE_LAYOUT_GENERAL, 1, &op.imageRegion);
-      imageBarriers.push_back(VkImageMemoryBarrier2{
-          .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-          .srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-          .dstStageMask        = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT,
-          .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
-          .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
-          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-          .image               = op.dstImage,
-          .subresourceRange =
-              {
-                  .aspectMask     = op.imageRegion.imageSubresource.aspectMask,
-                  .baseMipLevel   = op.imageRegion.imageSubresource.mipLevel,
-                  .levelCount     = 1,
-                  .baseArrayLayer = op.imageRegion.imageSubresource.baseArrayLayer,
-                  .layerCount     = op.imageRegion.imageSubresource.layerCount,
-              },
-      });
+      copy->copyBufferToTexture(op.imageRegion);
     }
   }
-
-  if(!imageBarriers.empty())
-  {
-    const VkDependencyInfo dependencyInfo{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = static_cast<uint32_t>(imageBarriers.size()),
-        .pImageMemoryBarriers    = imageBarriers.data(),
-    };
-    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-  }
+  cmd.endEncoding();
+  // Upload boundary: transfer copies from the staging buffer must be visible to
+  // later graphics/compute consumers; there is no pass graph edge for batch uploads.
+  cmd.barrier(rhi::StageFlags::transfer,
+              rhi::StageFlags::all,
+              rhi::HazardFlags::bufferWrites | rhi::HazardFlags::textureWrites);
 }
 
-utils::Buffer BatchUploadContext::releaseStagingBuffer()
+rhi::BufferHandle BatchUploadContext::releaseStagingBuffer()
 {
-  utils::Buffer buffer = m_stagingBuffer;
+  rhi::BufferHandle buffer = m_stagingBuffer;
   m_stagingBuffer      = {};
+  m_mappedData         = nullptr;
   m_capacity           = 0;
   m_head               = 0;
   m_pendingUploads.clear();
@@ -192,14 +174,14 @@ utils::Buffer BatchUploadContext::releaseStagingBuffer()
 
 void BatchUploadContext::destroy()
 {
-  if(m_stagingBuffer.buffer != VK_NULL_HANDLE)
+  if(m_device != nullptr && !m_stagingBuffer.isNull())
   {
-    vmaDestroyBuffer(m_allocator, m_stagingBuffer.buffer, m_stagingBuffer.allocation);
+    m_device->destroyBuffer(m_stagingBuffer);
   }
 
-  m_device        = VK_NULL_HANDLE;
-  m_allocator     = nullptr;
+  m_device        = nullptr;
   m_stagingBuffer = {};
+  m_mappedData    = nullptr;
   m_capacity      = 0;
   m_head          = 0;
   m_pendingUploads.clear();

@@ -1,9 +1,11 @@
 #pragma once
 
-#include "../common/Common.h"
-#include "../shaders/shader_io.h"
-#include "UploadUtils.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../common/Handles.h"
+#include "../rhi/RHIDevice.h"
 
+#include <cassert>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -50,9 +52,9 @@ public:
   };
 
   GPUDrivenLightResources() = default;
-  ~GPUDrivenLightResources() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+  ~GPUDrivenLightResources() { assert(m_device == nullptr && "Missing deinit()"); }
 
-  void init(VkDevice device, VmaAllocator allocator, const CreateInfo& createInfo);
+  void init(rhi::Device& device, const CreateInfo& createInfo);
   void deinit();
 
   void updateLights(uint32_t frameIndex,
@@ -63,16 +65,16 @@ public:
                       const shaderio::LightCoarseCullingUniforms& coarseUniforms,
                       const shaderio::ClusteredLightUniforms& clusteredUniforms);
 
-  [[nodiscard]] VkBuffer getPointLightBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getSpotLightBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getPointCoarseBoundsBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getSpotCoarseBoundsBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getCoarseUniformBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getLightingUniformBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getClusteredUniformBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getClusterCountsBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getClusterIndicesBuffer(uint32_t frameIndex) const;
-  [[nodiscard]] VkBuffer getClusterStatsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getPointLightBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getSpotLightBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getPointCoarseBoundsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getSpotCoarseBoundsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getCoarseUniformBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getLightingUniformBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getClusteredUniformBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getClusterCountsBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getClusterIndicesBuffer(uint32_t frameIndex) const;
+  [[nodiscard]] rhi::BufferHandle getClusterStatsBuffer(uint32_t frameIndex) const;
   [[nodiscard]] uint32_t getActivePointLightCount() const { return m_activePointLights; }
   [[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_activeSpotLights; }
   [[nodiscard]] uint32_t getMaxPointLights() const { return m_maxPointLights; }
@@ -84,25 +86,24 @@ public:
 private:
   struct FrameResources
   {
-    utils::Buffer pointLightBuffer{};
-    utils::Buffer spotLightBuffer{};
-    utils::Buffer pointCoarseBoundsBuffer{};
-    utils::Buffer spotCoarseBoundsBuffer{};
-    utils::Buffer lightingUniformBuffer{};
-    utils::Buffer coarseUniformBuffer{};
-    utils::Buffer clusteredUniformBuffer{};
-    utils::Buffer clusterCountsBuffer{};
-    utils::Buffer clusterIndicesBuffer{};
-    utils::Buffer clusterStatsBuffer{};
+    rhi::BufferHandle pointLightBuffer{};
+    rhi::BufferHandle spotLightBuffer{};
+    rhi::BufferHandle pointCoarseBoundsBuffer{};
+    rhi::BufferHandle spotCoarseBoundsBuffer{};
+    rhi::BufferHandle lightingUniformBuffer{};
+    rhi::BufferHandle coarseUniformBuffer{};
+    rhi::BufferHandle clusteredUniformBuffer{};
+    rhi::BufferHandle clusterCountsBuffer{};
+    rhi::BufferHandle clusterIndicesBuffer{};
+    rhi::BufferHandle clusterStatsBuffer{};
   };
 
-  [[nodiscard]] utils::Buffer createStorageBuffer(VkDeviceSize size, VmaMemoryUsage usage, VmaAllocationCreateFlags flags = {}) const;
-  [[nodiscard]] utils::Buffer createUniformBuffer(VkDeviceSize size, VmaMemoryUsage usage, VmaAllocationCreateFlags flags = {}) const;
-  void destroyBuffer(utils::Buffer& buffer) const;
-  void updateMappedBuffer(utils::Buffer& buffer, const void* data, VkDeviceSize size) const;
+  [[nodiscard]] rhi::BufferHandle createStorageBuffer(uint64_t size, rhi::MemoryUsage usage) const;
+  [[nodiscard]] rhi::BufferHandle createUniformBuffer(uint64_t size, rhi::MemoryUsage usage) const;
+  void destroyBuffer(rhi::BufferHandle& buffer) const;
+  void updateMappedBuffer(rhi::BufferHandle buffer, const void* data, uint64_t size) const;
 
-  VkDevice     m_device{VK_NULL_HANDLE};
-  VmaAllocator m_allocator{nullptr};
+  rhi::Device* m_device{nullptr};
   std::vector<FrameResources> m_frames;
   uint32_t m_maxPointLights{256};
   uint32_t m_maxSpotLights{128};

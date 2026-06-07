@@ -1,5 +1,6 @@
 #include "GPUDrivenDebugPass.h"
 
+#include "../ArgumentTables.h"
 #include "../GPUDrivenRenderer.h"
 #include "../../shaders/shader_io.h"
 
@@ -31,7 +32,7 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenDebugPass::getDependencie
 
 void GPUDrivenDebugPass::execute(const PassContext& context) const
 {
-  if(m_renderer != nullptr && context.cmd != nullptr && context.params != nullptr && context.transientAllocator != nullptr)
+  if(m_renderer != nullptr && context.commandBuffer != nullptr && context.params != nullptr && context.transientAllocator != nullptr)
   {
     // renderDebugOverlay(context);
   }
@@ -56,7 +57,7 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
     return;
   }
 
-  const std::vector<shaderio::DebugLineVertex>& debugVertices = m_renderer->getDebugLineVertices();
+  const std::vector<shaderio::DebugLineVertex>& debugVertices = m_renderer->getDebugLineVertices();  // Debug pass only; not on draw-heavy recording path.
   const bool hasLineDebug = !debugVertices.empty();
   const bool hasGPUCullingDebug =
       context.params->debugOptions.showGPUCullingOverlay && safeObjectCount > 0u
@@ -68,7 +69,12 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenDebug");
+  if(context.commandBuffer == nullptr)
+  {
+    return;
+  }
+
+  context.commandBuffer->beginEvent("GPUDrivenDebug");
 
   const rhi::Extent2D extent{sceneView->sceneDepthExtent.width, sceneView->sceneDepthExtent.height};
   rhi::RenderTargetDesc colorTarget{
@@ -80,79 +86,44 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::read,
-      .dstAccess = rhi::ResourceAccess::write,
-      .oldState = rhi::ResourceState::General,
-      .newState = rhi::ResourceState::ColorAttachment,
-      .isSwapchain = false,
-  });
-
-  context.cmd->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
-  context.cmd->setViewport(
+  enc->setViewport(
       rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  context.cmd->setScissor(rhi::Rect2D{{0, 0}, extent});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   const PipelineHandle debugPipeline = m_renderer->getDebugPipelineHandle();
   const PipelineHandle gpuCullingDebugPipeline = m_renderer->getGPUCullingDebugPipelineHandle();
   if((hasLineDebug && debugPipeline.isNull()) || (hasGPUCullingDebug && gpuCullingDebugPipeline.isNull()))
   {
-    context.cmd->endRenderPass();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
+    context.commandBuffer->endEncoding();
+    context.commandBuffer->endEvent();
     return;
   }
 
   if(!context.cameraAllocValid)
   {
-    context.cmd->endRenderPass();
-    context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-        .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-        .aspect = rhi::TextureAspect::color,
-        .srcStage = rhi::PipelineStage::FragmentShader,
-        .dstStage = rhi::PipelineStage::FragmentShader,
-        .srcAccess = rhi::ResourceAccess::write,
-        .dstAccess = rhi::ResourceAccess::read,
-        .oldState = rhi::ResourceState::ColorAttachment,
-        .newState = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
-    context.cmd->endEvent();
+    context.commandBuffer->endEncoding();
+    context.commandBuffer->endEvent();
     return;
   }
 
   const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
-  const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(context.frameIndex);
-  const uint32_t sceneDynamicOffsets[] = {cameraAlloc.offset, 0u};
+  const rhi::ArgumentTableHandle cameraArgumentTable = m_renderer->getCameraArgumentTable(context.frameIndex);
+  const rhi::BufferHandle transientBuffer = m_renderer->getTransientBufferHandle(context.frameIndex);
 
   if(hasLineDebug)
   {
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, debugPipeline);
-    if(!cameraBindGroupHandle.isNull())
+    enc->setPipeline(debugPipeline);
+    if(!cameraArgumentTable.isNull())
     {
-      context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, sceneDynamicOffsets, 2);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, transientBuffer, cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, transientBuffer, 0, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraArgumentTable);
     }
 
     const uint32_t vertexDataSize = static_cast<uint32_t>(debugVertices.size() * sizeof(shaderio::DebugLineVertex));
@@ -161,18 +132,19 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
     std::memcpy(vertexAlloc.cpuPtr, debugVertices.data(), vertexDataSize);
     context.transientAllocator->flushAllocation(vertexAlloc, vertexDataSize);
 
-    const uint64_t vertexBuffer = context.transientAllocator->getBufferOpaque();
     const uint64_t vertexOffset = vertexAlloc.offset;
-    context.cmd->bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
-    context.cmd->draw(static_cast<uint32_t>(debugVertices.size()), 1, 0, 0);
+    enc->bindVertexBuffers(0, &transientBuffer, &vertexOffset, 1);
+    enc->draw(rhi::DrawDesc{.vertexCount = static_cast<uint32_t>(debugVertices.size()), .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
   }
 
   if(hasGPUCullingDebug)
   {
-    context.cmd->bindPipeline(rhi::PipelineBindPoint::graphics, gpuCullingDebugPipeline);
-    if(!cameraBindGroupHandle.isNull())
+    enc->setPipeline(gpuCullingDebugPipeline);
+    if(!cameraArgumentTable.isNull())
     {
-      context.cmd->bindBindGroup(shaderio::LSetScene, cameraBindGroupHandle, sceneDynamicOffsets, 2);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, transientBuffer, cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, transientBuffer, 0, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraArgumentTable);
     }
 
     const shaderio::PushConstantGPUCullDebug pushValues{
@@ -183,24 +155,12 @@ void GPUDrivenDebugPass::renderDebugOverlay(const PassContext& context) const
         ._padding0 = 0u,
         ._padding1 = 0u,
     };
-    context.cmd->pushConstants(rhi::ShaderStage::vertex, 0, sizeof(pushValues), &pushValues);
-    context.cmd->draw(pushValues.segmentCount * 2u * 3u, pushValues.objectCount, 0, 0);
+    enc->setRootConstants(rhi::ShaderStage::vertex, kPrimaryRootConstantsSlot, &pushValues, sizeof(pushValues));
+    enc->draw(rhi::DrawDesc{.vertexCount = pushValues.segmentCount * 2u * 3u, .instanceCount = pushValues.objectCount, .firstVertex = 0, .firstInstance = 0});
   }
 
-  context.cmd->endRenderPass();
-  context.cmd->transitionTexture(rhi::TextureBarrierDesc{
-      .texture = rhi::TextureHandle{kPassOutputHandle.index, kPassOutputHandle.generation},
-      .nativeImage = reinterpret_cast<uint64_t>(sceneView->outputImage),
-      .aspect = rhi::TextureAspect::color,
-      .srcStage = rhi::PipelineStage::FragmentShader,
-      .dstStage = rhi::PipelineStage::FragmentShader,
-      .srcAccess = rhi::ResourceAccess::write,
-      .dstAccess = rhi::ResourceAccess::read,
-      .oldState = rhi::ResourceState::ColorAttachment,
-      .newState = rhi::ResourceState::General,
-      .isSwapchain = false,
-  });
-  context.cmd->endEvent();
+  context.commandBuffer->endEncoding();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

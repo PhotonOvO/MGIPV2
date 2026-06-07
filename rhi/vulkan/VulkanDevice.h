@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../RHIDevice.h"
+#include "../RHIResourceLifetime.h"
 
 #include <vector>
 #include <vulkan/vulkan.h>
@@ -12,6 +13,7 @@ using VmaAllocator = struct VmaAllocator_T*;
 namespace demo::rhi::vulkan {
 
 class VulkanResourceTable;
+class VulkanFrameContext;
 
 class VulkanDevice final : public demo::rhi::Device
 {
@@ -22,9 +24,9 @@ public:
   void init(const DeviceCreateInfo& createInfo) override;
   void deinit() override;
 
-  uint64_t getNativeInstance() const override;
-  uint64_t getNativePhysicalDevice() const override;
-  uint64_t getNativeDevice() const override;
+  uint64_t getBackendInstanceHandle() const override;
+  uint64_t getBackendPhysicalDeviceHandle() const override;
+  uint64_t getBackendDeviceHandle() const override;
 
   uint32_t                  getApiVersion() const override;
   const char*               getDeviceName() const override;
@@ -45,25 +47,28 @@ public:
   void waitIdle() override;
 
   TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) override;
-  TextureViewHandle registerExternalTextureView(uint64_t nativeView) override;
+  TextureViewHandle registerExternalTextureView(uint64_t externalView) override;
   void              destroyTextureView(TextureViewHandle handle) override;
-  uint64_t          resolveTextureViewNative(TextureViewHandle handle) const override;
+  uint64_t          resolveTextureViewBackendHandle(TextureViewHandle handle) const override;
 
-  TextureHandle registerExternalTexture(uint64_t nativeImage) override;
+  TextureHandle createTexture(const TextureDesc& desc) override;
+  void          destroyTexture(TextureHandle handle) override;
+  TextureHandle registerExternalTexture(uint64_t externalImage) override;
   void          destroyImage(TextureHandle handle) override;
-  uint64_t      resolveImageNative(TextureHandle handle) const override;
+  uint64_t      resolveTextureBackendHandle(TextureHandle handle) const override;
 
   // --- Modern GPU interface (Wave 1: buffers / samplers / query pools) ---
   BufferHandle createBuffer(const BufferDesc& desc) override;
   void         destroyBuffer(BufferHandle handle) override;
-  BufferHandle registerExternalBuffer(uint64_t nativeBuffer) override;
-  void         updateBufferBinding(BufferHandle handle, uint64_t nativeBuffer) override;
+  BufferHandle registerExternalBuffer(uint64_t externalBuffer) override;
+  void         updateBufferBinding(BufferHandle handle, uint64_t externalBuffer) override;
   GpuPtr       getBufferGpuAddress(BufferHandle handle) const override;
   void*        mapBuffer(BufferHandle handle) override;
   void         unmapBuffer(BufferHandle handle) override;
 
   SamplerHandle createSampler(const SamplerDesc& desc) override;
   void          destroySampler(SamplerHandle handle) override;
+  uint64_t      resolveSamplerBackendHandle(SamplerHandle handle) const override;
 
   QueryPoolHandle createQueryPool(uint32_t queryCount) override;
   void            destroyQueryPool(QueryPoolHandle handle) override;
@@ -75,10 +80,16 @@ public:
   ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle layout) override;
   void                 destroyArgumentTable(ArgumentTableHandle handle) override;
   void                 updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes) override;
+  PipelineHandle       createGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
+  PipelineHandle       createComputePipeline(const ComputePipelineDesc& desc) override;
+  void                 destroyPipeline(PipelineHandle handle) override;
+  uint64_t             resolveArgumentLayoutNative(ArgumentLayoutHandle layout) const;
+  uint64_t             resolveArgumentTableNative(ArgumentTableHandle table) const;
 
   // The render layer owns the resource table and injects it here so the device can
   // back its texture-view handles. Must be called before any createTextureView call.
   void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
+  void setFrameContext(VulkanFrameContext* frameContext) { m_frameContext = frameContext; }
 
   // The render layer owns the VMA allocator and injects it here so the device can create
   // images. Must be called before any createImage call.
@@ -88,7 +99,20 @@ public:
   VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
   VkDevice         device() const { return m_device; }
 
+  uint32_t processRetirements(uint64_t completedTimelineValue);
+
 private:
+  struct NativeRetirement
+  {
+    ResourceHandle resource{};
+    uint64_t       retireTimelineValue{0};
+    uint64_t       nativeObject{0};
+    uint64_t       nativeAllocation{0};
+    uint64_t       secondaryNativeObject{0};
+    bool           owned{false};
+    bool           ownsSecondary{false};
+  };
+
   struct NativeQueueInfo
   {
     VkQueue   queue{VK_NULL_HANDLE};
@@ -115,6 +139,11 @@ private:
   static bool extensionAvailable(const char* name, const std::vector<VkExtensionProperties>& extensions);
   static bool layerAvailable(const char* name, const std::vector<VkLayerProperties>& layers);
   static void appendFeatureNode(VkBaseOutStructure*& chainHead, void* featureStruct);
+
+  uint64_t retirementTimelineValue() const;
+  void     enqueueRetirement(NativeRetirement retirement);
+  void     destroyRetiredResource(const NativeRetirement& retirement);
+  void     drainRetirements();
 
   static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
                                                       VkDebugUtilsMessageTypeFlagsEXT             type,
@@ -164,8 +193,10 @@ private:
   bool                               m_initialized{false};
 
   VulkanResourceTable* m_resourceTable{nullptr};
+  VulkanFrameContext*  m_frameContext{nullptr};
   VmaAllocator         m_allocator{nullptr};
   VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // lazily created for argument tables
+  std::vector<NativeRetirement> m_pendingRetirements;
 };
 
 }  // namespace demo::rhi::vulkan

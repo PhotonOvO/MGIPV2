@@ -14,7 +14,8 @@ GPUDrivenDepthPyramidPass::GPUDrivenDepthPyramidPass(GPUDrivenRenderer* renderer
 PassNode::HandleSlice<PassResourceDependency> GPUDrivenDepthPyramidPass::getDependencies() const
 {
   static const std::array<PassResourceDependency, 2> dependencies = {
-      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+      PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
+                                      rhi::ResourceState::ShaderRead),
       PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::write, rhi::ShaderStage::compute,
                                       rhi::ResourceState::General),
   };
@@ -23,11 +24,11 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenDepthPyramidPass::getDepe
 
 void GPUDrivenDepthPyramidPass::execute(const PassContext& context) const
 {
-  if(m_renderer != nullptr && context.cmdBuffer != nullptr && context.params != nullptr)
+  if(m_renderer != nullptr && context.commandBuffer != nullptr && context.params != nullptr)
   {
-    context.cmdBuffer->beginEvent("GPUDrivenDepthPyramid");
-    m_renderer->executeDepthPyramidPass(*context.cmdBuffer, *context.params);
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->beginEvent("GPUDrivenDepthPyramid");
+    m_renderer->executeDepthPyramidPass(*context.commandBuffer, *context.params);
+    context.commandBuffer->endEvent();
   }
 }
 

@@ -6,8 +6,7 @@ def repoRoot = rootProject.file("..")
 def cachedDeps = rootProject.file("../out/build/x64-Debug/_deps")
 def cmakeArguments = [
         "-DANDROID_STL=c++_shared",
-        "-DUSE_SLANG=ON",
-        "-DTRACY_ENABLE=OFF"
+        "-DUSE_SLANG=ON"
 ]
 
 def addCmakePathIfExists = { name, path ->

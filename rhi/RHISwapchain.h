@@ -12,7 +12,7 @@ struct AcquireResult
     success,
     suboptimal,
     outOfDate,
-    notReady,  // Image not available yet (non-blocking acquire returned VK_NOT_READY)
+    notReady,  // Image not available yet from a non-blocking acquire.
   };
 
   TextureHandle texture{};
@@ -47,9 +47,9 @@ public:
   virtual uint32_t      getMaxFramesInFlight() const = 0;
   virtual uint32_t      getRequestedImageCount() const = 0;
 
-  virtual uint64_t getNativeSwapchain() const { return 0; }
-  virtual uint64_t getNativeImageView(uint32_t) const { return 0; }
-  virtual uint64_t getNativeImage(uint32_t) const { return 0; }
+  virtual uint64_t getBackendSwapchainHandle() const { return 0; }
+  virtual uint64_t getBackendImageViewHandle(uint32_t) const { return 0; }
+  virtual uint64_t getBackendImageHandle(uint32_t) const { return 0; }
 };
 
 }  // namespace demo::rhi

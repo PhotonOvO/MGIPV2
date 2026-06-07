@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "volk.h"
+
 // This file defines the DebugUtil class, a singleton utility for managing Vulkan debug utilities.
 // It provides functionality to set debug names for Vulkan objects and manage debug labels in command buffers.
 //
@@ -117,10 +119,6 @@ constexpr VkObjectType DebugUtil::getObjectType()
     return VK_OBJECT_TYPE_COMMAND_POOL;
   else if constexpr(std::is_same_v<T, VkDescriptorPool>)
     return VK_OBJECT_TYPE_DESCRIPTOR_POOL;
-  else if constexpr(std::is_same_v<T, VkDescriptorSet>)
-    return VK_OBJECT_TYPE_DESCRIPTOR_SET;
-  else if constexpr(std::is_same_v<T, VkDescriptorSetLayout>)
-    return VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
   else if constexpr(std::is_same_v<T, VkDevice>)
     return VK_OBJECT_TYPE_DEVICE;
   else if constexpr(std::is_same_v<T, VkDeviceMemory>)

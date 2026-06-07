@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RHICommandList.h"
+#include "RHICommandBuffer.h"
 
 #include <cstdint>
 
@@ -20,7 +20,7 @@ public:
 
   virtual bool isSignaled() const = 0;
 
-  virtual uint64_t getNativeHandle() const = 0;
+  virtual uint64_t getBackendHandle() const = 0;
 };
 
 class TimelineSemaphore
@@ -36,7 +36,7 @@ public:
 
   virtual uint64_t getCurrentValue() const = 0;
 
-  virtual uint64_t getNativeHandle() const = 0;
+  virtual uint64_t getBackendHandle() const = 0;
 };
 
 struct SubmissionReceipt
@@ -46,7 +46,7 @@ struct SubmissionReceipt
 
 struct SubmissionRequest
 {
-  CommandList* commandList{nullptr};
+  CommandBuffer* commandBuffer{nullptr};
 };
 
 class SubmissionQueue
@@ -54,7 +54,7 @@ class SubmissionQueue
 public:
   virtual ~SubmissionQueue() = default;
 
-  virtual SubmissionReceipt submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount) = 0;
+  virtual SubmissionReceipt submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount) = 0;
   virtual void              waitForSubmission(SubmissionReceipt receipt)                                 = 0;
 };
 

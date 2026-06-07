@@ -1,5 +1,7 @@
 #include "GPUDrivenShadowAtlasPass.h"
 
+#include "../ArgumentTables.h"
+
 #include "../GPUDrivenRenderer.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
@@ -35,11 +37,11 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
 
   m_renderer->setShadowAtlasAllocatedTiles(0u);
   const GPUDrivenSceneView* sceneView = context.params != nullptr ? context.params->gpuDrivenSceneView : nullptr;
-  if(context.params == nullptr || context.transientAllocator == nullptr || context.cmdBuffer == nullptr
+  if(context.params == nullptr || context.transientAllocator == nullptr || context.commandBuffer == nullptr
      || context.executor == nullptr
      || !context.params->debugOptions.enableShadowAtlas || sceneView == nullptr || !sceneView->usePersistentCullingObjects
      || sceneView->shadowPackedMeshes == nullptr || sceneView->shadowPackedMeshCount == 0
-     || sceneView->shadowPackedVertexBuffer == VK_NULL_HANDLE || sceneView->shadowPackedIndexBuffer == VK_NULL_HANDLE
+     || sceneView->shadowPackedVertexBuffer == 0 || sceneView->shadowPackedIndexBuffer == 0
      || m_renderer->getShadowAtlasImageOpaque() == 0 || m_renderer->getShadowAtlasViewOpaque() == 0)
   {
     return;
@@ -58,7 +60,7 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   }
 
   CSMShadowResources& csm = m_renderer->getCSMShadowResources();
-  const VkExtent2D atlasFullExtent = m_renderer->getShadowAtlasExtent();
+  const rhi::Extent2D atlasFullExtent = m_renderer->getShadowAtlasExtent();
   const uint32_t tileSize = std::max(1u, m_renderer->getShadowAtlasTileSize());
   const uint32_t tilesX = atlasFullExtent.width / tileSize;
   const uint32_t tilesY = atlasFullExtent.height / tileSize;
@@ -70,20 +72,20 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   }
 
   const uint32_t frameIndex = context.frameIndex;
-  const BindGroupHandle cameraBindGroupHandle = m_renderer->getCameraBindGroup(frameIndex);
-  const BindGroupHandle drawBindGroupHandle = m_renderer->getCSMShadowMDIDrawBindGroup(frameIndex, 0);
-  if(cameraBindGroupHandle.isNull() || drawBindGroupHandle.isNull())
+  const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(frameIndex);
+  const rhi::ArgumentTableHandle drawTable = m_renderer->getCSMShadowMDIDrawArgumentTable(frameIndex, 0);
+  if(cameraTable.isNull() || drawTable.isNull())
   {
     return;
   }
 
-  const BindGroupHandle materialBindGroupHandle = m_renderer->getGraphicsMaterialBindGroup();
-  if(materialBindGroupHandle.isNull())
+  const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
+  if(materialTable.isNull())
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenShadowAtlas");
+  context.commandBuffer->beginEvent("GPUDrivenShadowAtlas");
   const rhi::DepthTargetDesc depthTarget{
       .texture = rhi::TextureHandle{kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation},
       .view = m_renderer->getShadowAtlasViewHandle(),
@@ -93,7 +95,7 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
       .clearValue = {0.0f, 0},
   };
   const rhi::Extent2D atlasExtent{atlasFullExtent.width, atlasFullExtent.height};
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, atlasExtent},
       .colorTargets = nullptr,
       .colorTargetCount = 0,
@@ -101,10 +103,8 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
   });
 
   enc->setPipeline(shadowPipeline);
-  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                        rhi::ArgumentTableHandle{materialBindGroupHandle.index, materialBindGroupHandle.generation});  // bridge (Wave 8)
-  enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw,
-                        rhi::ArgumentTableHandle{drawBindGroupHandle.index, drawBindGroupHandle.generation});  // bridge
+  enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
+  enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw, drawTable);
 
   const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
   const rhi::BufferHandle indexBufferRHI  = m_renderer->getShadowPackedIndexBufferRHIHandle();
@@ -153,10 +153,9 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
     std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
     context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
 
-    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
-    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, 0, 0);
-    enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                          rhi::ArgumentTableHandle{cameraBindGroupHandle.index, cameraBindGroupHandle.generation});  // bridge
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, cameraAlloc.offset, 0);
+    enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, 0, 0);
+    enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, cameraTable);
 
     for(uint32_t meshIndex = 0; meshIndex < sceneView->shadowPackedMeshCount; ++meshIndex)
     {
@@ -171,16 +170,9 @@ void GPUDrivenShadowAtlasPass::execute(const PassContext& context) const
     }
   }
 
-  context.cmdBuffer->endEncoding();
-  const rhi::TextureBarrier atlasBarrier{
-      .texture = context.executor->resolveBarrierTexture(m_renderer->getShadowAtlasImageOpaque()),
-      .before  = rhi::ResourceState::DepthStencilAttachment,
-      .after   = rhi::ResourceState::General,
-      .range   = {.aspect = rhi::TextureAspect::depth, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-  };
-  context.cmdBuffer->resourceBarrier(&atlasBarrier, 1, nullptr, 0);
+  context.commandBuffer->endEncoding();
   m_renderer->setShadowAtlasAllocatedTiles(cascadeCount);
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

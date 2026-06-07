@@ -50,7 +50,7 @@ void MetalFrameContext::beginFrame()
   // 3. No wait needed (completion handlers handle synchronization)
 }
 
-SubmissionReceipt MetalFrameContext::endFrame(CommandList* cmdList)
+SubmissionReceipt MetalFrameContext::endFrame(CommandBuffer* cmdBuffer)
 {
   // TODO: Metal implementation
   // NOTES:
@@ -65,7 +65,7 @@ SubmissionReceipt MetalFrameContext::endFrame(CommandList* cmdList)
   //   // Mark frame as complete
   // }];
   // [cmdBuffer commit];
-  (void)cmdList;
+  (void)cmdBuffer;
   SubmissionReceipt receipt{};
   return receipt;
 }
@@ -78,7 +78,7 @@ void MetalFrameContext::setSwapchain(Swapchain* swapchain)
   m_swapchain = swapchain;
 }
 
-SubmissionReceipt MetalFrameContext::submitCommandLists(const SubmissionRequest* requests, uint32_t requestCount)
+SubmissionReceipt MetalFrameContext::submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount)
 {
   // TODO: Metal implementation
   // NOTES:
@@ -201,12 +201,12 @@ const DeferredDestructionQueue& MetalFrameContext::getDestructionQueue() const
   return m_deferredDestructionQueue;
 }
 
-SubmissionReceipt MetalFrameContext::submitCurrentFrame(CommandList& commandList)
+SubmissionReceipt MetalFrameContext::submitCurrentFrame(CommandBuffer& commandBuffer)
 {
   // TODO: Metal implementation
   // NOTES:
   // Internal helper to submit current frame's command buffer
-  (void)commandList;
+  (void)commandBuffer;
   SubmissionReceipt receipt{};
   return receipt;
 }

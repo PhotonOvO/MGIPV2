@@ -1,10 +1,17 @@
 #pragma once
 
-#include "../common/Common.h"
+#include "../common/Handles.h"
+#include "../rhi/RHIStageBarrier.h"
 #include "../rhi/RHIDevice.h"
+#include "../rhi/RHITypes.h"
 #include "Pass.h"
 
 #include <array>
+#include <cassert>
+#include <cstdint>
+#include <vector>
+
+#include <imgui.h>
 
 namespace demo {
 
@@ -13,168 +20,173 @@ class SceneResources
 public:
   struct CreateInfo
   {
-    VkExtent2D            size{};
-    std::vector<VkFormat> color;
-    VkFormat              depth{VK_FORMAT_UNDEFINED};
-    VkSampler             linearSampler{VK_NULL_HANDLE};
-    VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};
+    rhi::Extent2D              size{};
+    std::vector<rhi::TextureFormat> color;
+    rhi::TextureFormat         depth{rhi::TextureFormat::undefined};
+    rhi::SamplerHandle         linearSampler{};
+    rhi::SampleCount           sampleCount{rhi::SampleCount::count1};
   };
 
   SceneResources() = default;
-  ~SceneResources() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+  ~SceneResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
 
-  void init(rhi::Device& device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo);
+  void init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo);
   void deinit();
-  void update(VkCommandBuffer cmd, VkExtent2D newSize);
+  void update(rhi::CommandBuffer& cmd, rhi::Extent2D newSize);
 
   [[nodiscard]] ImTextureID                  getImTextureID(uint32_t i = 0) const;
-  [[nodiscard]] VkExtent2D                   getSize() const;
-  [[nodiscard]] VkImage                      getColorImage(uint32_t i = 0) const;
-  [[nodiscard]] VkImage                      getDepthImage() const;
+  [[nodiscard]] rhi::Extent2D                getSize() const;
+  [[nodiscard]] rhi::TextureHandle           getColorImage(uint32_t i = 0) const;
+  [[nodiscard]] rhi::TextureHandle           getDepthImage() const;
   [[nodiscard]] rhi::TextureViewHandle       getColorImageView(uint32_t i = 0) const;
-  [[nodiscard]] const VkDescriptorImageInfo& getDescriptorImageInfo(uint32_t i = 0) const;
   [[nodiscard]] rhi::TextureViewHandle       getDepthImageView() const;
-  [[nodiscard]] VkFormat                     getColorFormat(uint32_t i = 0) const;
-  [[nodiscard]] VkFormat                     getDepthFormat() const;
-  [[nodiscard]] VkSampleCountFlagBits        getSampleCount() const;
+  [[nodiscard]] rhi::TextureFormat           getColorFormat(uint32_t i = 0) const;
+  [[nodiscard]] rhi::TextureFormat           getDepthFormat() const;
+  [[nodiscard]] rhi::SampleCount             getSampleCount() const;
   [[nodiscard]] float                        getAspectRatio() const;
 
   // GBuffer MRT accessors (alias for existing color accessors)
   [[nodiscard]] rhi::TextureViewHandle       getGBufferImageView(uint32_t index) const { return getColorImageView(index); }
-  [[nodiscard]] const VkDescriptorImageInfo& getGBufferDescriptor(uint32_t index) const { return getDescriptorImageInfo(index); }
 
   // Output texture for PBR lighting result (follows screen size, like Unity/UE)
   static constexpr uint32_t kOutputTextureIndex = kPackedGBufferTargetCount;  // After packed GBuffer targets
 
   [[nodiscard]] rhi::TextureViewHandle getOutputTextureView() const;
   [[nodiscard]] ImTextureID getOutputTextureImID() const;
-  [[nodiscard]] VkImage getOutputTextureImage() const;
-  [[nodiscard]] VkFormat getOutputTextureFormat() const { return kOutputTextureFormat; }
+  [[nodiscard]] rhi::TextureHandle getOutputTextureImage() const;
+  [[nodiscard]] rhi::TextureFormat getOutputTextureFormat() const { return kOutputTextureFormat; }
   [[nodiscard]] uint64_t getOutputTextureEstimatedBytes() const;
-  [[nodiscard]] VkImage getSceneColorHdrImage() const;
+  [[nodiscard]] rhi::TextureHandle getSceneColorHdrImage() const;
   [[nodiscard]] rhi::TextureViewHandle getSceneColorHdrView() const;
-  [[nodiscard]] VkFormat getSceneColorHdrFormat() const { return kSceneColorHdrFormat; }
+  [[nodiscard]] rhi::TextureFormat getSceneColorHdrFormat() const { return kSceneColorHdrFormat; }
   [[nodiscard]] uint64_t getSceneColorHdrEstimatedBytes() const;
-  [[nodiscard]] VkImage getBloomHalfImage() const;
+  [[nodiscard]] rhi::TextureHandle getBloomHalfImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomHalfView() const;
-  [[nodiscard]] VkExtent2D getBloomHalfExtent() const;
-  [[nodiscard]] VkImage getBloomQuarterImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomHalfExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomQuarterImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomQuarterView() const;
-  [[nodiscard]] VkExtent2D getBloomQuarterExtent() const;
-  [[nodiscard]] VkImage getBloomEighthImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomQuarterExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomEighthImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomEighthView() const;
-  [[nodiscard]] VkExtent2D getBloomEighthExtent() const;
-  [[nodiscard]] VkImage getBloomSixteenthImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomEighthExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomSixteenthImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomSixteenthView() const;
-  [[nodiscard]] VkExtent2D getBloomSixteenthExtent() const;
-  [[nodiscard]] VkImage getBloomThirtySecondImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomSixteenthExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomThirtySecondImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomThirtySecondView() const;
-  [[nodiscard]] VkExtent2D getBloomThirtySecondExtent() const;
-  [[nodiscard]] VkImage getBloomUpsampleSixteenthImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomThirtySecondExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleSixteenthImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleSixteenthView() const;
-  [[nodiscard]] VkExtent2D getBloomUpsampleSixteenthExtent() const;
-  [[nodiscard]] VkImage getBloomUpsampleEighthImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleSixteenthExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleEighthImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleEighthView() const;
-  [[nodiscard]] VkExtent2D getBloomUpsampleEighthExtent() const;
-  [[nodiscard]] VkImage getBloomUpsampleQuarterImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleEighthExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomUpsampleQuarterImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomUpsampleQuarterView() const;
-  [[nodiscard]] VkExtent2D getBloomUpsampleQuarterExtent() const;
-  [[nodiscard]] VkImage getBloomOutputImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomUpsampleQuarterExtent() const;
+  [[nodiscard]] rhi::TextureHandle getBloomOutputImage() const;
   [[nodiscard]] rhi::TextureViewHandle getBloomOutputView() const;
-  [[nodiscard]] VkExtent2D getBloomOutputExtent() const;
-  [[nodiscard]] VkImage getColorGradingLutImage() const;
+  [[nodiscard]] rhi::Extent2D getBloomOutputExtent() const;
+  [[nodiscard]] rhi::TextureHandle getColorGradingLutImage() const;
   [[nodiscard]] rhi::TextureViewHandle getColorGradingLutView() const;
-  [[nodiscard]] VkExtent2D getColorGradingLutExtent() const;
+  [[nodiscard]] rhi::Extent2D getColorGradingLutExtent() const;
   [[nodiscard]] uint64_t getBloomEstimatedBytes() const;
-  [[nodiscard]] VkImage getVelocityImage() const;
+  [[nodiscard]] rhi::TextureHandle getVelocityImage() const;
   [[nodiscard]] rhi::TextureViewHandle getVelocityView() const;
-  [[nodiscard]] VkFormat getVelocityFormat() const { return kVelocityFormat; }
+  [[nodiscard]] rhi::TextureFormat getVelocityFormat() const { return kVelocityFormat; }
   [[nodiscard]] uint64_t getVelocityEstimatedBytes() const;
-  [[nodiscard]] VkImage getSceneColorHistoryImage(uint32_t index) const;
+  [[nodiscard]] rhi::TextureHandle getSceneColorHistoryImage(uint32_t index) const;
   [[nodiscard]] rhi::TextureViewHandle getSceneColorHistoryView(uint32_t index) const;
   [[nodiscard]] uint64_t getSceneColorHistoryEstimatedBytes() const;
 
-  static constexpr VkFormat kOutputTextureFormat = VK_FORMAT_B8G8R8A8_UNORM;
-  static constexpr VkFormat kSceneColorHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-  static constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-  static constexpr VkFormat kVelocityFormat = VK_FORMAT_R16G16_SFLOAT;
-  static constexpr VkFormat kColorGradingLutFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  static constexpr rhi::TextureFormat kOutputTextureFormat = rhi::TextureFormat::bgra8Unorm;
+  static constexpr rhi::TextureFormat kSceneColorHdrFormat = rhi::TextureFormat::rgba16Sfloat;
+  static constexpr rhi::TextureFormat kBloomFormat = rhi::TextureFormat::rgba16Sfloat;
+  static constexpr rhi::TextureFormat kVelocityFormat = rhi::TextureFormat::rg16Sfloat;
+  static constexpr rhi::TextureFormat kColorGradingLutFormat = rhi::TextureFormat::rgba8Unorm;
 
   static constexpr uint32_t kShadowMapSize = 2048;
   static constexpr uint32_t kColorGradingLutSize = 32;
 
-  [[nodiscard]] VkImage getShadowMapImage() const;
+  [[nodiscard]] rhi::TextureHandle getShadowMapImage() const;
   [[nodiscard]] rhi::TextureViewHandle getShadowMapView() const;
-  [[nodiscard]] VkExtent2D getShadowMapExtent() const;
-  [[nodiscard]] VkImage getDepthPyramidImage() const;
+  [[nodiscard]] rhi::Extent2D getShadowMapExtent() const;
+  [[nodiscard]] rhi::TextureHandle getDepthPyramidImage() const;
   [[nodiscard]] rhi::TextureViewHandle getDepthPyramidMipView(uint32_t mipLevel) const;
-  [[nodiscard]] VkExtent2D getDepthPyramidExtent() const;
+  [[nodiscard]] rhi::Extent2D getDepthPyramidExtent() const;
   [[nodiscard]] uint32_t getDepthPyramidMipCount() const;
 
 private:
+  struct ImageResource
+  {
+    rhi::TextureHandle image{};
+  };
+
+  struct BufferResource
+  {
+    rhi::BufferHandle buffer{};
+  };
+
   struct Resources
   {
-    std::vector<utils::Image>          colorImages;
-    utils::Image                       depthImage{};
+    std::vector<ImageResource>         colorImages;
+    ImageResource                      depthImage{};
     rhi::TextureViewHandle             depthView{};
-    std::vector<VkDescriptorImageInfo> descriptors;
-    std::vector<rhi::TextureViewHandle> colorViews;       // RHI handles backing descriptors[].imageView
+    std::vector<rhi::TextureViewHandle> colorViews;
     std::vector<rhi::TextureViewHandle> uiImageViews;
-    utils::Image                       outputTextureImage{};  // Fixed-res output for PBR result
+    ImageResource                      outputTextureImage{};  // Fixed-res output for PBR result
     rhi::TextureViewHandle             outputTextureView{};
     ImTextureID                        outputTextureImID{};
-    utils::Image                       sceneColorHdrImage{};
+    ImageResource                      sceneColorHdrImage{};
     rhi::TextureViewHandle             sceneColorHdrView{};
-    utils::Image                       bloomHalfImage{};
+    ImageResource                      bloomHalfImage{};
     rhi::TextureViewHandle             bloomHalfView{};
-    VkExtent2D                         bloomHalfExtent{};
-    utils::Image                       bloomQuarterImage{};
+    rhi::Extent2D                      bloomHalfExtent{};
+    ImageResource                      bloomQuarterImage{};
     rhi::TextureViewHandle             bloomQuarterView{};
-    VkExtent2D                         bloomQuarterExtent{};
-    utils::Image                       bloomEighthImage{};
+    rhi::Extent2D                      bloomQuarterExtent{};
+    ImageResource                      bloomEighthImage{};
     rhi::TextureViewHandle             bloomEighthView{};
-    VkExtent2D                         bloomEighthExtent{};
-    utils::Image                       bloomSixteenthImage{};
+    rhi::Extent2D                      bloomEighthExtent{};
+    ImageResource                      bloomSixteenthImage{};
     rhi::TextureViewHandle             bloomSixteenthView{};
-    VkExtent2D                         bloomSixteenthExtent{};
-    utils::Image                       bloomThirtySecondImage{};
+    rhi::Extent2D                      bloomSixteenthExtent{};
+    ImageResource                      bloomThirtySecondImage{};
     rhi::TextureViewHandle             bloomThirtySecondView{};
-    VkExtent2D                         bloomThirtySecondExtent{};
-    utils::Image                       bloomUpsampleSixteenthImage{};
+    rhi::Extent2D                      bloomThirtySecondExtent{};
+    ImageResource                      bloomUpsampleSixteenthImage{};
     rhi::TextureViewHandle             bloomUpsampleSixteenthView{};
-    VkExtent2D                         bloomUpsampleSixteenthExtent{};
-    utils::Image                       bloomUpsampleEighthImage{};
+    rhi::Extent2D                      bloomUpsampleSixteenthExtent{};
+    ImageResource                      bloomUpsampleEighthImage{};
     rhi::TextureViewHandle             bloomUpsampleEighthView{};
-    VkExtent2D                         bloomUpsampleEighthExtent{};
-    utils::Image                       bloomUpsampleQuarterImage{};
+    rhi::Extent2D                      bloomUpsampleEighthExtent{};
+    ImageResource                      bloomUpsampleQuarterImage{};
     rhi::TextureViewHandle             bloomUpsampleQuarterView{};
-    VkExtent2D                         bloomUpsampleQuarterExtent{};
-    utils::Image                       bloomOutputImage{};
+    rhi::Extent2D                      bloomUpsampleQuarterExtent{};
+    ImageResource                      bloomOutputImage{};
     rhi::TextureViewHandle             bloomOutputView{};
-    VkExtent2D                         bloomOutputExtent{};
-    utils::Image                       colorGradingLutImage{};
+    rhi::Extent2D                      bloomOutputExtent{};
+    ImageResource                      colorGradingLutImage{};
     rhi::TextureViewHandle             colorGradingLutView{};
-    VkExtent2D                         colorGradingLutExtent{};
-    utils::Buffer                      colorGradingLutStaging{};
-    utils::Image                       velocityImage{};
+    rhi::Extent2D                      colorGradingLutExtent{};
+    BufferResource                     colorGradingLutStaging{};
+    ImageResource                      velocityImage{};
     rhi::TextureViewHandle             velocityView{};
-    std::array<utils::Image, 2>        sceneColorHistoryImages{};
+    std::array<ImageResource, 2>       sceneColorHistoryImages{};
     std::array<rhi::TextureViewHandle, 2> sceneColorHistoryViews{};
-    utils::Image                       shadowMapImage{};
+    ImageResource                      shadowMapImage{};
     rhi::TextureViewHandle             shadowMapView{};
-    utils::Image                       depthPyramidImage{};
+    ImageResource                      depthPyramidImage{};
     std::vector<rhi::TextureViewHandle> depthPyramidMipViews;
-    VkExtent2D                         depthPyramidExtent{};
+    rhi::Extent2D                      depthPyramidExtent{};
     uint32_t                           depthPyramidMipCount{0};
   };
 
-  void                       create(VkCommandBuffer cmd);
+  void                       create(rhi::CommandBuffer& cmd);
   void                       destroy();
-  [[nodiscard]] utils::Image createImage(const VkImageCreateInfo& imageInfo) const;
+  [[nodiscard]] rhi::TextureHandle createImage(const rhi::TextureDesc& imageInfo) const;
 
-  VkDevice                 m_device{VK_NULL_HANDLE};
   rhi::Device*             m_rhiDevice{nullptr};
-  VmaAllocator             m_allocator{nullptr};
   CreateInfo               m_createInfo{};
   Resources                m_resources{};
   std::vector<ImTextureID> m_imguiTextureIds;

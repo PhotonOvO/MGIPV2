@@ -1,6 +1,12 @@
 #include "RendererFacade.h"
+#include "../rhi/vulkan/VulkanSurface.h"
 
 namespace demo {
+
+std::unique_ptr<rhi::Surface> RendererFacade::createSurface() const
+{
+  return std::make_unique<rhi::vulkan::VulkanSurface>();
+}
 
 void RendererFacade::init(void* window, rhi::Surface& surface, bool vSync)
 {
@@ -42,6 +48,11 @@ void RendererFacade::resize(rhi::Extent2D size)
   gpuDriven().resize(size);
 }
 
+void RendererFacade::beginUiFrame()
+{
+  gpuDriven().beginUiFrame();
+}
+
 void RendererFacade::render(const RenderParams& params)
 {
   gpuDriven().render(params);
@@ -72,14 +83,14 @@ MaterialHandle RendererFacade::getMaterialHandle(uint32_t slot) const
   return gpuDriven().getMaterialHandle(slot);
 }
 
-GltfUploadResult RendererFacade::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
+GltfUploadResult RendererFacade::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)
 {
   return gpuDriven().uploadGltfModel(model, cmd);
 }
 
 SceneUploadResult RendererFacade::commitSceneUploadPlan(const SceneAsset& asset,
                                                         const SceneUploadPlan& plan,
-                                                        VkCommandBuffer cmd)
+                                                        rhi::CommandBuffer& cmd)
 {
   return gpuDriven().commitSceneUploadPlan(asset, plan, cmd);
 }
@@ -89,7 +100,7 @@ void RendererFacade::uploadGltfModelBatch(const GltfModel&          model,
                                           std::span<const uint32_t> materialIndices,
                                           std::span<const uint32_t> meshIndices,
                                           GltfUploadResult&         ioResult,
-                                          VkCommandBuffer           cmd)
+                                          rhi::CommandBuffer&       cmd)
 {
   gpuDriven().uploadGltfModelBatch(model, textureIndices, materialIndices, meshIndices, ioResult, cmd);
 }
@@ -114,7 +125,7 @@ void RendererFacade::updateSceneInstanceTransform(uint32_t instanceIndex, const 
   gpuDriven().updateSceneInstanceTransform(instanceIndex, transform);
 }
 
-void RendererFacade::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
+void RendererFacade::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 {
   gpuDriven().executeUploadCommand(std::move(uploadFn));
 }

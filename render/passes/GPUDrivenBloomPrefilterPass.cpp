@@ -1,5 +1,7 @@
 #include "GPUDrivenBloomPrefilterPass.h"
 
+#include "../ArgumentTables.h"
+
 #include "../GPUDrivenRenderer.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
@@ -27,33 +29,22 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenBloomPrefilterPass::getDe
 
 void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.executor == nullptr || context.params == nullptr
      || !context.params->debugOptions.enablePostProcessing
      || !context.params->debugOptions.enableBloom)
   {
     return;
   }
 
-  const VkImage bloomImage = m_renderer->getBloomHalfImage();
+  const rhi::TextureHandle bloomImage = m_renderer->getBloomHalfImage();
   const rhi::TextureViewHandle bloomView = m_renderer->getBloomHalfView();
-  const VkExtent2D bloomExtent = m_renderer->getBloomHalfExtent();
-  if(bloomImage == VK_NULL_HANDLE || bloomView.isNull() || bloomExtent.width == 0u || bloomExtent.height == 0u)
+  const rhi::Extent2D bloomExtent = m_renderer->getBloomHalfExtent();
+  if(bloomImage.isNull() || bloomView.isNull() || bloomExtent.width == 0u || bloomExtent.height == 0u)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenBloomPrefilter");
-  const rhi::TextureHandle bloomBarrierTex = context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(bloomImage));
-  const auto transitionBloom = [&](rhi::ResourceState before, rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = bloomBarrierTex,
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
-  const auto restoreBloomState = [&]() { transitionBloom(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General); };
+  context.commandBuffer->beginEvent("GPUDrivenBloomPrefilter");
   rhi::RenderTargetDesc colorTarget{
       .texture = {},
       .view = bloomView,
@@ -63,10 +54,8 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
 
-  transitionBloom(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
-
   const rhi::Extent2D extent{bloomExtent.width, bloomExtent.height};
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
       .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
@@ -78,19 +67,17 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
   const PipelineHandle pipelineHandle = m_renderer->getBloomPrefilterPipelineHandle();
   if(pipelineHandle.isNull())
   {
-    context.cmdBuffer->endEncoding();
-    restoreBloomState();
-    context.cmdBuffer->endEvent();
+    context.commandBuffer->endEncoding();
+    context.commandBuffer->endEvent();
     return;
   }
-  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
-  if(!pipelineHandle.isNull() && !inputBindGroup.isNull())
+  const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+  if(!pipelineHandle.isNull() && !inputTable.isNull())
   {
     enc->setPipeline(pipelineHandle);
-    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                          rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
-    const VkExtent2D sourceExtent = m_renderer->getSceneExtent();
+    const rhi::Extent2D sourceExtent = m_renderer->getSceneExtent();
     const shaderio::PostProcessUniforms postProcessUniforms{
         .params0 = glm::vec4(context.params->debugOptions.postExposure,
                              context.params->debugOptions.bloomIntensity,
@@ -114,23 +101,18 @@ void GPUDrivenBloomPrefilterPass::execute(const PassContext& context) const
         context.transientAllocator->allocate(sizeof(postProcessUniforms), 256);
     std::memcpy(postProcessAlloc.cpuPtr, &postProcessUniforms, sizeof(postProcessUniforms));
     context.transientAllocator->flushAllocation(postProcessAlloc, sizeof(postProcessUniforms));
-    m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                                 context.transientAllocator->getBufferOpaque(),
-                                                 context.cameraAlloc.offset);
-    const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
-    if(!sceneBindGroup.isNull())
+    const rhi::ArgumentTableHandle sceneTable = m_renderer->getLightingSceneArgumentTable(context.frameIndex);
+    if(!sceneTable.isNull())
     {
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, context.cameraAlloc.offset, 0);
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, postProcessAlloc.offset, 0);
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                            rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, context.cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, postProcessAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, sceneTable);
       enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
     }
   }
 
-  context.cmdBuffer->endEncoding();
-  restoreBloomState();
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEncoding();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

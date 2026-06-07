@@ -1,17 +1,8 @@
-#define VMA_IMPLEMENTATION
-#define VMA_LEAK_LOG_FORMAT(format, ...)                                                                               \
-  {                                                                                                                    \
-    printf((format), __VA_ARGS__);                                                                                     \
-    printf("\n");                                                                                                      \
-  }
-
 #include "../common/Common.h"
 #include "../loader/GltfLoader.h"
 #include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
 #include "../render/RendererFacade.h"
-#include "../rhi/vulkan/VulkanCommandList.h"
-#include "../rhi/vulkan/VulkanSurface.h"
 
 #include <android/asset_manager.h>
 #include <android_native_app_glue.h>
@@ -90,8 +81,7 @@ public:
       return;
     }
 
-    VK_CHECK(volkInitialize());
-    m_surface = std::make_unique<demo::rhi::vulkan::VulkanSurface>();
+    m_surface = m_renderer.createSurface();
     m_renderer.init(window, *m_surface, true);
 
     const int32_t width = std::max(1, ANativeWindow_getWidth(window));
@@ -148,9 +138,7 @@ public:
       updateCamera();
     }
 
-    ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplAndroid_NewFrame();
-    ImGui::NewFrame();
+    m_renderer.beginUiFrame();
     ImGui::Begin("VKDemo Android");
     ImGui::TextUnformatted("GPU Driven renderer");
     ImGui::Text("Viewport: %u x %u", m_viewportSize.width, m_viewportSize.height);
@@ -179,9 +167,8 @@ public:
     params.lightSettings = m_lightSettings;
     params.debugOptions = m_debugOptions;
     params.gltfModel = m_uploadResult.has_value() ? &(*m_uploadResult) : nullptr;
-    params.recordUi = [](demo::rhi::CommandList& cmd) {
+    params.recordUi = []() {
       ImGui::Render();
-      ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), demo::rhi::vulkan::getNativeCommandBuffer(cmd));
     };
 
     m_renderer.render(params);
@@ -280,7 +267,7 @@ private:
       if(!batch.meshIndices.empty() || !batch.materialIndices.empty() || !batch.textureIndices.empty())
       {
         m_loadStatus = "Uploading scene assets...";
-        m_renderer.executeUploadCommand([this, &batch](VkCommandBuffer cmd) {
+        m_renderer.executeUploadCommand([this, &batch](demo::rhi::CommandBuffer& cmd) {
           m_renderer.uploadGltfModelBatch(*m_sceneModel,
                                           batch.textureIndices,
                                           batch.materialIndices,
@@ -322,7 +309,7 @@ private:
 
   android_app* m_app{nullptr};
   bool m_initialized{false};
-  std::unique_ptr<demo::rhi::vulkan::VulkanSurface> m_surface;
+  std::unique_ptr<demo::rhi::Surface> m_surface;
   demo::RendererFacade m_renderer;
   demo::Camera m_camera;
   demo::rhi::Extent2D m_viewportSize{1, 1};

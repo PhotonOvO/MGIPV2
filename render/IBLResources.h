@@ -1,9 +1,13 @@
 #pragma once
 
-#include "../common/Common.h"
 #include "../rhi/RHIDevice.h"
+#include "ShaderInterop.h"
 
 namespace demo {
+
+namespace rhi {
+class CommandBuffer;
+}
 
 class IBLResources
 {
@@ -12,8 +16,8 @@ public:
   {
     uint32_t cubeMapSize{128};   // Cube map face size
     uint32_t dfgLUTSize{256};    // DFG LUT size
-    VkFormat cubeMapFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
-    VkFormat dfgLUTFormat{VK_FORMAT_R16G16_SFLOAT};
+    rhi::TextureFormat cubeMapFormat{rhi::TextureFormat::rgba16Sfloat};
+    rhi::TextureFormat dfgLUTFormat{rhi::TextureFormat::rg16Sfloat};
     rhi::TextureViewHandle sourceEnvironmentView{};
     uint32_t sourceWidth{0};
     uint32_t sourceHeight{0};
@@ -24,18 +28,18 @@ public:
   };
 
   IBLResources() = default;
-  ~IBLResources() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+  ~IBLResources() { assert(m_backendDeviceToken == 0 && "Missing deinit()"); }
 
-  void init(rhi::Device& device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo);
+  void init(rhi::Device& device, uintptr_t backendAllocatorToken, rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
   void deinit();
 
   [[nodiscard]] rhi::TextureViewHandle getPrefilteredMapView() const { return m_prefilteredMapView; }
   [[nodiscard]] rhi::TextureViewHandle getDFGLUTView() const { return m_dfgLUTView; }
   [[nodiscard]] rhi::TextureViewHandle getIrradianceMapView() const { return m_irradianceMapView; }
-  [[nodiscard]] VkSampler getCubeMapSampler() const { return m_cubeMapSampler; }
-  [[nodiscard]] VkSampler getLUTSampler() const { return m_lutSampler; }
+  [[nodiscard]] rhi::SamplerHandle getCubeMapSampler() const { return m_cubeMapSampler; }
+  [[nodiscard]] rhi::SamplerHandle getLUTSampler() const { return m_lutSampler; }
   [[nodiscard]] uint32_t getMaxMipLevel() const { return m_maxMipLevel; }
-  [[nodiscard]] bool isInitialized() const { return m_device != VK_NULL_HANDLE; }
+  [[nodiscard]] bool isInitialized() const { return m_backendDeviceToken != 0; }
   [[nodiscard]] bool isSplitSumReady() const { return m_splitSumReady; }
 
 private:
@@ -51,39 +55,44 @@ private:
     uint32_t reserved{0};
   };
 
-  void createImages(VkCommandBuffer cmd, const CreateInfo& createInfo);
-  void createGenerationPipeline(VkShaderModule shaderModule,
-                                const char* entryPoint,
-                                VkPipelineLayout pipelineLayout,
-                                VkPipeline& pipeline) const;
-  void generateIBLMaps(VkCommandBuffer cmd, const CreateInfo& createInfo);
-  void transitionGeneratedImagesForSampling(VkCommandBuffer cmd) const;
+  struct NativeImageResource
+  {
+    uintptr_t image{0};
+    uintptr_t allocation{0};
+    rhi::TextureHandle handle{};
+  };
 
-  VkDevice m_device{VK_NULL_HANDLE};
+  void createImages(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
+  [[nodiscard]] rhi::PipelineHandle createGenerationPipeline(uintptr_t shaderModule,
+                                                             const char* entryPoint,
+                                                             rhi::ArgumentLayoutHandle layout,
+                                                             uint32_t variant) const;
+  void generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
+  void transitionGeneratedImagesForSampling(rhi::CommandBuffer& rhiCmd) const;
+
+  uintptr_t m_backendDeviceToken{0};
   rhi::Device* m_rhiDevice{nullptr};
-  VmaAllocator m_allocator{nullptr};
+  uintptr_t m_backendAllocatorToken{0};
 
-  utils::Image m_prefilteredMap{};
+  NativeImageResource m_prefilteredMap{};
   rhi::TextureViewHandle m_prefilteredMapView{};
 
-  utils::Image m_irradianceMap{};
+  NativeImageResource m_irradianceMap{};
   rhi::TextureViewHandle m_irradianceMapView{};
   rhi::TextureViewHandle m_irradianceStorageView{};
 
-  utils::Image m_dfgLUT{};
+  NativeImageResource m_dfgLUT{};
   rhi::TextureViewHandle m_dfgLUTView{};
 
-  VkSampler m_cubeMapSampler{VK_NULL_HANDLE};
-  VkSampler m_lutSampler{VK_NULL_HANDLE};
+  rhi::SamplerHandle m_cubeMapSampler{};
+  rhi::SamplerHandle m_lutSampler{};
 
-  VkDescriptorPool m_generationDescriptorPool{VK_NULL_HANDLE};
-  VkDescriptorSetLayout m_envGenerationSetLayout{VK_NULL_HANDLE};
-  VkDescriptorSetLayout m_lutGenerationSetLayout{VK_NULL_HANDLE};
-  VkPipelineLayout m_envGenerationPipelineLayout{VK_NULL_HANDLE};
-  VkPipelineLayout m_lutGenerationPipelineLayout{VK_NULL_HANDLE};
-  VkPipeline m_dfgGenerationPipeline{VK_NULL_HANDLE};
-  VkPipeline m_irradianceGenerationPipeline{VK_NULL_HANDLE};
-  VkPipeline m_prefilterGenerationPipeline{VK_NULL_HANDLE};
+  rhi::ArgumentLayoutHandle m_envGenerationArgumentLayout{};
+  rhi::ArgumentLayoutHandle m_lutGenerationArgumentLayout{};
+  std::vector<rhi::ArgumentTableHandle> m_generationArgumentTables;
+  rhi::PipelineHandle m_dfgGenerationPipeline{};
+  rhi::PipelineHandle m_irradianceGenerationPipeline{};
+  rhi::PipelineHandle m_prefilterGenerationPipeline{};
   std::vector<rhi::TextureViewHandle> m_generationMipViews;
 
   uint32_t m_maxMipLevel{0};

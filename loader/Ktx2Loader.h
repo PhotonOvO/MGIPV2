@@ -1,9 +1,11 @@
 #pragma once
 
 #include "../common/Common.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace demo {
 

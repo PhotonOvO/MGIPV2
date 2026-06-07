@@ -1,6 +1,5 @@
 #include "RenderDevice.h"
-#include "../rhi/vulkan/VulkanPipelines.h"
-#include "../rhi/vulkan/VulkanDescriptor.h"
+#include "../rhi/vulkan/VulkanCommandBuffer.h"
 #include "../rhi/vulkan/VulkanSwapchain.h"
 #include "../rhi/vulkan/VulkanDevice.h"
 #include "../rhi/vulkan/VulkanFrameContext.h"
@@ -26,8 +25,6 @@
 #include <random>
 #include <type_traits>
 #include <unordered_map>
-
-#include "../rhi/vulkan/VulkanCommandList.h"
 
 namespace demo {
 
@@ -362,15 +359,6 @@ struct TextureUploadDiagnostics
   return diagnostics;
 }
 
-struct PendingMipGeneration
-{
-  VkImage  image{VK_NULL_HANDLE};
-  VkFormat format{VK_FORMAT_UNDEFINED};
-  uint32_t width{0};
-  uint32_t height{0};
-  uint32_t mipLevels{1};
-};
-
 [[nodiscard]] glm::vec4 normalizePlane(glm::vec4 plane)
 {
   const float length = glm::length(glm::vec3(plane));
@@ -497,6 +485,11 @@ struct OverlayCircle
 
 }  // namespace
 
+rhi::ArgumentBinding makeArgumentBinding(uint32_t logicalIndex,
+                                         rhi::BindlessResourceType resourceType,
+                                         uint32_t descriptorCount,
+                                         rhi::ResourceVisibility visibility);
+
 static VkFormat selectSwapchainImageFormat(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
 {
   const VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR, .surface = surface};
@@ -538,7 +531,69 @@ static bool isValidExtent(VkExtent2D extent)
   return extent.width > 0 && extent.height > 0;
 }
 
-static bool extentChanged(VkExtent2D a, rhi::Extent2D b)
+[[nodiscard]] rhi::Extent2D toRhiExtent(VkExtent2D extent)
+{
+  return {extent.width, extent.height};
+}
+
+[[nodiscard]] VkExtent2D toVkExtent(rhi::Extent2D extent)
+{
+  return {extent.width, extent.height};
+}
+
+[[nodiscard]] VkFormat toVkFormat(rhi::TextureFormat format)
+{
+  switch(format)
+  {
+    case rhi::TextureFormat::rgba8Unorm:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+    case rhi::TextureFormat::bgra8Unorm:
+      return VK_FORMAT_B8G8R8A8_UNORM;
+    case rhi::TextureFormat::rgba16Sfloat:
+      return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case rhi::TextureFormat::rg16Sfloat:
+      return VK_FORMAT_R16G16_SFLOAT;
+    case rhi::TextureFormat::r32Sfloat:
+      return VK_FORMAT_R32_SFLOAT;
+    case rhi::TextureFormat::d16Unorm:
+      return VK_FORMAT_D16_UNORM;
+    case rhi::TextureFormat::d32Sfloat:
+      return VK_FORMAT_D32_SFLOAT;
+    case rhi::TextureFormat::d24UnormS8:
+      return VK_FORMAT_D24_UNORM_S8_UINT;
+    case rhi::TextureFormat::d32SfloatS8:
+      return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    case rhi::TextureFormat::undefined:
+    default:
+      return VK_FORMAT_UNDEFINED;
+  }
+}
+
+[[nodiscard]] uint64_t resolveNativeImage(const rhi::Device& device, rhi::TextureHandle handle)
+{
+  return handle.isNull() ? 0u : device.resolveTextureBackendHandle(handle);
+}
+
+[[nodiscard]] rhi::ResourceVisibility toResourceVisibility(rhi::ShaderStage stages)
+{
+  return static_cast<rhi::ResourceVisibility>(static_cast<uint32_t>(stages));
+}
+
+[[nodiscard]] rhi::TextureAspect sceneDepthTextureAspect(rhi::TextureFormat format)
+{
+  switch(format)
+  {
+    case rhi::TextureFormat::d24UnormS8:
+    case rhi::TextureFormat::d32SfloatS8:
+      return rhi::TextureAspect::depthStencil;
+    case rhi::TextureFormat::d16Unorm:
+    case rhi::TextureFormat::d32Sfloat:
+    default:
+      return rhi::TextureAspect::depth;
+  }
+}
+
+static bool extentChanged(rhi::Extent2D a, rhi::Extent2D b)
 {
   return a.width != b.width || a.height != b.height;
 }
@@ -638,6 +693,16 @@ static void destroyBuffer(const VmaAllocator allocator, utils::Buffer& buffer)
   }
 }
 
+static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer);
+
+static void destroyBuffer(const VmaAllocator allocator, UploadBufferRecord& buffer)
+{
+  ASSERT(buffer.rhiHandle.isNull(), "RHI-owned UploadBufferRecord must be destroyed through destroyUploadBufferRecord");
+  utils::Buffer nativeBuffer = toUtilsBuffer(buffer);
+  destroyBuffer(allocator, nativeBuffer);
+  buffer = {};
+}
+
 static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data, const VkDeviceSize size);
 static void writeHostVisibleBufferRange(const VmaAllocator allocator,
                                         utils::Buffer&      buffer,
@@ -645,25 +710,115 @@ static void writeHostVisibleBufferRange(const VmaAllocator allocator,
                                         const void*         data,
                                         VkDeviceSize        size);
 
-static utils::Buffer createStagingBuffer(const VkDevice              device,
-                                         const VmaAllocator          allocator,
-                                         std::vector<utils::Buffer>& stagingBuffers,
-                                         std::span<const std::byte>  data)
+static upload::NativeUploadContext makeNativeUploadContext(const VkDevice device, const VmaAllocator allocator)
 {
-  utils::Buffer stagingBuffer = upload::createUploadStagingBuffer(device, allocator, data);
-  stagingBuffers.push_back(stagingBuffer);
-  return stagingBuffer;
+  return upload::NativeUploadContext{
+      .device    = reinterpret_cast<uintptr_t>(device),
+      .allocator = reinterpret_cast<uintptr_t>(allocator),
+  };
+}
+
+static utils::Buffer toUtilsBuffer(const upload::NativeUploadBuffer& buffer)
+{
+  return utils::Buffer{
+      .buffer     = reinterpret_cast<VkBuffer>(buffer.buffer),
+      .allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
+  };
+}
+
+static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer)
+{
+  return utils::Buffer{
+      .buffer     = reinterpret_cast<VkBuffer>(buffer.buffer),
+      .allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
+      .address    = static_cast<VkDeviceAddress>(buffer.address),
+      .mapped     = buffer.mapped,
+  };
+}
+
+static UploadBufferRecord toUploadBufferRecord(const utils::Buffer& buffer)
+{
+  return UploadBufferRecord{
+      .buffer     = reinterpret_cast<uintptr_t>(buffer.buffer),
+      .allocation = reinterpret_cast<uintptr_t>(buffer.allocation),
+      .address    = static_cast<uintptr_t>(buffer.address),
+      .mapped     = buffer.mapped,
+  };
+}
+
+static UploadBufferRecord toUploadBufferRecord(const rhi::vulkan::BufferRecord& buffer, rhi::BufferHandle handle)
+{
+  return UploadBufferRecord{
+      .buffer    = static_cast<uintptr_t>(buffer.nativeBuffer),
+      .allocation = static_cast<uintptr_t>(buffer.nativeAllocation),
+      .address   = static_cast<uintptr_t>(buffer.gpuAddress),
+      .mapped    = buffer.mapped,
+      .rhiHandle = handle,
+  };
+}
+
+static void destroyUploadBufferRecord(rhi::Device* device, const VmaAllocator allocator, UploadBufferRecord& buffer)
+{
+  if(!buffer.rhiHandle.isNull())
+  {
+    if(device != nullptr)
+    {
+      device->destroyBuffer(buffer.rhiHandle);
+    }
+    buffer = {};
+    return;
+  }
+
+  destroyBuffer(allocator, buffer);
+}
+
+static void destroyUploadBufferRecord(rhi::Device* device, const VmaAllocator allocator, const UploadBufferRecord& buffer)
+{
+  if(buffer.isNull())
+  {
+    return;
+  }
+  if(!buffer.rhiHandle.isNull())
+  {
+    if(device != nullptr)
+    {
+      device->destroyBuffer(buffer.rhiHandle);
+    }
+    return;
+  }
+
+  utils::Buffer nativeBuffer = toUtilsBuffer(buffer);
+  destroyBuffer(allocator, nativeBuffer);
 }
 
 static utils::Buffer createBufferAndUploadData(const VkDevice               device,
                                                const VmaAllocator           allocator,
-                                               std::vector<utils::Buffer>&  stagingBuffers,
-                                               const VkCommandBuffer        cmd,
+                                               rhi::Device&                 rhiDevice,
+                                               std::vector<rhi::BufferHandle>& stagingBuffers,
+                                               rhi::CommandBuffer&          cmd,
                                                std::span<const std::byte>   data,
                                                const VkBufferUsageFlags2KHR usage,
                                                const upload::StaticBufferUploadPolicy& uploadPolicy)
 {
-  return upload::createStaticBufferWithUpload(device, allocator, cmd, data, usage, uploadPolicy, &stagingBuffers);
+  (void)uploadPolicy;
+  upload::NativeUploadBuffer nativeBuffer =
+      upload::createStaticBuffer(makeNativeUploadContext(device, allocator), data.size_bytes(), static_cast<uint64_t>(usage));
+  const rhi::BufferHandle bufferHandle = rhiDevice.registerExternalBuffer(nativeBuffer.buffer);
+
+  BatchUploadContext upload;
+  upload.init(rhiDevice, static_cast<uint64_t>(data.size_bytes()));
+  const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(data.size_bytes()), 16);
+  std::memcpy(slice.cpuPtr, data.data(), data.size_bytes());
+  upload.recordBufferUpload(slice, bufferHandle, 0, static_cast<uint64_t>(data.size_bytes()));
+  upload.executeUploads(cmd);
+  rhiDevice.destroyBuffer(bufferHandle);
+
+  rhi::BufferHandle stagingBuffer = upload.releaseStagingBuffer();
+  if(!stagingBuffer.isNull())
+  {
+    stagingBuffers.push_back(stagingBuffer);
+  }
+  return toUtilsBuffer(nativeBuffer);
 }
 
 static utils::Image createImage(const VmaAllocator allocator, const VkImageCreateInfo& imageInfo)
@@ -673,33 +828,6 @@ static utils::Image createImage(const VmaAllocator allocator, const VkImageCreat
   VmaAllocationInfo             allocInfo{};
   VK_CHECK(vmaCreateImage(allocator, &imageInfo, &allocationInfo, &image.image, &image.allocation, &allocInfo));
   return image;
-}
-
-static utils::ImageResource createImageAndUploadData(const VkDevice              device,
-                                                     const VmaAllocator          allocator,
-                                                     std::vector<utils::Buffer>& stagingBuffers,
-                                                     const VkCommandBuffer       cmd,
-                                                     std::span<const std::byte>  data,
-                                                     VkImageCreateInfo           imageInfo,
-                                                     const VkImageLayout         finalLayout)
-{
-  utils::Buffer stagingBuffer = createStagingBuffer(device, allocator, stagingBuffers, data);
-  imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-
-  utils::Image image = createImage(allocator, imageInfo);
-  utils::cmdInitImageLayout(cmd, image.image);
-
-  const VkBufferImageCopy copyRegion{
-      .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-      .imageExtent      = imageInfo.extent,
-  };
-  vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copyRegion);
-
-  utils::ImageResource resource{};
-  resource.image      = image.image;
-  resource.allocation = image.allocation;
-  resource.layout     = finalLayout;
-  return resource;
 }
 
 static void destroyImageResource(const VkDevice device, const VmaAllocator allocator, utils::ImageResource& image)
@@ -720,6 +848,21 @@ static void freeStagingBuffers(const VmaAllocator allocator, std::vector<utils::
   for(utils::Buffer& buffer : stagingBuffers)
   {
     destroyBuffer(allocator, buffer);
+  }
+  stagingBuffers.clear();
+}
+
+static void freeRhiStagingBuffers(rhi::Device* device, std::vector<rhi::BufferHandle>& stagingBuffers)
+{
+  if(device != nullptr)
+  {
+    for(rhi::BufferHandle buffer : stagingBuffers)
+    {
+      if(!buffer.isNull())
+      {
+        device->destroyBuffer(buffer);
+      }
+    }
   }
   stagingBuffers.clear();
 }
@@ -758,10 +901,9 @@ static rhi::ShaderReflectionData buildRasterShaderReflection()
                                  static_cast<uint32_t>(shaderio::LSetScene), static_cast<uint32_t>(shaderio::LBindSceneInfo), 1, 0},
   };
   reflection.pushConstantRanges = {
-      rhi::PushConstantRange{rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment, 0,
-                             std::max(sizeof(shaderio::PushConstant), sizeof(shaderio::PushConstantGltf))},
+      rhi::PushConstantRange{rhi::ShaderStageFlagBits::fragment, 0, sizeof(shaderio::PushConstant)},
   };
-  reflection.pushConstantSize        = std::max(sizeof(shaderio::PushConstant), sizeof(shaderio::PushConstantGltf));
+  reflection.pushConstantSize        = sizeof(shaderio::PushConstant);
   reflection.specializationConstants = {
       rhi::SpecializationConstant{0, 0, sizeof(VkBool32)},
   };
@@ -782,13 +924,13 @@ static rhi::ShaderReflectionData buildComputeShaderReflection()
   return reflection;
 }
 
-std::optional<uint32_t> RenderDevice::mapSetSlotToLegacyShaderSet(BindGroupSetSlot slot)
+std::optional<uint32_t> RenderDevice::mapSetSlotToLegacyShaderSet(ArgumentSlot slot)
 {
   switch(slot)
   {
-    case BindGroupSetSlot::material:
+    case ArgumentSlot::material:
       return static_cast<uint32_t>(shaderio::LSetTextures);
-    case BindGroupSetSlot::drawDynamic:
+    case ArgumentSlot::drawDynamic:
       return static_cast<uint32_t>(shaderio::LSetScene);
     default:
       return std::nullopt;
@@ -797,6 +939,8 @@ std::optional<uint32_t> RenderDevice::mapSetSlotToLegacyShaderSet(BindGroupSetSl
 
 void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 {
+  VK_CHECK(volkInitialize());
+
   m_swapchainDependent.vSync = vSync;
   m_materials                = MaterialResources{};
 
@@ -843,11 +987,11 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
          "RenderDevice::init requires graphics+compute+bindless capability floor");
 
-  const VkInstance nativeInstance = fromNativeHandle<VkInstance>(m_device.device->getNativeInstance());
-  const VkPhysicalDevice nativePhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
-  const VkDevice       nativeDevice        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkInstance nativeInstance = fromNativeHandle<VkInstance>(m_device.device->getBackendInstanceHandle());
+  const VkPhysicalDevice nativePhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle());
+  const VkDevice       nativeDevice        = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   const rhi::QueueInfo graphicsQueueInfo   = m_device.device->getGraphicsQueue();
-  const VkQueue        nativeGraphicsQueue = fromNativeHandle<VkQueue>(graphicsQueueInfo.nativeHandle);
+  const VkQueue        nativeGraphicsQueue = fromNativeHandle<VkQueue>(graphicsQueueInfo.backendHandle);
 
   rhi::WindowHandle windowHandle{window};
   surface.init(static_cast<void*>(nativeInstance), static_cast<void*>(nativePhysicalDevice), windowHandle);
@@ -867,12 +1011,15 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   }
 
 
-  m_meshPool.init(nativeDevice, m_device.allocator, m_device.device.get(), m_device.staticBufferUploadPolicy);
+  m_meshPool.init(reinterpret_cast<uintptr_t>(nativeDevice),
+                  reinterpret_cast<uintptr_t>(m_device.allocator),
+                  m_device.device.get(),
+                  m_device.staticBufferUploadPolicy);
 
-  const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getNativeHandle());
+  const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getBackendHandle());
   ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
   DBG_VK_NAME(nativeSurface);
-  m_swapchainDependent.swapchainImageFormat = selectSwapchainImageFormat(nativePhysicalDevice, nativeSurface);
+  m_swapchainDependent.swapchainImageFormat = toPortableTextureFormat(selectSwapchainImageFormat(nativePhysicalDevice, nativeSurface));
 
   createTransientCommandPool();
 
@@ -883,7 +1030,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   m_swapchainDependent.swapchain = std::move(nativeSwapchain);
   m_swapchainDependent.swapchain->rebuild();
   const rhi::Extent2D swapchainExtent = m_swapchainDependent.swapchain->getExtent();
-  m_swapchainDependent.windowSize     = VkExtent2D{swapchainExtent.width, swapchainExtent.height};
+  m_swapchainDependent.windowSize     = swapchainExtent;
 
   m_swapchainDependent.currentImageIndex = 0;
   m_swapchainDependent.imageStates.assign(
@@ -891,7 +1038,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
       rhi::ResourceState::Undefined);
 
   // Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
-  createMaterialBindGroup();
+  createMaterialArgumentTable();
   createFrameSubmission(m_swapchainDependent.swapchain->getRequestedImageCount());
   createDescriptorPool();
   initImGui(window);
@@ -914,160 +1061,89 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 
   {
     VkCommandBuffer cmd = utils::beginSingleTimeCommands(nativeDevice, m_device.transientCmdPool);
+    rhi::vulkan::VulkanCommandBuffer rhiCmd;
+    rhiCmd.setTarget(cmd, &m_device.resourceTable);
 
     const VkFormat             depthFormat = utils::findDepthFormat(nativePhysicalDevice);
     SceneResources::CreateInfo sceneResourcesInit{
         .size          = m_swapchainDependent.windowSize,
         .color         = {
-            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer0: BaseColor.rgb + roughness
-            VK_FORMAT_R8G8B8A8_UNORM,  // GBuffer1: oct normal.xy + metallic + AO
-            VK_FORMAT_R16G16B16A16_SFLOAT,  // GBuffer2: emissive.rgb + material flags
+            rhi::TextureFormat::rgba8Unorm,  // GBuffer0: BaseColor.rgb + roughness
+            rhi::TextureFormat::rgba8Unorm,  // GBuffer1: oct normal.xy + metallic + AO
+            rhi::TextureFormat::rgba16Sfloat,  // GBuffer2: emissive.rgb + material flags
         },
-        .depth         = depthFormat,
-        .linearSampler = linearSampler,
+        .depth         = toPortableTextureFormat(depthFormat),
+        .linearSampler = m_device.sceneLinearSamplerHandle,
     };
-    m_swapchainDependent.sceneResources.init(*m_device.device, m_device.allocator, cmd, sceneResourcesInit);
-    createIBLResources(cmd);
+    LOGI("RenderDevice::init: scene resources begin");
+    m_swapchainDependent.sceneResources.init(*m_device.device, rhiCmd, sceneResourcesInit);
+    LOGI("RenderDevice::init: scene resources completed");
+    LOGI("RenderDevice::init: IBL resources begin");
+    createIBLResources(rhiCmd);
+    LOGI("RenderDevice::init: IBL resources completed");
+    LOGI("RenderDevice::init: GPU culling resources begin");
     createGPUCullingResources();
+    LOGI("RenderDevice::init: GPU culling resources completed");
+    LOGI("RenderDevice::init: shadow culling resources begin");
     createShadowCullingResources();
+    LOGI("RenderDevice::init: shadow culling resources completed");
+    LOGI("RenderDevice::init: light resources begin");
     createLightResources();
+    LOGI("RenderDevice::init: light resources completed");
 
     // Initialize CSM shadow cascade resources
     CSMShadowResources::CreateInfo csmInfo{
         .cascadeCount      = 4,
         .cascadeResolution = 1024,
-        .shadowFormat      = VK_FORMAT_D32_SFLOAT,
+        .shadowFormat      = rhi::TextureFormat::d32Sfloat,
     };
-    m_csmShadowResources.init(nativeDevice, m_device.allocator, cmd, csmInfo);
+    LOGI("RenderDevice::init: CSM resources begin");
+    m_csmShadowResources.init(*m_device.device, rhiCmd, csmInfo);
+    LOGI("RenderDevice::init: CSM resources completed");
 
     // Create the per-cascade depth render-target views through the RHI texture-view
     // registry (a single 2D layer of the cascade array image each). CSMShadowResources
     // no longer owns these; the CSM pass binds them by handle.
     for(uint32_t cascadeIndex = 0; cascadeIndex < m_csmShadowResources.getCascadeCount(); ++cascadeIndex)
     {
-      const rhi::TextureHandle cascadeImageHandle =
-          m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()));
       m_csmCascadeViewHandles[cascadeIndex] = createTextureView(rhi::TextureViewCreateDesc{
-          .image          = cascadeImageHandle,
-          .format         = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
+          .image          = m_csmShadowResources.getCascadeImage(),
+          .format         = m_csmShadowResources.getShadowFormat(),
           .viewType       = rhi::ImageViewType::e2D,
           .aspect         = rhi::TextureAspect::depth,
           .baseArrayLayer = cascadeIndex,
           .layerCount     = 1,
           .debugName      = "CSM_CascadeLayerView",
       });
-      m_device.device->destroyImage(cascadeImageHandle);
     }
     // Full-array sampling view (all cascades), used by the lighting GBuffer descriptor set.
-    const rhi::TextureHandle cascadeArrayImageHandle =
-        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()));
     m_csmCascadeArrayViewHandle = createTextureView(rhi::TextureViewCreateDesc{
-        .image        = cascadeArrayImageHandle,
-        .format       = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
+        .image        = m_csmShadowResources.getCascadeImage(),
+        .format       = m_csmShadowResources.getShadowFormat(),
         .viewType     = rhi::ImageViewType::e2DArray,
         .aspect       = rhi::TextureAspect::depth,
         .baseArrayLayer = 0,
         .layerCount     = m_csmShadowResources.getCascadeCount(),
         .debugName      = "CSM_CascadeArrayView",
     });
-    m_device.device->destroyImage(cascadeArrayImageHandle);
-
-    // Create per-frame GBuffer descriptor sets for LightPass.
-    {
-      // Binding 0: sampled images (packed GBuffer0/1 + Depth)
-      const VkDescriptorSetLayoutBinding textureBinding{
-          shaderio::LBindTextures,
-          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          kLightPassTextureCount,
-          VK_SHADER_STAGE_FRAGMENT_BIT,
-          nullptr
-      };
-      const VkDescriptorSetLayoutBinding shadowMapBinding{
-          shaderio::LBindShadowMap,
-          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          1,
-          VK_SHADER_STAGE_FRAGMENT_BIT,
-          nullptr
-      };
-
-      const VkDescriptorSetLayoutBinding pointLightBinding{
-          2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding pointCoarseBoundsBinding{
-          3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding lightCoarseCullingUniformBinding{
-          4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding clusterCountsBinding{
-          5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding clusterIndicesBinding{
-          6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding clusteredLightUniformBinding{
-          7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-      const VkDescriptorSetLayoutBinding spotLightBinding{
-          8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
-      };
-
-      const std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
-          textureBinding,
-          shadowMapBinding,
-          pointLightBinding,
-          pointCoarseBoundsBinding,
-          lightCoarseCullingUniformBinding,
-          clusterCountsBinding,
-          clusterIndicesBinding,
-          clusteredLightUniformBinding,
-          spotLightBinding,
-      };
-
-      const VkDescriptorSetLayoutCreateInfo layoutInfo{
-          .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .bindingCount = static_cast<uint32_t>(bindings.size()),
-          .pBindings    = bindings.data(),
-      };
-      VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice, &layoutInfo, nullptr, &m_device.gbufferTextureSetLayout));
-      DBG_VK_NAME(m_device.gbufferTextureSetLayout);
-
-      const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-      ASSERT(frameCount > 0, "RenderDevice::init requires per-frame data before allocating LightPass descriptor sets");
-
-      std::vector<VkDescriptorSetLayout> setLayouts(frameCount, m_device.gbufferTextureSetLayout);
-      m_device.gbufferTextureSets.resize(frameCount, VK_NULL_HANDLE);
-      const VkDescriptorSetAllocateInfo allocInfo{
-          .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-          .descriptorPool     = m_device.descriptorPool,
-          .descriptorSetCount = frameCount,
-          .pSetLayouts        = setLayouts.data(),
-      };
-      VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, m_device.gbufferTextureSets.data()));
-      for(VkDescriptorSet descriptorSet : m_device.gbufferTextureSets)
-      {
-        DBG_VK_NAME(descriptorSet);
-      }
-    }
 
     utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
   }
 
-  // Update GBuffer texture descriptor set
-  updateGBufferTextureDescriptorSet();
-
-  createGraphicDescriptorSet();
+  createGraphicsArgumentTables();
   prebuildRequiredPipelineVariants();
 
   {
     VkCommandBuffer cmd = utils::beginSingleTimeCommands(nativeDevice, m_device.transientCmdPool);
-    m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
+    rhi::vulkan::VulkanCommandBuffer rhiCmd;
+    rhiCmd.setTarget(cmd, &m_device.resourceTable);
+    m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, *m_device.device, m_device.rhiStagingBuffers, rhiCmd,
                                                       std::as_bytes(std::span{s_vertices}),
                                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                       m_device.staticBufferUploadPolicy);
     DBG_VK_NAME(m_device.vertexBuffer.buffer);
 
-    m_device.pointsBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, m_device.stagingBuffers, cmd,
+    m_device.pointsBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, *m_device.device, m_device.rhiStagingBuffers, rhiCmd,
                                                       std::as_bytes(std::span{s_points}), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                       m_device.staticBufferUploadPolicy);
     DBG_VK_NAME(m_device.pointsBuffer.buffer);
@@ -1081,9 +1157,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     }
 #endif
     ASSERT(!filename.empty(), "Could not load texture image!");
-    rhi::vulkan::VulkanCommandList initCommandList{};
-    initCommandList.setCommandBuffer(cmd);
-    utils::ImageResource materialImage0   = loadAndCreateImage(initCommandList, filename);
+    utils::ImageResource materialImage0   = loadAndCreateImage(rhiCmd, filename);
     const TextureHandle  materialTexture0 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
             {
@@ -1107,7 +1181,7 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     }
 #endif
     ASSERT(!filename.empty(), "Could not load texture image!");
-    utils::ImageResource materialImage1   = loadAndCreateImage(initCommandList, filename);
+    utils::ImageResource materialImage1   = loadAndCreateImage(rhiCmd, filename);
     const TextureHandle  materialTexture1 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
             {
@@ -1144,26 +1218,15 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
   }
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+  freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
 
-  updateGraphicsDescriptorSet();
+  updateGraphicsArgumentTables();
 }
 
 void RenderDevice::shutdown(rhi::Surface& surface)
 {
   m_device.device->waitIdle();
-  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-
-#ifdef TRACY_ENABLE
-  // Destroy Tracy Vulkan context first (before command pool)
-  m_tracyVkCtx.reset();
-  if(m_tracyCmdPool != VK_NULL_HANDLE)
-  {
-    vkFreeCommandBuffers(device, m_tracyCmdPool, 1, &m_tracyCmdBuf);
-    vkDestroyCommandPool(device, m_tracyCmdPool, nullptr);
-    m_tracyCmdPool = VK_NULL_HANDLE;
-    m_tracyCmdBuf = VK_NULL_HANDLE;
-  }
-#endif
+  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
 
   if(m_swapchainDependent.swapchain)
   {
@@ -1182,7 +1245,7 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   }
 
   // Destroy bind groups FIRST (they use descriptor pools)
-  destroyBindGroups();
+  destroyArgumentTablesAndLayouts();
 
   // Shutdown ImGui Vulkan backend BEFORE destroying uiDescriptorPool
   // ImGui_ImplVulkan_Shutdown() frees descriptor sets from uiDescriptorPool
@@ -1195,38 +1258,11 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   ImGui::DestroyContext();
 
   // Destroy Vulkan objects that are not managed by smart pointers
-  if(m_device.lightPipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(device, m_device.lightPipelineLayout, nullptr);
-    m_device.lightPipelineLayout = VK_NULL_HANDLE;
-  }
-  if(m_device.postProcessPipelineLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyPipelineLayout(device, m_device.postProcessPipelineLayout, nullptr);
-    m_device.postProcessPipelineLayout = VK_NULL_HANDLE;
-  }
-  if(m_device.gpuCullingPipelineLayout)
-  {
-    m_device.gpuCullingPipelineLayout->deinit();
-    m_device.gpuCullingPipelineLayout.reset();
-  }
-  m_device.gpuCullingBindGroups.clear();
-  if(m_device.shadowCullingPipelineLayout)
-  {
-    m_device.shadowCullingPipelineLayout->deinit();
-    m_device.shadowCullingPipelineLayout.reset();
-  }
-  m_device.shadowCullingBindGroups.clear();
+  m_device.gpuCullingArgumentTables.clear();
+  m_device.shadowCullingArgumentTables.clear();
   destroyPassGpuProfileResources();
   m_lightResources.deinit();
   destroyIBLResources();
-  // Note: gbufferTextureSets are freed automatically when descriptorPool is destroyed
-  m_device.gbufferTextureSets.clear();
-  if(m_device.gbufferTextureSetLayout != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorSetLayout(device, m_device.gbufferTextureSetLayout, nullptr);
-    m_device.gbufferTextureSetLayout = VK_NULL_HANDLE;
-  }
   if(m_device.uiDescriptorPool != VK_NULL_HANDLE)
   {
     vkDestroyDescriptorPool(device, m_device.uiDescriptorPool, nullptr);
@@ -1271,37 +1307,7 @@ void RenderDevice::shutdown(rhi::Surface& surface)
       m_device.device->destroyTextureView(handle);
     }
   }
-  if(m_device.graphicPipelineLayout)
-  {
-    m_device.graphicPipelineLayout->deinit();
-    m_device.graphicPipelineLayout.reset();
-  }
-  if(m_device.computePipelineLayout)
-  {
-    m_device.computePipelineLayout->deinit();
-    m_device.computePipelineLayout.reset();
-  }
-  if(m_device.debugPipelineLayout)
-  {
-    m_device.debugPipelineLayout->deinit();
-    m_device.debugPipelineLayout.reset();
-  }
-  if(m_device.gbufferPipelineLayout)
-  {
-    m_device.gbufferPipelineLayout->deinit();
-    m_device.gbufferPipelineLayout.reset();
-  }
-  if(m_device.mdiPipelineLayout)
-  {
-    m_device.mdiPipelineLayout->deinit();
-    m_device.mdiPipelineLayout.reset();
-  }
-  if(m_device.csmShadowMdiPipelineLayout)
-  {
-    m_device.csmShadowMdiPipelineLayout->deinit();
-    m_device.csmShadowMdiPipelineLayout.reset();
-  }
-  // Per-frame bind groups already destroyed by destroyBindGroups() above
+  // Per-frame argument tables already destroyed by destroyArgumentTablesAndLayouts() above
   // Just cleanup the transient allocators
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
@@ -1361,6 +1367,13 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   m_swapchainDependent.sceneResources.deinit();
   m_meshPool.deinit();
   freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+  freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
+  if(m_device.device)
+  {
+    // RHI destroy calls above enqueue owned native resources for delayed physical
+    // destruction. Drain them while the VMA allocator is still alive.
+    m_device.device->waitIdle();
+  }
   if(m_device.allocator != nullptr)
   {
     vmaDestroyAllocator(m_device.allocator);
@@ -1376,7 +1389,7 @@ void RenderDevice::shutdown(rhi::Surface& surface)
 
 void RenderDevice::resize(rhi::Extent2D size)
 {
-  rebuildSwapchainDependentResources(VkExtent2D{size.width, size.height});
+  rebuildSwapchainDependentResources(size);
 }
 
 void RenderDevice::setVSync(bool enabled)
@@ -1583,25 +1596,31 @@ PipelineHandle RenderDevice::getGPUCullingPipelineHandle() const
   return m_gpuCullingPipeline;
 }
 
-uint64_t RenderDevice::getShadowCullingDescriptorSetOpaque(uint32_t frameIndex) const
+void RenderDevice::updateGPUCullingDepthPyramidArgumentTable(uint32_t frameIndex,
+                                                            const rhi::TextureViewHandle* mipViews,
+                                                            uint32_t mipCount)
 {
-  if(frameIndex >= m_device.shadowCullingBindGroups.size())
+  if(frameIndex >= m_device.gpuCullingArgumentTables.size()
+     || m_device.gpuCullingArgumentTables[frameIndex].isNull()
+     || mipViews == nullptr || mipCount == 0)
   {
-    return 0;
+    return;
   }
-  return m_device.resourceTable.resolveArgumentTable(m_device.shadowCullingBindGroups[frameIndex]);
-}
 
-uint64_t RenderDevice::getGPUCullingDescriptorSetOpaque(uint32_t frameIndex) const
-{
-  // Resolves the native VkDescriptorSet backing the per-frame ArgumentTable (step 3). The
-  // Hi-Z pyramid pass still writes binding 5 directly into this set via bindForCulling, and
-  // the ownsHiZVisibilityChain diagnostic compares against it.
-  if(frameIndex >= m_device.gpuCullingBindGroups.size())
+  std::array<rhi::ArgumentWrite, shaderio::LDepthPyramidMaxMips> writes{};
+  for(uint32_t i = 0; i < static_cast<uint32_t>(writes.size()); ++i)
   {
-    return 0;
+    writes[i] = rhi::ArgumentWrite{
+        .binding      = 5,
+        .arrayElement = i,
+        .type         = rhi::ArgumentType::sampledTexture,
+        .textureView  = mipViews[std::min(i, mipCount - 1u)],
+        .accessIntent = rhi::ArgumentAccessIntent::readWrite,
+    };
   }
-  return m_device.resourceTable.resolveArgumentTable(m_device.gpuCullingBindGroups[frameIndex]);
+  m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex],
+                                       static_cast<uint32_t>(writes.size()),
+                                       writes.data());
 }
 
 uint64_t RenderDevice::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
@@ -1622,26 +1641,6 @@ uint32_t RenderDevice::getShadowCullingMeshCapacity(uint32_t frameIndex) const
   return m_perFrame.frameUserData[frameIndex].shadowCullingMeshCapacity;
 }
 
-VkImageView RenderDevice::getCurrentSwapchainImageView() const
-{
-  if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
-  {
-    return VK_NULL_HANDLE;
-  }
-  return fromNativeHandle<VkImageView>(
-      m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
-}
-
-VkImage RenderDevice::getCurrentSwapchainImage() const
-{
-  if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
-  {
-    return VK_NULL_HANDLE;
-  }
-  return fromNativeHandle<VkImage>(
-      m_swapchainDependent.swapchain->getNativeImage(m_swapchainDependent.currentImageIndex));
-}
-
 rhi::TextureHandle RenderDevice::getCurrentSwapchainTextureHandle() const
 {
   if(m_swapchainDependent.swapchain == nullptr || !m_swapchainDependent.hasAcquiredImage)
@@ -1653,7 +1652,7 @@ rhi::TextureHandle RenderDevice::getCurrentSwapchainTextureHandle() const
   // backbuffer's native image into that table instead, caching one handle per image
   // index and re-registering only when the native image changes (swapchain rebuild).
   const uint32_t idx    = m_swapchainDependent.currentImageIndex;
-  const uint64_t native = m_swapchainDependent.swapchain->getNativeImage(idx);
+  const uint64_t native = m_swapchainDependent.swapchain->getBackendImageHandle(idx);
   if(native == 0)
   {
     return {};
@@ -1681,16 +1680,9 @@ rhi::TextureViewHandle RenderDevice::getOutputTextureView() const
   return m_swapchainDependent.sceneResources.getOutputTextureView();
 }
 
-VkImageView RenderDevice::getShadowMapView() const
+rhi::TextureViewHandle RenderDevice::getShadowMapView() const
 {
-  // Resolve the registry handle to the native view (RHI-adjacent seam; the descriptor-write
-  // path that consumes this is still native and migrates separately).
-  return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(m_csmCascadeArrayViewHandle)));
-}
-
-VkImage RenderDevice::getShadowMapImage() const
-{
-  return m_csmShadowResources.getCascadeImage();
+  return m_csmCascadeArrayViewHandle;
 }
 
 shaderio::ShadowUniforms* RenderDevice::getShadowUniformsData()
@@ -1719,9 +1711,19 @@ RuntimeProfileSnapshot RenderDevice::getRuntimeProfileSnapshot() const
   return snapshot;
 }
 
+void RenderDevice::beginUiFrame()
+{
+  ImGui_ImplVulkan_NewFrame();
+#ifdef __ANDROID__
+  ImGui_ImplAndroid_NewFrame();
+#else
+  ImGui_ImplGlfw_NewFrame();
+#endif
+  ImGui::NewFrame();
+}
+
 void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
 {
-  TRACY_ZONE_SCOPED("RenderDevice::renderWithPassExecutor");
 
   m_presentPassActive = false;
 
@@ -1730,7 +1732,6 @@ void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecut
 
   {
     demo::profiling::ScopedCpuRange profileSetupRange("RendererPreRecord.ProfileSetup");
-    TRACY_ZONE_SCOPED("RenderDevice::ProfileSetup");
     if(m_passGpuProfile.passNames.size() != passExecutor.getPassCount())
     {
       createPassGpuProfileResources(passExecutor);
@@ -1757,7 +1758,6 @@ void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecut
 
   {
     demo::profiling::ScopedCpuRange resizeCheckRange("RendererPreRecord.ResizeCheck");
-    TRACY_ZONE_SCOPED("RenderDevice::ResizeCheck");
     if(params.viewportSize.width > 0 && params.viewportSize.height > 0
        && (params.viewportSize.width != m_swapchainDependent.viewportSize.width
            || params.viewportSize.height != m_swapchainDependent.viewportSize.height))
@@ -1771,25 +1771,23 @@ void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecut
 
   {
     demo::profiling::ScopedCpuRange cacheStatsRange("RendererPreRecord.CacheGPUCullingStats");
-    TRACY_ZONE_SCOPED("RenderDevice::CacheGPUCullingStats");
     cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex(), params.debugOptions.showGPUCullingOverlay);
   }
   }
 
-  rhi::CommandList* cmd = nullptr;
+  rhi::CommandBuffer* cmdBuffer = nullptr;
   {
     demo::profiling::ScopedCpuRange recordCommandBufferRange("RecordCommandBuffer");
-    TRACY_ZONE_SCOPED("RenderDevice::beginCommandRecording");
-    cmd = &beginCommandRecording();
-    ASSERT(cmd != nullptr, "RenderDevice::renderWithPassExecutor requires a command list");
-    drawFrame(*cmd, params, passExecutor);
+    cmdBuffer = &beginCommandRecording();
+    ASSERT(cmdBuffer != nullptr, "RenderDevice::renderWithPassExecutor requires a command buffer");
+    drawFrame(*cmdBuffer, params, passExecutor);
   }
-  ASSERT(cmd != nullptr, "RenderDevice::renderWithPassExecutor requires a command list");
-  endFrame(*cmd);
+  ASSERT(cmdBuffer != nullptr, "RenderDevice::renderWithPassExecutor requires a command buffer");
+  endFrame(*cmdBuffer);
 }
 
 // Pass execution wrappers (used by PassNode implementations)
-void RenderDevice::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& params)
+void RenderDevice::executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params)
 {
   if(!m_presentPassActive)
   {
@@ -1808,11 +1806,17 @@ void RenderDevice::executeImGuiPass(rhi::CommandList& cmd, const RenderParams& p
 
   if(params.recordUi)
   {
-    params.recordUi(cmd);
+    params.recordUi();
+  }
+
+  const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
+  if(vkCmd != VK_NULL_HANDLE)
+  {
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmd);
   }
 }
 
-void RenderDevice::beginPresentPass(rhi::CommandList& cmd)
+void RenderDevice::beginPresentPass(rhi::CommandBuffer& cmdBuffer)
 {
   m_presentPassActive = false;
 
@@ -1827,14 +1831,46 @@ void RenderDevice::beginPresentPass(rhi::CommandList& cmd)
         .before  = rhi::ResourceState::General,
         .after   = rhi::ResourceState::ColorAttachment,
     };
-    m_perFrame.frameContext->getCommandBuffer()->resourceBarrier(&barrier, 1, nullptr, 0);
+    cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
   }
 
-  beginDynamicRenderingToSwapchain(cmd);
+  const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
+  if(vkCmd == VK_NULL_HANDLE)
+  {
+    return;
+  }
+  const VkExtent2D swapchainExtent = toVkExtent(m_swapchainDependent.windowSize);
+  const VkRenderingAttachmentInfo colorAttachment{
+      .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView   = fromNativeHandle<VkImageView>(
+          m_swapchainDependent.swapchain->getBackendImageViewHandle(m_swapchainDependent.currentImageIndex)),
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+      .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+  };
+  const VkRenderingInfo renderingInfo{
+      .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea           = {{0, 0}, swapchainExtent},
+      .layerCount           = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments    = &colorAttachment,
+  };
+  vkCmdBeginRendering(vkCmd, &renderingInfo);
+  const VkViewport viewport{
+      .x        = 0.0f,
+      .y        = 0.0f,
+      .width    = static_cast<float>(swapchainExtent.width),
+      .height   = static_cast<float>(swapchainExtent.height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
+  };
+  const VkRect2D scissor{{0, 0}, swapchainExtent};
+  vkCmdSetViewportWithCount(vkCmd, 1, &viewport);
+  vkCmdSetScissorWithCount(vkCmd, 1, &scissor);
   m_presentPassActive = true;
 }
 
-void RenderDevice::endPresentPass(rhi::CommandList& cmd)
+void RenderDevice::endPresentPass(rhi::CommandBuffer& cmdBuffer)
 {
   if(!m_presentPassActive)
   {
@@ -1842,7 +1878,11 @@ void RenderDevice::endPresentPass(rhi::CommandList& cmd)
   }
 
   m_presentPassActive = false;
-  endDynamicRenderingToSwapchain(cmd);
+  const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
+  if(vkCmd != VK_NULL_HANDLE)
+  {
+    vkCmdEndRendering(vkCmd);
+  }
 
   // Close the swapchain image layout explicitly at the end of the final UI pass.
   // This keeps presentation correctness local to the presentation path instead of
@@ -1860,16 +1900,13 @@ void RenderDevice::endPresentPass(rhi::CommandList& cmd)
       .before  = rhi::ResourceState::ColorAttachment,
       .after   = rhi::ResourceState::Present,
   };
-  m_perFrame.frameContext->getCommandBuffer()->resourceBarrier(&barrier, 1, nullptr, 0);
-
-  cmd.setResourceState(rhi::ResourceHandle{rhi::ResourceKind::Texture, kPassSwapchainHandle.index, kPassSwapchainHandle.generation},
-                       rhi::ResourceState::Present);
+  cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
 }
 
 void RenderDevice::createTransientCommandPool()
 {
   const rhi::QueueInfo          graphicsQueueInfo = m_device.device->getGraphicsQueue();
-  const VkDevice                device            = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice                device            = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   const VkCommandPoolCreateInfo commandPoolCreateInfo{
       .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
@@ -1900,18 +1937,20 @@ void RenderDevice::createTransientCommandPool()
 void RenderDevice::createFrameSubmission(uint32_t numFrames)
 {
   const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-  const VkDevice       device            = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice       device            = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
 
   m_perFrame.frameContext = std::make_unique<rhi::vulkan::VulkanFrameContext>();
   m_perFrame.frameContext->init(static_cast<void*>(device), graphicsQueueInfo.familyIndex, numFrames);
   m_perFrame.frameContext->setSwapchain(m_swapchainDependent.swapchain.get());
+  static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device)
+      .setFrameContext(static_cast<rhi::vulkan::VulkanFrameContext*>(m_perFrame.frameContext.get()));
   // Inject the resource table so the new CommandBuffer facade (getCommandBuffer) can resolve RHI handles.
   static_cast<rhi::vulkan::VulkanFrameContext&>(*m_perFrame.frameContext).setResourceTable(&m_device.resourceTable);
 
   m_perFrame.frameUserData.resize(numFrames);
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
-    frameUserData.transientAllocator.init(*m_device.device, m_device.allocator, kPerFrameTransientAllocatorSize);
+    frameUserData.transientAllocator.init(*m_device.device, kPerFrameTransientAllocatorSize);
     frameUserData.lightingBuffer =
         createBuffer(device, m_device.allocator, sizeof(shaderio::LightingUniforms), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
                      VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
@@ -1927,66 +1966,16 @@ void RenderDevice::createFrameSubmission(uint32_t numFrames)
     rebindFrameBufferHandle(frameUserData.lightingBufferRHI, frameUserData.lightingBuffer);
     rebindFrameBufferHandle(frameUserData.lightCullingBufferRHI, frameUserData.lightCullingBuffer);
     rebindFrameBufferHandle(frameUserData.gpuCullingUniformBufferRHI, frameUserData.gpuCullingUniformBuffer);
-    {
-      rhi::vulkan::BufferRecord transientRec{};
-      transientRec.nativeBuffer = frameUserData.transientAllocator.getBufferOpaque();
-      transientRec.owned        = false;  // TransientAllocator owns the VMA lifetime; registry mirrors only.
-      frameUserData.transientBufferRHI = m_device.resourceTable.registerBuffer(transientRec);
-    }
+    frameUserData.transientBufferRHI = frameUserData.transientAllocator.getBufferHandle();
   }
 
   m_perFrame.frameCounter = 1;
 
-#ifdef TRACY_ENABLE
-  // Initialize Tracy Vulkan context for GPU profiling
-  // Tracy requires a dedicated command buffer for calibration queries
-  const VkInstance        instance        = fromNativeHandle<VkInstance>(m_device.device->getNativeInstance());
-  const VkPhysicalDevice  physicalDevice  = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
-  const VkQueue           graphicsQueue   = fromNativeHandle<VkQueue>(graphicsQueueInfo.nativeHandle);
-
-  // Create dedicated command pool for Tracy (with reset bit for command buffer reuse)
-  const VkCommandPoolCreateInfo tracyPoolInfo{
-      .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-      .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-      .queueFamilyIndex = graphicsQueueInfo.familyIndex,
-  };
-  vkCreateCommandPool(device, &tracyPoolInfo, nullptr, &m_tracyCmdPool);
-
-  // Allocate command buffer for Tracy (Tracy owns it for calibration)
-  const VkCommandBufferAllocateInfo tracyAllocInfo{
-      .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool        = m_tracyCmdPool,
-      .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = 1,
-  };
-  vkAllocateCommandBuffers(device, &tracyAllocInfo, &m_tracyCmdBuf);
-
-  m_tracyVkCtx = std::make_unique<profiling::TracyVulkanContext>(
-      instance, physicalDevice, device, graphicsQueue, m_tracyCmdBuf);
-
-  // Tracy needs the initial command buffer submitted for calibration
-  // Submit an empty command buffer to kick off Tracy's calibration
-  const VkCommandBufferBeginInfo tracyBeginInfo{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-  vkBeginCommandBuffer(m_tracyCmdBuf, &tracyBeginInfo);
-  vkEndCommandBuffer(m_tracyCmdBuf);
-
-  const VkSubmitInfo tracySubmitInfo{
-      .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1,
-      .pCommandBuffers    = &m_tracyCmdBuf,
-  };
-  vkQueueSubmit(graphicsQueue, 1, &tracySubmitInfo, VK_NULL_HANDLE);
-  vkQueueWaitIdle(graphicsQueue);  // Wait for calibration to complete
-#endif
 }
 
 bool RenderDevice::prepareFrameResources()
 {
   demo::profiling::ScopedCpuRange prepareFrameRange("RendererPreRecord.PrepareFrameResources");
-  TRACY_ZONE_SCOPED("prepareFrameResources");
 
   {
     demo::profiling::ScopedCpuRange rebuildSwapchainRange("PrepareFrameResources.RebuildSwapchainDependentResources");
@@ -1995,20 +1984,15 @@ bool RenderDevice::prepareFrameResources()
 
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
-#ifdef TRACY_ENABLE
-  // Collect GPU profiling results at end of frame
-  // TracyVkCollect should be called in the same command buffer that recorded zones
-  // It will be called in endFrame after all passes complete
-#endif
-
   // Wait for the frame slot we are about to reuse. beginFrame()/submitFrame()
   // operate on the current slot, and endFrame() advances after submission.
   // Keeping the order as wait(current) -> begin(current) -> submit(current) ->
   // advance(next) preserves actual CPU/GPU overlap across the frame ring.
   {
     demo::profiling::ScopedCpuRange waitFrameRange("PrepareFrameResources.WaitForFrameCompletion");
-    TRACY_ZONE_SCOPED("waitForFrameCompletion");
     m_perFrame.frameContext->waitForFrameCompletion();
+    static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device)
+        .processRetirements(m_perFrame.frameContext->getCurrentFrameValue());
   }
 
   {
@@ -2019,8 +2003,8 @@ bool RenderDevice::prepareFrameResources()
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
   {
-    demo::profiling::ScopedCpuRange syncMaterialRange("PrepareFrameResources.SyncMaterialBindGroup");
-    syncMaterialBindGroup(currentFrameIndex);
+    demo::profiling::ScopedCpuRange syncMaterialRange("PrepareFrameResources.SyncMaterialArgumentTable");
+    syncMaterialArgumentTable(currentFrameIndex);
   }
 
   {
@@ -2037,11 +2021,11 @@ bool RenderDevice::prepareFrameResources()
     frameUserData.transientAllocator.reset();
     // This frame index's fence has been waited on, so last cycle's temporary bind
     // groups are idle and safe to recycle before new ones are created this frame.
-    for(const BindGroupHandle handle : frameUserData.transientBindGroups)
+    for(const rhi::ArgumentTableHandle handle : frameUserData.transientArgumentTables)
     {
-      destroyBindGroup(handle);
+      destroyArgumentTable(handle);
     }
-    frameUserData.transientBindGroups.clear();
+    frameUserData.transientArgumentTables.clear();
   }
   m_swapchainDependent.hasAcquiredImage = false;
 
@@ -2050,7 +2034,6 @@ bool RenderDevice::prepareFrameResources()
 
 bool RenderDevice::acquireSwapchainImageForPresent()
 {
-  TRACY_ZONE_SCOPED("lateAcquireSwapchainImage");
 
   ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before late acquire");
 
@@ -2073,7 +2056,7 @@ bool RenderDevice::acquireSwapchainImageForPresent()
   return true;
 }
 
-void RenderDevice::createIBLResources(VkCommandBuffer cmd)
+void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
 {
   destroyIBLResources();
 
@@ -2081,12 +2064,13 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
   m_device.iblUsingFallback = true;
   m_device.iblEnvironmentStatus = "Using flat ambient fallback";
 
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle());
   const std::filesystem::path environmentPath(kDefaultIBLEnvironmentPath);
 
   Ktx2Loader loader;
   Ktx2Loader::Ktx2Texture ktxTexture;
+  LOGI("RenderDevice::createIBLResources: checking %s", environmentPath.string().c_str());
   if(!std::filesystem::exists(environmentPath))
   {
     m_device.iblEnvironmentStatus = "KTX2 environment not found: " + environmentPath.string();
@@ -2111,6 +2095,7 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
     LOGW("%s", m_device.iblEnvironmentStatus.c_str());
     return;
   }
+  LOGI("RenderDevice::createIBLResources: loaded KTX2 payload");
 
   const uint32_t mipLevels = std::max(ktxTexture.mipLevels, 1u);
   const VkImageCreateInfo imageInfo{
@@ -2125,28 +2110,62 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
   };
 
   utils::Image environmentImage = createImage(m_device.allocator, imageInfo);
-  utils::cmdInitImageLayout(cmd, environmentImage.image);
+  LOGI("RenderDevice::createIBLResources: image created");
+  const rhi::TextureHandle environmentHandle =
+      m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(environmentImage.image));
+  const rhi::TextureSubresourceRange environmentRange{
+      .aspect = rhi::TextureAspect::color,
+      .baseMipLevel = 0,
+      .levelCount = mipLevels,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+  };
+  const rhi::TextureBarrier uploadBeginBarrier{
+      .texture = environmentHandle,
+      .before = rhi::ResourceState::Undefined,
+      .after = rhi::ResourceState::TransferDst,
+      .range = environmentRange,
+  };
+  cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+  LOGI("RenderDevice::createIBLResources: image layout initialized");
 
   BatchUploadContext batchUpload;
-  batchUpload.init(nativeDevice, m_device.allocator, static_cast<VkDeviceSize>(ktxTexture.data.size()) + 16u);
+  batchUpload.init(*m_device.device, static_cast<uint64_t>(ktxTexture.data.size()) + 16u);
+  LOGI("RenderDevice::createIBLResources: upload context initialized");
   const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
   std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
 
   for(uint32_t mip = 0; mip < mipLevels; ++mip)
   {
-    const VkBufferImageCopy region{
+    const rhi::BufferTextureCopyDesc region{
         .bufferOffset = ktxTexture.mipOffsets[mip],
-        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .layerCount = 1},
-        .imageExtent = {std::max(ktxTexture.width >> mip, 1u), std::max(ktxTexture.height >> mip, 1u), 1},
+        .texture = environmentHandle,
+        .aspect = rhi::TextureAspect::color,
+        .mipLevel = mip,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+        .width = std::max(ktxTexture.width >> mip, 1u),
+        .height = std::max(ktxTexture.height >> mip, 1u),
+        .depth = 1,
     };
-    batchUpload.recordTextureUpload(slice, environmentImage.image, region);
+    batchUpload.recordTextureUpload(slice, environmentHandle, region);
   }
   batchUpload.executeUploads(cmd);
+  LOGI("RenderDevice::createIBLResources: upload recorded");
 
-  utils::Buffer batchStagingBuffer = batchUpload.releaseStagingBuffer();
-  if(batchStagingBuffer.buffer != VK_NULL_HANDLE)
+  const rhi::TextureBarrier uploadEndBarrier{
+      .texture = environmentHandle,
+      .before = rhi::ResourceState::TransferDst,
+      .after = rhi::ResourceState::General,
+      .range = environmentRange,
+  };
+  cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+  m_device.device->destroyImage(environmentHandle);
+
+  rhi::BufferHandle batchStagingBuffer = batchUpload.releaseStagingBuffer();
+  if(!batchStagingBuffer.isNull())
   {
-    m_device.stagingBuffers.push_back(batchStagingBuffer);
+    m_device.rhiStagingBuffers.push_back(batchStagingBuffer);
   }
 
   const VkImageViewCreateInfo viewInfo{
@@ -2158,6 +2177,7 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
   };
   VkImageView environmentView = VK_NULL_HANDLE;
   VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &environmentView));
+  LOGI("RenderDevice::createIBLResources: view created");
 
   utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
   dutil.setObjectName(environmentImage.image, "IBL_EquirectEnvironment");
@@ -2167,7 +2187,7 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
   m_device.iblEnvironment.allocation = environmentImage.allocation;
   m_device.iblEnvironment.view = environmentView;
   m_device.iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
-  m_device.iblEnvironmentFormat = ktxTexture.format;
+  m_device.iblEnvironmentFormat = toPortableTextureFormat(ktxTexture.format);
   m_device.iblEnvironmentExtent = {ktxTexture.width, ktxTexture.height};
   m_device.iblEnvironmentMipCount = mipLevels;
   m_device.iblEnvironmentEstimatedBytes = static_cast<uint64_t>(ktxTexture.data.size());
@@ -2186,315 +2206,18 @@ void RenderDevice::createIBLResources(VkCommandBuffer cmd)
 void RenderDevice::destroyIBLResources()
 {
   const VkDevice nativeDevice = m_device.device
-                                    ? fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())
+                                    ? fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle())
                                     : VK_NULL_HANDLE;
   if(m_device.iblEnvironment.view != VK_NULL_HANDLE || m_device.iblEnvironment.image != VK_NULL_HANDLE)
   {
     destroyImageResource(nativeDevice, m_device.allocator, m_device.iblEnvironment);
   }
-  m_device.iblEnvironmentFormat = VK_FORMAT_UNDEFINED;
+  m_device.iblEnvironmentFormat = rhi::TextureFormat::undefined;
   m_device.iblEnvironmentExtent = {};
   m_device.iblEnvironmentMipCount = 0;
   m_device.iblEnvironmentEstimatedBytes = 0;
   m_device.iblEnvironmentLoaded = false;
   m_device.iblUsingFallback = true;
-}
-
-void RenderDevice::updateGBufferTextureDescriptorSet()
-{
-  if(m_device.gbufferTextureSets.empty() || m_perFrame.frameUserData.empty())
-  {
-    return;
-  }
-
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  SceneResources& sceneResources = m_swapchainDependent.sceneResources;
-
-  const auto nativeOf = [&](rhi::TextureViewHandle h) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(resolveTextureViewNative(h)));
-  };
-
-  // Verify the SceneResources has valid image views
-  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
-  {
-    const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
-    if(sceneDesc.imageView == VK_NULL_HANDLE)
-    {
-      LOGW("SceneResources image view %u is null, skipping GBuffer descriptor update", i);
-      return;
-    }
-  }
-  if(sceneResources.getDepthImageView().isNull())
-  {
-    LOGW("SceneResources depth image view is null, skipping GBuffer descriptor update");
-    return;
-  }
-  if(sceneResources.getSceneColorHdrView().isNull()
-      || sceneResources.getBloomHalfView().isNull()
-      || sceneResources.getBloomQuarterView().isNull()
-      || sceneResources.getColorGradingLutView().isNull()
-      || sceneResources.getVelocityView().isNull()
-      || sceneResources.getSceneColorHistoryView(0).isNull()
-      || sceneResources.getSceneColorHistoryView(1).isNull())
-  {
-    LOGW("GPU-driven post-process image view is null, skipping GBuffer descriptor update");
-    return;
-  }
-  if(m_csmCascadeArrayViewHandle.isNull())
-  {
-    LOGW("CSM cascade shadow view is null, skipping GBuffer descriptor update");
-    return;
-  }
-
-  // GBuffer sampler: linear mag/min, nearest mip, clamp-to-edge, full LOD range. Created
-  // once through the RHI and reused across resizes (this function reruns on swapchain rebuild).
-  if(m_device.gbufferLinearSamplerHandle.isNull())
-  {
-    m_device.gbufferLinearSamplerHandle = m_device.device->createSampler(rhi::SamplerDesc{
-        .magFilter    = rhi::Filter::linear,
-        .minFilter    = rhi::Filter::linear,
-        .mipmapMode   = rhi::MipmapMode::nearest,
-        .addressModeU = rhi::AddressMode::clampToEdge,
-        .addressModeV = rhi::AddressMode::clampToEdge,
-        .addressModeW = rhi::AddressMode::clampToEdge,
-        .maxLod       = VK_LOD_CLAMP_NONE,
-        .debugName    = "GBufferLinearSampler",
-    });
-  }
-  const VkSampler linearSampler =
-      reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_device.resourceTable.resolveSampler(m_device.gbufferLinearSamplerHandle)));
-
-  // Write descriptor array for packed GBuffer textures followed by scene depth.
-  std::array<VkDescriptorImageInfo, kLightPassTextureCount> imageInfos{};
-  for(uint32_t i = 0; i < kPackedGBufferTargetCount; ++i)
-  {
-    const VkDescriptorImageInfo& sceneDesc = sceneResources.getDescriptorImageInfo(i);
-    imageInfos[i] = VkDescriptorImageInfo{
-        .sampler     = linearSampler,
-        .imageView   = sceneDesc.imageView,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-  }
-  imageInfos[kLightPassDepthTextureIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getDepthImageView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassSceneColorHdrIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getSceneColorHdrView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomHalfIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomHalfView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomQuarterIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomQuarterView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomEighthIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomEighthView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomSixteenthIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomSixteenthView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomThirtySecondIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomThirtySecondView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomUpsampleSixteenthIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomUpsampleSixteenthView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomUpsampleEighthIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomUpsampleEighthView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomUpsampleQuarterIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomUpsampleQuarterView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassBloomOutputIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getBloomOutputView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassColorGradingLutIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getColorGradingLutView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassVelocityIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getVelocityView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassIBLEnvironmentIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = m_device.iblEnvironment.view != VK_NULL_HANDLE
-                         ? m_device.iblEnvironment.view
-                         : sceneResources.getDescriptorImageInfo(0).imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassAOIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = nativeOf(sceneResources.getDepthImageView()),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  imageInfos[kLightPassSSRIndex] = VkDescriptorImageInfo{
-      .sampler     = linearSampler,
-      .imageView   = sceneResources.getDescriptorImageInfo(0).imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo shadowMapInfo{
-      .sampler     = linearSampler,
-      .imageView   = getShadowMapView(),
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-
-  const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-  ASSERT(m_device.gbufferTextureSets.size() == frameCount, "LightPass descriptor set count must match frame count");
-  for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
-  {
-    imageInfos[kLightPassHistoryReadIndex] = VkDescriptorImageInfo{
-        .sampler     = linearSampler,
-        .imageView   = nativeOf(sceneResources.getSceneColorHistoryView((frameIndex + 1u) & 1u)),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-    imageInfos[kLightPassHistoryWriteIndex] = VkDescriptorImageInfo{
-        .sampler     = linearSampler,
-        .imageView   = nativeOf(sceneResources.getSceneColorHistoryView(frameIndex & 1u)),
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-
-    const VkDescriptorBufferInfo pointLightBufferInfo{
-        .buffer = m_lightResources.getPointLightBuffer(frameIndex),
-        .offset = 0,
-        .range  = VK_WHOLE_SIZE,
-    };
-    const VkDescriptorBufferInfo pointCoarseBoundsBufferInfo{
-        .buffer = m_lightResources.getPointCoarseBoundsBuffer(frameIndex),
-        .offset = 0,
-        .range  = VK_WHOLE_SIZE,
-    };
-    const VkDescriptorBufferInfo spotCoarseBoundsBufferInfo{
-        .buffer = m_lightResources.getSpotCoarseBoundsBuffer(frameIndex),
-        .offset = 0,
-        .range  = VK_WHOLE_SIZE,
-    };
-    const VkDescriptorBufferInfo coarseCullingUniformBufferInfo{
-        .buffer = m_lightResources.getCoarseCullingUniformBuffer(frameIndex),
-        .offset = 0,
-        .range  = sizeof(shaderio::LightCoarseCullingUniforms),
-    };
-    const VkDescriptorBufferInfo clusteredLightUniformBufferInfo{
-        .buffer = m_perFrame.frameUserData[frameIndex].lightingBuffer.buffer,
-        .offset = 0,
-        .range  = sizeof(shaderio::ClusteredLightUniforms),
-    };
-    const VkDescriptorBufferInfo spotLightBufferInfo{
-        .buffer = m_lightResources.getSpotLightBuffer(frameIndex),
-        .offset = 0,
-        .range  = VK_WHOLE_SIZE,
-    };
-
-    const std::array<VkWriteDescriptorSet, 9> writes{{
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = shaderio::LBindTextures,
-            .dstArrayElement = 0,
-            .descriptorCount = kLightPassTextureCount,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = imageInfos.data(),
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = shaderio::LBindShadowMap,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo      = &shadowMapInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 2,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo     = &pointLightBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 3,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo     = &pointCoarseBoundsBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 4,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &coarseCullingUniformBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 5,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo     = &pointCoarseBoundsBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 6,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo     = &spotCoarseBoundsBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 7,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &clusteredLightUniformBufferInfo,
-        },
-        VkWriteDescriptorSet{
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = m_device.gbufferTextureSets[frameIndex],
-            .dstBinding      = 8,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo     = &spotLightBufferInfo,
-        },
-    }};
-
-    vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-  }
 }
 
 void RenderDevice::updateLightingUniformBuffer(uint32_t frameIndex, const shaderio::LightingUniforms& lightingUniforms)
@@ -2541,7 +2264,7 @@ void RenderDevice::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& fra
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.gpuCullingObjectBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingIndirectBuffer.buffer != VK_NULL_HANDLE
      || frameUserData.gpuCullingDrawCountBuffer.buffer != VK_NULL_HANDLE
      || frameUserData.gpuCullingStatsBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingResultBuffer.buffer != VK_NULL_HANDLE)
@@ -2613,7 +2336,7 @@ void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderPara
   const bool useExternalPersistentObjects =
       params.gpuDrivenSceneView != nullptr
       && params.gpuDrivenSceneView->usePersistentCullingObjects
-      && params.gpuDrivenSceneView->gpuCullObjectBuffer != VK_NULL_HANDLE
+      && params.gpuDrivenSceneView->gpuCullObjectBuffer != 0
       && params.gpuDrivenSceneView->objectCount > 0;
   const uint32_t objectCount = useExternalPersistentObjects
                                    ? params.gpuDrivenSceneView->objectCount
@@ -2631,11 +2354,17 @@ void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderPara
 
   frameUserData.useExternalGPUCullingObjectBuffer = useExternalPersistentObjects;
   frameUserData.externalGPUCullingObjectBuffer =
-      useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBuffer : VK_NULL_HANDLE;
+      useExternalPersistentObjects
+          ? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullObjectBuffer)
+          : VK_NULL_HANDLE;
   frameUserData.externalGPUCullingMeshletBuffer =
-      useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullMeshletBuffer : VK_NULL_HANDLE;
+      useExternalPersistentObjects
+          ? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullMeshletBuffer)
+          : VK_NULL_HANDLE;
   frameUserData.externalGPUCullingSceneObjectBuffer =
-      useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullSceneObjectBuffer : VK_NULL_HANDLE;
+      useExternalPersistentObjects
+          ? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullSceneObjectBuffer)
+          : VK_NULL_HANDLE;
   frameUserData.externalGPUCullingObjectBufferAddress =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : 0;
   frameUserData.useExternalGPUCullingMeshletData =
@@ -2654,7 +2383,7 @@ void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderPara
       useExternalPersistentObjects ? params.gpuDrivenSceneView->overlayObjects : nullptr;
   m_externalGPUCullingOverlayObjectCount =
       useExternalPersistentObjects ? params.gpuDrivenSceneView->overlayObjectCount : 0;
-  updateGPUCullingDescriptorSet(frameIndex);
+  updateGPUCullingArgumentTable(frameIndex);
 
   frameUserData.gpuCullingScratchObjects.resize(objectCount);
   auto& objects = frameUserData.gpuCullingScratchObjects;
@@ -2716,7 +2445,7 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.shadowCullingObjectBuffer.buffer != VK_NULL_HANDLE
      || frameUserData.shadowCullingIndirectBuffer.buffer != VK_NULL_HANDLE
      || frameUserData.shadowCullingDrawDataBuffer.buffer != VK_NULL_HANDLE)
@@ -2758,14 +2487,14 @@ void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& 
   rebindFrameBufferHandle(frameUserData.shadowCullingIndirectBufferRHI, frameUserData.shadowCullingIndirectBuffer);
   rebindFrameBufferHandle(frameUserData.shadowCullingDrawDataBufferRHI, frameUserData.shadowCullingDrawDataBuffer);
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-  updateShadowCullingDescriptorSet(frameIndex);
-  updateShadowCullingDrawDataDescriptorSet(frameIndex);
+  updateShadowCullingArgumentTable(frameIndex);
+  updateShadowCullingDrawDataArgumentTable(frameIndex);
 }
 
-void RenderDevice::updateShadowCullingDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateShadowCullingArgumentTable(uint32_t frameIndex)
 {
-  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingBindGroups.size()
-     || m_device.shadowCullingBindGroups[frameIndex].isNull())
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.shadowCullingArgumentTables.size()
+     || m_device.shadowCullingArgumentTables[frameIndex].isNull())
   {
     return;
   }
@@ -2780,11 +2509,11 @@ void RenderDevice::updateShadowCullingDescriptorSet(uint32_t frameIndex)
       rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.shadowCullingObjectBufferRHI},
       rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.shadowCullingIndirectBufferRHI},
   }};
-  m_device.device->updateArgumentTable(m_device.shadowCullingBindGroups[frameIndex],
+  m_device.device->updateArgumentTable(m_device.shadowCullingArgumentTables[frameIndex],
                                        static_cast<uint32_t>(writes.size()), writes.data());
 }
 
-void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateShadowCullingDrawDataArgumentTable(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2811,12 +2540,12 @@ void RenderDevice::updateShadowCullingDrawDataDescriptorSet(uint32_t frameIndex)
   };
   for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
   {
-    const BindGroupHandle drawBindGroupHandle = getCSMShadowMDIDrawBindGroup(frameIndex, cascadeIndex);
-    if(drawBindGroupHandle.isNull())
+    const rhi::ArgumentTableHandle drawArgumentTableHandle = getCSMShadowMDIDrawArgumentTable(frameIndex, cascadeIndex);
+    if(drawArgumentTableHandle.isNull())
     {
       continue;
     }
-    updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
+    updateArgumentTable(drawArgumentTableHandle, &drawDataWrite, 1);
   }
 }
 
@@ -2828,7 +2557,7 @@ void RenderDevice::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserDa
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.gbufferMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
   {
     waitForAllFrameSlots();
@@ -2846,7 +2575,7 @@ void RenderDevice::ensureGBufferMdiDrawDataBuffer(PerFrameResources::FrameUserDa
   rebindFrameBufferHandle(frameUserData.gbufferMdiDrawDataBufferRHI, frameUserData.gbufferMdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-  updateGBufferMdiDrawDataDescriptorSet(frameIndex);
+  updateGBufferMdiDrawDataArgumentTable(frameIndex);
 }
 
 void RenderDevice::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
@@ -2857,7 +2586,7 @@ void RenderDevice::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& fra
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.mdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
   {
     waitForAllFrameSlots();
@@ -2875,7 +2604,7 @@ void RenderDevice::ensureMdiDrawDataBuffer(PerFrameResources::FrameUserData& fra
   rebindFrameBufferHandle(frameUserData.mdiDrawDataBufferRHI, frameUserData.mdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-  updateMdiDrawDataDescriptorSet(frameIndex);
+  updateMdiDrawDataArgumentTable(frameIndex);
 }
 
 void RenderDevice::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredDrawCount)
@@ -2886,7 +2615,7 @@ void RenderDevice::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.depthMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
   {
     waitForAllFrameSlots();
@@ -2904,7 +2633,7 @@ void RenderDevice::ensureDepthMdiDrawDataBuffer(PerFrameResources::FrameUserData
   rebindFrameBufferHandle(frameUserData.depthMdiDrawDataBufferRHI, frameUserData.depthMdiDrawDataBuffer);
 
   const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-  updateDepthMdiDrawDataDescriptorSet(frameIndex);
+  updateDepthMdiDrawDataArgumentTable(frameIndex);
 }
 
 void RenderDevice::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResources::FrameUserData& frameUserData,
@@ -2916,7 +2645,7 @@ void RenderDevice::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResourc
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   if(frameUserData.gpuDrivenPersistentIndirectStreamBuffer.buffer != VK_NULL_HANDLE)
   {
     waitForAllFrameSlots();
@@ -2934,7 +2663,7 @@ void RenderDevice::ensureGPUDrivenPersistentIndirectStreamBuffer(PerFrameResourc
                           frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
 }
 
-void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateGBufferMdiDrawDataArgumentTable(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2947,8 +2676,8 @@ void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const BindGroupHandle drawBindGroupHandle = getGBufferMDIDrawBindGroup(frameIndex);
-  if(drawBindGroupHandle.isNull())
+  const rhi::ArgumentTableHandle drawArgumentTableHandle = getGBufferMDIDrawArgumentTable(frameIndex);
+  if(drawArgumentTableHandle.isNull())
   {
     return;
   }
@@ -2960,10 +2689,10 @@ void RenderDevice::updateGBufferMdiDrawDataDescriptorSet(uint32_t frameIndex)
       .offset  = 0,
       .size    = 0,
   };
-  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
+  updateArgumentTable(drawArgumentTableHandle, &drawDataWrite, 1);
 }
 
-void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateMdiDrawDataArgumentTable(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -2976,8 +2705,8 @@ void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const BindGroupHandle drawBindGroupHandle = getMDIDrawBindGroup(frameIndex);
-  if(drawBindGroupHandle.isNull())
+  const rhi::ArgumentTableHandle drawArgumentTableHandle = getMDIDrawArgumentTable(frameIndex);
+  if(drawArgumentTableHandle.isNull())
   {
     return;
   }
@@ -2989,10 +2718,10 @@ void RenderDevice::updateMdiDrawDataDescriptorSet(uint32_t frameIndex)
       .offset  = 0,
       .size    = 0,
   };
-  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
+  updateArgumentTable(drawArgumentTableHandle, &drawDataWrite, 1);
 }
 
-void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateDepthMdiDrawDataArgumentTable(uint32_t frameIndex)
 {
   if(frameIndex >= m_perFrame.frameUserData.size())
   {
@@ -3005,8 +2734,8 @@ void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
     return;
   }
 
-  const BindGroupHandle drawBindGroupHandle = getDepthMDIDrawBindGroup(frameIndex);
-  if(drawBindGroupHandle.isNull())
+  const rhi::ArgumentTableHandle drawArgumentTableHandle = getDepthMDIDrawArgumentTable(frameIndex);
+  if(drawArgumentTableHandle.isNull())
   {
     return;
   }
@@ -3018,7 +2747,7 @@ void RenderDevice::updateDepthMdiDrawDataDescriptorSet(uint32_t frameIndex)
       .offset  = 0,
       .size    = 0,
   };
-  updateBindGroup(drawBindGroupHandle, &drawDataWrite, 1);
+  updateArgumentTable(drawArgumentTableHandle, &drawDataWrite, 1);
 }
 
 void RenderDevice::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
@@ -3140,14 +2869,12 @@ void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObj
   }
 
   {
-    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullStats");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(shaderio::GPUCullStats)));
     std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped, sizeof(m_lastGPUCullingStats));
   }
   m_lastGPUCullingDrawCounts = {};
   if(frameUserData.gpuCullingDrawCountBuffer.allocation != nullptr && frameUserData.gpuCullingDrawCountBuffer.mapped != nullptr)
   {
-    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullDrawCounts");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                      frameUserData.gpuCullingDrawCountBuffer.allocation,
                                      0,
@@ -3169,7 +2896,6 @@ void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObj
   }
 
   {
-    TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullResults");
     VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                      frameUserData.gpuCullingResultBuffer.allocation,
                                      0,
@@ -3203,7 +2929,6 @@ void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObj
     }
 
     {
-      TRACY_ZONE_SCOPED("RenderDevice::ReadGPUCullObjects");
       VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
                                        frameUserData.gpuCullingObjectBuffer.allocation,
                                        0,
@@ -3216,7 +2941,6 @@ void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObj
                                      ? std::min<size_t>(objectCount, m_externalGPUCullingOverlayObjectCount)
                                      : objectCount;
   {
-    TRACY_ZONE_SCOPED("RenderDevice::BuildGPUCullOverlayObjects");
     for(size_t objectIndex = 0; objectIndex < safeObjectCount; ++objectIndex)
     {
       const shaderio::GPUCullObject& object = objectData[objectIndex];
@@ -3283,7 +3007,7 @@ void RenderDevice::createPassGpuProfileResources(const PassExecutor& passExecuto
   }
 
   VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
+  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()), &deviceProperties2);
 
   m_passGpuProfile.timestampPeriodNs = deviceProperties2.properties.limits.timestampPeriod;
   m_passGpuProfile.queryCount = static_cast<uint32_t>(passExecutor.getPassCount() * 2);
@@ -3418,7 +3142,7 @@ void RenderDevice::resetPassGpuProfileQueries(rhi::CommandBuffer& cmdBuffer, uin
 
 void RenderDevice::writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const
 {
-  if(context.cmdBuffer == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
+  if(context.commandBuffer == nullptr || context.frameIndex >= m_passGpuProfile.frames.size() || m_passGpuProfile.queryCount == 0)
   {
     return;
   }
@@ -3435,7 +3159,7 @@ void RenderDevice::writePassGpuProfileTimestamp(const PassContext& context, uint
     return;
   }
 
-  context.cmdBuffer->writeTimestamp(queryPool, queryIndex, /*afterAllCommands=*/!isBegin);
+  context.commandBuffer->writeTimestamp(queryPool, queryIndex, /*afterAllCommands=*/!isBegin);
 }
 
 void RenderDevice::drawPassGpuProfileOverlay(const RenderParams& params) const
@@ -3584,34 +3308,31 @@ void RenderDevice::PassProfilingHooks::afterPass(const PassContext& context, con
 
 void RenderDevice::createGPUCullingResources()
 {
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
   // Wave 9 (step 3): the 9-binding culling descriptor layout is now an RHI ArgumentLayout
   // (binding 5 is a SAMPLED_IMAGE array of LDepthPyramidMaxMips), and each per-frame set is
-  // an RHI ArgumentTable wrapped as a BindGroupHandle. updateGPUCullingDescriptorSet writes
+  // an RHI ArgumentTable handle. updateGPUCullingArgumentTable writes
   // them via updateArgumentTable. The compute pipeline layout (step 4 migrates it) is still
-  // native but sourced from the RHI-owned VkDescriptorSetLayout.
-  const std::vector<rhi::BindTableLayoutEntry> layoutEntries{
-      rhi::BindTableLayoutEntry{.logicalIndex = 0, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 1, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 2, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 3, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 4, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 5, .resourceType = rhi::BindlessResourceType::sampledImage, .descriptorCount = shaderio::LDepthPyramidMaxMips, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 6, .resourceType = rhi::BindlessResourceType::uniformBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 7, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 8, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+  // native but sourced from the RHI-owned descriptor-set layout.
+  const std::vector<rhi::ArgumentBinding> layoutEntries{
+      makeArgumentBinding(0, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(1, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(2, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(3, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(4, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(5, rhi::BindlessResourceType::sampledImage, shaderio::LDepthPyramidMaxMips, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(6, rhi::BindlessResourceType::uniformBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(7, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(8, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
   };
-  const rhi::ArgumentLayoutHandle cullingLayout = createArgumentLayoutFromEntries(layoutEntries, "gpu-culling");
-  const VkDescriptorSetLayout     setLayout =
-      reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(cullingLayout)));
+  const rhi::ArgumentLayoutHandle cullingLayout = createArgumentLayoutFromBindings(layoutEntries, "gpu-culling");
 
-  m_device.gpuCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  m_device.gpuCullingArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.gpuCullingBindGroups[frameIndex] = createBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
+    m_device.gpuCullingArgumentTables[frameIndex] = createArgumentTable(ArgumentTableDesc{
+        .slot                = ArgumentSlot::shaderSpecific,
         .layout              = cullingLayout,
         .table               = m_device.device->createArgumentTable(cullingLayout),
         .primaryLogicalIndex = 0,
@@ -3619,49 +3340,30 @@ void RenderDevice::createGPUCullingResources()
     });
   }
 
-  // Wave 9 (step 4): the compute pipeline layout is now an RHI VulkanPipelineLayout owning a
-  // single descriptor set (set 0 = the culling ArgumentLayout), replacing the native member.
-  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> layoutMappings{{
-      rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(setLayout)),
-  }};
-  const rhi::vulkan::VulkanPipelineLayoutLowering layoutLowering{
-      .setLayouts     = layoutMappings.data(),
-      .setLayoutCount = static_cast<uint32_t>(layoutMappings.size()),
-  };
-  rhi::PipelineLayoutDesc cullingLayoutDesc{};
-  cullingLayoutDesc.debugName = "gpu-culling";
-  auto cullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  cullingPipelineLayout->init(static_cast<void*>(nativeDevice), cullingLayoutDesc, layoutLowering);
-  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(cullingPipelineLayout->getNativeHandle()));
-  m_device.gpuCullingPipelineLayout = std::move(cullingPipelineLayout);
-
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    updateGPUCullingDescriptorSet(frameIndex);
+    updateGPUCullingArgumentTable(frameIndex);
   }
 }
 
 void RenderDevice::createShadowCullingResources()
 {
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 
   // Wave 9 (shadowCulling RHI migration): the 2-binding descriptor layout is an RHI
   // ArgumentLayout and each per-frame set an ArgumentTable; the pipeline layout is an RHI
   // VulkanPipelineLayout carrying the ShadowCullPushConstants range. Isomorphic to gpuCulling.
-  const std::vector<rhi::BindTableLayoutEntry> layoutEntries{
-      rhi::BindTableLayoutEntry{.logicalIndex = 0, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
-      rhi::BindTableLayoutEntry{.logicalIndex = 1, .resourceType = rhi::BindlessResourceType::storageBuffer, .descriptorCount = 1, .visibility = rhi::ResourceVisibility::compute},
+  const std::vector<rhi::ArgumentBinding> layoutEntries{
+      makeArgumentBinding(0, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
+      makeArgumentBinding(1, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::compute),
   };
-  const rhi::ArgumentLayoutHandle shadowLayout = createArgumentLayoutFromEntries(layoutEntries, "shadow-culling");
-  const VkDescriptorSetLayout     setLayout =
-      reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(shadowLayout)));
+  const rhi::ArgumentLayoutHandle shadowLayout = createArgumentLayoutFromBindings(layoutEntries, "shadow-culling");
 
-  m_device.shadowCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  m_device.shadowCullingArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_device.shadowCullingBindGroups[frameIndex] = createBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::shaderSpecific,
+    m_device.shadowCullingArgumentTables[frameIndex] = createArgumentTable(ArgumentTableDesc{
+        .slot                = ArgumentSlot::shaderSpecific,
         .layout              = shadowLayout,
         .table               = m_device.device->createArgumentTable(shadowLayout),
         .primaryLogicalIndex = 0,
@@ -3669,35 +3371,16 @@ void RenderDevice::createShadowCullingResources()
     });
   }
 
-  rhi::PipelineLayoutDesc shadowLayoutDesc{};
-  shadowLayoutDesc.debugName = "shadow-culling";
-  shadowLayoutDesc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{
-      .stages = rhi::ShaderStage::compute,
-      .offset = 0,
-      .size   = sizeof(shaderio::ShadowCullPushConstants),
-  });
-  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> layoutMappings{{
-      rhi::vulkan::makePipelineLayoutBindingMapping(0, reinterpret_cast<uint64_t>(setLayout)),
-  }};
-  const rhi::vulkan::VulkanPipelineLayoutLowering layoutLowering{
-      .setLayouts     = layoutMappings.data(),
-      .setLayoutCount = static_cast<uint32_t>(layoutMappings.size()),
-  };
-  auto shadowPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  shadowPipelineLayout->init(static_cast<void*>(nativeDevice), shadowLayoutDesc, layoutLowering);
-  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(shadowPipelineLayout->getNativeHandle()));
-  m_device.shadowCullingPipelineLayout = std::move(shadowPipelineLayout);
-
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    updateShadowCullingDescriptorSet(frameIndex);
+    updateShadowCullingArgumentTable(frameIndex);
   }
 }
 
-void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
+void RenderDevice::updateGPUCullingArgumentTable(uint32_t frameIndex)
 {
-  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingBindGroups.size()
-     || m_device.gpuCullingBindGroups[frameIndex].isNull())
+  if(frameIndex >= m_perFrame.frameUserData.size() || frameIndex >= m_device.gpuCullingArgumentTables.size()
+     || m_device.gpuCullingArgumentTables[frameIndex].isNull())
   {
     return;
   }
@@ -3746,21 +3429,21 @@ void RenderDevice::updateGPUCullingDescriptorSet(uint32_t frameIndex)
         .arrayElement = i,
         .type         = rhi::ArgumentType::sampledTexture,
         .textureView  = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
-        .imageLayout  = rhi::ResourceState::General,
+        .accessIntent = rhi::ArgumentAccessIntent::readWrite,
     });
   }
   writes.push_back(rhi::ArgumentWrite{.binding = 6, .type = rhi::ArgumentType::uniformBuffer, .buffer = frameUserData.gpuCullingUniformBufferRHI, .size = sizeof(shaderio::GPUCullingUniforms)});
   writes.push_back(rhi::ArgumentWrite{.binding = 7, .type = rhi::ArgumentType::storageBuffer, .buffer = meshletHandle});
   writes.push_back(rhi::ArgumentWrite{.binding = 8, .type = rhi::ArgumentType::storageBuffer, .buffer = sceneObjectHandle});
 
-  m_device.device->updateArgumentTable(m_device.gpuCullingBindGroups[frameIndex],
+  m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex],
                                        static_cast<uint32_t>(writes.size()), writes.data());
 }
 
 void RenderDevice::createLightResources()
 {
   const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
-  m_lightResources.init(*m_device.device, m_device.allocator, LightResources::CreateInfo{
+  m_lightResources.init(*m_device.device, reinterpret_cast<uintptr_t>(m_device.allocator), LightResources::CreateInfo{
       .maxPointLights = 256,
       .maxSpotLights  = 128,
       .frameCount     = frameCount,
@@ -3768,7 +3451,7 @@ void RenderDevice::createLightResources()
 }
 
 
-void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> requestedViewportSize)
+void RenderDevice::rebuildSwapchainDependentResources(std::optional<rhi::Extent2D> requestedViewportSize)
 {
   if(requestedViewportSize.has_value() && isValidExtent(requestedViewportSize.value()))
   {
@@ -3784,7 +3467,7 @@ void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> 
   {
     m_swapchainDependent.swapchain->rebuild();
     const rhi::Extent2D extent             = m_swapchainDependent.swapchain->getExtent();
-    m_swapchainDependent.windowSize        = VkExtent2D{extent.width, extent.height};
+    m_swapchainDependent.windowSize        = extent;
     m_swapchainDependent.currentImageIndex = 0;
     m_swapchainDependent.hasAcquiredImage  = false;
     m_swapchainDependent.imageStates.assign(
@@ -3793,7 +3476,7 @@ void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> 
     swapchainRebuilt                       = true;
   }
 
-  const VkExtent2D gBufferSize = m_swapchainDependent.sceneResources.getSize();
+  const rhi::Extent2D gBufferSize = m_swapchainDependent.sceneResources.getSize();
   if(!extentChanged(gBufferSize, m_swapchainDependent.viewportSize))
   {
     return;
@@ -3808,17 +3491,17 @@ void RenderDevice::rebuildSwapchainDependentResources(std::optional<VkExtent2D> 
     m_perFrame.frameContext->waitForFrame(i);
   }
 
-  const VkDevice  device        = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const VkQueue   graphicsQueue = fromNativeHandle<VkQueue>(m_device.device->getGraphicsQueue().nativeHandle);
+  const VkDevice  device        = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+  const VkQueue   graphicsQueue = fromNativeHandle<VkQueue>(m_device.device->getGraphicsQueue().backendHandle);
   VkCommandBuffer cmd           = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
-  m_swapchainDependent.sceneResources.update(cmd, m_swapchainDependent.viewportSize);
+  rhi::vulkan::VulkanCommandBuffer rhiCmd;
+  rhiCmd.setTarget(cmd, &m_device.resourceTable);
+  m_swapchainDependent.sceneResources.update(rhiCmd, m_swapchainDependent.viewportSize);
   utils::endSingleTimeCommands(cmd, device, m_device.transientCmdPool, graphicsQueue);
 
-  // Update GBuffer texture descriptor set after potential SceneResources resize
-  updateGBufferTextureDescriptorSet();
   for(uint32_t frameIndex = 0; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
   {
-    updateGPUCullingDescriptorSet(frameIndex);
+    updateGPUCullingArgumentTable(frameIndex);
   }
 
 }
@@ -3829,41 +3512,39 @@ void RenderDevice::bindStaticPassResources(PassExecutor& passExecutor) const
   // Called once after swapchain/resources rebuild
   passExecutor.bindBuffer({
       .handle       = kPassVertexBufferHandle,
-      .nativeBuffer = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
+      .backendBufferToken = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
   });
   passExecutor.bindTexture({
       .handle       = kPassGBuffer0Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(0)),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getColorImage(0)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassGBuffer1Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(1)),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getColorImage(1)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassGBuffer2Handle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getColorImage(2)),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getColorImage(2)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassSceneDepthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getDepthImage()),
       .aspect       = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
-      // After swapchain rebuild, cmdInitImageLayout initializes depth to GENERAL layout
-      // PassExecutor will transition to DepthStencilAttachment before first depth pass
-      .initialState = rhi::ResourceState::General,
+      .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassShadowHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getShadowMapImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getShadowMapImage()),
       .aspect       = rhi::TextureAspect::depth,
       // After swapchain rebuild, cmdInitImageLayout initializes shadow map to GENERAL
       .initialState = rhi::ResourceState::General,
@@ -3871,139 +3552,138 @@ void RenderDevice::bindStaticPassResources(PassExecutor& passExecutor) const
   });
   passExecutor.bindTexture({
       .handle       = kPassCSMShadowHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_csmShadowResources.getCascadeImage()),
       .aspect       = rhi::TextureAspect::depth,
-      // CSM cascade image is initialized to GENERAL and shadow sampling/rendering
-      // passes transition it explicitly from there.
-      .initialState = rhi::ResourceState::General,
+      // The CSM pass clears the cascade array at the start of each frame.
+      .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getDepthPyramidImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getDepthPyramidImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassOutputHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getOutputTextureImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getOutputTextureImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassSceneColorHdrHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHdrImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getSceneColorHdrImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomHalfHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomHalfImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomHalfImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomQuarterHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomQuarterImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomQuarterImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomEighthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomEighthImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomEighthImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomSixteenthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomSixteenthImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomSixteenthImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomThirtySecondHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomThirtySecondImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomThirtySecondImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomUpsampleSixteenthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomUpsampleSixteenthImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomUpsampleEighthHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomUpsampleQuarterHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassBloomOutputHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getBloomOutputImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getBloomOutputImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassVelocityHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getVelocityImage()),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getVelocityImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassSceneColorHistoryReadHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHistoryImage(1)),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getSceneColorHistoryImage(1)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
   passExecutor.bindTexture({
       .handle       = kPassSceneColorHistoryWriteHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_swapchainDependent.sceneResources.getSceneColorHistoryImage(0)),
+      .backendImageToken  = resolveNativeImage(*m_device.device, m_swapchainDependent.sceneResources.getSceneColorHistoryImage(0)),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::general,
       .isSwapchain  = false,
   });
 }
 
-rhi::CommandList& RenderDevice::beginCommandRecording()
+rhi::CommandBuffer& RenderDevice::beginCommandRecording()
 {
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
-  rhi::FrameData& frame = m_perFrame.frameContext->getCurrentFrame();
-  ASSERT(frame.commandList != nullptr, "Current frame command list must be valid");
-  rhi::vulkan::setResourceTable(*frame.commandList, &m_device.resourceTable);
-  return *frame.commandList;
+  auto* vulkanFrameContext = dynamic_cast<rhi::vulkan::VulkanFrameContext*>(m_perFrame.frameContext.get());
+  ASSERT(vulkanFrameContext != nullptr, "RenderDevice currently requires VulkanFrameContext");
+  vulkanFrameContext->setResourceTable(&m_device.resourceTable);
+  rhi::CommandBuffer* cmdBuffer = m_perFrame.frameContext->getCommandBuffer();
+  ASSERT(cmdBuffer != nullptr, "Current frame command buffer must be valid");
+  return *cmdBuffer;
 }
 
-void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, PassExecutor& passExecutor)
+void RenderDevice::drawFrame(rhi::CommandBuffer& cmdBuffer, const RenderParams& params, PassExecutor& passExecutor)
 {
-  TRACY_ZONE_SCOPED("drawFrame");
 
   const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   auto&          frameUserData     = m_perFrame.frameUserData[currentFrameIndex];
 
   {
     demo::profiling::ScopedCpuRange buildRenderItemsRange("BuildRenderItems");
-    TRACY_ZONE_SCOPED("drawFrame.cpuFrontEnd");
 
     // Update CSM cascade matrices based on current camera and light direction
     if(params.cameraUniforms != nullptr)
@@ -4041,55 +3721,55 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
     // Only bind dynamic per-frame resources here
     passExecutor.bindBuffer({
         .handle       = kTransientAllocatorBufferHandle,
-        .nativeBuffer = frameUserData.transientAllocator.getBufferOpaque(),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.transientAllocator.getBufferHandle()),
     });
     passExecutor.bindBuffer({
         .handle       = kPassPointLightBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointLightBuffer(currentFrameIndex)),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(m_lightResources.getPointLightBuffer(currentFrameIndex)),
     });
     passExecutor.bindBuffer({
         .handle       = kPassSpotLightBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(m_lightResources.getSpotLightBuffer(currentFrameIndex)),
     });
     passExecutor.bindBuffer({
         .handle       = kPassPointLightCoarseBoundsHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
     });
     passExecutor.bindBuffer({
         .handle       = kPassSpotLightCoarseBoundsHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
     });
     passExecutor.bindBuffer({
         .handle       = kPassLightCoarseCullingUniformHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
+        .backendBufferToken = m_device.resourceTable.resolveBuffer(m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
     });
     passExecutor.bindBuffer({
         .handle       = kPassGPUCullObjectBufferHandle,
-        .nativeBuffer = frameUserData.useExternalGPUCullingObjectBuffer
+        .backendBufferToken = frameUserData.useExternalGPUCullingObjectBuffer
                             ? reinterpret_cast<uint64_t>(frameUserData.externalGPUCullingObjectBuffer)
                             : reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
     });
     passExecutor.bindBuffer({
         .handle       = kPassGPUCullIndirectBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
+        .backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
     });
     passExecutor.bindBuffer({
         .handle       = kPassGPUCullStatsBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
+        .backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
     });
     passExecutor.bindBuffer({
         .handle       = kPassGPUCullUniformBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
+        .backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
     });
     passExecutor.bindBuffer({
         .handle       = kPassGPUCullResultBufferHandle,
-        .nativeBuffer = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
+        .backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
     });
     m_perPass.drawStream.clear();
   }
 
   // Allocate CameraUniforms once for all passes
-  const VkExtent2D viewportExtent = m_swapchainDependent.sceneResources.getSize();
+  const rhi::Extent2D viewportExtent = m_swapchainDependent.sceneResources.getSize();
   const float viewportWidth = static_cast<float>(viewportExtent.width);
   const float viewportHeight = static_cast<float>(viewportExtent.height);
   TransientAllocator::Allocation cameraAlloc =
@@ -4121,26 +3801,13 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
   frameUserData.transientAllocator.flushAllocation(cameraAlloc, sizeof(cameraData));
 
   demo::PassContext context{
-      &cmd, &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
-      getCurrentMaterialBindGroupHandle(), cameraAlloc, true, m_perFrame.frameContext->getCommandBuffer()};
+      &frameUserData.transientAllocator, currentFrameIndex, 0, &params, &m_perPass.drawStream, params.gltfModel,
+      getCurrentMaterialArgumentTable(), cameraAlloc, true, &cmdBuffer};
   context.executor = &passExecutor;
-  resetPassGpuProfileQueries(*context.cmdBuffer, currentFrameIndex);
-
-#ifdef TRACY_ENABLE
-  if(m_tracyVkCtx)
-  {
-    const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(context.cmdBuffer->getNativeHandle());
-    TracyVkZone(m_tracyVkCtx->context(), vkCmd, "RenderFrame");
-  }
-#endif
+  resetPassGpuProfileQueries(*context.commandBuffer, currentFrameIndex);
 
   {
-    TRACY_ZONE_SCOPED("drawFrame.passExecution");
-#ifdef TRACY_ENABLE
-    passExecutor.execute(context, &m_passProfilingHooks, m_tracyVkCtx.get());
-#else
-    passExecutor.execute(context, &m_passProfilingHooks, nullptr);
-#endif
+    passExecutor.execute(context, &m_passProfilingHooks);
   }
 
   if(currentFrameIndex < m_passGpuProfile.frames.size())
@@ -4149,23 +3816,6 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
   }
 
   {
-    TRACY_ZONE_SCOPED("drawFrame.cleanup");
-
-    // Cleanup transitions: bring textures to known state for next frame start
-    // ForwardPass already transitions scene depth to General at its end
-    // CSM cascade ends as DepthStencilAttachment from CSMShadowPass, transition back to General
-    cmd.transitionTexture(rhi::TextureBarrierDesc{
-        .texture     = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
-        .nativeImage = reinterpret_cast<uint64_t>(m_csmShadowResources.getCascadeImage()),
-        .aspect      = rhi::TextureAspect::depth,
-        .srcStage    = rhi::PipelineStage::FragmentShader,
-        .dstStage    = rhi::PipelineStage::Compute,
-        .srcAccess   = rhi::ResourceAccess::write,
-        .dstAccess   = rhi::ResourceAccess::read,
-        .oldState    = rhi::ResourceState::DepthStencilAttachment,
-        .newState    = rhi::ResourceState::General,
-        .isSwapchain = false,
-    });
 
     // Update swapchain image state after rendering if this frame actually wrote a
     // presentable image. Late-acquire frames that skipped presentation leave the
@@ -4178,27 +3828,14 @@ void RenderDevice::drawFrame(rhi::CommandList& cmd, const RenderParams& params, 
   }
 }
 
-void RenderDevice::endFrame(rhi::CommandList& cmd)
+void RenderDevice::endFrame(rhi::CommandBuffer& cmdBuffer)
 {
-  TRACY_ZONE_SCOPED("endFrame");
 
-  (void)cmd;
   ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
-
-#ifdef TRACY_ENABLE
-  // Collect GPU profiling results at end of rendering command buffer
-  // TracyVkCollect resets query pools and reads results from GPU
-  if(m_tracyVkCtx)
-  {
-    const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(m_perFrame.frameContext->getCommandBuffer()->getNativeHandle());
-    TracyVkCollect(m_tracyVkCtx->context(), vkCmd);
-  }
-#endif
 
   {
     demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
-    TRACY_ZONE_SCOPED("submitFrame");
-    submitFrame(*m_perFrame.frameContext, cmd);
+    submitFrame(*m_perFrame.frameContext, cmdBuffer);
   }
 
   // Frame advancement and wait moved to prepareFrameResources for CPU/GPU overlap
@@ -4206,40 +3843,10 @@ void RenderDevice::endFrame(rhi::CommandList& cmd)
 
   {
     demo::profiling::ScopedCpuRange presentRange("Present");
-    TRACY_ZONE_SCOPED("presentFrame");
     presentFrame(*m_swapchainDependent.swapchain);
   }
   m_perFrame.frameCounter++;
 
-  TRACY_CPU_FRAME_MARK();
-}
-
-void RenderDevice::beginDynamicRenderingToSwapchain(const rhi::CommandList& cmd) const
-{
-  const VkImageView swapchainImageView =
-      fromNativeHandle<VkImageView>(m_swapchainDependent.swapchain->getNativeImageView(m_swapchainDependent.currentImageIndex));
-  const std::array<VkRenderingAttachmentInfo, 1> colorAttachment{{{
-      .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
-      .imageView   = swapchainImageView,
-      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,  // Preserve LightPass/ForwardPass output
-      .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-  }}};
-
-  const VkRenderingInfo renderingInfo{
-      .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-      .renderArea           = {{0, 0}, m_swapchainDependent.windowSize},
-      .layerCount           = 1,
-      .colorAttachmentCount = uint32_t(colorAttachment.size()),
-      .pColorAttachments    = colorAttachment.data(),
-  };
-
-  rhi::vulkan::cmdBeginRendering(cmd, renderingInfo);
-}
-
-void RenderDevice::endDynamicRenderingToSwapchain(const rhi::CommandList& cmd)
-{
-  rhi::vulkan::cmdEndRendering(cmd);
 }
 
 void RenderDevice::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
@@ -4541,7 +4148,7 @@ std::array<glm::vec3, 8> RenderDevice::computeOrthoFrustumCorners(const glm::mat
 shaderio::LightCullingUniforms RenderDevice::buildLightCullingUniforms(const RenderParams& params) const
 {
   shaderio::LightCullingUniforms uniforms{};
-  const VkExtent2D extent = m_swapchainDependent.sceneResources.getSize();
+  const rhi::Extent2D extent = m_swapchainDependent.sceneResources.getSize();
 
   shaderio::CameraUniforms camera{};
   if(params.cameraUniforms != nullptr)
@@ -4582,8 +4189,8 @@ shaderio::LightCullingUniforms RenderDevice::buildLightCullingUniforms(const Ren
 shaderio::GPUCullingUniforms RenderDevice::buildGPUCullingUniforms(const RenderParams& params, uint32_t objectCount) const
 {
   shaderio::GPUCullingUniforms uniforms{};
-  const VkExtent2D screenExtent = m_swapchainDependent.sceneResources.getSize();
-  const VkExtent2D pyramidExtent = m_swapchainDependent.sceneResources.getDepthPyramidExtent();
+  const rhi::Extent2D screenExtent = m_swapchainDependent.sceneResources.getSize();
+  const rhi::Extent2D pyramidExtent = m_swapchainDependent.sceneResources.getDepthPyramidExtent();
   const uint32_t mipCount =
       std::min<uint32_t>(m_swapchainDependent.sceneResources.getDepthPyramidMipCount(), shaderio::LDepthPyramidMaxMips);
 
@@ -4630,8 +4237,8 @@ shaderio::GPUCullingUniforms RenderDevice::buildGPUCullingUniforms(const RenderP
                                    2e-3f);
   const bool meshletCulling =
       params.gpuDrivenSceneView != nullptr
-      && params.gpuDrivenSceneView->gpuCullMeshletBuffer != VK_NULL_HANDLE
-      && params.gpuDrivenSceneView->gpuCullSceneObjectBuffer != VK_NULL_HANDLE;
+      && params.gpuDrivenSceneView->gpuCullMeshletBuffer != 0
+      && params.gpuDrivenSceneView->gpuCullSceneObjectBuffer != 0;
   uniforms.cullingControls = glm::vec4(params.debugOptions.enableGPUFrustumCulling ? 1.0f : 0.0f,
                                        params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
                                        meshletCulling ? 1.0f : 0.0f,
@@ -4868,7 +4475,7 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   const char* vertEntryName = "vertexMain";
   const char* fragEntryName = "fragmentMain";
 
-  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                               {shader_rast_slang, std::size(shader_rast_slang)});
   DBG_VK_NAME(vertShaderModule);
   VkShaderModule fragShaderModule = vertShaderModule;
@@ -4876,10 +4483,10 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   const char* vertEntryName = "main";
   const char* fragEntryName = "main";
 
-  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                               {shader_vert_glsl, std::size(shader_vert_glsl)});
   DBG_VK_NAME(vertShaderModule);
-  VkShaderModule fragShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+  VkShaderModule fragShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                               {shader_frag_glsl, std::size(shader_frag_glsl)});
   DBG_VK_NAME(fragShaderModule);
 #endif
@@ -4887,29 +4494,20 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   const auto bindingDescription    = Vertex::getBindingDescription();
   const auto attributeDescriptions = Vertex::getAttributeDescriptions();
 
-  const uint64_t materialLayoutHandle = getBindGroupLayoutOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
   ASSERT(!m_perFrame.frameUserData.empty(), "Per-frame resources must exist before graphics pipeline creation");
-  const uint64_t sceneLayoutHandle =
-      getBindGroupLayoutOpaque(m_perFrame.frameUserData.front().sceneBindGroup, BindGroupSetSlot::drawDynamic);
+  const rhi::vulkan::ArgumentTableRecord* materialTableRecord =
+      m_device.resourceTable.tryGetArgumentTable(m_materials.materialArgumentTable);
+  const rhi::vulkan::ArgumentTableRecord* sceneTableRecord =
+      m_device.resourceTable.tryGetArgumentTable(m_perFrame.frameUserData.front().sceneArgumentTable);
+  ASSERT(materialTableRecord != nullptr && sceneTableRecord != nullptr, "Prebuilt graphics pipelines require argument tables");
 
   const rhi::ShaderReflectionData rasterReflection = buildRasterShaderReflection();
-  rhi::PipelineLayoutDesc         layoutDesc       = rhi::derivePipelineLayoutDesc(rasterReflection);
-  layoutDesc.debugName                             = "graphics-layout";
-
-  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 2> layoutMappings{{
-      rhi::vulkan::makePipelineLayoutBindingMapping(static_cast<uint32_t>(shaderio::LSetTextures), materialLayoutHandle),
-      rhi::vulkan::makePipelineLayoutBindingMapping(static_cast<uint32_t>(shaderio::LSetScene), sceneLayoutHandle),
+  const std::vector<rhi::PipelinePushConstantRange> pushConstantRanges =
+      rhi::derivePipelinePushConstantRanges(rasterReflection);
+  const std::array<rhi::ArgumentLayoutHandle, 2> graphicsArgumentLayouts{{
+      materialTableRecord->layout,
+      sceneTableRecord->layout,
   }};
-  const rhi::vulkan::VulkanPipelineLayoutLowering                      layoutLowering{
-      .setLayouts     = layoutMappings.data(),
-      .setLayoutCount = static_cast<uint32_t>(layoutMappings.size()),
-  };
-
-  auto graphicsPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  graphicsPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                               layoutDesc, layoutLowering);
-  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(graphicsPipelineLayout->getNativeHandle()));
-  m_device.graphicPipelineLayout = std::move(graphicsPipelineLayout);
 
   const std::array<rhi::VertexBindingDesc, 1>   vertexBindings{{
       rhi::VertexBindingDesc{
@@ -4990,7 +4588,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   }};
 
   rhi::GraphicsPipelineDesc graphicsDesc{
-      .layout            = m_device.graphicPipelineLayout.get(),
       .shaderStages      = shaderStages.data(),
       .shaderStageCount  = static_cast<uint32_t>(shaderStages.size()),
       .vertexInput       = vertexInput,
@@ -5006,28 +4603,21 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
               .colorFormatCount = static_cast<uint32_t>(colorFormats.size()),
               .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
           },
+      .argumentLayouts     = graphicsArgumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(graphicsArgumentLayouts.size()),
+      .pushConstantRanges  = pushConstantRanges.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size()),
   };
   graphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
   graphicsDesc.rasterState.cullMode    = rhi::CullMode::none;
   graphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
   graphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-  rhi::vulkan::GraphicsPipelineCreateInfo graphicsCreateInfo{
-      .key =
-          {
-              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-              .specializationVariant = 1,
-          },
-      .desc = graphicsDesc,
-  };
-  const VkPipeline graphicsPipelineWithTexture =
-      rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), graphicsCreateInfo);
-  DBG_VK_NAME(graphicsPipelineWithTexture);
-  m_device.prebuiltPipelines.graphicsTextured = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                                 reinterpret_cast<uint64_t>(graphicsPipelineWithTexture),
-                                                                 graphicsCreateInfo.key.specializationVariant);
+  graphicsDesc.specializationVariant = 1;
+  const PipelineHandle graphicsPipelineWithTexture = m_device.device->createGraphicsPipeline(graphicsDesc);
+  m_device.prebuiltPipelines.graphicsTextured = graphicsPipelineWithTexture;
 
-  graphicsCreateInfo.key.specializationVariant = 0;
+  graphicsDesc.specializationVariant          = 0;
   shaderStages[1].specializationVariant        = 0;
   // Non-textured variant: useTexture = false (must be VkBool32 = uint32_t = 4 bytes)
   uint32_t useTextureFalse = VK_FALSE;
@@ -5036,60 +4626,34 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   shaderStages[1].specializationData         = specDataFalse;
   shaderStages[1].specializationConstants    = &specConstantFalse;
   shaderStages[1].specializationConstantCount = 1;
-  const VkPipeline graphicsPipelineWithoutTexture =
-      rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), graphicsCreateInfo);
-  DBG_VK_NAME(graphicsPipelineWithoutTexture);
-  m_device.prebuiltPipelines.graphicsNonTextured =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                       reinterpret_cast<uint64_t>(graphicsPipelineWithoutTexture), graphicsCreateInfo.key.specializationVariant);
+  const PipelineHandle graphicsPipelineWithoutTexture = m_device.device->createGraphicsPipeline(graphicsDesc);
+  m_device.prebuiltPipelines.graphicsNonTextured = graphicsPipelineWithoutTexture;
 
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), vertShaderModule, nullptr);
+  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), vertShaderModule, nullptr);
 #ifndef USE_SLANG
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), fragShaderModule, nullptr);
+  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), fragShaderModule, nullptr);
 #endif
 
   // Create GBuffer pipeline layout with uniform buffer bindings
   {
     // Set 1: Camera uniform buffer layout (dynamic)
-    std::vector<rhi::BindTableLayoutEntry> cameraLayoutEntries{
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindCamera,
-            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::allGraphics,
-        },
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindLighting,
-            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::fragment,
-        },
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindLightCulling,
-            .resourceType    = rhi::BindlessResourceType::uniformBuffer,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::compute,
-        },
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindPostProcess,
-            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::fragment,
-        },
+    std::vector<rhi::ArgumentBinding> cameraLayoutEntries{
+        makeArgumentBinding(shaderio::LBindCamera, rhi::BindlessResourceType::uniformBufferDynamic, 1, rhi::ResourceVisibility::allGraphics),
+        makeArgumentBinding(shaderio::LBindLighting, rhi::BindlessResourceType::uniformBuffer, 1, rhi::ResourceVisibility::fragment),
+        makeArgumentBinding(shaderio::LBindLightCulling, rhi::BindlessResourceType::uniformBuffer, 1, rhi::ResourceVisibility::compute),
+        makeArgumentBinding(shaderio::LBindPostProcess, rhi::BindlessResourceType::uniformBufferDynamic, 1, rhi::ResourceVisibility::fragment),
     };
 
     // One shared camera ArgumentLayout, a per-frame ArgumentTable. Dynamic-ness of the
     // camera/post-process UBOs comes from the layout (dynamicBindings), so the writes use
     // the plain uniformBuffer type and updateArgumentTable emits the *_DYNAMIC descriptor.
-    const rhi::ArgumentLayoutHandle cameraLayout = createArgumentLayoutFromEntries(cameraLayoutEntries, "gbuffer-camera");
-    const VkDescriptorSetLayout     cameraSetLayout =
-        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(cameraLayout)));
+    const rhi::ArgumentLayoutHandle cameraLayout = createArgumentLayoutFromBindings(cameraLayoutEntries, "gbuffer-camera");
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
       PerFrameResources::FrameUserData& fud         = m_perFrame.frameUserData[i];
       const rhi::ArgumentTableHandle    cameraTable = m_device.device->createArgumentTable(cameraLayout);
-      fud.cameraBindGroup                           = createBindGroup(BindGroupDesc{
-                                    .slot                = BindGroupSetSlot::shaderSpecific,
+      fud.cameraArgumentTable                           = createArgumentTable(ArgumentTableDesc{
+                                    .slot                = ArgumentSlot::shaderSpecific,
                                     .layout              = cameraLayout,
                                     .table               = cameraTable,
                                     .primaryLogicalIndex = shaderio::LBindCamera,
@@ -5106,23 +4670,16 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     }
 
     // Set 2: Draw uniform buffer (dynamic). One shared ArgumentLayout, per-frame table.
-    std::vector<rhi::BindTableLayoutEntry> drawLayoutEntries{
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindDrawModel,
-            .resourceType    = rhi::BindlessResourceType::uniformBufferDynamic,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
-        },
+    std::vector<rhi::ArgumentBinding> drawLayoutEntries{
+        makeArgumentBinding(shaderio::LBindDrawModel, rhi::BindlessResourceType::uniformBufferDynamic, 1, rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment),
     };
-    const rhi::ArgumentLayoutHandle drawLayout    = createArgumentLayoutFromEntries(drawLayoutEntries, "gbuffer-draw");
-    const VkDescriptorSetLayout     drawSetLayout =
-        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(drawLayout)));
+    const rhi::ArgumentLayoutHandle drawLayout    = createArgumentLayoutFromBindings(drawLayoutEntries, "gbuffer-draw");
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
       PerFrameResources::FrameUserData& fud       = m_perFrame.frameUserData[i];
       const rhi::ArgumentTableHandle    drawTable = m_device.device->createArgumentTable(drawLayout);
-      fud.drawBindGroup                           = createBindGroup(BindGroupDesc{
-                                    .slot                = BindGroupSetSlot::shaderSpecific,
+      fud.drawArgumentTable                           = createArgumentTable(ArgumentTableDesc{
+                                    .slot                = ArgumentSlot::shaderSpecific,
                                     .layout              = drawLayout,
                                     .table               = drawTable,
                                     .primaryLogicalIndex = shaderio::LBindDrawModel,
@@ -5134,22 +4691,14 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
     // MDI draw-data: one shared storage-buffer ArgumentLayout for the three per-frame MDI
     // variants and all CSM cascades. Descriptor sets are written lazily by the
-    // ensure*MdiDrawDataBuffer / updateShadowCullingDrawDataDescriptorSet paths.
-    std::vector<rhi::BindTableLayoutEntry> shadowMdiDrawLayoutEntries{
-        rhi::BindTableLayoutEntry{
-            .logicalIndex    = shaderio::LBindDrawModelMdi,
-            .resourceType    = rhi::BindlessResourceType::storageBuffer,
-            .descriptorCount = 1,
-            .visibility      = rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment,
-        },
+    // ensure*MdiDrawDataBuffer / updateShadowCullingDrawDataArgumentTable paths.
+    std::vector<rhi::ArgumentBinding> shadowMdiDrawLayoutEntries{
+        makeArgumentBinding(shaderio::LBindDrawModelMdi, rhi::BindlessResourceType::storageBuffer, 1, rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment),
     };
-    const rhi::ArgumentLayoutHandle mdiDrawLayout    = createArgumentLayoutFromEntries(shadowMdiDrawLayoutEntries, "mdi-draw");
-    const VkDescriptorSetLayout     mdiDrawSetLayout =
-        reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(m_device.resourceTable.resolveArgumentLayout(mdiDrawLayout)));
-    const VkDescriptorSetLayout shadowMdiDrawSetLayout = mdiDrawSetLayout;
+    const rhi::ArgumentLayoutHandle mdiDrawLayout    = createArgumentLayoutFromBindings(shadowMdiDrawLayoutEntries, "mdi-draw");
     const auto makeMdiTable = [&](const char* name) {
-      return createBindGroup(BindGroupDesc{
-          .slot                = BindGroupSetSlot::shaderSpecific,
+      return createArgumentTable(ArgumentTableDesc{
+          .slot                = ArgumentSlot::shaderSpecific,
           .layout              = mdiDrawLayout,
           .table               = m_device.device->createArgumentTable(mdiDrawLayout),
           .primaryLogicalIndex = shaderio::LBindDrawModelMdi,
@@ -5159,481 +4708,34 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
       PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
-      fud.mdiDrawBindGroup                  = makeMdiTable("mdi-draw");
-      fud.gbufferMdiDrawBindGroup           = makeMdiTable("gbuffer-mdi-draw");
-      fud.depthMdiDrawBindGroup             = makeMdiTable("depth-mdi-draw");
+      fud.mdiDrawArgumentTable                  = makeMdiTable("mdi-draw");
+      fud.gbufferMdiDrawArgumentTable           = makeMdiTable("gbuffer-mdi-draw");
+      fud.depthMdiDrawArgumentTable             = makeMdiTable("depth-mdi-draw");
       for(uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
       {
-        fud.csmShadowMdiDrawBindGroups[cascadeIndex] = makeMdiTable("csm-shadow-mdi-draw");
+        fud.csmShadowMdiDrawArgumentTables[cascadeIndex] = makeMdiTable("csm-shadow-mdi-draw");
       }
 
-      updateMdiDrawDataDescriptorSet(i);
-      updateGBufferMdiDrawDataDescriptorSet(i);
-      updateDepthMdiDrawDataDescriptorSet(i);
-      updateShadowCullingDrawDataDescriptorSet(i);
+      updateMdiDrawDataArgumentTable(i);
+      updateGBufferMdiDrawDataArgumentTable(i);
+      updateDepthMdiDrawDataArgumentTable(i);
+      updateShadowCullingDrawDataArgumentTable(i);
     }
 
-    // Create GBuffer pipeline layout
-    const uint64_t textureLayoutHandle = getBindGroupLayoutOpaque(m_materials.materialBindGroup, BindGroupSetSlot::material);
-    const uint64_t cameraLayoutHandle = reinterpret_cast<uint64_t>(cameraSetLayout);
-    const uint64_t drawLayoutHandle = reinterpret_cast<uint64_t>(drawSetLayout);
-    const uint64_t mdiDrawLayoutHandle = reinterpret_cast<uint64_t>(mdiDrawSetLayout);
-    const uint64_t shadowMdiDrawLayoutHandle = reinterpret_cast<uint64_t>(shadowMdiDrawSetLayout);
-
-    rhi::ShaderReflectionData gbufferReflection{};
-    gbufferReflection.name = "shader.gbuffer";
-    gbufferReflection.entryPoints = {
-        rhi::ShaderEntryPoint{"vertexMain", rhi::ShaderStageFlagBits::vertex},
-        rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
-    };
-    gbufferReflection.resourceBindings = {
-        rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
-                                   rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   RenderDevice::kDemoMaterialSlotCount, 0},
-        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
-        rhi::ShaderResourceBinding{"draw", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                   rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
-                                   shaderio::LSetDraw, shaderio::LBindDrawModel, 1, 0},
-    };
-    gbufferReflection.pushConstantRanges = {};  // No push constants for GBuffer
-
-    rhi::PipelineLayoutDesc gbufferLayoutDesc = rhi::derivePipelineLayoutDesc(gbufferReflection);
-    gbufferLayoutDesc.debugName = "gbuffer-layout";
-
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> gbufferLayoutMappings{
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, drawLayoutHandle),
-    };
-
-    const rhi::vulkan::VulkanPipelineLayoutLowering gbufferLayoutLowering{
-        .setLayouts     = gbufferLayoutMappings.data(),
-        .setLayoutCount = static_cast<uint32_t>(gbufferLayoutMappings.size()),
-    };
-
-    auto gbufferPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    gbufferPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                gbufferLayoutDesc, gbufferLayoutLowering);
-    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(gbufferPipelineLayout->getNativeHandle()));
-    m_device.gbufferPipelineLayout = std::move(gbufferPipelineLayout);
-
-    rhi::ShaderReflectionData mdiReflection{};
-    mdiReflection.name = "shader.mdi";
-    mdiReflection.entryPoints = {
-        rhi::ShaderEntryPoint{"vertexMdiMain", rhi::ShaderStageFlagBits::vertex},
-        rhi::ShaderEntryPoint{"fragmentMdiMain", rhi::ShaderStageFlagBits::fragment},
-    };
-    mdiReflection.resourceBindings = {
-        rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
-                                   rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   RenderDevice::kDemoMaterialSlotCount, 0},
-        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
-        rhi::ShaderResourceBinding{"drawData", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
-                                   rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
-                                   shaderio::LSetDraw, shaderio::LBindDrawModelMdi, 1, 0},
-    };
-
-    rhi::PipelineLayoutDesc mdiLayoutDesc = rhi::derivePipelineLayoutDesc(mdiReflection);
-    mdiLayoutDesc.debugName = "mdi-layout";
-
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> mdiLayoutMappings{
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, mdiDrawLayoutHandle),
-    };
-
-    const rhi::vulkan::VulkanPipelineLayoutLowering mdiLayoutLowering{
-        .setLayouts     = mdiLayoutMappings.data(),
-        .setLayoutCount = static_cast<uint32_t>(mdiLayoutMappings.size()),
-    };
-
-    auto mdiPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    mdiPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                            mdiLayoutDesc, mdiLayoutLowering);
-    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(mdiPipelineLayout->getNativeHandle()));
-    m_device.mdiPipelineLayout = std::move(mdiPipelineLayout);
-
-    rhi::ShaderReflectionData csmShadowMdiReflection{};
-    csmShadowMdiReflection.name = "shader.shadow.mdi";
-    csmShadowMdiReflection.entryPoints = {
-        rhi::ShaderEntryPoint{"vertexMdiMain", rhi::ShaderStageFlagBits::vertex},
-        rhi::ShaderEntryPoint{"fragmentMdiMain", rhi::ShaderStageFlagBits::fragment},
-    };
-    csmShadowMdiReflection.resourceBindings = {
-        rhi::ShaderResourceBinding{"textures", rhi::ShaderResourceType::sampler, rhi::DescriptorType::combinedImageSampler,
-                                   rhi::ShaderStageFlagBits::fragment, shaderio::LSetTextures, shaderio::LBindTextures,
-                                   RenderDevice::kDemoMaterialSlotCount, 0},
-        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
-        rhi::ShaderResourceBinding{"drawData", rhi::ShaderResourceType::storageBuffer, rhi::DescriptorType::storageBuffer,
-                                   rhi::ShaderStageFlagBits::vertex | rhi::ShaderStageFlagBits::fragment,
-                                   shaderio::LSetDraw, shaderio::LBindDrawModelMdi, 1, 0},
-    };
-
-    rhi::PipelineLayoutDesc csmShadowMdiLayoutDesc = rhi::derivePipelineLayoutDesc(csmShadowMdiReflection);
-    csmShadowMdiLayoutDesc.debugName = "csm-shadow-mdi-layout";
-
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 3> csmShadowMdiLayoutMappings{
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetDraw, shadowMdiDrawLayoutHandle),
-    };
-
-    const rhi::vulkan::VulkanPipelineLayoutLowering csmShadowMdiLayoutLowering{
-        .setLayouts     = csmShadowMdiLayoutMappings.data(),
-        .setLayoutCount = static_cast<uint32_t>(csmShadowMdiLayoutMappings.size()),
-    };
-
-    auto csmShadowMdiPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    csmShadowMdiPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                                     csmShadowMdiLayoutDesc, csmShadowMdiLayoutLowering);
-    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(csmShadowMdiPipelineLayout->getNativeHandle()));
-    m_device.csmShadowMdiPipelineLayout = std::move(csmShadowMdiPipelineLayout);
-
-    rhi::ShaderReflectionData debugReflection{};
-    debugReflection.name = "shader.debug.gpu-cull";
-    debugReflection.entryPoints = {
-        rhi::ShaderEntryPoint{"vertexCullMain", rhi::ShaderStageFlagBits::vertex},
-        rhi::ShaderEntryPoint{"fragmentMain", rhi::ShaderStageFlagBits::fragment},
-    };
-    debugReflection.resourceBindings = {
-        rhi::ShaderResourceBinding{"camera", rhi::ShaderResourceType::uniformBuffer, rhi::DescriptorType::uniformBufferDynamic,
-                                   rhi::ShaderStageFlagBits::vertex, shaderio::LSetScene, shaderio::LBindCamera, 1, 0},
-    };
-    debugReflection.pushConstantRanges = {
-        rhi::PushConstantRange{rhi::ShaderStageFlagBits::vertex, 0, sizeof(shaderio::PushConstantGPUCullDebug)},
-    };
-
-    rhi::PipelineLayoutDesc debugLayoutDesc = rhi::derivePipelineLayoutDesc(debugReflection);
-    debugLayoutDesc.debugName = "debug-layout";
-
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 2> debugLayoutMappings{
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, textureLayoutHandle),
-        rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, cameraLayoutHandle),
-    };
-    const rhi::vulkan::VulkanPipelineLayoutLowering debugLayoutLowering{
-        .setLayouts     = debugLayoutMappings.data(),
-        .setLayoutCount = static_cast<uint32_t>(debugLayoutMappings.size()),
-    };
-
-    auto debugPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    debugPipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())),
-                              debugLayoutDesc, debugLayoutLowering);
-    DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(debugPipelineLayout->getNativeHandle()));
-    m_device.debugPipelineLayout = std::move(debugPipelineLayout);
+    const rhi::vulkan::ArgumentTableRecord* materialLayoutRecord =
+        m_device.resourceTable.tryGetArgumentTable(m_materials.materialArgumentTable);
+    ASSERT(materialLayoutRecord != nullptr, "Material argument table must exist before graphics pipelines");
+    m_device.gbufferArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, drawLayout};
+    m_device.mdiArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, mdiDrawLayout};
+    m_device.csmShadowMdiArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, mdiDrawLayout};
+    m_device.debugArgumentLayouts = {materialLayoutRecord->layout, cameraLayout};
+    m_device.fullscreenArgumentLayouts = {materialLayoutRecord->layout, cameraLayout};
   }
-
-  // Create light pipeline for LightPass (fullscreen triangle sampling GBuffer)
-#ifdef USE_SLANG
-  {
-    if(m_device.lightPipelineLayout == VK_NULL_HANDLE)
-    {
-      ASSERT(!m_perFrame.frameUserData.empty(), "LightPass requires per-frame scene bind groups");
-      const VkDescriptorSetLayout sceneSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
-          getBindGroupLayoutOpaque(m_perFrame.frameUserData.front().cameraBindGroup, BindGroupSetSlot::shaderSpecific));
-      const std::array<VkDescriptorSetLayout, 2> setLayouts{m_device.gbufferTextureSetLayout, sceneSetLayout};
-      const VkPipelineLayoutCreateInfo layoutInfo{
-          .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-          .setLayoutCount = static_cast<uint32_t>(setLayouts.size()),
-          .pSetLayouts    = setLayouts.data(),
-      };
-      VK_CHECK(vkCreatePipelineLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                      &layoutInfo,
-                                      nullptr,
-                                      &m_device.lightPipelineLayout));
-      DBG_VK_NAME(m_device.lightPipelineLayout);
-    }
-
-    VkShaderModule lightShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                                                {shader_light_slang, std::size(shader_light_slang)});
-    DBG_VK_NAME(lightShaderModule);
-
-    // Shader stages
-    const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{{
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = lightShaderModule,
-            .pName  = "vertexMain",
-        },
-        {
-            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = lightShaderModule,
-            .pName  = "fragmentMain",
-        },
-    }};
-
-    // Vertex input (empty - fullscreen triangle generated in VS)
-    const VkPipelineVertexInputStateCreateInfo vertexInput{
-        .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount   = 0,
-        .vertexAttributeDescriptionCount = 0,
-    };
-
-    // Input assembly
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .primitiveRestartEnable = VK_FALSE,
-    };
-
-    // Rasterizer
-    const VkPipelineRasterizationStateCreateInfo rasterizer{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .depthClampEnable        = VK_FALSE,
-        .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode             = VK_POLYGON_MODE_FILL,
-        .cullMode                = VK_CULL_MODE_NONE,
-        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .depthBiasEnable         = VK_FALSE,
-        .lineWidth               = 1.0f,
-    };
-
-    // Multisampling
-    const VkPipelineMultisampleStateCreateInfo multisampling{
-        .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-        .sampleShadingEnable  = VK_FALSE,
-    };
-
-    // Color blend
-    const VkPipelineColorBlendAttachmentState colorBlendAttachment{
-        .blendEnable         = VK_FALSE,
-        .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo colorBlending{
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .logicOpEnable   = VK_FALSE,
-        .attachmentCount = 1,
-        .pAttachments    = &colorBlendAttachment,
-    };
-
-    // Dynamic state
-    const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
-        .pDynamicStates    = dynamicStates.data(),
-    };
-
-    // Depth stencil (disabled for light pass)
-    const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable       = VK_FALSE,
-        .depthWriteEnable      = VK_FALSE,
-        .depthCompareOp        = VK_COMPARE_OP_ALWAYS,
-        .depthBoundsTestEnable = VK_FALSE,
-        .stencilTestEnable     = VK_FALSE,
-    };
-
-    // Viewport state (required even with dynamic viewport/scissor)
-    const VkPipelineViewportStateCreateInfo viewportState{
-        .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 0,  // Set dynamically with VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT
-        .scissorCount  = 0,  // Set dynamically with VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT
-    };
-
-    // Pipeline rendering info
-    const VkFormat colorFormat = m_swapchainDependent.swapchainImageFormat;
-    const VkPipelineRenderingCreateInfo renderingInfo{
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount    = 1,
-        .pColorAttachmentFormats = &colorFormat,
-    };
-
-    // Graphics pipeline create info
-    const VkGraphicsPipelineCreateInfo pipelineInfo{
-        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &renderingInfo,
-        .stageCount          = static_cast<uint32_t>(shaderStages.size()),
-        .pStages             = shaderStages.data(),
-        .pVertexInputState   = &vertexInput,
-        .pInputAssemblyState = &inputAssembly,
-        .pViewportState      = &viewportState,
-        .pRasterizationState = &rasterizer,
-        .pMultisampleState   = &multisampling,
-        .pDepthStencilState  = &depthStencil,
-        .pColorBlendState    = &colorBlending,
-        .pDynamicState       = &dynamicState,
-        .layout              = m_device.lightPipelineLayout,
-        .renderPass          = VK_NULL_HANDLE,
-        .subpass             = 0,
-    };
-
-    VkPipeline lightPipeline = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                        VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &lightPipeline));
-    DBG_VK_NAME(lightPipeline);
-    m_lightPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                       reinterpret_cast<uint64_t>(lightPipeline),
-                                       2,  // specialization variant
-                                       reinterpret_cast<uint64_t>(m_device.lightPipelineLayout));
-
-    if(m_device.postProcessPipelineLayout == VK_NULL_HANDLE)
-    {
-      ASSERT(!m_perFrame.frameUserData.empty(), "Post-process pipelines require per-frame scene bind groups");
-      const VkDescriptorSetLayout sceneSetLayout = reinterpret_cast<VkDescriptorSetLayout>(
-          getBindGroupLayoutOpaque(m_perFrame.frameUserData.front().cameraBindGroup, BindGroupSetSlot::shaderSpecific));
-      const std::array<VkDescriptorSetLayout, 2> postSetLayouts{m_device.gbufferTextureSetLayout, sceneSetLayout};
-      const VkPipelineLayoutCreateInfo postLayoutInfo{
-          .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-          .setLayoutCount = static_cast<uint32_t>(postSetLayouts.size()),
-          .pSetLayouts    = postSetLayouts.data(),
-      };
-      VK_CHECK(vkCreatePipelineLayout(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                      &postLayoutInfo,
-                                      nullptr,
-                                      &m_device.postProcessPipelineLayout));
-      DBG_VK_NAME(m_device.postProcessPipelineLayout);
-    }
-
-    const auto createFullscreenPipeline = [&](const char* fragmentEntry,
-                                              VkPipelineLayout pipelineLayout,
-                                              VkFormat colorAttachmentFormat,
-                                              uint32_t variant) -> PipelineHandle {
-      const std::array<VkPipelineShaderStageCreateInfo, 2> fullscreenStages{{
-          {
-              .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-              .stage  = VK_SHADER_STAGE_VERTEX_BIT,
-              .module = lightShaderModule,
-              .pName  = "vertexMain",
-          },
-          {
-              .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-              .stage  = VK_SHADER_STAGE_FRAGMENT_BIT,
-              .module = lightShaderModule,
-              .pName  = fragmentEntry,
-          },
-      }};
-      const VkPipelineRenderingCreateInfo fullscreenRenderingInfo{
-          .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-          .colorAttachmentCount    = 1,
-          .pColorAttachmentFormats = &colorAttachmentFormat,
-      };
-      const VkGraphicsPipelineCreateInfo fullscreenPipelineInfo{
-          .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-          .pNext               = &fullscreenRenderingInfo,
-          .stageCount          = static_cast<uint32_t>(fullscreenStages.size()),
-          .pStages             = fullscreenStages.data(),
-          .pVertexInputState   = &vertexInput,
-          .pInputAssemblyState = &inputAssembly,
-          .pViewportState      = &viewportState,
-          .pRasterizationState = &rasterizer,
-          .pMultisampleState   = &multisampling,
-          .pDepthStencilState  = &depthStencil,
-          .pColorBlendState    = &colorBlending,
-          .pDynamicState       = &dynamicState,
-          .layout              = pipelineLayout,
-          .renderPass          = VK_NULL_HANDLE,
-          .subpass             = 0,
-      };
-      VkPipeline pipeline = VK_NULL_HANDLE;
-      VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                          VK_NULL_HANDLE, 1, &fullscreenPipelineInfo, nullptr, &pipeline));
-      DBG_VK_NAME(pipeline);
-      return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                              reinterpret_cast<uint64_t>(pipeline),
-                              variant);
-    };
-
-    m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain",
-                                                           m_device.lightPipelineLayout,
-                                                           SceneResources::kSceneColorHdrFormat,
-                                                           30);
-    {
-      const VkPipelineDepthStencilStateCreateInfo skyboxDepthStencil{
-          .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-          .depthTestEnable = VK_TRUE,
-          .depthWriteEnable = VK_FALSE,
-          .depthCompareOp = VK_COMPARE_OP_EQUAL,
-          .depthBoundsTestEnable = VK_FALSE,
-          .stencilTestEnable = VK_FALSE,
-      };
-      const std::array<VkPipelineShaderStageCreateInfo, 2> skyboxStages{{
-          {
-              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-              .stage = VK_SHADER_STAGE_VERTEX_BIT,
-              .module = lightShaderModule,
-              .pName = "vertexMain",
-          },
-          {
-              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-              .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-              .module = lightShaderModule,
-              .pName = "fragmentSkyboxMain",
-          },
-      }};
-      const VkFormat skyboxColorFormat = SceneResources::kSceneColorHdrFormat;
-      const VkFormat skyboxDepthFormat = m_swapchainDependent.sceneResources.getDepthFormat();
-      const VkFormat skyboxStencilFormat = hasStencilComponent(skyboxDepthFormat) ? skyboxDepthFormat : VK_FORMAT_UNDEFINED;
-      const VkPipelineRenderingCreateInfo skyboxRenderingInfo{
-          .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-          .colorAttachmentCount = 1,
-          .pColorAttachmentFormats = &skyboxColorFormat,
-          .depthAttachmentFormat = skyboxDepthFormat,
-          .stencilAttachmentFormat = skyboxStencilFormat,
-      };
-      const VkGraphicsPipelineCreateInfo skyboxPipelineInfo{
-          .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-          .pNext = &skyboxRenderingInfo,
-          .stageCount = static_cast<uint32_t>(skyboxStages.size()),
-          .pStages = skyboxStages.data(),
-          .pVertexInputState = &vertexInput,
-          .pInputAssemblyState = &inputAssembly,
-          .pViewportState = &viewportState,
-          .pRasterizationState = &rasterizer,
-          .pMultisampleState = &multisampling,
-          .pDepthStencilState = &skyboxDepthStencil,
-          .pColorBlendState = &colorBlending,
-          .pDynamicState = &dynamicState,
-          .layout = m_device.lightPipelineLayout,
-          .renderPass = VK_NULL_HANDLE,
-          .subpass = 0,
-      };
-      VkPipeline skyboxPipeline = VK_NULL_HANDLE;
-      VK_CHECK(vkCreateGraphicsPipelines(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                                          VK_NULL_HANDLE,
-                                          1,
-                                          &skyboxPipelineInfo,
-                                          nullptr,
-                                          &skyboxPipeline));
-      DBG_VK_NAME(skyboxPipeline);
-      m_gpuDrivenSkyboxPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                   reinterpret_cast<uint64_t>(skyboxPipeline),
-                                                   36);
-    }
-    m_bloomPrefilterPipeline = createFullscreenPipeline("fragmentBloomPrefilterMain",
-                                                        m_device.postProcessPipelineLayout,
-                                                        SceneResources::kBloomFormat,
-                                                        31);
-    m_bloomDownsamplePipeline = createFullscreenPipeline("fragmentBloomDownsampleMain",
-                                                         m_device.postProcessPipelineLayout,
-                                                         SceneResources::kBloomFormat,
-                                                         32);
-    m_finalColorPipeline = createFullscreenPipeline("fragmentFinalColorMain",
-                                                    m_device.postProcessPipelineLayout,
-                                                    m_swapchainDependent.sceneResources.getOutputTextureFormat(),
-                                                    33);
-    m_velocityPipeline = createFullscreenPipeline("fragmentVelocityMain",
-                                                  m_device.lightPipelineLayout,
-                                                  SceneResources::kVelocityFormat,
-                                                  34);
-    m_taaResolvePipeline = createFullscreenPipeline("fragmentTAAResolveMain",
-                                                    m_device.lightPipelineLayout,
-                                                    SceneResources::kSceneColorHdrFormat,
-                                                    35);
-
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), lightShaderModule, nullptr);
-  }
-#endif
 
   // Create depth prepass pipelines (Opaque + AlphaTest variants)
   {
     VkShaderModule depthPrepassShaderModule =
-        utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+        utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                   {shader_depth_prepass_slang, std::size(shader_depth_prepass_slang)});
     DBG_VK_NAME(depthPrepassShaderModule);
 
@@ -5667,7 +4769,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     }};
 
     rhi::GraphicsPipelineDesc depthDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),
         .shaderStages      = depthStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(depthStages.size()),
         .vertexInput       = depthVertexInput,
@@ -5683,6 +4784,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormatCount = 0,
                 .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
             },
+        .argumentLayouts = m_device.gbufferArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
     };
     depthDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
     depthDesc.rasterState.cullMode    = rhi::CullMode::back;
@@ -5699,71 +4802,40 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     depthShaderStages[1].specializationConstants = &specConstantAlphaTest;
     depthShaderStages[1].specializationConstantCount = 1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo depthCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 10,
-            },
-        .desc = depthDesc,
-    };
-    const VkPipeline depthOpaquePipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthCreateInfo);
-    DBG_VK_NAME(depthOpaquePipeline);
-    m_depthPrepassOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                    reinterpret_cast<uint64_t>(depthOpaquePipeline),
-                                                    depthCreateInfo.key.specializationVariant);
+    depthDesc.specializationVariant = 10;
+    m_depthPrepassOpaquePipeline = m_device.device->createGraphicsPipeline(depthDesc);
 
     uint32_t alphaTestTrue = VK_TRUE;
     rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
     depthShaderStages[1].specializationData = specDataTrue;
-    depthCreateInfo.key.specializationVariant = 11;
-    const VkPipeline depthAlphaTestPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthCreateInfo);
-    DBG_VK_NAME(depthAlphaTestPipeline);
-    m_depthPrepassAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                       reinterpret_cast<uint64_t>(depthAlphaTestPipeline),
-                                                       depthCreateInfo.key.specializationVariant);
+    depthDesc.specializationVariant = 11;
+    m_depthPrepassAlphaTestPipeline = m_device.device->createGraphicsPipeline(depthDesc);
 
-    if(m_device.mdiPipelineLayout)
+    if(!m_device.mdiArgumentLayouts[0].isNull())
     {
       rhi::GraphicsPipelineDesc depthMdiDesc = depthDesc;
       std::array<rhi::PipelineShaderStageDesc, 2> depthMdiShaderStages = depthMdiStages;
-      depthMdiDesc.layout = m_device.mdiPipelineLayout.get();
       depthMdiDesc.shaderStages = depthMdiShaderStages.data();
+      depthMdiDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
+      depthMdiDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
 
       depthMdiShaderStages[1].specializationData = specDataFalse;
       depthMdiShaderStages[1].specializationConstants = &specConstantAlphaTest;
       depthMdiShaderStages[1].specializationConstantCount = 1;
-      rhi::vulkan::GraphicsPipelineCreateInfo depthMdiCreateInfo{
-          .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 13},
-          .desc = depthMdiDesc,
-      };
-      const VkPipeline depthMdiOpaquePipeline =
-          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthMdiCreateInfo);
-      DBG_VK_NAME(depthMdiOpaquePipeline);
-      m_depthPrepassOpaqueMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                         reinterpret_cast<uint64_t>(depthMdiOpaquePipeline),
-                                                         depthMdiCreateInfo.key.specializationVariant,
-                                                         m_device.mdiPipelineLayout->getNativeHandle());
+      depthMdiDesc.specializationVariant = 13;
+    m_depthPrepassOpaqueMDIPipeline = m_device.device->createGraphicsPipeline(depthMdiDesc);
 
       depthMdiShaderStages[1].specializationData = specDataTrue;
-      depthMdiCreateInfo.key.specializationVariant = 14;
-      const VkPipeline depthMdiAlphaTestPipeline =
-          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthMdiCreateInfo);
-      DBG_VK_NAME(depthMdiAlphaTestPipeline);
-      m_depthPrepassAlphaTestMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                            reinterpret_cast<uint64_t>(depthMdiAlphaTestPipeline),
-                                                            depthMdiCreateInfo.key.specializationVariant,
-                                                            m_device.mdiPipelineLayout->getNativeHandle());
+      depthMdiDesc.specializationVariant = 14;
+    m_depthPrepassAlphaTestMDIPipeline = m_device.device->createGraphicsPipeline(depthMdiDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), depthPrepassShaderModule, nullptr);
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), depthPrepassShaderModule, nullptr);
   }
 
   // Create GBuffer pipelines (Opaque + AlphaTest variants)
   {
-    VkShaderModule gbufferShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+    VkShaderModule gbufferShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                                 {shader_gbuffer_slang, std::size(shader_gbuffer_slang)});
     DBG_VK_NAME(gbufferShaderModule);
 
@@ -5834,7 +4906,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     }};
 
     rhi::GraphicsPipelineDesc gbufferGraphicsDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),
         .shaderStages      = gbufferShaderStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(gbufferShaderStages.size()),
         .vertexInput       = gbufferVertexInput,
@@ -5850,6 +4921,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormatCount = static_cast<uint32_t>(gbufferColorFormats.size()),
                 .depthFormat      = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
             },
+        .argumentLayouts = m_device.gbufferArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
     };
     gbufferGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
     gbufferGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
@@ -5863,72 +4936,40 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     gbufferShaderStages[1].specializationConstants = &specConstantAlphaTest;
     gbufferShaderStages[1].specializationConstantCount = 1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo gbufferCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 3,  // GBuffer Opaque variant
-            },
-        .desc = gbufferGraphicsDesc,
-    };
-    const VkPipeline gbufferOpaquePipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferCreateInfo);
-    DBG_VK_NAME(gbufferOpaquePipeline);
-    m_gbufferOpaquePipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                               reinterpret_cast<uint64_t>(gbufferOpaquePipeline),
-                                               gbufferCreateInfo.key.specializationVariant);
+    gbufferGraphicsDesc.specializationVariant = 3;  // GBuffer Opaque variant
+    m_gbufferOpaquePipeline = m_device.device->createGraphicsPipeline(gbufferGraphicsDesc);
 
     // Variant 1: AlphaTest (alphaTestEnabled = true)
     uint32_t alphaTestTrue = VK_TRUE;
     rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
     gbufferShaderStages[1].specializationData = specDataTrue;
-    gbufferCreateInfo.key.specializationVariant = 4;  // GBuffer AlphaTest variant
+    gbufferGraphicsDesc.specializationVariant = 4;  // GBuffer AlphaTest variant
+    m_gbufferAlphaTestPipeline = m_device.device->createGraphicsPipeline(gbufferGraphicsDesc);
 
-    const VkPipeline gbufferAlphaTestPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferCreateInfo);
-    DBG_VK_NAME(gbufferAlphaTestPipeline);
-    m_gbufferAlphaTestPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                   reinterpret_cast<uint64_t>(gbufferAlphaTestPipeline),
-                                                   gbufferCreateInfo.key.specializationVariant);
-
-    if(m_device.mdiPipelineLayout)
+    if(!m_device.mdiArgumentLayouts[0].isNull())
     {
       rhi::GraphicsPipelineDesc gbufferMdiGraphicsDesc = gbufferGraphicsDesc;
-      gbufferMdiGraphicsDesc.layout = m_device.mdiPipelineLayout.get();
       gbufferMdiGraphicsDesc.shaderStages = gbufferMdiShaderStages.data();
+      gbufferMdiGraphicsDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
+      gbufferMdiGraphicsDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
 
       gbufferMdiShaderStages[1].specializationData = specDataFalse;
       gbufferMdiShaderStages[1].specializationConstants = &specConstantAlphaTest;
       gbufferMdiShaderStages[1].specializationConstantCount = 1;
-      rhi::vulkan::GraphicsPipelineCreateInfo gbufferMdiCreateInfo{
-          .key = {.shaderIdentity = rhi::vulkan::PipelineShaderIdentity::raster, .specializationVariant = 15},
-          .desc = gbufferMdiGraphicsDesc,
-      };
-      const VkPipeline gbufferMdiOpaquePipeline =
-          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferMdiCreateInfo);
-      DBG_VK_NAME(gbufferMdiOpaquePipeline);
-      m_gbufferOpaqueMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                    reinterpret_cast<uint64_t>(gbufferMdiOpaquePipeline),
-                                                    gbufferMdiCreateInfo.key.specializationVariant,
-                                                    m_device.mdiPipelineLayout->getNativeHandle());
+      gbufferMdiGraphicsDesc.specializationVariant = 15;
+    m_gbufferOpaqueMDIPipeline = m_device.device->createGraphicsPipeline(gbufferMdiGraphicsDesc);
 
       gbufferMdiShaderStages[1].specializationData = specDataTrue;
-      gbufferMdiCreateInfo.key.specializationVariant = 16;
-      const VkPipeline gbufferMdiAlphaTestPipeline =
-          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferMdiCreateInfo);
-      DBG_VK_NAME(gbufferMdiAlphaTestPipeline);
-      m_gbufferAlphaTestMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                       reinterpret_cast<uint64_t>(gbufferMdiAlphaTestPipeline),
-                                                       gbufferMdiCreateInfo.key.specializationVariant,
-                                                       m_device.mdiPipelineLayout->getNativeHandle());
+      gbufferMdiGraphicsDesc.specializationVariant = 16;
+    m_gbufferAlphaTestMDIPipeline = m_device.device->createGraphicsPipeline(gbufferMdiGraphicsDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), gbufferShaderModule, nullptr);
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), gbufferShaderModule, nullptr);
   }
 
   // Create Shadow pipeline
   {
-    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                                   {shader_shadow_slang, std::size(shader_shadow_slang)});
     DBG_VK_NAME(shadowShaderModule);
 
@@ -5956,7 +4997,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMain"},
     }};
     rhi::GraphicsPipelineDesc shadowDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),
         .shaderStages      = shadowStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(shadowStages.size()),
         .vertexInput       = shadowVertexInput,
@@ -5972,57 +5012,35 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormatCount = 0,
                 .depthFormat      = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
             },
+        .argumentLayouts = m_device.gbufferArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
     };
     shadowDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
     shadowDesc.rasterState.cullMode    = rhi::CullMode::none;
     shadowDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
     shadowDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo shadowCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 6,
-            },
-        .desc = shadowDesc,
-    };
-    const VkPipeline shadowPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowCreateInfo);
-    DBG_VK_NAME(shadowPipeline);
-    m_shadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                        reinterpret_cast<uint64_t>(shadowPipeline),
-                                        shadowCreateInfo.key.specializationVariant);
+    shadowDesc.specializationVariant = 6;
+    m_shadowPipeline = m_device.device->createGraphicsPipeline(shadowDesc);
 
     std::array<rhi::PipelineShaderStageDesc, 2> shadowMdiStages{{
         {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "vertexMdiMain"},
         {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMdiMain"},
     }};
     rhi::GraphicsPipelineDesc shadowMdiDesc = shadowDesc;
-    shadowMdiDesc.layout = m_device.csmShadowMdiPipelineLayout.get();
     shadowMdiDesc.shaderStages = shadowMdiStages.data();
+    shadowMdiDesc.argumentLayouts = m_device.csmShadowMdiArgumentLayouts.data();
+    shadowMdiDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.csmShadowMdiArgumentLayouts.size());
 
-    rhi::vulkan::GraphicsPipelineCreateInfo shadowMdiCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 7,
-            },
-        .desc = shadowMdiDesc,
-    };
-    const VkPipeline shadowMdiPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowMdiCreateInfo);
-    DBG_VK_NAME(shadowMdiPipeline);
-    m_csmShadowPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                           reinterpret_cast<uint64_t>(shadowMdiPipeline),
-                                           shadowMdiCreateInfo.key.specializationVariant,
-                                           m_device.csmShadowMdiPipelineLayout->getNativeHandle());
+    shadowMdiDesc.specializationVariant = 7;
+    m_csmShadowPipeline = m_device.device->createGraphicsPipeline(shadowMdiDesc);
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), shadowShaderModule, nullptr);
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), shadowShaderModule, nullptr);
   }
 
   // Create Forward pipeline for transparent objects
   {
-    VkShaderModule forwardShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+    VkShaderModule forwardShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                                 {shader_forward_slang, std::size(shader_forward_slang)});
     DBG_VK_NAME(forwardShaderModule);
 
@@ -6088,12 +5106,11 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     }};
 
     // Render to swapchain format
-    const rhi::TextureFormat swapchainFormat = toPortableTextureFormat(m_swapchainDependent.swapchainImageFormat);
+    const rhi::TextureFormat swapchainFormat = m_swapchainDependent.swapchainImageFormat;
     const rhi::TextureFormat hdrSceneColorFormat = toPortableTextureFormat(SceneResources::kSceneColorHdrFormat);
     const rhi::TextureFormat depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat());
 
     rhi::GraphicsPipelineDesc forwardGraphicsDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),
         .shaderStages      = forwardShaderStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(forwardShaderStages.size()),
         .vertexInput       = forwardVertexInput,
@@ -6109,57 +5126,35 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormatCount = 1,
                 .depthFormat      = depthFormat,
             },
+        .argumentLayouts = m_device.gbufferArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
     };
     forwardGraphicsDesc.rasterState.topology    = rhi::PrimitiveTopology::triangleList;
     forwardGraphicsDesc.rasterState.cullMode    = rhi::CullMode::back;
     forwardGraphicsDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
     forwardGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo forwardCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 5,  // Forward variant
-            },
-        .desc = forwardGraphicsDesc,
-    };
-    const VkPipeline forwardPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardCreateInfo);
-    DBG_VK_NAME(forwardPipeline);
-    m_forwardPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                         reinterpret_cast<uint64_t>(forwardPipeline),
-                                         forwardCreateInfo.key.specializationVariant);
+    forwardGraphicsDesc.specializationVariant = 5;  // Forward variant
+    m_forwardPipeline = m_device.device->createGraphicsPipeline(forwardGraphicsDesc);
 
-    if(m_device.mdiPipelineLayout)
+    if(!m_device.mdiArgumentLayouts[0].isNull())
     {
       rhi::GraphicsPipelineDesc forwardMdiGraphicsDesc = forwardGraphicsDesc;
-      forwardMdiGraphicsDesc.layout = m_device.mdiPipelineLayout.get();
       forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages.data();
       forwardMdiGraphicsDesc.renderingInfo.colorFormats = &hdrSceneColorFormat;
+      forwardMdiGraphicsDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
+      forwardMdiGraphicsDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
 
-      rhi::vulkan::GraphicsPipelineCreateInfo forwardMdiCreateInfo{
-          .key =
-              {
-                  .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                  .specializationVariant = 17,
-              },
-          .desc = forwardMdiGraphicsDesc,
-      };
-      const VkPipeline forwardMdiPipeline =
-          rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardMdiCreateInfo);
-      DBG_VK_NAME(forwardMdiPipeline);
-      m_forwardMDIPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                              reinterpret_cast<uint64_t>(forwardMdiPipeline),
-                                              forwardMdiCreateInfo.key.specializationVariant,
-                                              m_device.mdiPipelineLayout->getNativeHandle());
+      forwardMdiGraphicsDesc.specializationVariant = 17;
+    m_forwardMDIPipeline = m_device.device->createGraphicsPipeline(forwardMdiGraphicsDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), forwardShaderModule, nullptr);
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), forwardShaderModule, nullptr);
   }
 
   // Create Debug line pipeline
   {
-    VkShaderModule debugShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+    VkShaderModule debugShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                                  {shader_debug_slang, std::size(shader_debug_slang)});
     DBG_VK_NAME(debugShaderModule);
 
@@ -6196,9 +5191,15 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexMain"},
         {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
     }};
+    const std::array<rhi::PipelinePushConstantRange, 1> debugPushConstants{{
+        rhi::PipelinePushConstantRange{
+            .stages = rhi::ShaderStage::vertex,
+            .offset = 0,
+            .size   = sizeof(shaderio::PushConstantGPUCullDebug),
+        },
+    }};
     const rhi::TextureFormat outputFormat = toPortableTextureFormat(VK_FORMAT_B8G8R8A8_UNORM);
     rhi::GraphicsPipelineDesc debugDesc{
-        .layout            = m_device.gbufferPipelineLayout.get(),
         .shaderStages      = debugStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(debugStages.size()),
         .vertexInput       = debugVertexInput,
@@ -6213,35 +5214,25 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormats     = &outputFormat,
                 .colorFormatCount = 1,
                 .depthFormat      = rhi::TextureFormat::undefined,
-            },
+        },
+        .argumentLayouts = m_device.gbufferArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
+        .pushConstantRanges  = debugPushConstants.data(),
+        .pushConstantRangeCount = static_cast<uint32_t>(debugPushConstants.size()),
     };
     debugDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;
     debugDesc.rasterState.cullMode    = rhi::CullMode::none;
     debugDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
     debugDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo debugCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 7,
-            },
-        .desc = debugDesc,
-    };
-    const VkPipeline debugPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugCreateInfo);
-    DBG_VK_NAME(debugPipeline);
-    m_debugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                       reinterpret_cast<uint64_t>(debugPipeline),
-                                       debugCreateInfo.key.specializationVariant,
-                                       m_device.gbufferPipelineLayout->getNativeHandle());
+    debugDesc.specializationVariant = 7;
+    m_debugPipeline = m_device.device->createGraphicsPipeline(debugDesc);
 
     const std::array<rhi::PipelineShaderStageDesc, 2> debugCullStages{{
         {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexCullMain"},
         {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
     }};
     rhi::GraphicsPipelineDesc debugCullDesc{
-        .layout            = m_device.debugPipelineLayout.get(),
         .shaderStages      = debugCullStages.data(),
         .shaderStageCount  = static_cast<uint32_t>(debugCullStages.size()),
         .vertexInput       = {},
@@ -6256,35 +5247,27 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
                 .colorFormats     = &outputFormat,
                 .colorFormatCount = 1,
                 .depthFormat      = rhi::TextureFormat::undefined,
-            },
+        },
+        .argumentLayouts = m_device.debugArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_device.debugArgumentLayouts.size()),
+        .pushConstantRanges  = debugPushConstants.data(),
+        .pushConstantRangeCount = static_cast<uint32_t>(debugPushConstants.size()),
     };
     debugCullDesc.rasterState.topology    = rhi::PrimitiveTopology::lineList;
     debugCullDesc.rasterState.cullMode    = rhi::CullMode::none;
     debugCullDesc.rasterState.frontFace   = rhi::FrontFace::counterClockwise;
     debugCullDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-    rhi::vulkan::GraphicsPipelineCreateInfo debugCullCreateInfo{
-        .key =
-            {
-                .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::raster,
-                .specializationVariant = 8,
-            },
-        .desc = debugCullDesc,
-    };
-    const VkPipeline debugCullPipeline =
-        rhi::vulkan::createGraphicsPipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugCullCreateInfo);
-    DBG_VK_NAME(debugCullPipeline);
-    m_gpuCullingDebugPipeline = registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                                                 reinterpret_cast<uint64_t>(debugCullPipeline),
-                                                 debugCullCreateInfo.key.specializationVariant,
-                                                 m_device.debugPipelineLayout->getNativeHandle());
+    debugCullDesc.specializationVariant = 8;
+    m_gpuCullingDebugPipeline = m_device.device->createGraphicsPipeline(debugCullDesc);
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), debugShaderModule, nullptr);
+    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), debugShaderModule, nullptr);
   }
 }
 
 void RenderDevice::initImGui(void* window)
 {
+  LOGI("RenderDevice::initImGui: begin");
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::StyleColorsDark();
@@ -6294,14 +5277,14 @@ void RenderDevice::initImGui(void* window)
 #else
   ImGui_ImplGlfw_InitForVulkan(static_cast<GLFWwindow*>(window), true);
 #endif
-  static VkFormat           imageFormats[] = {m_swapchainDependent.swapchainImageFormat};
+  VkFormat                  imageFormats[] = {toVkFormat(m_swapchainDependent.swapchainImageFormat)};
   const rhi::QueueInfo      graphicsQueue  = m_device.device->getGraphicsQueue();
   ImGui_ImplVulkan_InitInfo initInfo       = {
-      .Instance       = fromNativeHandle<VkInstance>(m_device.device->getNativeInstance()),
-      .PhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()),
-      .Device         = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+      .Instance       = fromNativeHandle<VkInstance>(m_device.device->getBackendInstanceHandle()),
+      .PhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()),
+      .Device         = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
       .QueueFamily    = graphicsQueue.familyIndex,
-      .Queue          = fromNativeHandle<VkQueue>(graphicsQueue.nativeHandle),
+      .Queue          = fromNativeHandle<VkQueue>(graphicsQueue.backendHandle),
       .DescriptorPool = m_device.uiDescriptorPool,
       .MinImageCount  = 2,
       .ImageCount     = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
@@ -6320,14 +5303,16 @@ void RenderDevice::initImGui(void* window)
   initInfo.PipelineInfoForViewports = initInfo.PipelineInfoMain;
 
   ImGui_ImplVulkan_Init(&initInfo);
+  LOGI("RenderDevice::initImGui: Vulkan backend initialized");
 
   ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
+  LOGI("RenderDevice::initImGui: completed");
 }
 
 void RenderDevice::createDescriptorPool()
 {
   VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice()), &deviceProperties2);
+  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()), &deviceProperties2);
   const auto& deviceProperties = deviceProperties2.properties;
 
   {
@@ -6351,7 +5336,7 @@ void RenderDevice::createDescriptorPool()
         .poolSizeCount = uint32_t(poolSizes.size()),
         .pPoolSizes    = poolSizes.data(),
     };
-    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &poolInfo, nullptr,
+    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &poolInfo, nullptr,
                                     &m_device.descriptorPool));
     DBG_VK_NAME(m_device.descriptorPool);
     LOGI("Created application descriptor pool: %u textures, %u dynamic UBOs, %u sets", m_materials.maxTextures,
@@ -6378,7 +5363,7 @@ void RenderDevice::createDescriptorPool()
         .pPoolSizes    = poolSizes.data(),
     };
 
-    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &poolInfo, nullptr,
+    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &poolInfo, nullptr,
                                     &m_device.uiDescriptorPool));
     DBG_VK_NAME(m_device.uiDescriptorPool);
     LOGI("Created UI descriptor pool: %u sampled images, %u samplers, %u sets", uiTextureDescriptorCount,
@@ -6439,29 +5424,24 @@ static void writeHostVisibleBufferRange(const VmaAllocator allocator,
   }
 }
 
-void RenderDevice::createMaterialBindGroup()
+void RenderDevice::createMaterialArgumentTable()
 {
   // Create per-frame material bind groups early - needed for pipeline layout creation
-  std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
-      .logicalIndex    = kMaterialBindlessTexturesIndex,
-      .resourceType    = rhi::BindlessResourceType::sampledTexture,
-      .descriptorCount = m_materials.maxTextures,
-      .visibility      = rhi::ResourceVisibility::allGraphics,
-  }};
+  std::vector<rhi::ArgumentBinding> layoutEntries{makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture, m_materials.maxTextures, rhi::ResourceVisibility::allGraphics)};
 
   const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
-  m_materials.materialBindGroups.clear();
-  m_materials.materialBindGroups.reserve(frameCount);
-  m_materials.materialBindGroupGenerations.assign(frameCount, 0);
+  m_materials.materialArgumentTables.clear();
+  m_materials.materialArgumentTables.reserve(frameCount);
+  m_materials.materialArgumentTableGenerations.assign(frameCount, 0);
   m_materials.materialDescriptorViews.assign(m_materials.maxTextures, {});
   m_materials.materialDescriptorValid.assign(m_materials.maxTextures, 0);
   m_materials.materialDescriptorGeneration = 0;
 
-  const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromEntries(layoutEntries, "material-texture-bind-group");
+  const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromBindings(layoutEntries, "material-texture-bind-group");
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_materials.materialBindGroups.push_back(createBindGroup(BindGroupDesc{
-        .slot                = BindGroupSetSlot::material,
+    m_materials.materialArgumentTables.push_back(createArgumentTable(ArgumentTableDesc{
+        .slot                = ArgumentSlot::material,
         .layout              = materialLayout,
         .table               = m_device.device->createArgumentTable(materialLayout),
         .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
@@ -6469,29 +5449,24 @@ void RenderDevice::createMaterialBindGroup()
     }));
   }
 
-  m_materials.materialBindGroup =
-      m_materials.materialBindGroups.empty() ? kNullBindGroupHandle : m_materials.materialBindGroups.front();
+  m_materials.materialArgumentTable =
+      m_materials.materialArgumentTables.empty() ? rhi::ArgumentTableHandle{} : m_materials.materialArgumentTables.front();
 }
 
-void RenderDevice::createGraphicDescriptorSet()
+void RenderDevice::createGraphicsArgumentTables()
 {
-  if(m_materials.materialBindGroups.size() < m_perFrame.frameUserData.size())
+  if(m_materials.materialArgumentTables.size() < m_perFrame.frameUserData.size())
   {
-    std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
-        .logicalIndex    = kMaterialBindlessTexturesIndex,
-        .resourceType    = rhi::BindlessResourceType::sampledTexture,
-        .descriptorCount = m_materials.maxTextures,
-        .visibility      = rhi::ResourceVisibility::allGraphics,
-    }};
+    std::vector<rhi::ArgumentBinding> layoutEntries{makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture, m_materials.maxTextures, rhi::ResourceVisibility::allGraphics)};
 
-    const size_t existingCount = m_materials.materialBindGroups.size();
-    m_materials.materialBindGroups.reserve(m_perFrame.frameUserData.size());
-    m_materials.materialBindGroupGenerations.resize(m_perFrame.frameUserData.size(), 0);
-    const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromEntries(layoutEntries, "material-texture-bind-group");
+    const size_t existingCount = m_materials.materialArgumentTables.size();
+    m_materials.materialArgumentTables.reserve(m_perFrame.frameUserData.size());
+    m_materials.materialArgumentTableGenerations.resize(m_perFrame.frameUserData.size(), 0);
+    const rhi::ArgumentLayoutHandle materialLayout = createArgumentLayoutFromBindings(layoutEntries, "material-texture-bind-group");
     for(size_t frameIndex = existingCount; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
     {
-      m_materials.materialBindGroups.push_back(createBindGroup(BindGroupDesc{
-          .slot                = BindGroupSetSlot::material,
+      m_materials.materialArgumentTables.push_back(createArgumentTable(ArgumentTableDesc{
+          .slot                = ArgumentSlot::material,
           .layout              = materialLayout,
           .table               = m_device.device->createArgumentTable(materialLayout),
           .primaryLogicalIndex = kMaterialBindlessTexturesIndex,
@@ -6502,18 +5477,13 @@ void RenderDevice::createGraphicDescriptorSet()
 
   // Create per-frame scene bind groups - must be called after createFrameSubmission()
   {
-    std::vector<rhi::BindTableLayoutEntry> layoutEntries{rhi::BindTableLayoutEntry{
-        .logicalIndex    = kSceneBindlessInfoIndex,
-        .resourceType    = rhi::BindlessResourceType::uniformBuffer,
-        .descriptorCount = 1,
-        .visibility      = rhi::ResourceVisibility::allGraphics,
-    }};
+    std::vector<rhi::ArgumentBinding> layoutEntries{makeArgumentBinding(kSceneBindlessInfoIndex, rhi::BindlessResourceType::uniformBuffer, 1, rhi::ResourceVisibility::allGraphics)};
 
-    const rhi::ArgumentLayoutHandle sceneLayout = createArgumentLayoutFromEntries(layoutEntries, "scene-dynamic-bind-group");
+    const rhi::ArgumentLayoutHandle sceneLayout = createArgumentLayoutFromBindings(layoutEntries, "scene-dynamic-bind-group");
     for(uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
     {
-      m_perFrame.frameUserData[i].sceneBindGroup = createBindGroup(BindGroupDesc{
-          .slot                = BindGroupSetSlot::drawDynamic,
+      m_perFrame.frameUserData[i].sceneArgumentTable = createArgumentTable(ArgumentTableDesc{
+          .slot                = ArgumentSlot::drawDynamic,
           .layout              = sceneLayout,
           .table               = m_device.device->createArgumentTable(sceneLayout),
           .primaryLogicalIndex = kSceneBindlessInfoIndex,
@@ -6523,7 +5493,7 @@ void RenderDevice::createGraphicDescriptorSet()
   }
 }
 
-void RenderDevice::updateGraphicsDescriptorSet()
+void RenderDevice::updateGraphicsArgumentTables()
 {
   // Wave 8: shared material sampler for combinedImageSampler ArgumentWrites, created once
   // through the RHI (linear mag/min/mip, repeat, full LOD range).
@@ -6569,11 +5539,11 @@ void RenderDevice::updateGraphicsDescriptorSet()
   }
   ++m_materials.materialDescriptorGeneration;
 
-  for(uint32_t frameIndex = 0; frameIndex < m_materials.materialBindGroups.size(); ++frameIndex)
+  for(uint32_t frameIndex = 0; frameIndex < m_materials.materialArgumentTables.size(); ++frameIndex)
   {
-    updateBindGroup(m_materials.materialBindGroups[frameIndex], materialWrites.data(),
+    updateArgumentTable(m_materials.materialArgumentTables[frameIndex], materialWrites.data(),
                     static_cast<uint32_t>(materialWrites.size()));
-    m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
+    m_materials.materialArgumentTableGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
   }
 
   for(auto& frameUserData : m_perFrame.frameUserData)
@@ -6585,18 +5555,18 @@ void RenderDevice::updateGraphicsDescriptorSet()
         .offset  = 0,
         .size    = sizeof(shaderio::SceneInfo),
     };
-    updateBindGroup(frameUserData.sceneBindGroup, &sceneWrite, 1);
+    updateArgumentTable(frameUserData.sceneArgumentTable, &sceneWrite, 1);
   }
 }
 
-void RenderDevice::syncMaterialBindGroup(uint32_t frameIndex)
+void RenderDevice::syncMaterialArgumentTable(uint32_t frameIndex)
 {
-  if(frameIndex >= m_materials.materialBindGroups.size() || frameIndex >= m_materials.materialBindGroupGenerations.size())
+  if(frameIndex >= m_materials.materialArgumentTables.size() || frameIndex >= m_materials.materialArgumentTableGenerations.size())
   {
     return;
   }
 
-  if(m_materials.materialBindGroupGenerations[frameIndex] == m_materials.materialDescriptorGeneration)
+  if(m_materials.materialArgumentTableGenerations[frameIndex] == m_materials.materialDescriptorGeneration)
   {
     return;
   }
@@ -6644,17 +5614,17 @@ void RenderDevice::syncMaterialBindGroup(uint32_t frameIndex)
 
   if(!writes.empty())
   {
-    updateBindGroup(m_materials.materialBindGroups[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
+    updateArgumentTable(m_materials.materialArgumentTables[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
   }
 
-  m_materials.materialBindGroupGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
+  m_materials.materialArgumentTableGenerations[frameIndex] = m_materials.materialDescriptorGeneration;
 }
 
-BindGroupHandle RenderDevice::getCurrentMaterialBindGroupHandle() const
+rhi::ArgumentTableHandle RenderDevice::getCurrentMaterialArgumentTable() const
 {
-  if(m_materials.materialBindGroups.empty())
+  if(m_materials.materialArgumentTables.empty())
   {
-    return m_materials.materialBindGroup;
+    return m_materials.materialArgumentTable;
   }
 
   uint32_t frameIndex = 0;
@@ -6662,11 +5632,11 @@ BindGroupHandle RenderDevice::getCurrentMaterialBindGroupHandle() const
   {
     frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
   }
-  if(frameIndex >= m_materials.materialBindGroups.size())
+  if(frameIndex >= m_materials.materialArgumentTables.size())
   {
-    return m_materials.materialBindGroups.front();
+    return m_materials.materialArgumentTables.front();
   }
-  return m_materials.materialBindGroups[frameIndex];
+  return m_materials.materialArgumentTables[frameIndex];
 }
 
 // Maps a legacy BindlessResourceType to the new ArgumentType + dynamic-offset flag.
@@ -6690,23 +5660,25 @@ static std::pair<rhi::ArgumentType, bool> toArgumentType(rhi::BindlessResourceTy
   }
 }
 
-rhi::ArgumentLayoutHandle RenderDevice::createArgumentLayoutFromEntries(const std::vector<rhi::BindTableLayoutEntry>& entries,
-                                                                       const char* debugName)
+rhi::ArgumentBinding makeArgumentBinding(uint32_t logicalIndex,
+                                         rhi::BindlessResourceType resourceType,
+                                         uint32_t descriptorCount,
+                                         rhi::ResourceVisibility visibility)
 {
-  std::vector<rhi::ArgumentBinding> bindings;
-  bindings.reserve(entries.size());
-  for(const rhi::BindTableLayoutEntry& e : entries)
-  {
-    const std::pair<rhi::ArgumentType, bool> mapped = toArgumentType(e.resourceType);
-    bindings.push_back(rhi::ArgumentBinding{
-        .binding       = e.logicalIndex,
-        .type          = mapped.first,
-        .visibility    = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(e.visibility)),
-        .arrayCount    = e.descriptorCount,
-        .bindless      = false,
-        .dynamicOffset = mapped.second,
-    });
-  }
+  const std::pair<rhi::ArgumentType, bool> mapped = toArgumentType(resourceType);
+  return rhi::ArgumentBinding{
+      .binding       = logicalIndex,
+      .type          = mapped.first,
+      .visibility    = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(visibility)),
+      .arrayCount    = descriptorCount,
+      .bindless      = false,
+      .dynamicOffset = mapped.second,
+  };
+}
+
+rhi::ArgumentLayoutHandle RenderDevice::createArgumentLayoutFromBindings(std::span<const rhi::ArgumentBinding> bindings,
+                                                                         const char* debugName)
+{
   const rhi::ArgumentLayoutDesc layoutDesc{
       .bindings     = bindings.data(),
       .bindingCount = static_cast<uint32_t>(bindings.size()),
@@ -6717,47 +5689,45 @@ rhi::ArgumentLayoutHandle RenderDevice::createArgumentLayoutFromEntries(const st
   return layout;
 }
 
-rhi::ArgumentLayoutHandle RenderDevice::createBindGroupLayout(const rhi::BindGroupLayoutDesc& desc)
+rhi::ArgumentLayoutHandle RenderDevice::createArgumentLayout(const ArgumentLayoutDesc& desc)
 {
-  std::vector<rhi::BindTableLayoutEntry> tableEntries;
-  tableEntries.reserve(desc.entryCount);
+  std::vector<rhi::ArgumentBinding> bindings;
+  bindings.reserve(desc.entryCount);
   for(uint32_t i = 0; i < desc.entryCount; ++i)
   {
-    tableEntries.push_back(rhi::BindTableLayoutEntry{
-        .logicalIndex    = desc.entries[i].binding,
-        .resourceType    = desc.entries[i].type,
-        .descriptorCount = desc.entries[i].count,
-        .visibility      = static_cast<rhi::ResourceVisibility>(desc.entries[i].visibility),
-    });
+    bindings.push_back(makeArgumentBinding(desc.entries[i].binding,
+                                           desc.entries[i].type,
+                                           desc.entries[i].count,
+                                           static_cast<rhi::ResourceVisibility>(desc.entries[i].visibility)));
   }
-  return createArgumentLayoutFromEntries(tableEntries, "bind-group-layout");
+  return createArgumentLayoutFromBindings(bindings, "argument-layout");
 }
 
-void RenderDevice::destroyBindGroup(BindGroupHandle handle)
+void RenderDevice::destroyArgumentTable(rhi::ArgumentTableHandle handle)
 {
   if(handle.isNull())
   {
     return;
   }
   // Destroy only the ArgumentTable (descriptor set). The layout it was built from is
-  // owned separately (ownedArgumentLayouts) and released in destroyBindGroups(). For
+  // owned separately (ownedArgumentLayouts) and released in destroyArgumentTablesAndLayouts(). For
   // adopted external tables (owned=false) this just unregisters the mirror.
   m_device.device->destroyArgumentTable(handle);
 }
 
-BindGroupHandle RenderDevice::createBindGroup(BindGroupDesc desc)
+rhi::ArgumentTableHandle RenderDevice::createArgumentTable(ArgumentTableDesc desc)
 {
-  ASSERT(isStableBindGroupSetSlot(desc.slot), "BindGroupDesc slot must be one of stable set slots 0..3");
-  ASSERT(desc.table.isValid(), "BindGroupDesc table must be a valid ArgumentTable handle");
+  ASSERT(isStableArgumentSlot(desc.slot), "ArgumentTableDesc slot must be one of stable set slots 0..3");
+  ASSERT(desc.table.isValid(), "ArgumentTableDesc table must be a valid ArgumentTable handle");
   m_materials.ownedArgumentTables.push_back(desc.table);
   return desc.table;
 }
 
-BindGroupHandle RenderDevice::createPersistentBindGroup(rhi::ArgumentLayoutHandle layout, const char* debugName)
+rhi::ArgumentTableHandle RenderDevice::createPersistentArgumentTable(rhi::ArgumentLayoutHandle layout, const char* debugName)
 {
-  ASSERT(!layout.isNull(), "createPersistentBindGroup requires a valid argument layout handle");
-  return createBindGroup(BindGroupDesc{
-      .slot                = BindGroupSetSlot::shaderSpecific,
+  ASSERT(!layout.isNull(), "createPersistentArgumentTable requires a valid argument layout handle");
+  return createArgumentTable(ArgumentTableDesc{
+      .slot                = ArgumentSlot::shaderSpecific,
       .layout              = layout,
       .table               = m_device.device->createArgumentTable(layout),
       .primaryLogicalIndex = 0,
@@ -6765,11 +5735,13 @@ BindGroupHandle RenderDevice::createPersistentBindGroup(rhi::ArgumentLayoutHandl
   });
 }
 
-BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::ArgumentLayoutHandle layoutHandle,
-                                                       const rhi::ArgumentWrite* writes, uint32_t writeCount,
-                                                       BindGroupSetSlot slot, const char* debugName)
+rhi::ArgumentTableHandle RenderDevice::createTemporaryArgumentTable(rhi::ArgumentLayoutHandle layoutHandle,
+                                                                    const rhi::ArgumentWrite* writes,
+                                                                    uint32_t writeCount,
+                                                                    ArgumentSlot slot,
+                                                                    const char* debugName)
 {
-  ASSERT(!layoutHandle.isNull(), "createTemporaryBindGroup requires a valid argument layout handle");
+  ASSERT(!layoutHandle.isNull(), "createTemporaryArgumentTable requires a valid argument layout handle");
   (void)slot;
   (void)debugName;
 
@@ -6784,12 +5756,14 @@ BindGroupHandle RenderDevice::createTemporaryBindGroup(rhi::ArgumentLayoutHandle
   const uint32_t frameIndex = getCurrentFrameIndexHint();
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    m_perFrame.frameUserData[frameIndex].transientBindGroups.push_back(table);
+    m_perFrame.frameUserData[frameIndex].transientArgumentTables.push_back(table);
   }
   return table;
 }
 
-void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWrite* writes, uint32_t writeCount) const
+void RenderDevice::updateArgumentTable(rhi::ArgumentTableHandle handle,
+                                       const rhi::ArgumentWrite* writes,
+                                       uint32_t writeCount) const
 {
   if(writeCount == 0 || writes == nullptr || handle.isNull())
   {
@@ -6798,7 +5772,7 @@ void RenderDevice::updateBindGroup(BindGroupHandle handle, const rhi::ArgumentWr
   m_device.device->updateArgumentTable(handle, writeCount, writes);
 }
 
-void RenderDevice::destroyBindGroups()
+void RenderDevice::destroyArgumentTablesAndLayouts()
 {
   for(const rhi::ArgumentTableHandle table : m_materials.ownedArgumentTables)
   {
@@ -6811,52 +5785,25 @@ void RenderDevice::destroyBindGroups()
   }
   m_materials.ownedArgumentLayouts.clear();
 
-  m_materials.materialBindGroup = kNullBindGroupHandle;
-  m_materials.materialBindGroups.clear();
+  m_materials.materialArgumentTable = rhi::ArgumentTableHandle{};
+  m_materials.materialArgumentTables.clear();
   m_materials.materialDescriptorViews.clear();
   m_materials.materialDescriptorValid.clear();
-  m_materials.materialBindGroupGenerations.clear();
+  m_materials.materialArgumentTableGenerations.clear();
   m_materials.materialDescriptorGeneration = 0;
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
-    frameUserData.sceneBindGroup = kNullBindGroupHandle;
-    frameUserData.cameraBindGroup = kNullBindGroupHandle;
-    frameUserData.drawBindGroup = kNullBindGroupHandle;
-    frameUserData.mdiDrawBindGroup = kNullBindGroupHandle;
-    frameUserData.gbufferMdiDrawBindGroup = kNullBindGroupHandle;
-    frameUserData.depthMdiDrawBindGroup = kNullBindGroupHandle;
-    frameUserData.csmShadowMdiDrawBindGroups.fill(kNullBindGroupHandle);
+    frameUserData.sceneArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.cameraArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.drawArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.mdiDrawArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.gbufferMdiDrawArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.depthMdiDrawArgumentTable = rhi::ArgumentTableHandle{};
+    frameUserData.csmShadowMdiDrawArgumentTables.fill(rhi::ArgumentTableHandle{});
   }
 }
 
-BindGroupHandle RenderDevice::registerExternalBindGroup(uint64_t nativeDescriptorSet, const char* debugName)
-{
-  (void)debugName;
-  // Adopt an externally-owned descriptor set as a non-owned ArgumentTable (no layout;
-  // these sets are written through their own native path, not updateArgumentTable).
-  const rhi::ArgumentTableHandle table =
-      m_device.resourceTable.registerArgumentTable(nativeDescriptorSet, rhi::ArgumentLayoutHandle{}, /*owned=*/false);
-  m_materials.ownedArgumentTables.push_back(table);
-  return table;
-}
-
-uint64_t RenderDevice::getBindGroupLayoutHandleNative(rhi::ArgumentLayoutHandle handle) const
-{
-  return m_device.resourceTable.resolveArgumentLayout(handle);
-}
-
-uint64_t RenderDevice::getBindGroupLayoutOpaque(BindGroupHandle handle, BindGroupSetSlot /*expectedSlot*/) const
-{
-  const rhi::vulkan::ArgumentTableRecord* record = m_device.resourceTable.tryGetArgumentTable(handle);
-  return record != nullptr ? m_device.resourceTable.resolveArgumentLayout(record->layout) : 0;
-}
-
-uint64_t RenderDevice::getBindGroupDescriptorSetOpaque(BindGroupHandle handle, BindGroupSetSlot /*expectedSlot*/) const
-{
-  return m_device.resourceTable.resolveArgumentTable(handle);
-}
-
-utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, const std::string& filename)
+utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
 {
   int            w = 0, h = 0, comp = 0, req_comp{4};
   const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
@@ -6879,7 +5826,7 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, con
 #endif
   ASSERT(data != nullptr, "Could not load texture image!");
   const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
-  const uint32_t mipLevels = MipmapGenerator::calculateMipLevelCount(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+  const uint32_t mipLevels = 1;
 
   const VkImageCreateInfo imageInfo = {
       .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -6892,21 +5839,63 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, con
       .usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
   };
 
+  utils::Image nativeImage = createImage(m_device.allocator, imageInfo);
+  const rhi::TextureHandle imageHandle =
+      m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(nativeImage.image));
+  const rhi::TextureSubresourceRange imageRange{
+      .aspect = rhi::TextureAspect::color,
+      .baseMipLevel = 0,
+      .levelCount = mipLevels,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+  };
+  const rhi::TextureBarrier uploadBeginBarrier{
+      .texture = imageHandle,
+      .before = rhi::ResourceState::Undefined,
+      .after = rhi::ResourceState::TransferDst,
+      .range = imageRange,
+  };
+  cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+
+  BatchUploadContext upload;
   const std::span<const std::byte> dataSpan(reinterpret_cast<const std::byte*>(data), static_cast<size_t>(w * h * 4));
-  utils::ImageResource image =
-      createImageAndUploadData(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
-                               m_device.allocator,
-                               m_device.stagingBuffers,
-                               rhi::vulkan::getNativeCommandBuffer(cmd),
-                               dataSpan,
-                               imageInfo,
-                               VK_IMAGE_LAYOUT_GENERAL);
-  MipmapGenerator::generateMipmaps(rhi::vulkan::getNativeCommandBuffer(cmd),
-                                   image.image,
-                                   format,
-                                   static_cast<uint32_t>(w),
-                                   static_cast<uint32_t>(h),
-                                   mipLevels);
+  upload.init(*m_device.device, static_cast<uint64_t>(dataSpan.size_bytes()));
+  const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(dataSpan.size_bytes()), 4);
+  std::memcpy(slice.cpuPtr, dataSpan.data(), dataSpan.size_bytes());
+  upload.recordTextureUpload(
+      slice,
+      imageHandle,
+      rhi::BufferTextureCopyDesc{
+          .texture = imageHandle,
+          .aspect = rhi::TextureAspect::color,
+          .mipLevel = 0,
+          .baseArrayLayer = 0,
+          .layerCount = 1,
+          .width = static_cast<uint32_t>(w),
+          .height = static_cast<uint32_t>(h),
+          .depth = 1,
+      });
+  upload.executeUploads(cmd);
+
+  const rhi::TextureBarrier uploadEndBarrier{
+      .texture = imageHandle,
+      .before = rhi::ResourceState::TransferDst,
+      .after = rhi::ResourceState::General,
+      .range = imageRange,
+  };
+  cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+  m_device.device->destroyImage(imageHandle);
+
+  rhi::BufferHandle staging = upload.releaseStagingBuffer();
+  if(!staging.isNull())
+  {
+    m_device.rhiStagingBuffers.push_back(staging);
+  }
+
+  utils::ImageResource image{};
+  image.image = nativeImage.image;
+  image.allocation = nativeImage.allocation;
+  image.layout = VK_IMAGE_LAYOUT_GENERAL;
   DBG_VK_NAME(image.image);
   image.extent = {uint32_t(w), uint32_t(h)};
 
@@ -6917,7 +5906,7 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, con
       .format           = format,
       .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
   };
-  VK_CHECK(vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), &viewInfo, nullptr, &image.view));
+  VK_CHECK(vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &viewInfo, nullptr, &image.view));
   DBG_VK_NAME(image.view);
 #ifdef __ANDROID__
   if(data != fallbackPixels.data())
@@ -6931,90 +5920,68 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandList& cmd, con
 
 void RenderDevice::createPrebuiltComputePipelineVariant()
 {
-  const rhi::ShaderReflectionData computeReflection = buildComputeShaderReflection();
-  rhi::PipelineLayoutDesc         layoutDesc        = rhi::derivePipelineLayoutDesc(computeReflection);
-  layoutDesc.debugName                              = "compute-layout";
-
-  auto computePipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  computePipelineLayout->init(static_cast<void*>(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice())), layoutDesc);
-  DBG_VK_NAME(reinterpret_cast<VkPipelineLayout>(computePipelineLayout->getNativeHandle()));
-  m_device.computePipelineLayout = std::move(computePipelineLayout);
-
 #ifdef USE_SLANG
-  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                      {shader_comp_slang, std::size(shader_comp_slang)});
 #else
-  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()),
+  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
                                                      {shader_comp_glsl, std::size(shader_comp_glsl)});
 #endif
   DBG_VK_NAME(compute);
 
+  const std::array<rhi::PipelinePushConstantRange, 1> computePushConstants{{
+      rhi::PipelinePushConstantRange{
+          .stages = rhi::ShaderStage::compute,
+          .offset = 0,
+          .size   = sizeof(shaderio::PushConstantCompute),
+      },
+  }};
   const rhi::ComputePipelineDesc computeDesc{
-      .layout = m_device.computePipelineLayout.get(),
       .shaderStage =
           {
               .stage        = rhi::ShaderStage::compute,
               .shaderModule = reinterpret_cast<uint64_t>(compute),
               .entryPoint   = "main",
           },
+      .pushConstantRanges  = computePushConstants.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(computePushConstants.size()),
   };
-  const rhi::vulkan::ComputePipelineCreateInfo computeCreateInfo{
-      .key =
-          {
-              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::compute,
-              .specializationVariant = 0,
-          },
-      .desc          = computeDesc,
-      .pipelineFlags = 0,
-  };
-  const VkPipeline computePipeline =
-      rhi::vulkan::createComputePipeline(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), computeCreateInfo);
-  DBG_VK_NAME(computePipeline);
-  m_device.prebuiltPipelines.compute =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
-                       reinterpret_cast<uint64_t>(computePipeline), computeCreateInfo.key.specializationVariant);
+  m_device.prebuiltPipelines.compute = m_device.device->createComputePipeline(computeDesc);
 
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getNativeDevice()), compute, nullptr);
+  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), compute, nullptr);
 }
 
 
 
 void RenderDevice::createGPUCullingPipeline()
 {
-  if(!m_device.gpuCullingPipelineLayout)
+  if(m_device.gpuCullingArgumentTables.empty() || m_device.gpuCullingArgumentTables.front().isNull())
   {
     return;
   }
 
 #ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   VkShaderModule shaderModule =
       utils::createShaderModule(nativeDevice, {shader_gpu_culling_slang, std::size(shader_gpu_culling_slang)});
   DBG_VK_NAME(shaderModule);
+  const rhi::vulkan::ArgumentTableRecord* tableRecord =
+      m_device.resourceTable.tryGetArgumentTable(m_device.gpuCullingArgumentTables.front());
+  ASSERT(tableRecord != nullptr, "GPU culling pipeline requires an argument layout");
+  const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableRecord->layout}};
 
   const rhi::ComputePipelineDesc computeDesc{
-      .layout      = m_device.gpuCullingPipelineLayout.get(),
       .shaderStage =
           {
               .stage        = rhi::ShaderStage::compute,
               .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
               .entryPoint   = "gpuCullingMain",
-          },
+      },
+      .argumentLayouts     = argumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+      .specializationVariant = 13,
   };
-  const rhi::vulkan::ComputePipelineCreateInfo createInfo{
-      .key =
-          {
-              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::compute,
-              .specializationVariant = 13,
-          },
-      .desc          = computeDesc,
-      .pipelineFlags = 0,
-  };
-  const VkPipeline pipeline = rhi::vulkan::createComputePipeline(nativeDevice, createInfo);
-  DBG_VK_NAME(pipeline);
-  m_gpuCullingPipeline =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 13,
-                       m_device.gpuCullingPipelineLayout->getNativeHandle());
+  m_gpuCullingPipeline = m_device.device->createComputePipeline(computeDesc);
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
@@ -7022,73 +5989,43 @@ void RenderDevice::createGPUCullingPipeline()
 
 void RenderDevice::createShadowCullingPipeline()
 {
-  if(!m_device.shadowCullingPipelineLayout)
+  if(m_device.shadowCullingArgumentTables.empty() || m_device.shadowCullingArgumentTables.front().isNull())
   {
     return;
   }
 
 #ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   VkShaderModule shaderModule =
       utils::createShaderModule(nativeDevice, {shader_shadow_culling_slang, std::size(shader_shadow_culling_slang)});
   DBG_VK_NAME(shaderModule);
+  const rhi::vulkan::ArgumentTableRecord* tableRecord =
+      m_device.resourceTable.tryGetArgumentTable(m_device.shadowCullingArgumentTables.front());
+  ASSERT(tableRecord != nullptr, "Shadow culling pipeline requires an argument layout");
+  const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableRecord->layout}};
+  const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{{
+      rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute,
+                                     .offset = 0,
+                                     .size   = sizeof(shaderio::ShadowCullPushConstants)},
+  }};
 
   const rhi::ComputePipelineDesc computeDesc{
-      .layout      = m_device.shadowCullingPipelineLayout.get(),
       .shaderStage =
           {
               .stage        = rhi::ShaderStage::compute,
               .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
               .entryPoint   = "shadowCullingMain",
           },
+      .argumentLayouts     = argumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+      .pushConstantRanges  = pushConstants.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
+      .specializationVariant = 14,
   };
-  const rhi::vulkan::ComputePipelineCreateInfo createInfo{
-      .key =
-          {
-              .shaderIdentity        = rhi::vulkan::PipelineShaderIdentity::compute,
-              .specializationVariant = 14,
-          },
-      .desc          = computeDesc,
-      .pipelineFlags = 0,
-  };
-  const VkPipeline pipeline = rhi::vulkan::createComputePipeline(nativeDevice, createInfo);
-  DBG_VK_NAME(pipeline);
-  m_shadowCullingPipeline =
-      registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE), reinterpret_cast<uint64_t>(pipeline), 14,
-                       m_device.shadowCullingPipelineLayout->getNativeHandle());
+  m_shadowCullingPipeline = m_device.device->createComputePipeline(computeDesc);
 
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
-}
-
-PipelineHandle RenderDevice::registerPipeline(uint32_t bindPoint, uint64_t nativePipeline, uint32_t specializationVariant,
-                                          uint64_t nativeLayout, bool owned)
-{
-  return m_device.resourceTable.registerPipeline(bindPoint, nativePipeline, specializationVariant, nativeLayout, owned);
-}
-
-PipelineHandle RenderDevice::registerExternalGraphicsPipeline(VkPipeline pipeline, VkPipelineLayout layout,
-                                                              uint32_t specializationVariant)
-{
-  return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_GRAPHICS),
-                          reinterpret_cast<uint64_t>(pipeline), specializationVariant,
-                          reinterpret_cast<uint64_t>(layout));
-}
-
-PipelineHandle RenderDevice::registerExternalComputePipeline(VkPipeline pipeline, VkPipelineLayout layout,
-                                                             uint32_t specializationVariant)
-{
-  return registerPipeline(static_cast<uint32_t>(VK_PIPELINE_BIND_POINT_COMPUTE),
-                          reinterpret_cast<uint64_t>(pipeline), specializationVariant,
-                          reinterpret_cast<uint64_t>(layout), /*owned=*/false);
-}
-
-void RenderDevice::unregisterExternalPipeline(PipelineHandle handle)
-{
-  if(!handle.isNull())
-  {
-    m_device.resourceTable.destroyPipeline(handle);
-  }
 }
 
 // Texture-view lifetime now lives on rhi::Device (VulkanDevice). These remain as thin
@@ -7098,9 +6035,9 @@ rhi::TextureViewHandle RenderDevice::createTextureView(const rhi::TextureViewCre
   return m_device.device->createTextureView(desc);
 }
 
-rhi::TextureViewHandle RenderDevice::registerExternalTextureView(uint64_t nativeView)
+rhi::TextureViewHandle RenderDevice::registerExternalTextureView(uint64_t externalView)
 {
-  return m_device.device->registerExternalTextureView(nativeView);
+  return m_device.device->registerExternalTextureView(externalView);
 }
 
 void RenderDevice::destroyTextureView(rhi::TextureViewHandle handle)
@@ -7108,26 +6045,20 @@ void RenderDevice::destroyTextureView(rhi::TextureViewHandle handle)
   m_device.device->destroyTextureView(handle);
 }
 
-uint64_t RenderDevice::resolveTextureViewNative(rhi::TextureViewHandle handle) const
+uint64_t RenderDevice::resolveTextureViewBackendHandle(rhi::TextureViewHandle handle) const
 {
-  return m_device.device->resolveTextureViewNative(handle);
+  return m_device.device->resolveTextureViewBackendHandle(handle);
 }
 
 void RenderDevice::destroyPipelines()
 {
   std::vector<PipelineHandle> handles;
   m_device.resourceTable.forEachPipeline(
-      [&](PipelineHandle handle, const rhi::vulkan::PipelineRecord&) { handles.push_back(handle); });
+      [&](PipelineHandle handle, const auto&) { handles.push_back(handle); });
 
-  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
   for(const PipelineHandle handle : handles)
   {
-    const rhi::vulkan::PipelineRecord* record = m_device.resourceTable.tryGetPipeline(handle);
-    if(record != nullptr && record->nativePipeline != 0 && record->owned)
-    {
-      vkDestroyPipeline(device, reinterpret_cast<VkPipeline>(record->nativePipeline), nullptr);
-    }
-    m_device.resourceTable.destroyPipeline(handle);
+    m_device.device->destroyPipeline(handle);
   }
 
   m_device.prebuiltPipelines.compute             = kNullPipelineHandle;
@@ -7158,16 +6089,6 @@ void RenderDevice::destroyPipelines()
   m_gpuCullingDebugPipeline = kNullPipelineHandle;
 }
 
-const rhi::vulkan::PipelineRecord* RenderDevice::tryGetPipelineRecord(PipelineHandle handle) const
-{
-  return m_device.resourceTable.tryGetPipeline(handle);
-}
-
-uint64_t RenderDevice::getPipelineOpaque(PipelineHandle handle, uint32_t expectedBindPoint) const
-{
-  return m_device.resourceTable.resolvePipeline(handle, expectedBindPoint);
-}
-
 const RenderDevice::MaterialResources::TextureHotData* RenderDevice::tryGetTextureHot(TextureHandle handle) const
 {
   const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
@@ -7191,25 +6112,27 @@ void RenderDevice::waitForIdle()
   m_device.device->waitIdle();
 }
 
-VkDevice RenderDevice::getNativeDeviceHandle() const
+uintptr_t RenderDevice::getBackendDeviceToken() const
 {
   if(m_device.device == nullptr)
   {
-    return VK_NULL_HANDLE;
+    return 0;
   }
-  return fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  return static_cast<uintptr_t>(m_device.device->getBackendDeviceHandle());
 }
 
-void RenderDevice::executeUploadCommand(std::function<void(VkCommandBuffer)> uploadFn)
+void RenderDevice::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 {
   flushPendingUploadCommands(true);
 
-  const VkDevice       device       = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice       device       = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   const rhi::QueueInfo graphicsInfo = m_device.device->getGraphicsQueue();
-  const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.nativeHandle);
+  const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.backendHandle);
 
   VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.uploadCmdPool);
-  uploadFn(cmd);
+  rhi::vulkan::VulkanCommandBuffer rhiCmd;
+  rhiCmd.setTarget(cmd, &m_device.resourceTable);
+  uploadFn(rhiCmd);
   VK_CHECK(vkEndCommandBuffer(cmd));
 
   // Create fence for this upload (non-blocking submit)
@@ -7241,7 +6164,7 @@ void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
     return;
   }
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   bool           completedAnyUpload = false;
   for(auto& frameUserData : m_perFrame.frameUserData)
   {
@@ -7298,6 +6221,7 @@ void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
     if(!hasPendingUpload)
     {
       freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+      freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
       m_meshPool.freeStagingBuffers();
       LOGI("Upload memory snapshot after renderer staging free: rendererStaging=%zu buffers meshPoolDeferred=%zu buffers %.2f MiB",
            m_device.stagingBuffers.size(),
@@ -7307,7 +6231,7 @@ void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
   }
 }
 
-GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
+GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)
 {
   GltfUploadResult result;
   initializeGltfUploadResult(model, result);
@@ -7323,7 +6247,7 @@ GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, VkCommand
   return result;
 }
 
-SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, VkCommandBuffer cmd)
+SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan, rhi::CommandBuffer& cmd)
 {
   const SceneUploadPlanValidationResult validation =
       SceneUploadPlanner::validate(makeSceneAssetView(asset), plan);
@@ -7334,8 +6258,8 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
   result.materials.resize(asset.materials.size(), kNullMaterialHandle);
   result.textures.resize(asset.textures.size(), kNullTextureHandle);
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle());
 
   VkDeviceSize estimatedTextureUploadBytes = 0;
   VkDeviceSize estimatedVertexUploadBytes = 0;
@@ -7350,8 +6274,17 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
     estimatedIndexUploadBytes += meshPlan.indexByteSize;
   }
 
-  BatchUploadContext batchUpload;
-  batchUpload.init(device, m_device.allocator, estimatedTextureUploadBytes + estimatedVertexUploadBytes + estimatedIndexUploadBytes);
+  struct PendingTextureUploadState
+  {
+    rhi::TextureHandle texture{};
+    uint32_t           mipLevels{1};
+  };
+
+  BatchUploadContext textureBatchUpload;
+  textureBatchUpload.init(*m_device.device, static_cast<uint64_t>(estimatedTextureUploadBytes));
+  std::vector<PendingTextureUploadState> textureUploadStates;
+  BatchUploadContext meshBatchUpload;
+  meshBatchUpload.init(*m_device.device, static_cast<uint64_t>(estimatedVertexUploadBytes + estimatedIndexUploadBytes));
   m_meshPool.reserve(estimatedVertexUploadBytes, estimatedIndexUploadBytes, cmd);
 
   for(const TextureUploadPlan& texturePlan : plan.textures)
@@ -7408,33 +6341,61 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
     };
 
     utils::Image image = createImage(m_device.allocator, imageInfo);
-    utils::cmdInitImageLayout(cmd, image.image);
+    const rhi::TextureHandle imageHandle =
+        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+    const rhi::TextureSubresourceRange imageRange{
+        .aspect = rhi::TextureAspect::color,
+        .baseMipLevel = 0,
+        .levelCount = mipLevels,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    const rhi::TextureBarrier uploadBeginBarrier{
+        .texture = imageHandle,
+        .before = rhi::ResourceState::Undefined,
+        .after = rhi::ResourceState::TransferDst,
+        .range = imageRange,
+    };
+    cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+    textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
     if(isKtxPayload)
     {
-      const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
+      const BatchUploadContext::Slice slice = textureBatchUpload.allocate(ktxTexture.data.size(), 16);
       std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
 
       for(uint32_t mip = 0; mip < mipLevels; ++mip)
       {
-        const VkBufferImageCopy region{
+        const rhi::BufferTextureCopyDesc region{
             .bufferOffset = ktxTexture.mipOffsets[mip],
-            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .layerCount = 1},
-            .imageExtent = {std::max(width >> mip, 1u), std::max(height >> mip, 1u), 1},
+            .texture = imageHandle,
+            .aspect = rhi::TextureAspect::color,
+            .mipLevel = mip,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .width = std::max(width >> mip, 1u),
+            .height = std::max(height >> mip, 1u),
+            .depth = 1,
         };
-        batchUpload.recordTextureUpload(slice, image.image, region);
+        textureBatchUpload.recordTextureUpload(slice, imageHandle, region);
       }
     }
     else
     {
-      const BatchUploadContext::Slice slice = batchUpload.allocate(payloadSize, 4);
+      const BatchUploadContext::Slice slice = textureBatchUpload.allocate(payloadSize, 4);
       std::memcpy(slice.cpuPtr, payloadData, payloadSize);
-      batchUpload.recordTextureUpload(
+      textureBatchUpload.recordTextureUpload(
           slice,
-          image.image,
-          VkBufferImageCopy{
-              .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-              .imageExtent = {width, height, 1},
+          imageHandle,
+          rhi::BufferTextureCopyDesc{
+              .texture = imageHandle,
+              .aspect = rhi::TextureAspect::color,
+              .mipLevel = 0,
+              .baseArrayLayer = 0,
+              .layerCount = 1,
+              .width = width,
+              .height = height,
+              .depth = 1,
           });
     }
 
@@ -7541,7 +6502,7 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
         .materialIndex = static_cast<int32_t>(mesh.materialIndex),
     };
 
-    MeshHandle meshHandle = m_meshPool.uploadMesh(sceneMeshData, cmd, &batchUpload);
+    MeshHandle meshHandle = m_meshPool.uploadMesh(sceneMeshData, cmd, &meshBatchUpload);
     if(meshHandle.isNull())
     {
       continue;
@@ -7734,12 +6695,37 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
     }
   }
 
-  batchUpload.executeUploads(cmd);
+  textureBatchUpload.executeUploads(cmd);
+  meshBatchUpload.executeUploads(cmd);
 
-  utils::Buffer batchStagingBuffer = batchUpload.releaseStagingBuffer();
-  if(batchStagingBuffer.buffer != VK_NULL_HANDLE)
+  for(const PendingTextureUploadState& state : textureUploadStates)
   {
-    m_device.stagingBuffers.push_back(batchStagingBuffer);
+    const rhi::TextureBarrier uploadEndBarrier{
+        .texture = state.texture,
+        .before = rhi::ResourceState::TransferDst,
+        .after = rhi::ResourceState::General,
+        .range =
+            {
+                .aspect = rhi::TextureAspect::color,
+                .baseMipLevel = 0,
+                .levelCount = state.mipLevels,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+    };
+    cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+    m_device.device->destroyImage(state.texture);
+  }
+
+  rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
+  if(!textureStagingBuffer.isNull())
+  {
+    m_device.rhiStagingBuffers.push_back(textureStagingBuffer);
+  }
+  rhi::BufferHandle meshStagingBuffer = meshBatchUpload.releaseStagingBuffer();
+  if(!meshStagingBuffer.isNull())
+  {
+    m_meshPool.deferStagingBuffer(meshStagingBuffer);
   }
 
   const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
@@ -7770,10 +6756,10 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
                                     std::span<const uint32_t> materialIndices,
                                     std::span<const uint32_t> meshIndices,
                                     GltfUploadResult&         ioResult,
-                                    VkCommandBuffer           cmd)
+                                    rhi::CommandBuffer&       cmd)
 {
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getNativePhysicalDevice());
+  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+  const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle());
 
   if(ioResult.meshes.size() != model.meshes.size()
      || ioResult.materials.size() != model.materials.size()
@@ -7782,7 +6768,7 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     initializeGltfUploadResult(model, ioResult);
   }
 
-  BatchUploadContext batchUpload;
+  BatchUploadContext textureBatchUpload;
   const VkDeviceSize estimatedTextureUploadBytes = computeSelectedTextureUploadSize(model, textureIndices);
   const VkDeviceSize estimatedMeshUploadBytes = computeSelectedMeshUploadSize(model, meshIndices);
   const VkDeviceSize estimatedBatchUploadBytes = estimatedTextureUploadBytes + estimatedMeshUploadBytes;
@@ -7821,7 +6807,16 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
          hasKtx2Sidecar ? 1 : 0,
          mipLevels);
   }
-  batchUpload.init(device, m_device.allocator, estimatedBatchUploadBytes);
+  struct PendingTextureUploadState
+  {
+    rhi::TextureHandle texture{};
+    uint32_t           mipLevels{1};
+  };
+
+  textureBatchUpload.init(*m_device.device, static_cast<uint64_t>(estimatedTextureUploadBytes));
+  std::vector<PendingTextureUploadState> textureUploadStates;
+  BatchUploadContext meshBatchUpload;
+  meshBatchUpload.init(*m_device.device, static_cast<uint64_t>(estimatedMeshUploadBytes));
 
   VkDeviceSize selectedVertexBytes = 0;
   VkDeviceSize selectedIndexBytes = 0;
@@ -7837,8 +6832,6 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     selectedIndexBytes += static_cast<VkDeviceSize>(meshData.indices.size()) * sizeof(uint32_t);
   }
   m_meshPool.reserve(selectedVertexBytes, selectedIndexBytes, cmd);
-
-  std::vector<PendingMipGeneration> pendingMipGenerations;
 
   for(const uint32_t textureIndex : textureIndices)
   {
@@ -7900,33 +6893,61 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     };
 
     utils::Image image = createImage(m_device.allocator, imageInfo);
-    utils::cmdInitImageLayout(cmd, image.image);
+    const rhi::TextureHandle imageHandle =
+        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+    const rhi::TextureSubresourceRange imageRange{
+        .aspect = rhi::TextureAspect::color,
+        .baseMipLevel = 0,
+        .levelCount = mipLevels,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    const rhi::TextureBarrier uploadBeginBarrier{
+        .texture = imageHandle,
+        .before = rhi::ResourceState::Undefined,
+        .after = rhi::ResourceState::TransferDst,
+        .range = imageRange,
+    };
+    cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+    textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
     if(hasSupportedKtx2Sidecar)
     {
-      const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
+      const BatchUploadContext::Slice slice = textureBatchUpload.allocate(ktxTexture.data.size(), 16);
       std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
 
       for(uint32_t mip = 0; mip < mipLevels; ++mip)
       {
-        const VkBufferImageCopy region{
+        const rhi::BufferTextureCopyDesc region{
             .bufferOffset = ktxTexture.mipOffsets[mip],
-            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = mip, .layerCount = 1},
-            .imageExtent = {std::max(width >> mip, 1u), std::max(height >> mip, 1u), 1},
+            .texture = imageHandle,
+            .aspect = rhi::TextureAspect::color,
+            .mipLevel = mip,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .width = std::max(width >> mip, 1u),
+            .height = std::max(height >> mip, 1u),
+            .depth = 1,
         };
-        batchUpload.recordTextureUpload(slice, image.image, region);
+        textureBatchUpload.recordTextureUpload(slice, imageHandle, region);
       }
     }
     else
     {
-      const BatchUploadContext::Slice slice = batchUpload.allocate(rawImageData->pixels.size(), 4);
+      const BatchUploadContext::Slice slice = textureBatchUpload.allocate(rawImageData->pixels.size(), 4);
       std::memcpy(slice.cpuPtr, rawImageData->pixels.data(), rawImageData->pixels.size());
-      batchUpload.recordTextureUpload(
+      textureBatchUpload.recordTextureUpload(
           slice,
-          image.image,
-          VkBufferImageCopy{
-              .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-              .imageExtent      = {width, height, 1},
+          imageHandle,
+          rhi::BufferTextureCopyDesc{
+              .texture = imageHandle,
+              .aspect = rhi::TextureAspect::color,
+              .mipLevel = 0,
+              .baseArrayLayer = 0,
+              .layerCount = 1,
+              .width = width,
+              .height = height,
+              .depth = 1,
           });
 
       // Temporary validation path: keep raw glTF texture uploads at base mip only
@@ -8030,7 +7051,7 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     }
 
     const GltfMeshData& meshData = model.meshes[meshIndex];
-    MeshHandle          meshHandle = m_meshPool.uploadMesh(meshData, cmd, &batchUpload);
+    MeshHandle          meshHandle = m_meshPool.uploadMesh(meshData, cmd, &meshBatchUpload);
     if(meshHandle.isNull())
     {
       continue;
@@ -8080,16 +7101,37 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     }
   }
 
-  batchUpload.executeUploads(cmd);
-  for(const PendingMipGeneration& mip : pendingMipGenerations)
+  textureBatchUpload.executeUploads(cmd);
+  meshBatchUpload.executeUploads(cmd);
+
+  for(const PendingTextureUploadState& state : textureUploadStates)
   {
-    MipmapGenerator::generateMipmaps(cmd, mip.image, mip.format, mip.width, mip.height, mip.mipLevels);
+    const rhi::TextureBarrier uploadEndBarrier{
+        .texture = state.texture,
+        .before = rhi::ResourceState::TransferDst,
+        .after = rhi::ResourceState::General,
+        .range =
+            {
+                .aspect = rhi::TextureAspect::color,
+                .baseMipLevel = 0,
+                .levelCount = state.mipLevels,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+    };
+    cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+    m_device.device->destroyImage(state.texture);
   }
 
-  utils::Buffer batchStagingBuffer = batchUpload.releaseStagingBuffer();
-  if(batchStagingBuffer.buffer != VK_NULL_HANDLE)
+  rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
+  if(!textureStagingBuffer.isNull())
   {
-    m_device.stagingBuffers.push_back(batchStagingBuffer);
+    m_device.rhiStagingBuffers.push_back(textureStagingBuffer);
+  }
+  rhi::BufferHandle meshStagingBuffer = meshBatchUpload.releaseStagingBuffer();
+  if(!meshStagingBuffer.isNull())
+  {
+    m_meshPool.deferStagingBuffer(meshStagingBuffer);
   }
 
   const uint32_t gltfTextureBaseIndex = kDemoMaterialSlotCount;
@@ -8106,15 +7148,50 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
   rebuildShadowPackedBuffers(model, ioResult, cmd);
 }
 
-void RenderDevice::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, VkCommandBuffer cmd)
+UploadBufferRecord RenderDevice::createShadowPackedUploadBuffer(rhi::CommandBuffer& cmd,
+                                                                std::span<const std::byte> data,
+                                                                rhi::BufferUsageFlags usage,
+                                                                const char* debugName)
 {
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
+  if(data.empty())
+  {
+    return {};
+  }
+
+  const rhi::BufferHandle buffer = m_device.device->createBuffer(rhi::BufferDesc{
+      .size = static_cast<uint64_t>(data.size_bytes()),
+      .usage = usage | rhi::BufferUsageFlags::transferDst | rhi::BufferUsageFlags::shaderDeviceAddress,
+      .memoryUsage = rhi::MemoryUsage::gpuOnly,
+      .allowGpuAddress = true,
+      .debugName = debugName,
+  });
+  const rhi::vulkan::BufferRecord* record = m_device.resourceTable.tryGetBuffer(buffer);
+  ASSERT(record != nullptr, "RHI shadow packed buffer must be registered in the resource table");
+
+  BatchUploadContext upload;
+  upload.init(*m_device.device, static_cast<uint64_t>(data.size_bytes()));
+  const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(data.size_bytes()), 16);
+  std::memcpy(slice.cpuPtr, data.data(), data.size_bytes());
+  upload.recordBufferUpload(slice, buffer, 0, static_cast<uint64_t>(data.size_bytes()));
+  upload.executeUploads(cmd);
+
+  rhi::BufferHandle staging = upload.releaseStagingBuffer();
+  if(!staging.isNull())
+  {
+    m_device.rhiStagingBuffers.push_back(staging);
+  }
+
+  return toUploadBufferRecord(*record, buffer);
+}
+
+void RenderDevice::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result, rhi::CommandBuffer& cmd)
+{
+  if(result.shadowPackedVertexBuffer.buffer != 0 || result.shadowPackedIndexBuffer.buffer != 0)
   {
     waitForAllFrameSlots();
   }
-  destroyBuffer(m_device.allocator, result.shadowPackedVertexBuffer);
-  destroyBuffer(m_device.allocator, result.shadowPackedIndexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
   result.shadowPackedMeshes.clear();
 
   if(result.shadowCasterIndices.empty())
@@ -8222,33 +7299,20 @@ void RenderDevice::rebuildShadowPackedBuffers(const GltfModel& model, GltfUpload
   const std::span<const std::byte> packedIndexBytes(reinterpret_cast<const std::byte*>(packedIndexData.data()),
                                                     packedIndexData.size() * sizeof(uint32_t));
 
-  result.shadowPackedVertexBuffer = upload::createStaticBufferWithUpload(
-      device,
-      m_device.allocator,
-      cmd,
-      packedVertexBytes,
-      VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
-      m_device.staticBufferUploadPolicy,
-      &m_device.stagingBuffers);
-  result.shadowPackedIndexBuffer = upload::createStaticBufferWithUpload(
-      device,
-      m_device.allocator,
-      cmd,
-      packedIndexBytes,
-      VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
-      m_device.staticBufferUploadPolicy,
-      &m_device.stagingBuffers);
+  result.shadowPackedVertexBuffer =
+      createShadowPackedUploadBuffer(cmd, packedVertexBytes, rhi::BufferUsageFlags::vertex, "ShadowPackedVertexBuffer");
+  result.shadowPackedIndexBuffer =
+      createShadowPackedUploadBuffer(cmd, packedIndexBytes, rhi::BufferUsageFlags::index, "ShadowPackedIndexBuffer");
 }
 
-void RenderDevice::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, VkCommandBuffer cmd)
+void RenderDevice::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result, rhi::CommandBuffer& cmd)
 {
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
-  if(result.shadowPackedVertexBuffer.buffer != VK_NULL_HANDLE || result.shadowPackedIndexBuffer.buffer != VK_NULL_HANDLE)
+  if(result.shadowPackedVertexBuffer.buffer != 0 || result.shadowPackedIndexBuffer.buffer != 0)
   {
     waitForAllFrameSlots();
   }
-  destroyBuffer(m_device.allocator, result.shadowPackedVertexBuffer);
-  destroyBuffer(m_device.allocator, result.shadowPackedIndexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
   result.shadowPackedMeshes.clear();
 
   if(result.shadowCasterDrawIndices.empty() && result.shadowCasterIndices.empty())
@@ -8358,33 +7422,19 @@ void RenderDevice::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUplo
   const std::span<const std::byte> packedIndexBytes(reinterpret_cast<const std::byte*>(packedIndexData.data()),
                                                     packedIndexData.size() * sizeof(uint32_t));
 
-  result.shadowPackedVertexBuffer = upload::createStaticBufferWithUpload(
-      device,
-      m_device.allocator,
-      cmd,
-      packedVertexBytes,
-      VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR,
-      m_device.staticBufferUploadPolicy,
-      &m_device.stagingBuffers);
-  result.shadowPackedIndexBuffer = upload::createStaticBufferWithUpload(
-      device,
-      m_device.allocator,
-      cmd,
-      packedIndexBytes,
-      VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
-      m_device.staticBufferUploadPolicy,
-      &m_device.stagingBuffers);
+  result.shadowPackedVertexBuffer =
+      createShadowPackedUploadBuffer(cmd, packedVertexBytes, rhi::BufferUsageFlags::vertex, "SceneShadowPackedVertexBuffer");
+  result.shadowPackedIndexBuffer =
+      createShadowPackedUploadBuffer(cmd, packedIndexBytes, rhi::BufferUsageFlags::index, "SceneShadowPackedIndexBuffer");
 }
 
 void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
 {
-  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getNativeDevice());
+  VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
   const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
 
-  utils::Buffer shadowPackedVertexBuffer = result.shadowPackedVertexBuffer;
-  utils::Buffer shadowPackedIndexBuffer = result.shadowPackedIndexBuffer;
-  destroyBuffer(m_device.allocator, shadowPackedVertexBuffer);
-  destroyBuffer(m_device.allocator, shadowPackedIndexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
+  destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
 
   // Destroy meshes
   for(MeshHandle handle : result.meshes)
@@ -8422,65 +7472,14 @@ void RenderDevice::updateMeshTransform(MeshHandle handle, const glm::mat4& trans
   m_meshPool.updateTransform(handle, transform);
 }
 
-uint64_t RenderDevice::getLightPipelineLayout() const
-{
-  return reinterpret_cast<uint64_t>(m_device.lightPipelineLayout);
-}
-
-uint64_t RenderDevice::getGBufferColorDescriptorSet() const
-{
-  return getBindGroupDescriptorSetOpaque(getCurrentMaterialBindGroupHandle(), BindGroupSetSlot::material);
-}
-
-uint64_t RenderDevice::getGBufferTextureDescriptorSet() const
-{
-  if(m_device.gbufferTextureSets.empty())
-  {
-    return 0;
-  }
-
-  uint32_t frameIndex = 0;
-  if(m_perFrame.frameContext != nullptr)
-  {
-    frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
-  }
-  if(frameIndex >= m_device.gbufferTextureSets.size())
-  {
-    return 0;
-  }
-  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex]);
-}
-
-uint64_t RenderDevice::getGBufferTextureSetLayout() const
-{
-  return reinterpret_cast<uint64_t>(m_device.gbufferTextureSetLayout);
-}
-
-uint64_t RenderDevice::getGBufferTextureDescriptorSetAt(uint32_t frameIndex) const
-{
-  return frameIndex < m_device.gbufferTextureSets.size()
-             ? reinterpret_cast<uint64_t>(m_device.gbufferTextureSets[frameIndex])
-             : 0;
-}
-
 uint32_t RenderDevice::getFrameResourceCount() const
 {
   return static_cast<uint32_t>(m_perFrame.frameUserData.size());
 }
 
-uint64_t RenderDevice::getGraphicsMaterialDescriptorSet() const
+rhi::ArgumentTableHandle RenderDevice::getGraphicsMaterialArgumentTable() const
 {
-  return getGBufferColorDescriptorSet();
-}
-
-BindGroupHandle RenderDevice::getGraphicsMaterialBindGroup() const
-{
-  return getCurrentMaterialBindGroupHandle();
-}
-
-uint64_t RenderDevice::getLightingInputDescriptorSet() const
-{
-  return getGBufferTextureDescriptorSet();
+  return getCurrentMaterialArgumentTable();
 }
 
 bool RenderDevice::getIBLEnvironmentLoaded() const
@@ -8493,12 +7492,12 @@ bool RenderDevice::getIBLUsingFallback() const
   return m_device.iblUsingFallback;
 }
 
-VkFormat RenderDevice::getIBLEnvironmentFormat() const
+rhi::TextureFormat RenderDevice::getIBLEnvironmentFormat() const
 {
   return m_device.iblEnvironmentFormat;
 }
 
-VkExtent2D RenderDevice::getIBLEnvironmentExtent() const
+rhi::Extent2D RenderDevice::getIBLEnvironmentExtent() const
 {
   return m_device.iblEnvironmentExtent;
 }
@@ -8726,58 +7725,58 @@ uint32_t RenderDevice::getPreviousGPUCullingObjectCount(uint32_t currentFrameInd
   return previousFrame.gpuCullingObjectCount;
 }
 
-BindGroupHandle RenderDevice::getCameraBindGroup(uint32_t frameIndex) const
+rhi::ArgumentTableHandle RenderDevice::getCameraArgumentTable(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    return m_perFrame.frameUserData[frameIndex].cameraBindGroup;
+    return m_perFrame.frameUserData[frameIndex].cameraArgumentTable;
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
-BindGroupHandle RenderDevice::getDrawBindGroup(uint32_t frameIndex) const
+rhi::ArgumentTableHandle RenderDevice::getDrawArgumentTable(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    return m_perFrame.frameUserData[frameIndex].drawBindGroup;
+    return m_perFrame.frameUserData[frameIndex].drawArgumentTable;
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
-BindGroupHandle RenderDevice::getMDIDrawBindGroup(uint32_t frameIndex) const
+rhi::ArgumentTableHandle RenderDevice::getMDIDrawArgumentTable(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    return m_perFrame.frameUserData[frameIndex].mdiDrawBindGroup;
+    return m_perFrame.frameUserData[frameIndex].mdiDrawArgumentTable;
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
-BindGroupHandle RenderDevice::getGBufferMDIDrawBindGroup(uint32_t frameIndex) const
+rhi::ArgumentTableHandle RenderDevice::getGBufferMDIDrawArgumentTable(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    return m_perFrame.frameUserData[frameIndex].gbufferMdiDrawBindGroup;
+    return m_perFrame.frameUserData[frameIndex].gbufferMdiDrawArgumentTable;
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
-BindGroupHandle RenderDevice::getDepthMDIDrawBindGroup(uint32_t frameIndex) const
+rhi::ArgumentTableHandle RenderDevice::getDepthMDIDrawArgumentTable(uint32_t frameIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size())
   {
-    return m_perFrame.frameUserData[frameIndex].depthMdiDrawBindGroup;
+    return m_perFrame.frameUserData[frameIndex].depthMdiDrawArgumentTable;
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
-BindGroupHandle RenderDevice::getCSMShadowMDIDrawBindGroup(uint32_t frameIndex, uint32_t cascadeIndex) const
+rhi::ArgumentTableHandle RenderDevice::getCSMShadowMDIDrawArgumentTable(uint32_t frameIndex, uint32_t cascadeIndex) const
 {
   if(frameIndex < m_perFrame.frameUserData.size() && cascadeIndex < shaderio::LCascadeCount)
   {
-    return m_perFrame.frameUserData[frameIndex].csmShadowMdiDrawBindGroups[cascadeIndex];
+    return m_perFrame.frameUserData[frameIndex].csmShadowMdiDrawArgumentTables[cascadeIndex];
   }
-  return kNullBindGroupHandle;
+  return {};
 }
 
 uint64_t RenderDevice::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
@@ -8917,9 +7916,9 @@ void RenderDevice::ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, 
   ensureGPUDrivenPersistentIndirectStreamBuffer(frameUserData, requiredDrawCount);
 }
 
-BindGroupHandle RenderDevice::getGlobalBindlessGroup() const
+rhi::ArgumentTableHandle RenderDevice::getGlobalBindlessGroup() const
 {
-  return getCurrentMaterialBindGroupHandle();
+  return getCurrentMaterialArgumentTable();
 }
 
 rhi::BufferHandle RenderDevice::getCurrentTransientBufferHandle() const
@@ -9040,7 +8039,7 @@ void RenderDevice::updateBindlessTexture(uint32_t index, TextureHandle textureHa
   }
 
   // Wave 8: cache the adopted view handle; the shared materialSamplerHandle pairs with it
-  // through combinedImageSampler ArgumentWrites in syncMaterialBindGroup.
+  // through combinedImageSampler ArgumentWrites in syncMaterialArgumentTable.
   if(index < m_materials.materialDescriptorViews.size())
   {
     m_materials.materialDescriptorViews[index] = textureHot->sampledViewHandle;

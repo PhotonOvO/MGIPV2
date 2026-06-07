@@ -1,10 +1,6 @@
 #pragma once
 
 #include "../RHICommandPool.h"
-#include "VulkanCommandList.h"
-
-#include <memory>
-#include <vector>
 
 struct VkDevice_T;
 struct VkCommandPool_T;
@@ -29,30 +25,18 @@ public:
   void deinit() override;
   void reset() override;
 
-  CommandList* allocateCommandList() override;
-  void         freeCommandList(CommandList* cmdList) override;
+  VkCommandBuffer allocateNativeCommandBuffer();
+  void            freeNativeCommandBuffer(VkCommandBuffer commandBuffer);
 
-  void allocateCommandLists(uint32_t count, CommandList** cmdLists) override;
-  void freeCommandLists(uint32_t count, CommandList** cmdLists) override;
-
-  uint64_t getNativeHandle() const override;
+  uint64_t getBackendHandle() const override;
 
   [[nodiscard]] VkCommandPool nativePool() const { return m_pool; }
 
 private:
-  struct CommandListRecord
-  {
-    VkCommandBuffer                    commandBuffer{nullptr};
-    std::unique_ptr<VulkanCommandList> commandList;
-  };
-
-  size_t findRecordIndex(const CommandList* cmdList) const;
-
-  VkDevice                       m_device{nullptr};
-  VkCommandPool                  m_pool{nullptr};
-  QueueClass                     m_queueClass{QueueClass::graphics};
-  uint32_t                       m_queueFamilyIndex{~0U};
-  std::vector<CommandListRecord> m_records;
+  VkDevice      m_device{nullptr};
+  VkCommandPool m_pool{nullptr};
+  QueueClass    m_queueClass{QueueClass::graphics};
+  uint32_t      m_queueFamilyIndex{~0U};
 };
 
 }  // namespace vulkan

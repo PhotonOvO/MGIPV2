@@ -8,5 +8,6 @@ static_assert(static_cast<uint32_t>(StreamEntryType::setMesh) == 2u);
 static_assert(static_cast<uint32_t>(StreamEntryType::setDynamicBuffer) == 3u);
 static_assert(static_cast<uint32_t>(StreamEntryType::setDynamicOffset) == 4u);
 static_assert(static_cast<uint32_t>(StreamEntryType::draw) == 5u);
+static_assert(static_cast<uint32_t>(StreamEntryType::drawIndexed) == 6u);
 
 }  // namespace demo

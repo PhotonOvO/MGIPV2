@@ -19,9 +19,9 @@ bool acquireSwapchainImage(rhi::Swapchain& swapchain, uint32_t& imageIndexOut)
   return true;
 }
 
-rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandList& commandList)
+rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandBuffer& commandBuffer)
 {
-  return frameContext.endFrame(&commandList);
+  return frameContext.endFrame(&commandBuffer);
 }
 
 rhi::PresentResult presentFrame(rhi::Swapchain& swapchain)

@@ -12,6 +12,10 @@ enum class CapabilityTier : uint8_t
   ExtensionAsyncCompute,
   ExtensionMeshShader,
   ExtensionRayTracing,
+  DescriptorHeap,
+  Residency,
+  PipelineCompiler,
+  MultiQueue,
 };
 
 // Device capability report expressed in portable vocabulary.
@@ -27,6 +31,10 @@ struct CapabilityReport
   bool extensionAsyncCompute{false};
   bool extensionMeshShader{false};
   bool extensionRayTracing{false};
+  bool descriptorHeap{false};
+  bool residency{false};
+  bool pipelineCompiler{false};
+  bool multiQueue{false};
 };
 
 // Requirements requested at device creation.
@@ -40,6 +48,10 @@ struct CapabilityRequirements
   bool requireExtensionAsyncCompute{false};
   bool requireExtensionMeshShader{false};
   bool requireExtensionRayTracing{false};
+  bool requireDescriptorHeap{false};
+  bool requireResidency{false};
+  bool requirePipelineCompiler{false};
+  bool requireMultiQueue{false};
 };
 
 // Stable failure codes for capability negotiation.
@@ -53,6 +65,10 @@ enum class RHICapabilityError : uint8_t
   MissingExtensionAsyncCompute,
   MissingExtensionMeshShader,
   MissingExtensionRayTracing,
+  MissingDescriptorHeap,
+  MissingResidency,
+  MissingPipelineCompiler,
+  MissingMultiQueue,
 };
 
 constexpr bool supportsTier(const CapabilityReport& report, CapabilityTier tier)
@@ -67,6 +83,14 @@ constexpr bool supportsTier(const CapabilityReport& report, CapabilityTier tier)
       return report.extensionMeshShader;
     case CapabilityTier::ExtensionRayTracing:
       return report.extensionRayTracing;
+    case CapabilityTier::DescriptorHeap:
+      return report.descriptorHeap;
+    case CapabilityTier::Residency:
+      return report.residency;
+    case CapabilityTier::PipelineCompiler:
+      return report.pipelineCompiler;
+    case CapabilityTier::MultiQueue:
+      return report.multiQueue;
     default:
       return false;
   }
@@ -98,6 +122,22 @@ constexpr RHICapabilityError evaluateCapabilityRequirements(const CapabilityRepo
   {
     return RHICapabilityError::MissingExtensionRayTracing;
   }
+  if(requirements.requireDescriptorHeap && !report.descriptorHeap)
+  {
+    return RHICapabilityError::MissingDescriptorHeap;
+  }
+  if(requirements.requireResidency && !report.residency)
+  {
+    return RHICapabilityError::MissingResidency;
+  }
+  if(requirements.requirePipelineCompiler && !report.pipelineCompiler)
+  {
+    return RHICapabilityError::MissingPipelineCompiler;
+  }
+  if(requirements.requireMultiQueue && !report.multiQueue)
+  {
+    return RHICapabilityError::MissingMultiQueue;
+  }
   return RHICapabilityError::None;
 }
 
@@ -119,6 +159,14 @@ constexpr const char* toString(RHICapabilityError error)
       return "missing_extension_mesh_shader";
     case RHICapabilityError::MissingExtensionRayTracing:
       return "missing_extension_ray_tracing";
+    case RHICapabilityError::MissingDescriptorHeap:
+      return "missing_descriptor_heap";
+    case RHICapabilityError::MissingResidency:
+      return "missing_residency";
+    case RHICapabilityError::MissingPipelineCompiler:
+      return "missing_pipeline_compiler";
+    case RHICapabilityError::MissingMultiQueue:
+      return "missing_multi_queue";
     default:
       return "unknown_capability_error";
   }

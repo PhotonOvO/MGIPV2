@@ -23,9 +23,9 @@ public:
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
 
-  uint64_t getNativeSwapchain() const override;
-  uint64_t getNativeImageView(uint32_t imageIndex) const override;
-  uint64_t getNativeImage(uint32_t imageIndex) const override;
+  uint64_t getBackendSwapchainHandle() const override;
+  uint64_t getBackendImageViewHandle(uint32_t imageIndex) const override;
+  uint64_t getBackendImageHandle(uint32_t imageIndex) const override;
 
   // Metal-native accessors (for backend interop)
   // NOTES: Returns opaque handles to Metal objects

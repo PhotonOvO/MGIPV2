@@ -3,7 +3,6 @@
 #include "../common/Handles.h"
 #include "DrawStream.h"
 #include "TransientAllocator.h"
-#include "../rhi/RHICommandList.h"
 #include "../rhi/RHICommandBuffer.h"
 
 #include <cstdint>
@@ -19,7 +18,6 @@ class PassExecutor;
 
 struct PassContext
 {
-  rhi::CommandList*   cmd{nullptr};
   TransientAllocator* transientAllocator{nullptr};
   uint32_t            frameIndex{0};
   uint32_t            passIndex{0};
@@ -30,16 +28,15 @@ struct PassContext
   // glTF model data for rendering meshes
   const SceneUploadResult*  gltfModel{nullptr};
   // Global bindless resource (bind once at pass start)
-  BindGroupHandle           globalBindlessGroup{};
+  rhi::ArgumentTableHandle  globalBindlessGroup{};
   // Shared camera uniform allocation (set once per frame by RenderDevice)
   TransientAllocator::Allocation cameraAlloc{};
   bool cameraAllocValid{false};
-  // NEW (Wave 3+): one-shot recording facade over the same per-frame VkCommandBuffer as `cmd`.
-  // Migrated passes record through this; un-migrated passes keep using `cmd`.
-  rhi::CommandBuffer* cmdBuffer{nullptr};
+  // One-shot recording facade for the frame.
+  rhi::CommandBuffer* commandBuffer{nullptr};
   // Wave 9 (P0-3): lets a pass mirror a native image into the backend registry so its
-  // own layout transitions can be expressed via cmdBuffer->resourceBarrier (handle-based)
-  // instead of the legacy cmd->transitionTexture (native seam). Set by the executor.
+  // own layout transitions can be expressed with handle-based barriers.
+  // Set by the executor.
   const PassExecutor* executor{nullptr};
 };
 
@@ -61,6 +58,8 @@ struct PassResourceDependency
   PassResourceType type{PassResourceType::buffer};
   ResourceAccess   access{ResourceAccess::read};
   rhi::ShaderStage stageMask{rhi::ShaderStage::none};
+  rhi::StageFlags  stages{rhi::StageFlags::none};
+  rhi::HazardFlags hazards{rhi::HazardFlags::none};
   rhi::ResourceState requiredState{rhi::ResourceState::Undefined};
   TextureHandle    textureHandle{};
   BufferHandle     bufferHandle{};
@@ -72,6 +71,7 @@ struct PassResourceDependency
     dependency.type          = PassResourceType::texture;
     dependency.access        = accessMode;
     dependency.stageMask     = stages;
+    dependency.hazards       = rhi::HazardFlags::textureWrites;
     dependency.requiredState = textureState;
     dependency.textureHandle = handle;
     return dependency;
@@ -83,7 +83,27 @@ struct PassResourceDependency
     dependency.type         = PassResourceType::buffer;
     dependency.access       = accessMode;
     dependency.stageMask    = stages;
+    dependency.hazards      = rhi::HazardFlags::bufferWrites;
     dependency.bufferHandle = handle;
+    return dependency;
+  }
+
+  static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::StageFlags dependencyStages,
+                                        rhi::HazardFlags dependencyHazards,
+                                        rhi::ResourceState textureState = rhi::ResourceState::Undefined)
+  {
+    PassResourceDependency dependency = texture(handle, accessMode, rhi::ShaderStage::none, textureState);
+    dependency.stages                = dependencyStages;
+    dependency.hazards               = dependencyHazards;
+    return dependency;
+  }
+
+  static PassResourceDependency buffer(BufferHandle handle, ResourceAccess accessMode, rhi::StageFlags dependencyStages,
+                                       rhi::HazardFlags dependencyHazards)
+  {
+    PassResourceDependency dependency = buffer(handle, accessMode, rhi::ShaderStage::none);
+    dependency.stages                = dependencyStages;
+    dependency.hazards               = dependencyHazards;
     return dependency;
   }
 };

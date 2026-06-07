@@ -3,6 +3,8 @@
 #include "../loader/GltfLoader.h"
 #include "../scene/SceneAsset.h"
 #include "../rhi/RHIDevice.h"
+#include "../rhi/RHIEncoder.h"
+#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <array>
 #include <cstring>
@@ -14,8 +16,40 @@ namespace demo {
 namespace {
 
 constexpr uint32_t kInterleavedVertexStride = 48;
-constexpr VkDeviceSize kInitialSharedVertexCapacity = 4ull * 1024ull * 1024ull;
-constexpr VkDeviceSize kInitialSharedIndexCapacity = 2ull * 1024ull * 1024ull;
+constexpr uint64_t kInitialSharedVertexCapacity = 4ull * 1024ull * 1024ull;
+constexpr uint64_t kInitialSharedIndexCapacity = 2ull * 1024ull * 1024ull;
+
+upload::NativeUploadContext makeNativeUploadContext(uintptr_t device, uintptr_t allocator)
+{
+    return upload::NativeUploadContext{
+        .device    = device,
+        .allocator = allocator,
+    };
+}
+
+VkBuffer toVkBuffer(const upload::NativeUploadBuffer& buffer)
+{
+    return reinterpret_cast<VkBuffer>(buffer.buffer);
+}
+
+VmaAllocation toVmaAllocation(const upload::NativeUploadBuffer& buffer)
+{
+    return reinterpret_cast<VmaAllocation>(buffer.allocation);
+}
+
+VkBufferUsageFlags2KHR toVkBufferUsage(rhi::BufferUsageFlags usage)
+{
+    VkBufferUsageFlags2KHR result = 0;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::vertex) != 0) result |= VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::index) != 0) result |= VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::transferSrc) != 0) result |= VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::transferDst) != 0) result |= VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::storage) != 0) result |= VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::uniform) != 0) result |= VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::indirect) != 0) result |= VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR;
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::shaderDeviceAddress) != 0) result |= VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR;
+    return result;
+}
 
 void updateWorldBounds(MeshRecord& record)
 {
@@ -106,10 +140,10 @@ void updateLocalBoundsFromInterleavedVertices(MeshRecord& record, std::span<cons
 
 }  // namespace
 
-void MeshPool::init(VkDevice device, VmaAllocator allocator, rhi::Device* rhiDevice,
+void MeshPool::init(uintptr_t backendDeviceToken, uintptr_t backendAllocatorToken, rhi::Device* rhiDevice,
                     upload::StaticBufferUploadPolicy staticUploadPolicy) {
-    m_device = device;
-    m_allocator = allocator;
+    m_backendDeviceToken = backendDeviceToken;
+    m_backendAllocatorToken = backendAllocatorToken;
     m_rhiDevice = rhiDevice;
     m_staticUploadPolicy = staticUploadPolicy;
 }
@@ -130,42 +164,49 @@ void MeshPool::deinit() {
 
     resetSharedBuffers();
 
-    m_device = VK_NULL_HANDLE;
-    m_allocator = nullptr;
+    m_backendDeviceToken = 0;
+    m_backendAllocatorToken = 0;
 }
 
 void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
-                                    VkDeviceSize requiredSize,
-                                    VkBufferUsageFlags2KHR usage,
-                                    VkCommandBuffer cmd)
+                                    uint64_t requiredSize,
+                                    rhi::BufferUsageFlags usage,
+                                    rhi::CommandBuffer& cmd)
 {
     if(requiredSize <= arena.capacity)
     {
         return;
     }
 
-    VkDeviceSize newCapacity = arena.capacity == 0 ? requiredSize : arena.capacity;
+    uint64_t newCapacity = arena.capacity == 0 ? requiredSize : arena.capacity;
     while(newCapacity < requiredSize)
     {
         newCapacity = std::max(newCapacity * 2, requiredSize);
     }
 
-    if(usage & VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR)
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::vertex) != 0)
     {
         newCapacity = std::max(newCapacity, kInitialSharedVertexCapacity);
     }
-    if(usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR)
+    if(static_cast<uint32_t>(usage & rhi::BufferUsageFlags::index) != 0)
     {
         newCapacity = std::max(newCapacity, kInitialSharedIndexCapacity);
     }
 
-    utils::Buffer newBuffer = upload::createStaticBuffer(m_device, m_allocator, newCapacity, usage);
-    const bool replacingVertexArena = (usage & VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR) != 0;
-    const bool replacingIndexArena = (usage & VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR) != 0;
-    if(arena.buffer.buffer != VK_NULL_HANDLE && arena.bytesUsed > 0)
+    upload::NativeUploadBuffer newBuffer =
+        upload::createStaticBuffer(makeNativeUploadContext(m_backendDeviceToken, m_backendAllocatorToken), newCapacity, toVkBufferUsage(usage));
+    const bool replacingVertexArena = static_cast<uint32_t>(usage & rhi::BufferUsageFlags::vertex) != 0;
+    const bool replacingIndexArena = static_cast<uint32_t>(usage & rhi::BufferUsageFlags::index) != 0;
+    if(!arena.buffer.isNull() && arena.bytesUsed > 0)
     {
-        const VkBufferCopy copyRegion{.size = arena.bytesUsed};
-        vkCmdCopyBuffer(cmd, arena.buffer.buffer, newBuffer.buffer, 1, &copyRegion);
+        ASSERT(m_rhiDevice != nullptr, "MeshPool RHI device is required for arena copy");
+        rhi::BufferHandle srcHandle = replacingVertexArena ? m_sharedVertexBufferRHI : m_sharedIndexBufferRHI;
+        rhi::BufferHandle dstHandle =
+            m_rhiDevice->registerExternalBuffer(newBuffer.buffer);
+        rhi::ComputeEncoder* copy = cmd.beginComputePass();
+        copy->copyBuffer(srcHandle, 0, dstHandle, 0, arena.bytesUsed);
+        cmd.endEncoding();
+        m_rhiDevice->destroyBuffer(dstHandle);
         m_stagingBuffers.push_back(arena.buffer);
     }
 
@@ -177,11 +218,11 @@ void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
         m_pool.forEachActive([&](MeshHandle, MeshRecord& record) {
             if(replacingVertexArena)
             {
-                record.setNativeVertexBuffer(newBuffer.buffer);
+                record.vertexBuffer = m_sharedVertexBufferRHI;
             }
             if(replacingIndexArena)
             {
-                record.setNativeIndexBuffer(newBuffer.buffer);
+                record.indexBuffer = m_sharedIndexBufferRHI;
             }
         });
 
@@ -190,7 +231,7 @@ void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
         // MeshPool owns the VMA lifetime, the registry only mirrors the native buffer.
         if(m_rhiDevice != nullptr)
         {
-            const uint64_t native = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(newBuffer.buffer));
+            const uint64_t native = newBuffer.buffer;
             const auto     bind   = [&](rhi::BufferHandle& rhiHandle) {
                 if(rhiHandle.isNull())
                 {
@@ -207,19 +248,19 @@ void MeshPool::ensureSharedCapacity(SharedBufferArena& arena,
     }
 }
 
-void MeshPool::reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd)
+void MeshPool::reserve(uint64_t additionalVertexBytes, uint64_t additionalIndexBytes, rhi::CommandBuffer& cmd)
 {
     ensureSharedCapacity(m_sharedVertexBuffer,
                          m_sharedVertexBuffer.bytesUsed + additionalVertexBytes,
-                         VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
+                         rhi::BufferUsageFlags::vertex | rhi::BufferUsageFlags::transferSrc,
                          cmd);
     ensureSharedCapacity(m_sharedIndexBuffer,
                          m_sharedIndexBuffer.bytesUsed + additionalIndexBytes,
-                         VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
+                         rhi::BufferUsageFlags::index | rhi::BufferUsageFlags::transferSrc,
                          cmd);
 }
 
-MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload) {
+MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, rhi::CommandBuffer& cmd, BatchUploadContext* batchUpload) {
     // Validate input
     if (meshData.positions.empty() || meshData.indices.empty()) {
         return kNullMeshHandle;
@@ -243,8 +284,8 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
 
     record.vertexBufferOffset = m_sharedVertexBuffer.bytesUsed;
     record.indexBufferOffset = m_sharedIndexBuffer.bytesUsed;
-    record.setNativeVertexBuffer(m_sharedVertexBuffer.buffer.buffer);
-    record.setNativeIndexBuffer(m_sharedIndexBuffer.buffer.buffer);
+    record.vertexBuffer = m_sharedVertexBufferRHI;
+    record.indexBuffer = m_sharedIndexBufferRHI;
 
     if(batchUpload != nullptr)
     {
@@ -253,14 +294,16 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
                                    record,
                                    std::span<uint8_t>(static_cast<uint8_t*>(vertexSlice.cpuPtr), vertexDataSize));
         batchUpload->recordBufferUpload(vertexSlice,
-                                        m_sharedVertexBuffer.buffer.buffer,
-                                        VkBufferCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize});
+                                        m_sharedVertexBufferRHI,
+                                        record.vertexBufferOffset,
+                                        vertexDataSize);
 
         const BatchUploadContext::Slice indexSlice = batchUpload->allocate(indexDataSize, alignof(uint32_t));
         std::memcpy(indexSlice.cpuPtr, meshData.indices.data(), indexDataSize);
         batchUpload->recordBufferUpload(indexSlice,
-                                        m_sharedIndexBuffer.buffer.buffer,
-                                        VkBufferCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize});
+                                        m_sharedIndexBufferRHI,
+                                        record.indexBufferOffset,
+                                        indexDataSize);
     }
     else
     {
@@ -271,16 +314,17 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
         const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()),
                                                     indexDataSize);
 
-        utils::Buffer vertexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, vertexBytes);
-        utils::Buffer indexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, indexBytes);
+        ASSERT(m_rhiDevice != nullptr, "MeshPool RHI device is required for non-batched upload");
+        rhi::BufferHandle vertexStagingBuffer = upload::createUploadStagingBuffer(*m_rhiDevice, vertexBytes);
+        rhi::BufferHandle indexStagingBuffer = upload::createUploadStagingBuffer(*m_rhiDevice, indexBytes);
 
-        const VkBufferCopy vertexCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize};
-        const VkBufferCopy indexCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize};
-        vkCmdCopyBuffer(cmd, vertexStagingBuffer.buffer, m_sharedVertexBuffer.buffer.buffer, 1, &vertexCopy);
-        vkCmdCopyBuffer(cmd, indexStagingBuffer.buffer, m_sharedIndexBuffer.buffer.buffer, 1, &indexCopy);
+        rhi::ComputeEncoder* copy = cmd.beginComputePass();
+        copy->copyBuffer(vertexStagingBuffer, 0, m_sharedVertexBufferRHI, record.vertexBufferOffset, vertexDataSize);
+        copy->copyBuffer(indexStagingBuffer, 0, m_sharedIndexBufferRHI, record.indexBufferOffset, indexDataSize);
+        cmd.endEncoding();
 
-        m_stagingBuffers.push_back(vertexStagingBuffer);
-        m_stagingBuffers.push_back(indexStagingBuffer);
+        m_rhiStagingBuffers.push_back(vertexStagingBuffer);
+        m_rhiStagingBuffers.push_back(indexStagingBuffer);
     }
 
     m_sharedVertexBuffer.bytesUsed += vertexDataSize;
@@ -291,7 +335,7 @@ MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cm
     return m_pool.emplace(std::move(record));
 }
 
-MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload)
+MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, rhi::CommandBuffer& cmd, BatchUploadContext* batchUpload)
 {
     if(meshData.interleavedVertexData.empty() || meshData.indices.empty() || meshData.vertexCount == 0) {
         return kNullMeshHandle;
@@ -315,8 +359,8 @@ MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, VkCommandBuffer c
 
     record.vertexBufferOffset = m_sharedVertexBuffer.bytesUsed;
     record.indexBufferOffset = m_sharedIndexBuffer.bytesUsed;
-    record.setNativeVertexBuffer(m_sharedVertexBuffer.buffer.buffer);
-    record.setNativeIndexBuffer(m_sharedIndexBuffer.buffer.buffer);
+    record.vertexBuffer = m_sharedVertexBufferRHI;
+    record.indexBuffer = m_sharedIndexBufferRHI;
     updateLocalBoundsFromInterleavedVertices(record, meshData.interleavedVertexData);
 
     if(batchUpload != nullptr)
@@ -324,30 +368,33 @@ MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, VkCommandBuffer c
         const BatchUploadContext::Slice vertexSlice = batchUpload->allocate(vertexDataSize, alignof(float));
         std::memcpy(vertexSlice.cpuPtr, meshData.interleavedVertexData.data(), vertexDataSize);
         batchUpload->recordBufferUpload(vertexSlice,
-                                        m_sharedVertexBuffer.buffer.buffer,
-                                        VkBufferCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize});
+                                        m_sharedVertexBufferRHI,
+                                        record.vertexBufferOffset,
+                                        vertexDataSize);
 
         const BatchUploadContext::Slice indexSlice = batchUpload->allocate(indexDataSize, alignof(uint32_t));
         std::memcpy(indexSlice.cpuPtr, meshData.indices.data(), indexDataSize);
         batchUpload->recordBufferUpload(indexSlice,
-                                        m_sharedIndexBuffer.buffer.buffer,
-                                        VkBufferCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize});
+                                        m_sharedIndexBufferRHI,
+                                        record.indexBufferOffset,
+                                        indexDataSize);
     }
     else
     {
         const std::span<const std::byte> vertexBytes(reinterpret_cast<const std::byte*>(meshData.interleavedVertexData.data()), vertexDataSize);
         const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()), indexDataSize);
 
-        utils::Buffer vertexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, vertexBytes);
-        utils::Buffer indexStagingBuffer = upload::createUploadStagingBuffer(m_device, m_allocator, indexBytes);
+        ASSERT(m_rhiDevice != nullptr, "MeshPool RHI device is required for non-batched upload");
+        rhi::BufferHandle vertexStagingBuffer = upload::createUploadStagingBuffer(*m_rhiDevice, vertexBytes);
+        rhi::BufferHandle indexStagingBuffer = upload::createUploadStagingBuffer(*m_rhiDevice, indexBytes);
 
-        const VkBufferCopy vertexCopy{.dstOffset = record.vertexBufferOffset, .size = vertexDataSize};
-        const VkBufferCopy indexCopy{.dstOffset = record.indexBufferOffset, .size = indexDataSize};
-        vkCmdCopyBuffer(cmd, vertexStagingBuffer.buffer, m_sharedVertexBuffer.buffer.buffer, 1, &vertexCopy);
-        vkCmdCopyBuffer(cmd, indexStagingBuffer.buffer, m_sharedIndexBuffer.buffer.buffer, 1, &indexCopy);
+        rhi::ComputeEncoder* copy = cmd.beginComputePass();
+        copy->copyBuffer(vertexStagingBuffer, 0, m_sharedVertexBufferRHI, record.vertexBufferOffset, vertexDataSize);
+        copy->copyBuffer(indexStagingBuffer, 0, m_sharedIndexBufferRHI, record.indexBufferOffset, indexDataSize);
+        cmd.endEncoding();
 
-        m_stagingBuffers.push_back(vertexStagingBuffer);
-        m_stagingBuffers.push_back(indexStagingBuffer);
+        m_rhiStagingBuffers.push_back(vertexStagingBuffer);
+        m_rhiStagingBuffers.push_back(indexStagingBuffer);
     }
 
     m_sharedVertexBuffer.bytesUsed += vertexDataSize;
@@ -362,17 +409,6 @@ void MeshPool::destroyMesh(MeshHandle handle) {
     MeshRecord* record = m_pool.tryGet(handle);
     if (record == nullptr) {
         return;
-    }
-
-    VkBuffer vertexBuffer = record->getNativeVertexBuffer();
-    VkBuffer indexBuffer = record->getNativeIndexBuffer();
-
-    if (record->vertexAllocation != nullptr && vertexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator, vertexBuffer, record->vertexAllocation);
-    }
-
-    if (record->indexAllocation != nullptr && indexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator, indexBuffer, record->indexAllocation);
     }
 
     m_pool.destroy(handle);
@@ -444,33 +480,24 @@ const MeshRecord* MeshPool::tryGet(MeshHandle handle) const {
     return m_pool.tryGet(handle);
 }
 
-uint64_t MeshPool::getSharedVertexBufferHandle() const
-{
-    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedVertexBuffer.buffer.buffer));
-}
-
-uint64_t MeshPool::getSharedIndexBufferHandle() const
-{
-    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_sharedIndexBuffer.buffer.buffer));
-}
-
 size_t MeshPool::getDeferredStagingBufferCount() const
 {
     return m_stagingBuffers.size();
 }
 
-VkDeviceSize MeshPool::getDeferredStagingBufferBytes() const
+uint64_t MeshPool::getDeferredStagingBufferBytes() const
 {
-    VkDeviceSize totalBytes = 0;
-    for(const utils::Buffer& buffer : m_stagingBuffers)
+    uint64_t totalBytes = 0;
+    const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(m_backendAllocatorToken);
+    for(const upload::NativeUploadBuffer& buffer : m_stagingBuffers)
     {
-        if(buffer.allocation == nullptr)
+        if(buffer.allocation == 0)
         {
             continue;
         }
 
         VmaAllocationInfo allocationInfo{};
-        vmaGetAllocationInfo(m_allocator, buffer.allocation, &allocationInfo);
+        vmaGetAllocationInfo(allocator, toVmaAllocation(buffer), &allocationInfo);
         totalBytes += allocationInfo.size;
     }
 
@@ -479,13 +506,14 @@ VkDeviceSize MeshPool::getDeferredStagingBufferBytes() const
 
 void MeshPool::resetSharedBuffers()
 {
-    if(m_sharedVertexBuffer.buffer.buffer != VK_NULL_HANDLE)
+    const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(m_backendAllocatorToken);
+    if(!m_sharedVertexBuffer.buffer.isNull())
     {
-        vmaDestroyBuffer(m_allocator, m_sharedVertexBuffer.buffer.buffer, m_sharedVertexBuffer.buffer.allocation);
+        vmaDestroyBuffer(allocator, toVkBuffer(m_sharedVertexBuffer.buffer), toVmaAllocation(m_sharedVertexBuffer.buffer));
     }
-    if(m_sharedIndexBuffer.buffer.buffer != VK_NULL_HANDLE)
+    if(!m_sharedIndexBuffer.buffer.isNull())
     {
-        vmaDestroyBuffer(m_allocator, m_sharedIndexBuffer.buffer.buffer, m_sharedIndexBuffer.buffer.allocation);
+        vmaDestroyBuffer(allocator, toVkBuffer(m_sharedIndexBuffer.buffer), toVmaAllocation(m_sharedIndexBuffer.buffer));
     }
     m_sharedVertexBuffer = {};
     m_sharedIndexBuffer = {};
@@ -499,13 +527,32 @@ void MeshPool::resetSharedBuffers()
     m_sharedIndexBufferRHI = {};
 }
 
+void MeshPool::deferStagingBuffer(rhi::BufferHandle buffer)
+{
+    if(!buffer.isNull())
+    {
+        m_rhiStagingBuffers.push_back(buffer);
+    }
+}
+
 void MeshPool::freeStagingBuffers() {
     for (auto& buffer : m_stagingBuffers) {
-        if (buffer.buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(m_allocator, buffer.buffer, buffer.allocation);
+        if (!buffer.isNull()) {
+            vmaDestroyBuffer(reinterpret_cast<VmaAllocator>(m_backendAllocatorToken), toVkBuffer(buffer), toVmaAllocation(buffer));
         }
     }
     m_stagingBuffers.clear();
+    if(m_rhiDevice != nullptr)
+    {
+        for(rhi::BufferHandle buffer : m_rhiStagingBuffers)
+        {
+            if(!buffer.isNull())
+            {
+                m_rhiDevice->destroyBuffer(buffer);
+            }
+        }
+    }
+    m_rhiStagingBuffers.clear();
 }
 
 }  // namespace demo

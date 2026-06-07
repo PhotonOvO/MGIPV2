@@ -2,111 +2,27 @@
 
 namespace demo {
 
-bool DrawStreamDecoder::decode(const DrawStream& stream, std::vector<DecodedDraw>& outDraws) const
+bool DrawStreamDecoder::decode(const DrawStream& stream, std::vector<DecodedDraw>& outDraws) const  // Debug/compat only.
 {
+  // Debug/compat path only. Hot recording should use forEachDecodedDraw visitor decode.
   outDraws.clear();
-
-  State    currentState{};
-  bool     hasPipeline{false};
-  bool     hasMaterial{false};
-  bool     hasMesh{false};
-  bool     hasDynamicBuffer{false};
-  bool     hasDynamicOffset{false};
-  uint32_t pendingDirtyMask{0};
-
-  for(const StreamEntry& entry : stream)
+  if(!forEachDecodedDraw(stream, [&outDraws](const DecodedDraw& decodedDraw)
   {
-    switch(entry.type)
-    {
-      case StreamEntryType::setPipeline:
-        currentState.pipeline = entry.payload.pipeline;
-        hasPipeline           = true;
-        pendingDirtyMask |= kDrawStreamDirtyPipeline;
-        break;
-      case StreamEntryType::setMaterial:
-        currentState.materialIndex = entry.payload.materialIndex;
-        hasMaterial                = true;
-        pendingDirtyMask |= kDrawStreamDirtyMaterial;
-        break;
-      case StreamEntryType::setMesh:
-        currentState.mesh = entry.payload.mesh;
-        hasMesh           = true;
-        pendingDirtyMask |= kDrawStreamDirtyMesh;
-        break;
-      case StreamEntryType::setDynamicBuffer:
-        currentState.dynamicBufferIndex = entry.payload.dynamicBufferIndex;
-        hasDynamicBuffer                = true;
-        pendingDirtyMask |= kDrawStreamDirtyDynamicBuffer;
-        break;
-      case StreamEntryType::setDynamicOffset:
-        currentState.dynamicOffset = entry.payload.dynamicOffset;
-        hasDynamicOffset           = true;
-        pendingDirtyMask |= kDrawStreamDirtyDynamicOffset;
-        break;
-      case StreamEntryType::draw: {
-        if(!(hasPipeline && hasMaterial && hasMesh && hasDynamicBuffer && hasDynamicOffset))
-        {
-          outDraws.clear();
-          return false;
-        }
-        if(entry.payload.draw.dirtyMask != pendingDirtyMask)
-        {
-          outDraws.clear();
-          return false;
-        }
-
-        DecodedDraw decodedDraw{};
-        decodedDraw.state         = currentState;
-        decodedDraw.vertexOffset  = entry.payload.draw.vertexOffset;
-        decodedDraw.vertexCount   = entry.payload.draw.vertexCount;
-        decodedDraw.instanceCount = entry.payload.draw.instanceCount;
-        decodedDraw.isIndexed     = false;
-        outDraws.push_back(decodedDraw);
-        pendingDirtyMask = 0;
-      }
-      break;
-      case StreamEntryType::drawIndexed: {
-        if(!(hasPipeline && hasMaterial && hasMesh && hasDynamicBuffer && hasDynamicOffset))
-        {
-          outDraws.clear();
-          return false;
-        }
-        if(entry.payload.drawIndexed.dirtyMask != pendingDirtyMask)
-        {
-          outDraws.clear();
-          return false;
-        }
-
-        DecodedDraw decodedDraw{};
-        decodedDraw.state              = currentState;
-        decodedDraw.isIndexed          = true;
-        decodedDraw.indexCount         = entry.payload.drawIndexed.indexCount;
-        decodedDraw.instanceCount      = entry.payload.drawIndexed.instanceCount;
-        decodedDraw.firstIndex         = entry.payload.drawIndexed.firstIndex;
-        decodedDraw.vertexOffsetIndexed = entry.payload.drawIndexed.vertexOffset;
-        decodedDraw.firstInstance      = entry.payload.drawIndexed.firstInstance;
-        outDraws.push_back(decodedDraw);
-        pendingDirtyMask = 0;
-      }
-      break;
-    }
+    outDraws.push_back(decodedDraw);
+  }))
+  {
+    outDraws.clear();
+    return false;
   }
 
   return true;
 }
 
-bool DrawStreamDecoder::decodeToDrawPackets(const DrawStream& stream, std::vector<DrawPacket>& outPackets) const
+bool DrawStreamDecoder::decodeToDrawPackets(const DrawStream& stream, std::vector<DrawPacket>& outPackets) const  // Debug/compat only.
 {
-  std::vector<DecodedDraw> decodedDraws;
-  if(!decode(stream, decodedDraws))
-  {
-    outPackets.clear();
-    return false;
-  }
-
+  // Debug/compat path only. Main draw recording must not materialize DrawPacket arrays.
   outPackets.clear();
-  outPackets.reserve(decodedDraws.size());
-  for(const DecodedDraw& decodedDraw : decodedDraws)
+  if(!forEachDecodedDraw(stream, [&outPackets](const DecodedDraw& decodedDraw)
   {
     DrawPacket packet{};
     packet.pipeline           = decodedDraw.state.pipeline;
@@ -124,6 +40,10 @@ bool DrawStreamDecoder::decodeToDrawPackets(const DrawStream& stream, std::vecto
     packet.vertexOffsetIndexed = decodedDraw.vertexOffsetIndexed;
     packet.firstInstance      = decodedDraw.firstInstance;
     outPackets.push_back(packet);
+  }))
+  {
+    outPackets.clear();
+    return false;
   }
 
   return true;

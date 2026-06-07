@@ -4,11 +4,10 @@
 // results, debug options, etc.). Split out of RenderDevice.h so passes and other
 // consumers can depend on the data types without pulling in the full device header.
 
-#include "../common/Common.h"
 #include "../common/Handles.h"
 #include "../shaders/shader_io.h"
+#include "../rhi/RHIHandles.h"
 #include "../rhi/RHITypes.h"
-#include "../rhi/RHICommandList.h"
 #include "../scene/SceneLight.h"
 #include "../scene/SceneAsset.h"
 #include "../loader/GltfLoader.h"
@@ -25,6 +24,19 @@
 namespace demo {
 
 struct SceneUploadResult;
+
+using OpaqueGpuBufferHandle = uintptr_t;
+
+struct UploadBufferRecord
+{
+  uintptr_t buffer{0};
+  uintptr_t allocation{0};
+  uintptr_t address{0};
+  void*     mapped{nullptr};
+  rhi::BufferHandle rhiHandle{};
+
+  [[nodiscard]] bool isNull() const { return buffer == 0; }
+};
 
 struct DirectionalLightSettings
 {
@@ -132,9 +144,9 @@ struct GPUDrivenSceneView
   uint64_t                           gpuSceneObjectBufferAddress{0};
   // Phase 1 authoritative object source for GPU culling and indirect command generation.
   uint64_t                           gpuCullObjectBufferAddress{0};
-  VkBuffer                           gpuCullObjectBuffer{VK_NULL_HANDLE};
-  VkBuffer                           gpuCullMeshletBuffer{VK_NULL_HANDLE};
-  VkBuffer                           gpuCullSceneObjectBuffer{VK_NULL_HANDLE};
+  OpaqueGpuBufferHandle             gpuCullObjectBuffer{0};
+  OpaqueGpuBufferHandle             gpuCullMeshletBuffer{0};
+  OpaqueGpuBufferHandle             gpuCullSceneObjectBuffer{0};
   uint32_t                           objectCount{0};
   const shaderio::GPUCullObject*     overlayObjects{nullptr};
   uint32_t                           overlayObjectCount{0};
@@ -148,60 +160,60 @@ struct GPUDrivenSceneView
   uint32_t                           drawMeshHandleCount{0};
   const size_t*                      shadowCasterMeshIndices{nullptr};
   uint32_t                           shadowCasterCount{0};
-  VkBuffer                           shadowPackedVertexBuffer{VK_NULL_HANDLE};
-  VkBuffer                           shadowPackedIndexBuffer{VK_NULL_HANDLE};
+  OpaqueGpuBufferHandle             shadowPackedVertexBuffer{0};
+  OpaqueGpuBufferHandle             shadowPackedIndexBuffer{0};
   const ShadowPackedMesh*            shadowPackedMeshes{nullptr};
   uint32_t                           shadowPackedMeshCount{0};
   glm::vec3                          sceneBoundsMin{0.0f};
   glm::vec3                          sceneBoundsMax{0.0f};
   bool                               sceneBoundsValid{false};
-  VkFormat                           sceneDepthFormat{VK_FORMAT_UNDEFINED};
-  VkImage                            sceneDepthImage{VK_NULL_HANDLE};
+  rhi::TextureFormat                sceneDepthFormat{rhi::TextureFormat::undefined};
+  rhi::TextureHandle                sceneDepthImage{};
   rhi::TextureViewHandle             sceneDepthView{};
-  VkExtent2D                         sceneDepthExtent{};
-  std::array<VkImage, kPackedGBufferTargetCount>     gbufferImages{};
+  rhi::Extent2D                     sceneDepthExtent{};
+  std::array<rhi::TextureHandle, kPackedGBufferTargetCount>     gbufferImages{};
   std::array<rhi::TextureViewHandle, kPackedGBufferTargetCount> gbufferViews{};
-  VkImage                            outputImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                outputImage{};
   rhi::TextureViewHandle             outputView{};
-  VkImage                            sceneColorHdrImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                sceneColorHdrImage{};
   rhi::TextureViewHandle             sceneColorHdrView{};
-  VkImage                            bloomHalfImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                bloomHalfImage{};
   rhi::TextureViewHandle             bloomHalfView{};
-  VkExtent2D                         bloomHalfExtent{};
-  VkImage                            bloomQuarterImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomHalfExtent{};
+  rhi::TextureHandle                bloomQuarterImage{};
   rhi::TextureViewHandle             bloomQuarterView{};
-  VkExtent2D                         bloomQuarterExtent{};
-  VkImage                            bloomEighthImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomQuarterExtent{};
+  rhi::TextureHandle                bloomEighthImage{};
   rhi::TextureViewHandle             bloomEighthView{};
-  VkExtent2D                         bloomEighthExtent{};
-  VkImage                            bloomSixteenthImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomEighthExtent{};
+  rhi::TextureHandle                bloomSixteenthImage{};
   rhi::TextureViewHandle             bloomSixteenthView{};
-  VkExtent2D                         bloomSixteenthExtent{};
-  VkImage                            bloomThirtySecondImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomSixteenthExtent{};
+  rhi::TextureHandle                bloomThirtySecondImage{};
   rhi::TextureViewHandle             bloomThirtySecondView{};
-  VkExtent2D                         bloomThirtySecondExtent{};
-  VkImage                            bloomUpsampleSixteenthImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomThirtySecondExtent{};
+  rhi::TextureHandle                bloomUpsampleSixteenthImage{};
   rhi::TextureViewHandle             bloomUpsampleSixteenthView{};
-  VkExtent2D                         bloomUpsampleSixteenthExtent{};
-  VkImage                            bloomUpsampleEighthImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomUpsampleSixteenthExtent{};
+  rhi::TextureHandle                bloomUpsampleEighthImage{};
   rhi::TextureViewHandle             bloomUpsampleEighthView{};
-  VkExtent2D                         bloomUpsampleEighthExtent{};
-  VkImage                            bloomUpsampleQuarterImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomUpsampleEighthExtent{};
+  rhi::TextureHandle                bloomUpsampleQuarterImage{};
   rhi::TextureViewHandle             bloomUpsampleQuarterView{};
-  VkExtent2D                         bloomUpsampleQuarterExtent{};
-  VkImage                            bloomOutputImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomUpsampleQuarterExtent{};
+  rhi::TextureHandle                bloomOutputImage{};
   rhi::TextureViewHandle             bloomOutputView{};
-  VkExtent2D                         bloomOutputExtent{};
-  VkImage                            colorGradingLutImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     bloomOutputExtent{};
+  rhi::TextureHandle                colorGradingLutImage{};
   rhi::TextureViewHandle             colorGradingLutView{};
-  VkExtent2D                         colorGradingLutExtent{};
-  VkImage                            velocityImage{VK_NULL_HANDLE};
+  rhi::Extent2D                     colorGradingLutExtent{};
+  rhi::TextureHandle                velocityImage{};
   rhi::TextureViewHandle             velocityView{};
-  VkImage                            sceneColorHistoryReadImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                sceneColorHistoryReadImage{};
   rhi::TextureViewHandle             sceneColorHistoryReadView{};
-  VkImage                            sceneColorHistoryWriteImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                sceneColorHistoryWriteImage{};
   rhi::TextureViewHandle             sceneColorHistoryWriteView{};
-  VkImage                            depthPyramidImage{VK_NULL_HANDLE};
+  rhi::TextureHandle                depthPyramidImage{};
   const rhi::TextureViewHandle*      depthPyramidMipViews{nullptr};
   uint32_t                           depthPyramidMipCount{0};
   TextureHandle                      depthPyramidSourceDepth{};
@@ -216,7 +228,7 @@ struct RenderParams
   float                                  timeSeconds{0.0F};
   MaterialHandle                         materialHandle{};
   rhi::ClearColorValue                   clearColor{0.2F, 0.2F, 0.3F, 1.0F};
-  std::function<void(rhi::CommandList&)> recordUi;
+  std::function<void()>                     recordUi;
   glm::vec4                              viewportImageRect{0.0f};  // x, y, width, height in ImGui screen space
   // glTF model data for rendering
   const SceneUploadResult*               gltfModel{nullptr};
@@ -269,8 +281,8 @@ struct SceneUploadResult
   glm::vec3 lastSortCameraPos{0.0f};           // Camera position used for last sort
   bool transparentSortDirty{true};              // Force re-sort on first frame
 
-  utils::Buffer                 shadowPackedVertexBuffer{};
-  utils::Buffer                 shadowPackedIndexBuffer{};
+  UploadBufferRecord            shadowPackedVertexBuffer{};
+  UploadBufferRecord            shadowPackedIndexBuffer{};
   std::vector<demo::ShadowPackedMesh> shadowPackedMeshes;
 };
 

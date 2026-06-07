@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <string>
 
-#include "../../common/TracyProfiling.h"
 #include "../../common/logger.h"
 #include "volk.h"
 #include "vulkan/vk_enum_string_helper.h"
@@ -181,7 +180,6 @@ AcquireResult VulkanSwapchain::acquireNextImage()
   // pacing the app under FIFO or waiting for an image to recycle.
   VkResult result = VK_SUCCESS;
   {
-    TRACY_ZONE_SCOPED("vkAcquireNextImageKHR");
     result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
                                    frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
   }
@@ -244,7 +242,6 @@ PresentResult VulkanSwapchain::present()
 
   VkResult result = VK_SUCCESS;
   {
-    TRACY_ZONE_SCOPED("vkQueuePresentKHR");
     result = vkQueuePresentKHR(m_queue, &presentInfo);
   }
   PresentResult  presentResult{};
@@ -297,17 +294,17 @@ uint32_t VulkanSwapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t VulkanSwapchain::getNativeSwapchain() const
+uint64_t VulkanSwapchain::getBackendSwapchainHandle() const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(m_swapchain));
 }
 
-uint64_t VulkanSwapchain::getNativeImageView(uint32_t imageIndex) const
+uint64_t VulkanSwapchain::getBackendImageViewHandle(uint32_t imageIndex) const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(nativeImageView(imageIndex)));
 }
 
-uint64_t VulkanSwapchain::getNativeImage(uint32_t imageIndex) const
+uint64_t VulkanSwapchain::getBackendImageHandle(uint32_t imageIndex) const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(nativeImage(imageIndex)));
 }

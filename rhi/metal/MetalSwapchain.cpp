@@ -148,7 +148,7 @@ uint32_t MetalSwapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t MetalSwapchain::getNativeSwapchain() const
+uint64_t MetalSwapchain::getBackendSwapchainHandle() const
 {
   // TODO: Metal implementation
   // NOTES:
@@ -158,7 +158,7 @@ uint64_t MetalSwapchain::getNativeSwapchain() const
   return 0;
 }
 
-uint64_t MetalSwapchain::getNativeImageView(uint32_t imageIndex) const
+uint64_t MetalSwapchain::getBackendImageViewHandle(uint32_t imageIndex) const
 {
   // TODO: Metal implementation
   // NOTES:
@@ -168,7 +168,7 @@ uint64_t MetalSwapchain::getNativeImageView(uint32_t imageIndex) const
   return 0;
 }
 
-uint64_t MetalSwapchain::getNativeImage(uint32_t imageIndex) const
+uint64_t MetalSwapchain::getBackendImageHandle(uint32_t imageIndex) const
 {
   // TODO: Metal implementation
   // NOTES:

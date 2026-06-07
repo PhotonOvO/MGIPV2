@@ -2,7 +2,6 @@
 
 #include <cassert>
 
-#include "../../common/TracyProfiling.h"
 #include "volk.h"
 
 namespace demo {
@@ -69,7 +68,6 @@ void VulkanFence::wait(uint64_t timeout)
   ASSERT(m_device != VK_NULL_HANDLE, "VulkanFence::wait requires VkDevice");
   ASSERT(m_fence != VK_NULL_HANDLE, "VulkanFence::wait requires VkFence");
   {
-    TRACY_ZONE_SCOPED("vkWaitForFences");
     checkVk(vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, timeout), "VulkanFence::wait failed");
   }
 }
@@ -91,7 +89,7 @@ bool VulkanFence::isSignaled() const
   return result == VK_SUCCESS;
 }
 
-uint64_t VulkanFence::getNativeHandle() const
+uint64_t VulkanFence::getBackendHandle() const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(m_fence));
 }
@@ -168,7 +166,6 @@ void VulkanTimelineSemaphore::wait(uint64_t value, uint64_t timeout)
       .pValues        = &value,
   };
   {
-    TRACY_ZONE_SCOPED("vkWaitSemaphores");
     checkVk(vkWaitSemaphores(m_device, &waitInfo, timeout), "VulkanTimelineSemaphore::wait failed");
   }
 }
@@ -183,7 +180,7 @@ uint64_t VulkanTimelineSemaphore::getCurrentValue() const
   return currentValue;
 }
 
-uint64_t VulkanTimelineSemaphore::getNativeHandle() const
+uint64_t VulkanTimelineSemaphore::getBackendHandle() const
 {
   return toNativeU64(reinterpret_cast<uintptr_t>(m_semaphore));
 }

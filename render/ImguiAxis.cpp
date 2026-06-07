@@ -11,6 +11,8 @@
 
 #include "../common/Common.h"
 
+#include <imgui.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>

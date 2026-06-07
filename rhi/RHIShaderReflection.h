@@ -193,8 +193,8 @@ struct ShaderReflectionData
   // Total size of push constant block across all stages
   uint32_t pushConstantSize = 0;
 
-  // Get total number of descriptor sets
-  uint32_t getDescriptorSetCount() const
+  // Get total number of logical argument sets
+  uint32_t getArgumentSetCount() const
   {
     uint32_t maxSet = 0;
     for(const auto& binding : resourceBindings)

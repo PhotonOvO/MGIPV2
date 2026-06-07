@@ -54,8 +54,8 @@ struct ArgumentBuffer {
 
 | RHI Concept | Metal Implementation |
 |-------------|---------------------|
-| BindTableLayout | MTLArgumentEncoder |
-| BindTable | MTLBuffer (containing resource pointers) |
+| DescriptorTableLayout | MTLArgumentEncoder |
+| DescriptorTable | MTLBuffer (containing resource pointers) |
 | Logical Index | Array index in argument buffer |
 | Update | MTLArgumentEncoder setTexture/setBuffer/setSampler |
 

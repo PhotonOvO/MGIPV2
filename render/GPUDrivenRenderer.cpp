@@ -1,9 +1,9 @@
 #include "GPUDrivenRenderer.h"
+#include "ArgumentTables.h"
 #include "BatchUploadContext.h"
 #include "UploadUtils.h"
-#include "../common/TracyProfiling.h"
+#include "RHIFormatBridge.h"
 #include "../loader/Ktx2Loader.h"
-#include "../rhi/vulkan/VulkanPipelines.h"
 
 #include <algorithm>
 #include <cstring>
@@ -59,6 +59,11 @@ uint64_t estimateImageBytes(VkExtent2D extent, uint32_t bytesPerPixel)
 {
   return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height) * bytesPerPixel;
 }
+
+uint64_t estimateImageBytes(rhi::Extent2D extent, uint32_t bytesPerPixel)
+{
+  return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height) * bytesPerPixel;
+}
 constexpr const char* kGPUDrivenDefaultIBLEnvironmentPath = "resources/environment/lilienstein_4k.ktx2";
 
 uint32_t bytesPerPixelForFormat(VkFormat format)
@@ -78,10 +83,80 @@ uint32_t bytesPerPixelForFormat(VkFormat format)
   }
 }
 
+uint32_t bytesPerPixelForFormat(rhi::TextureFormat format)
+{
+  switch(format)
+  {
+    case rhi::TextureFormat::bgra8Unorm:
+    case rhi::TextureFormat::rgba8Unorm:
+      return 4u;
+    case rhi::TextureFormat::rg16Sfloat:
+      return 4u;
+    case rhi::TextureFormat::rgba16Sfloat:
+      return 8u;
+    default:
+      return 0u;
+  }
+}
+
 uint64_t estimateTextureBytes(VkExtent2D extent, VkFormat format)
 {
   return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
          * static_cast<uint64_t>(bytesPerPixelForFormat(format));
+}
+
+uint64_t estimateTextureBytes(rhi::Extent2D extent, rhi::TextureFormat format)
+{
+  return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
+         * static_cast<uint64_t>(bytesPerPixelForFormat(format));
+}
+
+VkExtent2D toVkExtent(rhi::Extent2D extent)
+{
+  return {extent.width, extent.height};
+}
+
+uint64_t resolveNativeTexture(rhi::Device& device, rhi::TextureHandle handle)
+{
+  return handle.isNull() ? 0u : device.resolveTextureBackendHandle(handle);
+}
+
+const char* formatDisplayName(VkFormat format)
+{
+  switch(format)
+  {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+      return "B8G8R8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_UNORM:
+      return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:
+      return "R8G8B8A8_SRGB";
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return "R16G16B16A16_SFLOAT";
+    case VK_FORMAT_UNDEFINED:
+      return "Undefined";
+    default:
+      return "Other";
+  }
+}
+
+const char* formatDisplayName(rhi::TextureFormat format)
+{
+  switch(format)
+  {
+    case rhi::TextureFormat::bgra8Unorm:
+      return "B8G8R8A8_UNORM";
+    case rhi::TextureFormat::rgba8Unorm:
+      return "R8G8B8A8_UNORM";
+    case rhi::TextureFormat::rgba16Sfloat:
+      return "R16G16B16A16_SFLOAT";
+    case rhi::TextureFormat::rg16Sfloat:
+      return "R16G16_SFLOAT";
+    case rhi::TextureFormat::undefined:
+      return "Undefined";
+    default:
+      return "Other";
+  }
 }
 
 glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
@@ -265,11 +340,27 @@ utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator alloc
 
 utils::Buffer createDeviceLocalStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
 {
-  return upload::createStaticBuffer(device,
-                                    allocator,
-                                    size,
-                                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR
-                                        | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR);
+  const upload::NativeUploadContext context{
+      .device    = reinterpret_cast<uintptr_t>(device),
+      .allocator = reinterpret_cast<uintptr_t>(allocator),
+  };
+  const upload::NativeUploadBuffer buffer =
+      upload::createStaticBuffer(context,
+                                 size,
+                                 VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR
+                                     | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR);
+  return utils::Buffer{
+      .buffer     = reinterpret_cast<VkBuffer>(buffer.buffer),
+      .allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
+  };
+}
+
+utils::Buffer toUtilsBuffer(const upload::NativeUploadBuffer& buffer)
+{
+  return utils::Buffer{
+      .buffer     = reinterpret_cast<VkBuffer>(buffer.buffer),
+      .allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
+  };
 }
 
 void destroyBuffer(VmaAllocator allocator, utils::Buffer& buffer)
@@ -343,15 +434,19 @@ constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
 void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 {
   m_renderer.init(window, surface, vSync);
-  m_sceneRegistry.init(getNativeDeviceHandle(), getAllocatorHandle());
+  m_sceneRegistry.init(getBackendDeviceToken(),
+                       getAllocatorToken(),
+                       &m_renderer.getRHIDevice());
   initLightingResources();
   initIBLResources();
   m_enableExperimentalMeshletPath = kEnableExperimentalMeshletPath;
   if(m_enableExperimentalMeshletPath)
   {
-    m_meshletBuffer.init(getNativeDeviceHandle(), getAllocatorHandle(), &m_renderer.getRHIDevice());
+    m_meshletBuffer.init(getBackendDeviceToken(),
+                         getAllocatorToken(),
+                         &m_renderer.getRHIDevice());
   }
-  m_hiZDepthPyramid.init(getRHIDevice(), getAllocatorHandle(), getSwapchainImageCount(), getSceneExtent());
+  m_hiZDepthPyramid.init(getRHIDevice(), reinterpret_cast<VmaAllocator>(getAllocatorToken()), getSwapchainImageCount(), toVkExtent(getSceneExtent()));
 
   m_depthPrepass = std::make_unique<GPUDrivenDepthPrepass>(this);
   m_depthPyramidPass = std::make_unique<GPUDrivenDepthPyramidPass>(this);
@@ -408,7 +503,7 @@ void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
   bindStaticPassResources();
   m_passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
+      .backendImageToken  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
@@ -473,13 +568,13 @@ void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
 void GPUDrivenRenderer::resize(rhi::Extent2D size)
 {
   m_renderer.resize(size);
-  m_hiZDepthPyramid.resize(getSceneExtent());
+  m_hiZDepthPyramid.resize(toVkExtent(getSceneExtent()));
   resizePhase7Resources();
   m_passExecutor.clearResourceBindings();
   bindStaticPassResources();
   m_passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
+      .backendImageToken  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
@@ -489,23 +584,18 @@ void GPUDrivenRenderer::resize(rhi::Extent2D size)
 
 void GPUDrivenRenderer::render(const RenderParams& params)
 {
-  TRACY_ZONE_SCOPED("GPUDrivenRenderer::render");
 
   const bool sceneRenderingSuspended = m_suspendSceneRendering;
   {
-    TRACY_ZONE_SCOPED("GPUDriven::HiZResize");
-    m_hiZDepthPyramid.resize(getSceneExtent());
+    m_hiZDepthPyramid.resize(toVkExtent(getSceneExtent()));
   }
   {
-    TRACY_ZONE_SCOPED("GPUDriven::FlushSceneUploads");
     flushPendingSceneUploads();
   }
   {
-    TRACY_ZONE_SCOPED("GPUDriven::RefreshSceneView");
     refreshSceneView();
   }
   {
-    TRACY_ZONE_SCOPED("GPUDriven::UploadPersistentDrawData");
     uploadPersistentDrawData();
   }
   const uint32_t safeObjectCount = getSafePersistentObjectCount();
@@ -544,10 +634,8 @@ void GPUDrivenRenderer::render(const RenderParams& params)
   if(kEnableShippingVisibilitySort && !sceneRenderingSuspended)
   {
     {
-      TRACY_ZONE_SCOPED("GPUDriven::BuildVisibilitySortInputs");
       if(m_cachedStaticVisibilitySortTopologyVersion != m_sceneTopologyVersion)
       {
-        TRACY_ZONE_SCOPED("GPUDriven::BuildStaticVisibilitySortInputs");
         m_cachedStaticVisibilitySortObjects.clear();
         m_cachedStaticVisibilitySortKeys.clear();
         const size_t staticSortInputCount = m_opaqueDrawIndices.size() + m_alphaTestDrawIndices.size();
@@ -627,7 +715,6 @@ void GPUDrivenRenderer::render(const RenderParams& params)
               : nextPowerOfTwo(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
     }
     {
-      TRACY_ZONE_SCOPED("GPUDriven::PrepareVisibilitySortInputs");
       prepareVisibilitySortInputs(frameIndex);
     }
     if(frameIndex < m_visibilitySortFrames.size())
@@ -635,11 +722,11 @@ void GPUDrivenRenderer::render(const RenderParams& params)
       const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
       m_passExecutor.bindBuffer({
           .handle       = kPassGPUDrivenSortKeyBufferHandle,
-          .nativeBuffer = reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
+          .backendBufferToken = reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
       });
       m_passExecutor.bindBuffer({
           .handle       = kPassGPUDrivenSortValueBufferHandle,
-          .nativeBuffer = reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
+          .backendBufferToken = reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
       });
     }
   }
@@ -649,11 +736,11 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     m_visibilitySortInputKeys.clear();
     m_passExecutor.bindBuffer({
         .handle       = kPassGPUDrivenSortKeyBufferHandle,
-        .nativeBuffer = 0,
+        .backendBufferToken = 0,
     });
     m_passExecutor.bindBuffer({
         .handle       = kPassGPUDrivenSortValueBufferHandle,
-        .nativeBuffer = 0,
+        .backendBufferToken = 0,
     });
   }
 
@@ -677,7 +764,7 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     m_temporalCameraUniforms.unjitteredInverseViewProjection = unjitteredCamera.inverseViewProjection;
     m_temporalCameraUniforms.prevUnjitteredViewProjection = m_previousCameraUniforms.viewProjection;
     m_temporalCameraUniforms.prevJitteredViewProjection = m_previousJitteredViewProjection;
-    const VkExtent2D temporalExtent = getSceneExtent();
+    const rhi::Extent2D temporalExtent = getSceneExtent();
     if(gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
        && temporalExtent.width > 0u && temporalExtent.height > 0u)
     {
@@ -695,7 +782,6 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     gpuParams.cameraUniforms = &m_temporalCameraUniforms;
   }
   {
-    TRACY_ZONE_SCOPED("GPUDriven::BuildRenderParams");
     if(isMeshletRenderingActive())
     {
       gpuParams.debugOptions.enableGPUOcclusionCulling = params.debugOptions.enableGPUMeshletOcclusionCulling;
@@ -733,35 +819,33 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     updatePhase7Descriptors(frameIndex);
     m_passExecutor.bindTexture({
         .handle       = kPassVelocityHandle,
-        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.velocityImage),
+        .backendImageToken  = resolveNativeTexture(getRHIDevice(), m_sceneView.velocityImage),
         .aspect       = rhi::TextureAspect::color,
         .initialState = rhi::ResourceState::General,
         .isSwapchain  = false,
     });
     m_passExecutor.bindTexture({
         .handle       = kPassSceneColorHistoryReadHandle,
-        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHistoryReadImage),
+        .backendImageToken  = resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryReadImage),
         .aspect       = rhi::TextureAspect::color,
         .initialState = rhi::ResourceState::General,
         .isSwapchain  = false,
     });
     m_passExecutor.bindTexture({
         .handle       = kPassSceneColorHistoryWriteHandle,
-        .nativeImage  = reinterpret_cast<uint64_t>(m_sceneView.sceneColorHistoryWriteImage),
+        .backendImageToken  = resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryWriteImage),
         .aspect       = rhi::TextureAspect::color,
         .initialState = rhi::ResourceState::General,
         .isSwapchain  = false,
     });
   }
   {
-    TRACY_ZONE_SCOPED("GPUDriven::submitPassGraph");
     submitPassGraph(gpuParams);
   }
-  const VkDescriptorSet gpuCullingDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
+  const rhi::ArgumentTableHandle gpuCullingArgumentTable = getGPUCullingArgumentTable(frameIndex);
   {
-    TRACY_ZONE_SCOPED("GPUDriven::PostSubmitStats");
-    m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
+    m_sceneView.depthPyramidImage =
+        getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()));
     m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
     m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
     m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
@@ -775,7 +859,8 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         m_hiZDepthPyramid.isValid()
         && m_hiZDepthPyramid.getSourceDepth().index == kPassSceneDepthHandle.index
         && m_hiZDepthPyramid.getSourceDepth().generation == kPassSceneDepthHandle.generation
-        && m_hiZDepthPyramid.getLastBoundSet() == gpuCullingDescriptorSet
+        && m_hiZDepthPyramid.getLastBoundArgumentTable().index == gpuCullingArgumentTable.index
+        && m_hiZDepthPyramid.getLastBoundArgumentTable().generation == gpuCullingArgumentTable.generation
         && m_hiZDepthPyramid.getLastBoundBinding() == 5;
     const HiZDepthPyramid::MobilePolicy& hiZPolicy = m_hiZDepthPyramid.getMobilePolicy();
     const VkExtent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
@@ -807,10 +892,10 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .cameraDeltaDistance = m_lastHiZCameraDeltaDistance,
         .fastCameraFallbackTriggered = m_lastHiZFastCameraFallbackTriggered,
     };
-    const VkExtent2D postExtent = getSceneExtent();
-    const VkFormat outputFormat = getOutputTextureFormat();
-    const VkFormat sceneColorFormat = getSceneColorHdrFormat();
-    constexpr VkFormat kRecommendedMobileHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    const rhi::Extent2D postExtent = getSceneExtent();
+    const rhi::TextureFormat outputFormat = getOutputTextureFormat();
+    const rhi::TextureFormat sceneColorFormat = getSceneColorHdrFormat();
+    constexpr rhi::TextureFormat kRecommendedMobileHdrFormat = rhi::TextureFormat::rgba16Sfloat;
     m_runtimeStats.postProcessDiagnostics = GPUDrivenPostProcessDiagnostics{
         .displayWidth = getSwapchainExtent().width,
         .displayHeight = getSwapchainExtent().height,
@@ -821,6 +906,9 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .outputFormat = outputFormat,
         .sceneColorFormat = sceneColorFormat,
         .recommendedHdrFormat = kRecommendedMobileHdrFormat,
+        .outputFormatName = formatDisplayName(outputFormat),
+        .sceneColorFormatName = formatDisplayName(sceneColorFormat),
+        .recommendedHdrFormatName = formatDisplayName(kRecommendedMobileHdrFormat),
         .outputMemoryBytes = getOutputTextureEstimatedBytes(),
         .sceneColorMemoryBytes = getSceneColorHdrEstimatedBytes(),
         .recommendedHdrMemoryBytes = estimateTextureBytes(postExtent, kRecommendedMobileHdrFormat),
@@ -842,12 +930,12 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .renderScale = gpuParams.debugOptions.renderScale,
         .upscaleMode = static_cast<uint32_t>(std::max(0, gpuParams.debugOptions.upscalingMode)),
         .hdrSceneColorActive = sceneColorFormat == kRecommendedMobileHdrFormat
-                               && m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE
+                               && !m_sceneView.sceneColorHdrImage.isNull()
                                && !getGPUDrivenLightHdrPipelineHandle().isNull(),
         .mobileHdrRecommended = true,
         .toneMapInLightPass = false,
         .finalColorPassActive = !getFinalColorPipelineHandle().isNull(),
-        .velocityBufferActive = m_sceneView.velocityImage != VK_NULL_HANDLE
+        .velocityBufferActive = !m_sceneView.velocityImage.isNull()
                                 && !getVelocityPipelineHandle().isNull(),
         .taaPassActive = gpuParams.debugOptions.enablePostProcessing
                          && gpuParams.debugOptions.enableTAA
@@ -870,12 +958,13 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .lensEffectsActive = gpuParams.debugOptions.enablePostProcessing
                              && gpuParams.debugOptions.enableLensEffects,
     };
-    const VkExtent2D iblExtent = getIBLEnvironmentExtent();
+    const rhi::Extent2D iblExtent = getIBLEnvironmentExtent();
     m_runtimeStats.iblDiagnostics = GPUDrivenIBLDiagnostics{
         .width = iblExtent.width,
         .height = iblExtent.height,
         .mipCount = getIBLEnvironmentMipCount(),
         .format = getIBLEnvironmentFormat(),
+        .formatName = formatDisplayName(getIBLEnvironmentFormat()),
         .estimatedMemoryBytes = getIBLEnvironmentEstimatedBytes(),
         .intensity = gpuParams.debugOptions.iblIntensity,
         .enabled = gpuParams.debugOptions.enableIBL,
@@ -923,9 +1012,9 @@ void GPUDrivenRenderer::render(const RenderParams& params)
         .ssrHeight = m_phase7HalfExtent.height,
         .estimatedMemoryBytes = aoBytes + ssrBytes,
         .aoEnabled = gpuParams.debugOptions.enableAO,
-        .aoReady = m_aoDenoised.view != VK_NULL_HANDLE && m_gtaoPipeline != VK_NULL_HANDLE && m_aoDenoisePipeline != VK_NULL_HANDLE,
+        .aoReady = m_aoDenoised.view != VK_NULL_HANDLE && !m_gtaoPipelineHandle.isNull() && !m_aoDenoisePipelineHandle.isNull(),
         .ssrEnabled = gpuParams.debugOptions.enableSSR,
-        .ssrReady = m_ssrRaw.view != VK_NULL_HANDLE && m_ssrTracePipeline != VK_NULL_HANDLE,
+        .ssrReady = m_ssrRaw.view != VK_NULL_HANDLE && !m_ssrTracePipelineHandle.isNull(),
     };
     const uint32_t shadowAtlasTileSize = std::max(1u, m_shadowAtlasTileSize);
     const uint32_t shadowAtlasCapacity =
@@ -936,8 +1025,8 @@ void GPUDrivenRenderer::render(const RenderParams& params)
     const bool shadowAtlasHasScene = m_sceneView.usePersistentCullingObjects
                                      && m_sceneView.shadowPackedMeshes != nullptr
                                      && m_sceneView.shadowPackedMeshCount > 0
-                                     && m_sceneView.shadowPackedVertexBuffer != VK_NULL_HANDLE
-                                     && m_sceneView.shadowPackedIndexBuffer != VK_NULL_HANDLE;
+                                     && m_sceneView.shadowPackedVertexBuffer != 0
+                                     && m_sceneView.shadowPackedIndexBuffer != 0;
     const uint32_t shadowAtlasExpectedTiles =
         gpuParams.debugOptions.enableShadowAtlas && shadowAtlasReady && shadowAtlasHasScene
             ? std::min(shadowAtlasCsm.getCascadeCount(), shadowAtlasCapacity)
@@ -984,31 +1073,33 @@ void GPUDrivenRenderer::render(const RenderParams& params)
 void GPUDrivenRenderer::executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams&)
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
-  const VkImage sourceDepthImage = m_sceneView.sceneDepthImage;
   const rhi::TextureViewHandle sourceDepthView = m_sceneView.sceneDepthView;
-  const VkExtent2D sourceDepthExtent = m_sceneView.sceneDepthExtent;
+  const rhi::TextureHandle sourceDepthRHI = m_passExecutor.getTextureRHIHandle(kPassSceneDepthHandle);
+  const VkExtent2D sourceDepthExtent = toVkExtent(m_sceneView.sceneDepthExtent);
   m_hiZDepthPyramid.generate(frameIndex,
-                             static_cast<VkCommandBuffer>(cmdBuffer.getNativeHandle()),
+                             cmdBuffer,
                              sourceDepthExtent,
-                             sourceDepthImage,
                              sourceDepthView,
-                             kPassSceneDepthHandle);
-  const VkDescriptorSet gpuCullingDescriptorSet =
-      reinterpret_cast<VkDescriptorSet>(getGPUCullingDescriptorSetOpaque(frameIndex));
-  if(gpuCullingDescriptorSet != VK_NULL_HANDLE)
+                             kPassSceneDepthHandle,
+                             sourceDepthRHI);
+  const rhi::ArgumentTableHandle gpuCullingArgumentTable = getGPUCullingArgumentTable(frameIndex);
+  if(!gpuCullingArgumentTable.isNull())
   {
-    m_hiZDepthPyramid.bindForCulling(gpuCullingDescriptorSet, 5);
+    m_renderer.updateGPUCullingDepthPyramidArgumentTable(frameIndex,
+                                                         m_hiZDepthPyramid.getMipViewsData(),
+                                                         m_hiZDepthPyramid.getMipCount());
+    m_hiZDepthPyramid.markBoundForCulling(gpuCullingArgumentTable, 5);
   }
   m_passExecutor.bindTexture({
       .handle       = kPassDepthPyramidHandle,
-      .nativeImage  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
+      .backendImageToken  = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
       .aspect       = rhi::TextureAspect::color,
       .initialState = rhi::ResourceState::Undefined,
       .isSwapchain  = false,
   });
 }
 
-GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCommandBuffer cmd)
+GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)
 {
   GltfUploadResult result = m_renderer.uploadGltfModel(model, cmd);
   m_activeUploadResultStorage = result;
@@ -1018,7 +1109,7 @@ GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, VkCo
 
 SceneUploadResult GPUDrivenRenderer::commitSceneUploadPlan(const SceneAsset& asset,
                                                            const SceneUploadPlan& plan,
-                                                           VkCommandBuffer cmd)
+                                                           rhi::CommandBuffer& cmd)
 {
   SceneUploadResult result = m_renderer.commitSceneUploadPlan(asset, plan, cmd);
   m_activeUploadResultStorage = result;
@@ -1031,7 +1122,7 @@ void GPUDrivenRenderer::uploadGltfModelBatch(const GltfModel&          model,
                                              std::span<const uint32_t> materialIndices,
                                              std::span<const uint32_t> meshIndices,
                                              GltfUploadResult&         ioResult,
-                                             VkCommandBuffer           cmd)
+                                             rhi::CommandBuffer&       cmd)
 {
   m_renderer.uploadGltfModelBatch(model, textureIndices, materialIndices, meshIndices, ioResult, cmd);
   m_activeUploadResultStorage = ioResult;
@@ -1196,13 +1287,13 @@ uint64_t GPUDrivenRenderer::packMeshHandleKey(MeshHandle handle)
   return (static_cast<uint64_t>(handle.generation) << 32u) | static_cast<uint64_t>(handle.index);
 }
 
-void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, VkCommandBuffer cmd)
+void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult, rhi::CommandBuffer& cmd)
 {
   const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
   if(firstSceneBuild)
   {
     clearGPUDrivenScene();
-    m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
+    m_hiZDepthPyramid.resize(toVkExtent(m_renderer.getSceneExtent()));
   }
   m_activeUploadResult = &uploadResult;
 
@@ -1332,7 +1423,7 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const Gltf
   }
   if(m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
   {
-    m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+    m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
   }
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = true;
@@ -1371,13 +1462,13 @@ void GPUDrivenRenderer::appendSceneObjectDraw(uint64_t meshKey, MeshHandle meshH
 void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset,
                                               const SceneUploadPlan& plan,
                                               const SceneUploadResult& uploadResult,
-                                              VkCommandBuffer cmd)
+                                              rhi::CommandBuffer& cmd)
 {
   const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
   if(firstSceneBuild)
   {
     clearGPUDrivenScene();
-    m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
+    m_hiZDepthPyramid.resize(toVkExtent(m_renderer.getSceneExtent()));
   }
   m_activeUploadResult = &uploadResult;
 
@@ -1613,7 +1704,7 @@ void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset,
   }
   if(m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
   {
-    m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+    m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
   }
   m_sceneUploadPending = false;
   m_persistentDrawDataDirty = true;
@@ -1679,14 +1770,14 @@ void GPUDrivenRenderer::flushPendingSceneUploads()
     return;
   }
 
-  m_renderer.executeUploadCommand([this](VkCommandBuffer cmd) {
+  m_renderer.executeUploadCommand([this](rhi::CommandBuffer& cmdBuffer) {
     if(m_sceneRegistry.isDirty())
     {
-      m_sceneRegistry.syncToGpu(cmd);
+      m_sceneRegistry.syncToGpu(cmdBuffer);
     }
     if(m_enableExperimentalMeshletPath && !m_meshletDataCpu.empty())
     {
-      m_meshletBuffer.uploadMeshlets(cmd, m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+      m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
     }
   });
   m_sceneUploadPending = false;
@@ -1952,7 +2043,7 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.gpuCullObjectBufferAddress = m_sceneRegistry.getCullBufferAddress();
   m_sceneView.gpuCullObjectBuffer = m_sceneRegistry.getCullBufferHandle();
   m_sceneView.gpuCullSceneObjectBuffer = m_sceneRegistry.getBufferHandle();
-  m_sceneView.gpuCullMeshletBuffer = VK_NULL_HANDLE;
+  m_sceneView.gpuCullMeshletBuffer = 0;
   m_sceneView.objectCount = m_sceneRegistry.getObjectCount();
   m_sceneView.overlayObjects = m_sceneRegistry.getOverlayObjects().empty() ? nullptr : m_sceneRegistry.getOverlayObjects().data();
   m_sceneView.overlayObjectCount = static_cast<uint32_t>(m_sceneRegistry.getOverlayObjects().size());
@@ -1960,7 +2051,7 @@ void GPUDrivenRenderer::refreshSceneView()
   {
     m_sceneView.overlayObjectCount = m_sceneView.objectCount;
   }
-  m_sceneView.usePersistentCullingObjects = m_sceneView.gpuCullObjectBuffer != VK_NULL_HANDLE && m_sceneView.objectCount > 0;
+  m_sceneView.usePersistentCullingObjects = m_sceneView.gpuCullObjectBuffer != 0 && m_sceneView.objectCount > 0;
   m_sceneView.authority = m_sceneView.usePersistentCullingObjects
                               ? GPUDrivenSceneAuthority::persistentCullObjects
                               : GPUDrivenSceneAuthority::none;
@@ -1970,7 +2061,7 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.indirectCommandStride =
       m_sceneView.usePersistentCullingObjects ? m_renderer.getGPUCullingIndirectCommandStride() : 0;
   if(m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
-     && m_meshletBuffer.getMeshletCullObjectBuffer() != VK_NULL_HANDLE)
+     && m_meshletBuffer.getMeshletCullObjectBuffer() != 0)
   {
     m_sceneView.gpuCullObjectBufferAddress = m_meshletBuffer.getMeshletCullObjectAddress();
     m_sceneView.gpuCullObjectBuffer = m_meshletBuffer.getMeshletCullObjectBuffer();
@@ -2000,15 +2091,15 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.shadowCasterCount =
       m_activeUploadResult != nullptr ? static_cast<uint32_t>(m_activeUploadResult->shadowCasterIndices.size()) : 0;
   m_sceneView.shadowPackedVertexBuffer =
-      m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedVertexBuffer.buffer : VK_NULL_HANDLE;
+      m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedVertexBuffer.buffer : 0;
   m_sceneView.shadowPackedIndexBuffer =
-      m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedIndexBuffer.buffer : VK_NULL_HANDLE;
+      m_activeUploadResult != nullptr ? m_activeUploadResult->shadowPackedIndexBuffer.buffer : 0;
   // Keep stable RHI handles bound to the scene's shadow packed buffers (owned=false:
   // the upload result owns the VMA lifetime, the registry only mirrors the native buffer).
   {
     rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
-    const auto rebindShadowPacked = [resourceTable](rhi::BufferHandle& handle, VkBuffer buffer) {
-      if(buffer == VK_NULL_HANDLE)
+    const auto rebindShadowPacked = [resourceTable](rhi::BufferHandle& handle, OpaqueGpuBufferHandle buffer) {
+      if(buffer == 0)
       {
         if(!handle.isNull())
         {
@@ -2017,7 +2108,7 @@ void GPUDrivenRenderer::refreshSceneView()
         }
         return;
       }
-      const uint64_t native = reinterpret_cast<uint64_t>(buffer);
+      const uint64_t native = static_cast<uint64_t>(buffer);
       if(handle.isNull())
       {
         rhi::vulkan::BufferRecord rec{};
@@ -2091,7 +2182,8 @@ void GPUDrivenRenderer::refreshSceneView()
   m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(1);
   m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(0);
   m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(0);
-  m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImage();
+  m_sceneView.depthPyramidImage =
+      getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()));
   m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
   m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
   m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
@@ -2198,6 +2290,21 @@ uint32_t GPUDrivenRenderer::getSafePersistentObjectCount() const
   return safeCount;
 }
 
+rhi::TextureFormat GPUDrivenRenderer::getIBLEnvironmentFormat() const
+{
+  return m_iblEnvironmentFormat;
+}
+
+uintptr_t GPUDrivenRenderer::getBackendDeviceToken() const
+{
+  return m_renderer.getBackendDeviceToken();
+}
+
+uintptr_t GPUDrivenRenderer::getAllocatorToken() const
+{
+  return m_renderer.getAllocatorToken();
+}
+
 void GPUDrivenRenderer::recordDepthPrepassVisibilitySource(bool     usedPreviousFrameIndirect,
                                                            bool     usedSortedBootstrap,
                                                            uint32_t previousObjectCount,
@@ -2235,15 +2342,14 @@ void GPUDrivenRenderer::recordForwardVisibilityPatch(bool patched,
 
 void GPUDrivenRenderer::initLightingResources()
 {
-  m_lightResources.init(getNativeDeviceHandle(),
-                        getAllocatorHandle(),
+  m_lightResources.init(getRHIDevice(),
                         GPUDrivenLightResources::CreateInfo{
                             .maxPointLights = 256,
                             .maxSpotLights = 128,
                             .frameCount = std::max(1u, getSwapchainImageCount()),
                         });
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
   const VkSamplerCreateInfo samplerInfo{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -2255,67 +2361,69 @@ void GPUDrivenRenderer::initLightingResources()
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .maxLod = VK_LOD_CLAMP_NONE,
   };
-  VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &m_linearClampSampler));
+  VkSampler linearClampSampler = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &linearClampSampler));
+  m_linearClampSampler = reinterpret_cast<uintptr_t>(linearClampSampler);
   // Register the shared samplers (linear-clamp + IBL cube/LUT) as RHI handles for the
   // combinedImageSampler ArgumentWrites of the lighting-input set.
   rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
-  m_linearClampSamplerHandle = resourceTable->registerSampler(reinterpret_cast<uint64_t>(m_linearClampSampler));
+  m_linearClampSamplerHandle = resourceTable->registerSampler(static_cast<uint64_t>(m_linearClampSampler));
   // IBL samplers are created later in initIBLResources(); their handles are registered
-  // lazily on first use in updateLightingDescriptorSet.
+  // lazily on first use in updateLightingArgumentTable.
 
   // lighting-input set (set LSetTextures): combined image samplers + light buffers + IBL.
-  const std::array<rhi::BindGroupLayoutEntry, 12> lightingEntries{{
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindTextures, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = kGPUDrivenLightPassTextureCount},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindShadowMap, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLIrradiance, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLPrefiltered, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindIBLBrdfLut, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+  const std::array<ArgumentLayoutEntry, 12> lightingEntries{{
+      ArgumentLayoutEntry{.binding = shaderio::LBindTextures, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = kGPUDrivenLightPassTextureCount},
+      ArgumentLayoutEntry{.binding = shaderio::LBindShadowMap, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      ArgumentLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindIBLIrradiance, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindIBLPrefiltered, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindIBLBrdfLut, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::sampledTexture, .count = 1},
   }};
-  m_lightingArgumentLayout = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = lightingEntries.data(), .entryCount = static_cast<uint32_t>(lightingEntries.size())});
+  m_lightingArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = lightingEntries.data(), .entryCount = static_cast<uint32_t>(lightingEntries.size())});
 
   // lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting/culling UBO.
-  const std::array<rhi::BindGroupLayoutEntry, 4> sceneEntries{{
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindCamera, .visibility = rhi::ShaderStage::allGraphics, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindLighting, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindLightCulling, .visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(rhi::ShaderStage::fragment) | static_cast<uint32_t>(rhi::ShaderStage::compute)), .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = shaderio::LBindPostProcess, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
+  const std::array<ArgumentLayoutEntry, 4> sceneEntries{{
+      ArgumentLayoutEntry{.binding = shaderio::LBindCamera, .visibility = rhi::ShaderStage::allGraphics, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindLighting, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindLightCulling, .visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(rhi::ShaderStage::fragment) | static_cast<uint32_t>(rhi::ShaderStage::compute)), .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = shaderio::LBindPostProcess, .visibility = rhi::ShaderStage::fragment, .type = rhi::BindlessResourceType::uniformBufferDynamic, .count = 1},
   }};
-  m_lightingSceneArgumentLayout = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = sceneEntries.data(), .entryCount = static_cast<uint32_t>(sceneEntries.size())});
+  m_lightingSceneArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = sceneEntries.data(), .entryCount = static_cast<uint32_t>(sceneEntries.size())});
 
-  const std::array<rhi::BindGroupLayoutEntry, 9> cullingEntries{{
-      rhi::BindGroupLayoutEntry{.binding = 0, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 1, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
-      rhi::BindGroupLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+  const std::array<ArgumentLayoutEntry, 9> cullingEntries{{
+      ArgumentLayoutEntry{.binding = 0, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 1, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 2, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 3, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 4, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 5, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::uniformBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 6, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 7, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
+      ArgumentLayoutEntry{.binding = 8, .visibility = rhi::ShaderStage::compute, .type = rhi::BindlessResourceType::storageBuffer, .count = 1},
   }};
-  m_lightCoarseCullingArgumentLayout = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = cullingEntries.data(), .entryCount = static_cast<uint32_t>(cullingEntries.size())});
+  m_lightCoarseCullingArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = cullingEntries.data(), .entryCount = static_cast<uint32_t>(cullingEntries.size())});
 
   // Owned RHI ArgumentTables for the lighting-input set. The buffer bindings (2-8) come from
   // stable GPUDrivenLightResources buffers; mirror them as owned=false handles. The image
-  // bindings are written per-frame in updateLightingDescriptorSet (views change on resize).
-  m_lightingInputBindGroups.assign(frameCount, BindGroupHandle{});
+  // bindings are written per-frame in updateLightingArgumentTable (views change on resize).
+  m_lightingInputArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_lightingInputBindGroups[i] =
-        m_renderer.createPersistentBindGroup(m_lightingArgumentLayout, "gpu-driven-lighting-input");
+    m_lightingInputArgumentTables[i] =
+        m_renderer.createPersistentArgumentTable(m_lightingArgumentLayout, "gpu-driven-lighting-input");
 
     // Buffer bindings 2-8 come from stable light-resource buffers; register + write once.
-    const std::array<VkBuffer, 7> inputBuffers{{
+    const std::array<rhi::BufferHandle, 7> inputBuffers{{
         m_lightResources.getPointLightBuffer(i),
         m_lightResources.getPointCoarseBoundsBuffer(i),
         m_lightResources.getCoarseUniformBuffer(i),
@@ -2336,28 +2444,23 @@ void GPUDrivenRenderer::initLightingResources()
     std::array<rhi::ArgumentWrite, 7> inputWrites{};
     for(uint32_t b = 0; b < 7u; ++b)
     {
-      rhi::vulkan::BufferRecord rec{};
-      rec.nativeBuffer          = reinterpret_cast<uint64_t>(inputBuffers[b]);
-      rec.owned                 = false;
-      const rhi::BufferHandle h = resourceTable->registerBuffer(rec);
-      m_lightingInputBufferHandles.push_back(h);
-      inputWrites[b] = rhi::ArgumentWrite{.binding = inputBindings[b], .type = inputTypes[b], .buffer = h, .size = inputSizes[b]};
+      inputWrites[b] = rhi::ArgumentWrite{.binding = inputBindings[b], .type = inputTypes[b], .buffer = inputBuffers[b], .size = inputSizes[b]};
     }
-    m_renderer.updateBindGroup(m_lightingInputBindGroups[i], inputWrites.data(), static_cast<uint32_t>(inputWrites.size()));
+    m_renderer.updateArgumentTable(m_lightingInputArgumentTables[i], inputWrites.data(), static_cast<uint32_t>(inputWrites.size()));
   }
 
   // Owned RHI ArgumentTables for the coarse-culling set (point/spot + clustered). The 9
   // light-resource buffers are stable after init (GPUDrivenLightResources has no resize),
   // so mirror them as RHI handles and write each table once here instead of per-frame.
-  m_lightCoarseCullingBindGroups.assign(frameCount, BindGroupHandle{});
+  m_lightCoarseCullingArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   m_lightCoarseCullingBufferHandles.clear();
   m_lightCoarseCullingBufferHandles.reserve(frameCount * 9u);
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_lightCoarseCullingBindGroups[i] =
-        m_renderer.createPersistentBindGroup(m_lightCoarseCullingArgumentLayout, "gpu-driven-light-coarse-culling");
+    m_lightCoarseCullingArgumentTables[i] =
+        m_renderer.createPersistentArgumentTable(m_lightCoarseCullingArgumentLayout, "gpu-driven-light-coarse-culling");
 
-    const std::array<VkBuffer, 9> cullBuffers{{
+    const std::array<rhi::BufferHandle, 9> cullBuffers{{
         m_lightResources.getPointLightBuffer(i),
         m_lightResources.getSpotLightBuffer(i),
         m_lightResources.getPointCoarseBoundsBuffer(i),
@@ -2378,41 +2481,29 @@ void GPUDrivenRenderer::initLightingResources()
     std::array<rhi::ArgumentWrite, 9> cullWrites{};
     for(uint32_t b = 0; b < 9u; ++b)
     {
-      rhi::vulkan::BufferRecord rec{};
-      rec.nativeBuffer            = reinterpret_cast<uint64_t>(cullBuffers[b]);
-      rec.owned                   = false;  // GPUDrivenLightResources owns the VMA lifetime.
-      const rhi::BufferHandle h   = resourceTable->registerBuffer(rec);
-      m_lightCoarseCullingBufferHandles.push_back(h);
+      m_lightCoarseCullingBufferHandles.push_back(cullBuffers[b]);
       cullWrites[b] = rhi::ArgumentWrite{
           .binding = b,
           .type    = (b == 4 || b == 5) ? rhi::ArgumentType::uniformBuffer : rhi::ArgumentType::storageBuffer,
-          .buffer  = h,
+          .buffer  = cullBuffers[b],
           .size    = cullSizes[b],
       };
     }
-    m_renderer.updateBindGroup(m_lightCoarseCullingBindGroups[i], cullWrites.data(), static_cast<uint32_t>(cullWrites.size()));
+    m_renderer.updateArgumentTable(m_lightCoarseCullingArgumentTables[i], cullWrites.data(), static_cast<uint32_t>(cullWrites.size()));
   }
 
   // Owned RHI ArgumentTables for the lighting-scene set (camera/postProcess dynamic UBO +
   // lighting/culling UBO). Written once below from stable buffers; dynamic offsets supplied
   // at bind time via setDynamicBuffer.
-  m_lightingSceneBindGroups.assign(frameCount, BindGroupHandle{});
+  m_lightingSceneArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_lightingSceneBindGroups[i] =
-        m_renderer.createPersistentBindGroup(m_lightingSceneArgumentLayout, "gpu-driven-lighting-scene");
+    m_lightingSceneArgumentTables[i] =
+        m_renderer.createPersistentArgumentTable(m_lightingSceneArgumentLayout, "gpu-driven-lighting-scene");
 
     const rhi::BufferHandle transientHandle = m_renderer.getTransientBufferHandle(i);
-    rhi::vulkan::BufferRecord lightingRec{};
-    lightingRec.nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getLightingUniformBuffer(i));
-    lightingRec.owned        = false;
-    const rhi::BufferHandle lightingHandle = resourceTable->registerBuffer(lightingRec);
-    rhi::vulkan::BufferRecord coarseRec{};
-    coarseRec.nativeBuffer = reinterpret_cast<uint64_t>(m_lightResources.getCoarseUniformBuffer(i));
-    coarseRec.owned        = false;
-    const rhi::BufferHandle coarseHandle = resourceTable->registerBuffer(coarseRec);
-    m_lightingInputBufferHandles.push_back(lightingHandle);
-    m_lightingInputBufferHandles.push_back(coarseHandle);
+    const rhi::BufferHandle lightingHandle = m_lightResources.getLightingUniformBuffer(i);
+    const rhi::BufferHandle coarseHandle = m_lightResources.getCoarseUniformBuffer(i);
 
     const std::array<rhi::ArgumentWrite, 4> sceneWrites{{
         rhi::ArgumentWrite{.binding = shaderio::LBindCamera, .type = rhi::ArgumentType::uniformBuffer, .buffer = transientHandle, .size = sizeof(shaderio::CameraUniforms)},
@@ -2420,99 +2511,52 @@ void GPUDrivenRenderer::initLightingResources()
         rhi::ArgumentWrite{.binding = shaderio::LBindLightCulling, .type = rhi::ArgumentType::uniformBuffer, .buffer = coarseHandle, .size = sizeof(shaderio::LightCoarseCullingUniforms)},
         rhi::ArgumentWrite{.binding = shaderio::LBindPostProcess, .type = rhi::ArgumentType::uniformBuffer, .buffer = transientHandle, .size = sizeof(shaderio::PostProcessUniforms)},
     }};
-    m_renderer.updateBindGroup(m_lightingSceneBindGroups[i], sceneWrites.data(), static_cast<uint32_t>(sceneWrites.size()));
+    m_renderer.updateArgumentTable(m_lightingSceneArgumentTables[i], sceneWrites.data(), static_cast<uint32_t>(sceneWrites.size()));
   }
 
-  // RHI pipeline layout for the coarse-culling compute pipelines (set 0 = coarse layout).
-  const uint64_t cullingSetLayoutNative = m_renderer.getBindGroupLayoutHandleNative(m_lightCoarseCullingArgumentLayout);
-  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> cullingLayoutMappings{{
-      rhi::vulkan::makePipelineLayoutBindingMapping(0, cullingSetLayoutNative),
-  }};
-  const rhi::vulkan::VulkanPipelineLayoutLowering cullingLayoutLowering{
-      .setLayouts     = cullingLayoutMappings.data(),
-      .setLayoutCount = static_cast<uint32_t>(cullingLayoutMappings.size()),
-  };
-  rhi::PipelineLayoutDesc cullingPipelineLayoutDesc{};
-  cullingPipelineLayoutDesc.debugName = "gpu-driven-light-coarse-culling";
-  auto cullingPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  cullingPipelineLayout->init(static_cast<void*>(nativeDevice), cullingPipelineLayoutDesc, cullingLayoutLowering);
-  m_lightCoarseCullingPipelineLayout = std::move(cullingPipelineLayout);
-
-  // RHI pipeline layout for the fullscreen lighting/post graphics pipelines: set
-  // LSetTextures = lighting-input, set LSetScene = lighting-scene.
-  const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 2> lightLayoutMappings{{
-      rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetTextures, m_renderer.getBindGroupLayoutHandleNative(m_lightingArgumentLayout)),
-      rhi::vulkan::makePipelineLayoutBindingMapping(shaderio::LSetScene, m_renderer.getBindGroupLayoutHandleNative(m_lightingSceneArgumentLayout)),
-  }};
-  const rhi::vulkan::VulkanPipelineLayoutLowering lightLayoutLowering{
-      .setLayouts     = lightLayoutMappings.data(),
-      .setLayoutCount = static_cast<uint32_t>(lightLayoutMappings.size()),
-  };
-  rhi::PipelineLayoutDesc lightPipelineLayoutDesc{};
-  lightPipelineLayoutDesc.debugName = "gpu-driven-light";
-  auto lightPipelineLayout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-  lightPipelineLayout->init(static_cast<void*>(nativeDevice), lightPipelineLayoutDesc, lightLayoutLowering);
-  m_lightPipelineLayout = std::move(lightPipelineLayout);
+  m_lightPipelineArgumentLayouts = {m_lightingArgumentLayout, m_lightingSceneArgumentLayout};
 }
 
 void GPUDrivenRenderer::shutdownLightingResources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   if(nativeDevice != VK_NULL_HANDLE)
   {
-    if(m_lightPipelineLayout)
+    if(m_linearClampSampler != 0)
     {
-      m_lightPipelineLayout->deinit();
-      m_lightPipelineLayout.reset();
-    }
-    if(m_lightCoarseCullingPipelineLayout)
-    {
-      m_lightCoarseCullingPipelineLayout->deinit();
-      m_lightCoarseCullingPipelineLayout.reset();
-    }
-    if(m_linearClampSampler != VK_NULL_HANDLE)
-    {
-      vkDestroySampler(nativeDevice, m_linearClampSampler, nullptr);
-      m_linearClampSampler = VK_NULL_HANDLE;
+      vkDestroySampler(nativeDevice, reinterpret_cast<VkSampler>(m_linearClampSampler), nullptr);
+      m_linearClampSampler = 0;
     }
   }
   // Owned ArgumentTables + layouts (lighting-input/scene/coarse) are freed by
-  // RenderDevice::destroyBindGroups(); here we drop the now-stale handles and the
+  // RenderDevice::destroyArgumentTablesAndLayouts(); here we drop the now-stale handles and the
   // owned=false buffer/view/sampler mirrors registered in the resource table.
   if(rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable())
   {
-    for(const rhi::BufferHandle& handle : m_lightCoarseCullingBufferHandles)
-    {
-      if(!handle.isNull()) resourceTable->removeBuffer(handle);
-    }
-    for(const rhi::BufferHandle& handle : m_lightingInputBufferHandles)
-    {
-      if(!handle.isNull()) resourceTable->removeBuffer(handle);
-    }
     if(!m_linearClampSamplerHandle.isNull()) resourceTable->removeSampler(m_linearClampSamplerHandle);
     if(!m_iblCubeSamplerHandle.isNull())     resourceTable->removeSampler(m_iblCubeSamplerHandle);
     if(!m_iblLutSamplerHandle.isNull())      resourceTable->removeSampler(m_iblLutSamplerHandle);
   }
-  const auto dropView = [&](rhi::TextureViewHandle& h, VkImageView& nativeView) {
+  const auto dropView = [&](rhi::TextureViewHandle& h, uintptr_t& viewToken) {
     if(!h.isNull()) m_renderer.destroyTextureView(h);
-    h          = {};
-    nativeView = VK_NULL_HANDLE;
+    h         = {};
+    viewToken = 0;
   };
-  dropView(m_iblEnvViewHandle, m_iblEnvViewNative);
-  dropView(m_aoViewHandle, m_aoViewNative);
-  dropView(m_ssrViewHandle, m_ssrViewNative);
-  dropView(m_shadowMapViewHandle, m_shadowMapViewNative);
+  dropView(m_iblEnvViewHandle, m_iblEnvViewToken);
+  dropView(m_aoViewHandle, m_aoViewToken);
+  dropView(m_ssrViewHandle, m_ssrViewToken);
   m_lightingInputBufferHandles.clear();
-  m_lightingSceneBindGroups.clear();
-  m_lightingInputBindGroups.clear();
+  m_lightingSceneArgumentTables.clear();
+  m_lightingInputArgumentTables.clear();
   m_lightingArgumentLayout         = {};
   m_lightingSceneArgumentLayout    = {};
   m_linearClampSamplerHandle       = {};
   m_iblCubeSamplerHandle           = {};
   m_iblLutSamplerHandle            = {};
   m_lightCoarseCullingBufferHandles.clear();
-  m_lightCoarseCullingBindGroups.clear();
+  m_lightCoarseCullingArgumentTables.clear();
   m_lightCoarseCullingArgumentLayout = {};
+  m_lightPipelineArgumentLayouts = {};
   m_lightResources.deinit();
   m_gpuDrivenPointLights.clear();
   m_gpuDrivenSpotLights.clear();
@@ -2525,13 +2569,18 @@ void GPUDrivenRenderer::initIBLResources()
   m_iblEnvironmentStatus = "Using flat ambient fallback";
   m_iblUsingFallback = true;
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   const auto initFallbackSplitSumResources = [&]() {
     IBLResources::CreateInfo fallbackInfo{
         .cubeMapSize = 128,
         .dfgLUTSize = 256,
     };
-    executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(getRHIDevice(), getAllocatorHandle(), cmd, fallbackInfo); });
+    executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer) {
+      m_iblResources.init(getRHIDevice(),
+                          getAllocatorToken(),
+                          cmdBuffer,
+                          fallbackInfo);
+    });
   };
 
   Ktx2Loader loader;
@@ -2568,12 +2617,24 @@ void GPUDrivenRenderer::initIBLResources()
   VmaAllocationCreateInfo allocInfo{};
   allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
   utils::Image image{};
-  VK_CHECK(vmaCreateImage(getAllocatorHandle(), &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr));
+  VK_CHECK(vmaCreateImage(reinterpret_cast<VmaAllocator>(getAllocatorToken()), &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr));
 
-  executeUploadCommand([&](VkCommandBuffer cmd) {
+  rhi::TextureHandle environmentImageHandle =
+      getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+  executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer) {
     BatchUploadContext upload;
-    upload.init(nativeDevice, getAllocatorHandle(), static_cast<VkDeviceSize>(texture.data.size()));
-    utils::cmdInitImageLayout(cmd, image.image);
+    upload.init(getRHIDevice(), static_cast<VkDeviceSize>(texture.data.size()));
+    const rhi::TextureBarrier initBarrier{
+        .texture = environmentImageHandle,
+        .before = rhi::ResourceState::Undefined,
+        .after = rhi::ResourceState::TransferDst,
+        .range = {.aspect = rhi::TextureAspect::color,
+                  .baseMipLevel = 0,
+                  .levelCount = std::max(1u, texture.mipLevels),
+                  .baseArrayLayer = 0,
+                  .layerCount = 1},
+    };
+    cmdBuffer.resourceBarrier(&initBarrier, 1, nullptr, 0);
     for(uint32_t level = 0; level < std::max(1u, texture.mipLevels); ++level)
     {
       if(level >= texture.mipOffsets.size() || level >= texture.mipSizes.size())
@@ -2592,20 +2653,31 @@ void GPUDrivenRenderer::initIBLResources()
       const BatchUploadContext::Slice slice = upload.allocate(size, 4);
       upload.copyToSlices(std::span<const BatchUploadContext::Slice>(&slice, 1),
                           std::span<const std::span<const std::byte>>(&payload, 1));
-      const VkBufferImageCopy region{
+      rhi::BufferTextureCopyDesc region{
           .bufferOffset = 0,
-          .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = level, .baseArrayLayer = 0, .layerCount = 1},
-          .imageExtent = {std::max(1u, texture.width >> level), std::max(1u, texture.height >> level), 1},
+          .texture = environmentImageHandle,
+          .aspect = rhi::TextureAspect::color,
+          .mipLevel = level,
+          .baseArrayLayer = 0,
+          .layerCount = 1,
+          .width = std::max(1u, texture.width >> level),
+          .height = std::max(1u, texture.height >> level),
+          .depth = 1,
       };
-      upload.recordTextureUpload(slice, image.image, region);
+      upload.recordTextureUpload(slice, environmentImageHandle, region);
     }
-    upload.executeUploads(cmd);
-    utils::Buffer staging = upload.releaseStagingBuffer();
-    if(staging.buffer != VK_NULL_HANDLE)
+    upload.executeUploads(cmdBuffer);
+    rhi::TextureBarrier sampleBarrier = initBarrier;
+    sampleBarrier.before = rhi::ResourceState::TransferDst;
+    sampleBarrier.after = rhi::ResourceState::ShaderRead;
+    cmdBuffer.resourceBarrier(&sampleBarrier, 1, nullptr, 0);
+    rhi::BufferHandle staging = upload.releaseStagingBuffer();
+    if(!staging.isNull())
     {
-      m_gpuDrivenStagingBuffers.push_back(staging);
+      m_gpuDrivenRhiStagingBuffers.push_back(staging);
     }
   });
+  getRHIDevice().destroyImage(environmentImageHandle);
 
   const VkImageViewCreateInfo viewInfo{
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -2621,7 +2693,7 @@ void GPUDrivenRenderer::initIBLResources()
   m_iblEnvironment.allocation = image.allocation;
   m_iblEnvironment.view = view;
   m_iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
-  m_iblEnvironmentFormat = texture.format;
+  m_iblEnvironmentFormat = toPortableTextureFormat(texture.format);
   m_iblEnvironmentExtent = {texture.width, texture.height};
   m_iblEnvironmentMipCount = std::max(1u, texture.mipLevels);
   m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
@@ -2639,7 +2711,12 @@ void GPUDrivenRenderer::initIBLResources()
       .sourceHeight = texture.height,
       .sourceMipCount = std::max(1u, texture.mipLevels),
   };
-  executeUploadCommand([&](VkCommandBuffer cmd) { m_iblResources.init(getRHIDevice(), getAllocatorHandle(), cmd, iblCreateInfo); });
+  executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer) {
+    m_iblResources.init(getRHIDevice(),
+                        getAllocatorToken(),
+                        cmdBuffer,
+                        iblCreateInfo);
+  });
   getRHIDevice().destroyTextureView(envViewHandle);
 
   m_iblEnvironmentStatus = m_iblResources.isSplitSumReady()
@@ -2656,7 +2733,7 @@ void GPUDrivenRenderer::initIBLResources()
 
 void GPUDrivenRenderer::shutdownIBLResources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   m_iblResources.deinit();
   if(nativeDevice != VK_NULL_HANDLE && (m_iblEnvironment.view != VK_NULL_HANDLE || m_iblEnvironment.image != VK_NULL_HANDLE))
   {
@@ -2666,11 +2743,11 @@ void GPUDrivenRenderer::shutdownIBLResources()
     }
     if(m_iblEnvironment.image != VK_NULL_HANDLE)
     {
-      vmaDestroyImage(getAllocatorHandle(), m_iblEnvironment.image, m_iblEnvironment.allocation);
+      vmaDestroyImage(reinterpret_cast<VmaAllocator>(getAllocatorToken()), m_iblEnvironment.image, m_iblEnvironment.allocation);
     }
     m_iblEnvironment = {};
   }
-  m_iblEnvironmentFormat = VK_FORMAT_UNDEFINED;
+  m_iblEnvironmentFormat = rhi::TextureFormat::undefined;
   m_iblEnvironmentExtent = {};
   m_iblEnvironmentMipCount = 0;
   m_iblEnvironmentEstimatedBytes = 0;
@@ -2680,18 +2757,26 @@ void GPUDrivenRenderer::shutdownIBLResources()
   {
     if(buffer.buffer != VK_NULL_HANDLE)
     {
-      vmaDestroyBuffer(getAllocatorHandle(), buffer.buffer, buffer.allocation);
+      vmaDestroyBuffer(reinterpret_cast<VmaAllocator>(getAllocatorToken()), buffer.buffer, buffer.allocation);
       buffer = {};
     }
   }
   m_gpuDrivenStagingBuffers.clear();
+  for(rhi::BufferHandle staging : m_gpuDrivenRhiStagingBuffers)
+  {
+    if(!staging.isNull())
+    {
+      getRHIDevice().destroyBuffer(staging);
+    }
+  }
+  m_gpuDrivenRhiStagingBuffers.clear();
 }
 
 void GPUDrivenRenderer::initPhase7Resources()
 {
   shutdownPhase7Resources();
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   if(nativeDevice == VK_NULL_HANDLE)
   {
     return;
@@ -2700,16 +2785,16 @@ void GPUDrivenRenderer::initPhase7Resources()
 
   // AO set: 2 sampled images + 1 storage image (compute). RHI ArgumentLayout + per-frame
   // owned ArgumentTables (AO trace + denoise). SSR set is already an RHI ArgumentLayout
-  // (per-frame temporary bind group via acquireSSRTempBindGroup).
-  const std::array<rhi::BindGroupLayoutEntry, 3> aoLayoutEntries{{
+  // (per-frame temporary argument table via acquireSSRTempArgumentTable).
+  const std::array<ArgumentLayoutEntry, 3> aoLayoutEntries{{
       {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
       {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
       {2, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageTexture, 1},
   }};
-  m_aoArgumentLayout = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = aoLayoutEntries.data(), .entryCount = static_cast<uint32_t>(aoLayoutEntries.size())});
+  m_aoArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = aoLayoutEntries.data(), .entryCount = static_cast<uint32_t>(aoLayoutEntries.size())});
 
-  const std::array<rhi::BindGroupLayoutEntry, 6> ssrLayoutEntries{{
+  const std::array<ArgumentLayoutEntry, 6> ssrLayoutEntries{{
       {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
       {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
       {2, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
@@ -2717,32 +2802,16 @@ void GPUDrivenRenderer::initPhase7Resources()
       {4, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageTexture, 1},
       {5, rhi::ShaderStage::compute, rhi::BindlessResourceType::uniformBuffer, 1},
   }};
-  m_ssrLayoutHandle = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = ssrLayoutEntries.data(), .entryCount = static_cast<uint32_t>(ssrLayoutEntries.size())});
-
-  // RHI pipeline layouts (single set + a compute push-constant range each).
-  const auto makeComputeLayout = [&](rhi::ArgumentLayoutHandle setLayout, uint32_t pushSize, const char* name) {
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> mappings{{
-        rhi::vulkan::makePipelineLayoutBindingMapping(0, m_renderer.getBindGroupLayoutHandleNative(setLayout)),
-    }};
-    const rhi::vulkan::VulkanPipelineLayoutLowering lowering{.setLayouts = mappings.data(), .setLayoutCount = 1};
-    rhi::PipelineLayoutDesc desc{};
-    desc.debugName = name;
-    desc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute, .offset = 0, .size = pushSize});
-    auto layout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    layout->init(static_cast<void*>(nativeDevice), desc, lowering);
-    return layout;
-  };
-  m_aoPipelineLayout  = makeComputeLayout(m_aoArgumentLayout, sizeof(shaderio::GPUDrivenAOPushConstants), "gpu-driven-ao");
-  m_ssrPipelineLayout = makeComputeLayout(m_ssrLayoutHandle, sizeof(shaderio::GPUDrivenSSRPushConstants), "gpu-driven-ssr");
+  m_ssrLayoutHandle = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = ssrLayoutEntries.data(), .entryCount = static_cast<uint32_t>(ssrLayoutEntries.size())});
 
   // Per-frame owned ArgumentTables for AO trace + denoise (written in updatePhase7Descriptors).
-  m_aoBindGroups.assign(frameCount, BindGroupHandle{});
-  m_aoDenoiseBindGroups.assign(frameCount, BindGroupHandle{});
+  m_aoArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
+  m_aoDenoiseArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
   for(uint32_t i = 0; i < frameCount; ++i)
   {
-    m_aoBindGroups[i]        = m_renderer.createPersistentBindGroup(m_aoArgumentLayout, "gpu-driven-ao");
-    m_aoDenoiseBindGroups[i] = m_renderer.createPersistentBindGroup(m_aoArgumentLayout, "gpu-driven-ao-denoise");
+    m_aoArgumentTables[i]        = m_renderer.createPersistentArgumentTable(m_aoArgumentLayout, "gpu-driven-ao");
+    m_aoDenoiseArgumentTables[i] = m_renderer.createPersistentArgumentTable(m_aoArgumentLayout, "gpu-driven-ao-denoise");
   }
 
   resizePhase7Resources();
@@ -2750,8 +2819,8 @@ void GPUDrivenRenderer::initPhase7Resources()
 
 void GPUDrivenRenderer::shutdownPhase7Resources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
   const auto destroyImage = [&](utils::ImageResource& image) {
     if(nativeDevice != VK_NULL_HANDLE && image.view != VK_NULL_HANDLE)
     {
@@ -2778,31 +2847,19 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
   }
   destroyImage(m_shadowAtlas);
 
-  if(nativeDevice != VK_NULL_HANDLE)
-  {
-    if(m_aoPipelineLayout)
-    {
-      m_aoPipelineLayout->deinit();
-      m_aoPipelineLayout.reset();
-    }
-    if(m_ssrPipelineLayout)
-    {
-      m_ssrPipelineLayout->deinit();
-      m_ssrPipelineLayout.reset();
-    }
-  }
+  (void)nativeDevice;
   // Drop the adopted AO storage-image view handles (owned=false RHI mirrors).
-  const auto dropView = [&](rhi::TextureViewHandle& h, VkImageView& nativeView) {
+  const auto dropView = [&](rhi::TextureViewHandle& h, uintptr_t& viewToken) {
     if(!h.isNull()) m_renderer.destroyTextureView(h);
-    h          = {};
-    nativeView = VK_NULL_HANDLE;
+    h         = {};
+    viewToken = 0;
   };
-  dropView(m_aoRawViewHandle, m_aoRawViewNative);
-  dropView(m_aoDenoisedViewHandle, m_aoDenoisedViewNative);
-  // Owned ArgumentTables + layouts are freed by RenderDevice::destroyBindGroups at device
+  dropView(m_aoRawViewHandle, m_aoRawViewToken);
+  dropView(m_aoDenoisedViewHandle, m_aoDenoisedViewToken);
+  // Owned ArgumentTables + layouts are freed by RenderDevice::destroyArgumentTablesAndLayouts at device
   // shutdown; just drop our handle references here.
-  m_aoBindGroups.clear();
-  m_aoDenoiseBindGroups.clear();
+  m_aoArgumentTables.clear();
+  m_aoDenoiseArgumentTables.clear();
   m_aoArgumentLayout = {};
   m_phase7HalfExtent = {};
   m_shadowAtlasAllocatedTiles = 0u;
@@ -2810,14 +2867,15 @@ void GPUDrivenRenderer::shutdownPhase7Resources()
 
 void GPUDrivenRenderer::resizePhase7Resources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
   if(nativeDevice == VK_NULL_HANDLE || allocator == nullptr)
   {
     return;
   }
-  const VkExtent2D sceneExtent = getSceneExtent();
-  const VkExtent2D halfExtent{std::max(1u, (sceneExtent.width + 1u) / 2u), std::max(1u, (sceneExtent.height + 1u) / 2u)};
+  const VkExtent2D sceneExtent = toVkExtent(getSceneExtent());
+  const rhi::Extent2D halfExtent{std::max(1u, (sceneExtent.width + 1u) / 2u),
+                                 std::max(1u, (sceneExtent.height + 1u) / 2u)};
   if(m_phase7HalfExtent.width == halfExtent.width && m_phase7HalfExtent.height == halfExtent.height
      && m_aoRaw.image != VK_NULL_HANDLE && m_aoDenoised.image != VK_NULL_HANDLE && m_ssrRaw.image != VK_NULL_HANDLE
      && m_shadowAtlas.image != VK_NULL_HANDLE)
@@ -2852,7 +2910,7 @@ void GPUDrivenRenderer::resizePhase7Resources()
   destroyOnlyImage(m_shadowAtlas);
   m_phase7HalfExtent = halfExtent;
 
-  const auto createImageResource = [&](VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
+  const auto createImageResource = [&](VkFormat format, rhi::Extent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect) {
     const VkImageCreateInfo imageInfo{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
@@ -2878,8 +2936,22 @@ void GPUDrivenRenderer::resizePhase7Resources()
     };
     VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &resource.view));
     resource.layout = VK_IMAGE_LAYOUT_GENERAL;
-    resource.extent = extent;
-    executeUploadCommand([&](VkCommandBuffer cmd) { utils::cmdInitImageLayout(cmd, resource.image, aspect); });
+    resource.extent = toVkExtent(extent);
+    executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer) {
+      rhi::TextureHandle imageHandle = getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(resource.image));
+      const rhi::TextureBarrier barrier{
+          .texture = imageHandle,
+          .before = rhi::ResourceState::Undefined,
+          .after = rhi::ResourceState::General,
+          .range = {.aspect = aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? rhi::TextureAspect::depth : rhi::TextureAspect::color,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1},
+      };
+      cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
+      getRHIDevice().destroyImage(imageHandle);
+    });
     return resource;
   };
 
@@ -2903,9 +2975,9 @@ void GPUDrivenRenderer::bindPhase7PassResources()
 
   m_passExecutor.bindTexture({
       .handle = kPassGPUDrivenShadowAtlasHandle,
-      .nativeImage = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
+      .backendImageToken = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
       .aspect = rhi::TextureAspect::depth,
-      .initialState = rhi::ResourceState::General,
+      .initialState = rhi::ResourceState::Undefined,
       .isSwapchain = false,
   });
 }
@@ -2913,82 +2985,63 @@ void GPUDrivenRenderer::bindPhase7PassResources()
 void GPUDrivenRenderer::initPhase7Pipelines()
 {
   shutdownPhase7Pipelines();
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  if(nativeDevice == VK_NULL_HANDLE || !m_aoPipelineLayout || !m_ssrPipelineLayout)
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  if(nativeDevice == VK_NULL_HANDLE || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
   {
     return;
   }
-  const VkPipelineLayout aoLayoutNative  = reinterpret_cast<VkPipelineLayout>(m_aoPipelineLayout->getNativeHandle());
-  const VkPipelineLayout ssrLayoutNative = reinterpret_cast<VkPipelineLayout>(m_ssrPipelineLayout->getNativeHandle());
-
 #ifdef USE_SLANG
   const auto createComputePipeline = [&](const void* shaderData,
                                          size_t shaderSize,
                                          const char* entryPoint,
-                                         VkPipelineLayout layout,
-                                         VkPipeline& outPipeline) {
+                                         rhi::ArgumentLayoutHandle layout,
+                                         uint32_t pushSize,
+                                         uint32_t variant) {
     VkShaderModule shaderModule = utils::createShaderModule(nativeDevice, {static_cast<const uint32_t*>(shaderData), shaderSize});
-    const VkPipelineShaderStageCreateInfo stage{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = shaderModule,
-        .pName = entryPoint,
+    const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{layout}};
+    const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{{
+        rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute, .offset = 0, .size = pushSize},
+    }};
+    const rhi::ComputePipelineDesc desc{
+        .shaderStage =
+            rhi::PipelineShaderStageDesc{
+                .stage        = rhi::ShaderStage::compute,
+                .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+                .entryPoint   = entryPoint,
+            },
+        .argumentLayouts = argumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+        .pushConstantRanges = pushConstants.data(),
+        .pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
+        .specializationVariant = variant,
     };
-    const VkComputePipelineCreateInfo pipelineInfo{
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = stage,
-        .layout = layout,
-    };
-    VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
+    const PipelineHandle handle = getRHIDevice().createComputePipeline(desc);
     vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
+    return handle;
   };
 
-  createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO", aoLayoutNative, m_gtaoPipeline);
-  createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise", aoLayoutNative, m_aoDenoisePipeline);
-  createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace", ssrLayoutNative, m_ssrTracePipeline);
-
-  // Phase 6: register the raw compute pipelines (with their layouts) so the AO/SSR
-  // passes bind them through cmd->bindPipeline + cmd->bindBindGroup. Ownership stays
-  // here (unregistered + vkDestroyed in shutdownPhase7Pipelines).
-  m_gtaoPipelineHandle      = m_renderer.registerExternalComputePipeline(m_gtaoPipeline, aoLayoutNative, 100u);
-  m_aoDenoisePipelineHandle = m_renderer.registerExternalComputePipeline(m_aoDenoisePipeline, aoLayoutNative, 101u);
-  m_ssrTracePipelineHandle  = m_renderer.registerExternalComputePipeline(m_ssrTracePipeline, ssrLayoutNative, 102u);
+  m_gtaoPipelineHandle      = createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO",
+                                                    m_aoArgumentLayout, sizeof(shaderio::GPUDrivenAOPushConstants), 0x6301u);
+  m_aoDenoisePipelineHandle = createComputePipeline(ao_denoise_slang, std::size(ao_denoise_slang), "kernelAODenoise",
+                                                    m_aoArgumentLayout, sizeof(shaderio::GPUDrivenAOPushConstants), 0x6302u);
+  m_ssrTracePipelineHandle  = createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace",
+                                                    m_ssrLayoutHandle, sizeof(shaderio::GPUDrivenSSRPushConstants), 0x6303u);
 #endif
 }
 
 void GPUDrivenRenderer::shutdownPhase7Pipelines()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  if(nativeDevice == VK_NULL_HANDLE)
-  {
-    return;
-  }
-  m_renderer.unregisterExternalPipeline(m_gtaoPipelineHandle);
-  m_renderer.unregisterExternalPipeline(m_aoDenoisePipelineHandle);
-  m_renderer.unregisterExternalPipeline(m_ssrTracePipelineHandle);
+  getRHIDevice().destroyPipeline(m_gtaoPipelineHandle);
+  getRHIDevice().destroyPipeline(m_aoDenoisePipelineHandle);
+  getRHIDevice().destroyPipeline(m_ssrTracePipelineHandle);
   m_gtaoPipelineHandle      = {};
   m_aoDenoisePipelineHandle = {};
   m_ssrTracePipelineHandle  = {};
-  if(m_gtaoPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_gtaoPipeline, nullptr);
-    m_gtaoPipeline = VK_NULL_HANDLE;
-  }
-  if(m_aoDenoisePipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_aoDenoisePipeline, nullptr);
-    m_aoDenoisePipeline = VK_NULL_HANDLE;
-  }
-  if(m_ssrTracePipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_ssrTracePipeline, nullptr);
-    m_ssrTracePipeline = VK_NULL_HANDLE;
-  }
 }
 
 void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
 {
-  if(frameIndex >= m_aoBindGroups.size() || frameIndex >= m_aoDenoiseBindGroups.size())
+  if(frameIndex >= m_aoArgumentTables.size() || frameIndex >= m_aoDenoiseArgumentTables.size())
   {
     return;
   }
@@ -2999,40 +3052,42 @@ void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
     return;
   }
 
-  const auto adopt = [&](VkImageView native, rhi::TextureViewHandle& cachedHandle, VkImageView& cachedNative) {
-    if(native != cachedNative)
+  const auto adoptViewToken = [&](uintptr_t viewToken, rhi::TextureViewHandle& cachedHandle, uintptr_t& cachedToken) {
+    if(viewToken != cachedToken)
     {
       if(!cachedHandle.isNull()) m_renderer.destroyTextureView(cachedHandle);
-      cachedHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(native));
-      cachedNative = native;
+      cachedHandle = m_renderer.registerExternalTextureView(static_cast<uint64_t>(viewToken));
+      cachedToken = viewToken;
     }
     return cachedHandle;
   };
-  const rhi::TextureViewHandle aoRawView      = adopt(m_aoRaw.view, m_aoRawViewHandle, m_aoRawViewNative);
-  const rhi::TextureViewHandle aoDenoisedView = adopt(m_aoDenoised.view, m_aoDenoisedViewHandle, m_aoDenoisedViewNative);
+  const rhi::TextureViewHandle aoRawView =
+      adoptViewToken(reinterpret_cast<uintptr_t>(m_aoRaw.view), m_aoRawViewHandle, m_aoRawViewToken);
+  const rhi::TextureViewHandle aoDenoisedView =
+      adoptViewToken(reinterpret_cast<uintptr_t>(m_aoDenoised.view), m_aoDenoisedViewHandle, m_aoDenoisedViewToken);
 
   // AO trace set: depth + normals sampled, aoRaw storage out.
   const std::array<rhi::ArgumentWrite, 3> aoWrites{{
-      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView, .imageLayout = rhi::ResourceState::General},
-      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[1], .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[1], .accessIntent = rhi::ArgumentAccessIntent::readWrite},
       rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageTexture, .textureView = aoRawView},
   }};
-  m_renderer.updateBindGroup(m_aoBindGroups[frameIndex], aoWrites.data(), static_cast<uint32_t>(aoWrites.size()));
+  m_renderer.updateArgumentTable(m_aoArgumentTables[frameIndex], aoWrites.data(), static_cast<uint32_t>(aoWrites.size()));
 
   // Denoise set: aoRaw + depth sampled, aoDenoised storage out.
   const std::array<rhi::ArgumentWrite, 3> denoiseWrites{{
-      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = aoRawView, .imageLayout = rhi::ResourceState::General},
-      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView, .imageLayout = rhi::ResourceState::General},
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = aoRawView, .accessIntent = rhi::ArgumentAccessIntent::readWrite},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView},
       rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageTexture, .textureView = aoDenoisedView},
   }};
-  m_renderer.updateBindGroup(m_aoDenoiseBindGroups[frameIndex], denoiseWrites.data(), static_cast<uint32_t>(denoiseWrites.size()));
+  m_renderer.updateArgumentTable(m_aoDenoiseArgumentTables[frameIndex], denoiseWrites.data(), static_cast<uint32_t>(denoiseWrites.size()));
 }
 
-BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer, uint32_t cameraOffset)
+rhi::ArgumentTableHandle GPUDrivenRenderer::acquireSSRTempArgumentTable(uint64_t cameraBuffer, uint32_t cameraOffset)
 {
   if(m_ssrLayoutHandle.isNull() || cameraBuffer == 0)
   {
-    return BindGroupHandle{};
+    return rhi::ArgumentTableHandle{};
   }
   const GPUDrivenSceneView& sceneView = m_sceneView;
   const rhi::TextureViewHandle historyView = !sceneView.sceneColorHistoryReadView.isNull()
@@ -3042,13 +3097,13 @@ BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer
      || sceneView.gbufferViews[0].isNull() || sceneView.gbufferViews[1].isNull()
      || m_ssrRawViewHandle.isNull())
   {
-    return BindGroupHandle{};
+    return rhi::ArgumentTableHandle{};
   }
 
   const rhi::BufferHandle cameraBufferHandle = m_renderer.getCurrentTransientBufferHandle();
   if(cameraBufferHandle.isNull())
   {
-    return BindGroupHandle{};
+    return rhi::ArgumentTableHandle{};
   }
 
   const std::array<rhi::ArgumentWrite, 6> writes{{
@@ -3059,8 +3114,8 @@ BindGroupHandle GPUDrivenRenderer::acquireSSRTempBindGroup(uint64_t cameraBuffer
       rhi::ArgumentWrite{.binding = 4, .type = rhi::ArgumentType::storageTexture, .textureView = m_ssrRawViewHandle},
       rhi::ArgumentWrite{.binding = 5, .type = rhi::ArgumentType::uniformBuffer, .buffer = cameraBufferHandle, .offset = cameraOffset, .size = sizeof(shaderio::CameraUniforms)},
   }};
-  return m_renderer.createTemporaryBindGroup(m_ssrLayoutHandle, writes.data(), static_cast<uint32_t>(writes.size()),
-                                             BindGroupSetSlot::shaderSpecific, "gpu-driven-ssr-temp");
+  return m_renderer.createTemporaryArgumentTable(m_ssrLayoutHandle, writes.data(), static_cast<uint32_t>(writes.size()),
+                                             ArgumentSlot::shaderSpecific, "gpu-driven-ssr-temp");
 }
 
 void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)
@@ -3109,7 +3164,7 @@ void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32
   }
 
   const shaderio::CameraUniforms* camera = params.cameraUniforms;
-  const VkExtent2D extent = getSceneExtent();
+  const VkExtent2D extent = toVkExtent(getSceneExtent());
   const glm::mat4 view = camera != nullptr ? camera->view : glm::mat4(1.0f);
   const glm::mat4 projection = camera != nullptr ? camera->projection : glm::mat4(1.0f);
   const glm::mat4 inverseView = glm::inverse(view);
@@ -3178,44 +3233,18 @@ void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32
   };
   m_lightResources.updateLights(frameIndex, m_gpuDrivenPointLights, m_gpuDrivenSpotLights);
   m_lightResources.updateUniforms(frameIndex, lightingUniforms, coarseUniforms, clusteredUniforms);
-  updateLightingDescriptorSet(frameIndex);
+  updateLightingArgumentTable(frameIndex);
 }
 
-uint64_t GPUDrivenRenderer::getLightingInputDescriptorSet() const
+rhi::ArgumentTableHandle GPUDrivenRenderer::getCurrentLightCullingArgumentTable() const
 {
   const uint32_t frameIndex = getCurrentFrameIndexHint();
-  if(frameIndex >= m_lightingInputBindGroups.size())
-  {
-    return 0;
-  }
-  return m_renderer.getBindGroupDescriptorSet(m_lightingInputBindGroups[frameIndex], BindGroupSetSlot::shaderSpecific);
+  return frameIndex < m_lightCoarseCullingArgumentTables.size() ? m_lightCoarseCullingArgumentTables[frameIndex] : rhi::ArgumentTableHandle{};
 }
 
-uint64_t GPUDrivenRenderer::getLightingSceneDescriptorSet(uint32_t frameIndex) const
+void GPUDrivenRenderer::updateLightingArgumentTable(uint32_t frameIndex)
 {
-  if(frameIndex >= m_lightingSceneBindGroups.size())
-  {
-    return 0;
-  }
-  return m_renderer.getBindGroupDescriptorSet(m_lightingSceneBindGroups[frameIndex], BindGroupSetSlot::shaderSpecific);
-}
-
-BindGroupHandle GPUDrivenRenderer::getCurrentLightCullingBindGroup() const
-{
-  const uint32_t frameIndex = getCurrentFrameIndexHint();
-  return frameIndex < m_lightCoarseCullingBindGroups.size() ? m_lightCoarseCullingBindGroups[frameIndex] : BindGroupHandle{};
-}
-
-void GPUDrivenRenderer::updateLightingSceneDescriptorSet(uint32_t /*frameIndex*/, uint64_t /*transientBufferOpaque*/, uint32_t)
-{
-  // No-op: the lighting-scene ArgumentTable is written once in initLightingResources from
-  // stable buffers (camera/postProcess are dynamic UBOs whose offset is supplied at bind
-  // time via setDynamicBuffer), so there is nothing to rewrite per-frame.
-}
-
-void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
-{
-  if(frameIndex >= m_lightingInputBindGroups.size() || m_lightingInputBindGroups[frameIndex].isNull())
+  if(frameIndex >= m_lightingInputArgumentTables.size() || m_lightingInputArgumentTables[frameIndex].isNull())
   {
     return;
   }
@@ -3233,22 +3262,22 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
     }
   }
 
-  // Adopt a per-frame native VkImageView as an owned=false RHI view handle, re-registering
-  // only when the underlying native view changes (resize / resource swap).
-  const auto adopt = [&](VkImageView native, rhi::TextureViewHandle& cachedHandle, VkImageView& cachedNative,
-                         rhi::TextureViewHandle fallback) -> rhi::TextureViewHandle {
-    if(native == VK_NULL_HANDLE)
+  // Adopt a per-frame backend view token as an owned=false RHI view handle, re-registering
+  // only when the underlying backend token changes (resize / resource swap).
+  const auto adoptViewToken = [&](uintptr_t viewToken, rhi::TextureViewHandle& cachedHandle, uintptr_t& cachedToken,
+                                  rhi::TextureViewHandle fallback) -> rhi::TextureViewHandle {
+    if(viewToken == 0)
     {
       return fallback;
     }
-    if(native != cachedNative)
+    if(viewToken != cachedToken)
     {
       if(!cachedHandle.isNull())
       {
         m_renderer.destroyTextureView(cachedHandle);
       }
-      cachedHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(native));
-      cachedNative = native;
+      cachedHandle = m_renderer.registerExternalTextureView(static_cast<uint64_t>(viewToken));
+      cachedToken = viewToken;
     }
     return cachedHandle;
   };
@@ -3276,21 +3305,24 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
   texViews[kGPUDrivenLightPassVelocityIndex]                = viewOr(sceneView.velocityView, fallbackColor);
   texViews[kGPUDrivenLightPassHistoryReadIndex]             = viewOr(sceneView.sceneColorHistoryReadView, fallbackColor);
   texViews[kGPUDrivenLightPassHistoryWriteIndex]            = viewOr(sceneView.sceneColorHistoryWriteView, fallbackColor);
-  texViews[kGPUDrivenLightPassIBLEnvironmentIndex]          = adopt(m_iblEnvironment.view, m_iblEnvViewHandle, m_iblEnvViewNative, fallbackColor);
-  texViews[kGPUDrivenLightPassAOIndex]                      = adopt(m_aoDenoised.view, m_aoViewHandle, m_aoViewNative, fallbackDepth);
-  texViews[kGPUDrivenLightPassSSRIndex]                     = adopt(m_ssrRaw.view, m_ssrViewHandle, m_ssrViewNative, fallbackColor);
+  texViews[kGPUDrivenLightPassIBLEnvironmentIndex] =
+      adoptViewToken(reinterpret_cast<uintptr_t>(m_iblEnvironment.view), m_iblEnvViewHandle, m_iblEnvViewToken, fallbackColor);
+  texViews[kGPUDrivenLightPassAOIndex] =
+      adoptViewToken(reinterpret_cast<uintptr_t>(m_aoDenoised.view), m_aoViewHandle, m_aoViewToken, fallbackDepth);
+  texViews[kGPUDrivenLightPassSSRIndex] =
+      adoptViewToken(reinterpret_cast<uintptr_t>(m_ssrRaw.view), m_ssrViewHandle, m_ssrViewToken, fallbackColor);
 
-  const rhi::TextureViewHandle shadowView =
-      adopt(m_renderer.getShadowMapView(), m_shadowMapViewHandle, m_shadowMapViewNative, fallbackDepth);
+  const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 
-  // IBL samplers are created after initLightingResources(); register their handles lazily.
-  if(m_iblCubeSamplerHandle.isNull() && m_iblResources.getCubeMapSampler() != VK_NULL_HANDLE)
+  // IBLResources now owns RHI sampler handles directly; cache them lazily so the
+  // lighting table can fall back before the IBL resources finish initializing.
+  if(m_iblCubeSamplerHandle.isNull())
   {
-    m_iblCubeSamplerHandle = m_renderer.getResourceTable()->registerSampler(reinterpret_cast<uint64_t>(m_iblResources.getCubeMapSampler()));
+    m_iblCubeSamplerHandle = m_iblResources.getCubeMapSampler();
   }
-  if(m_iblLutSamplerHandle.isNull() && m_iblResources.getLUTSampler() != VK_NULL_HANDLE)
+  if(m_iblLutSamplerHandle.isNull())
   {
-    m_iblLutSamplerHandle = m_renderer.getResourceTable()->registerSampler(reinterpret_cast<uint64_t>(m_iblResources.getLUTSampler()));
+    m_iblLutSamplerHandle = m_iblResources.getLUTSampler();
   }
   const rhi::SamplerHandle iblCubeSampler = m_iblCubeSamplerHandle.isNull() ? m_linearClampSamplerHandle : m_iblCubeSamplerHandle;
   const rhi::SamplerHandle iblLutSampler  = m_iblLutSamplerHandle.isNull() ? m_linearClampSamplerHandle : m_iblLutSamplerHandle;
@@ -3301,14 +3333,14 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
   {
     writes.push_back(rhi::ArgumentWrite{
         .binding = shaderio::LBindTextures, .arrayElement = i, .type = rhi::ArgumentType::combinedImageSampler,
-        .textureView = texViews[i], .sampler = m_linearClampSamplerHandle, .imageLayout = rhi::ResourceState::General});
+        .textureView = texViews[i], .sampler = m_linearClampSamplerHandle});
   }
-  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler, .textureView = shadowView, .sampler = m_linearClampSamplerHandle, .imageLayout = rhi::ResourceState::General});
-  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLIrradiance, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getIrradianceMapView(), .sampler = iblCubeSampler, .imageLayout = rhi::ResourceState::General});
-  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLPrefiltered, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getPrefilteredMapView(), .sampler = iblCubeSampler, .imageLayout = rhi::ResourceState::General});
-  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLBrdfLut, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getDFGLUTView(), .sampler = iblLutSampler, .imageLayout = rhi::ResourceState::General});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler, .textureView = shadowView, .sampler = m_linearClampSamplerHandle});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLIrradiance, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getIrradianceMapView(), .sampler = iblCubeSampler});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLPrefiltered, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getPrefilteredMapView(), .sampler = iblCubeSampler});
+  writes.push_back(rhi::ArgumentWrite{.binding = shaderio::LBindIBLBrdfLut, .type = rhi::ArgumentType::combinedImageSampler, .textureView = m_iblResources.getDFGLUTView(), .sampler = iblLutSampler});
 
-  m_renderer.updateBindGroup(m_lightingInputBindGroups[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
+  m_renderer.updateArgumentTable(m_lightingInputArgumentTables[frameIndex], writes.data(), static_cast<uint32_t>(writes.size()));
   // Buffer bindings 2-8 are written once in initLightingResources (stable light-resource
   // buffers); the coarse-culling table is likewise written once there.
 }
@@ -3317,92 +3349,61 @@ void GPUDrivenRenderer::updateLightingDescriptorSet(uint32_t frameIndex)
 
 void GPUDrivenRenderer::initLightingPipelines()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  if(nativeDevice == VK_NULL_HANDLE || !m_lightPipelineLayout)
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  if(nativeDevice == VK_NULL_HANDLE || m_lightPipelineArgumentLayouts[0].isNull()
+     || m_lightPipelineArgumentLayouts[1].isNull())
   {
     return;
   }
-  const VkPipelineLayout lightLayoutNative = reinterpret_cast<VkPipelineLayout>(m_lightPipelineLayout->getNativeHandle());
 
 #ifdef USE_SLANG
   VkShaderModule lightShaderModule =
       utils::createShaderModule(nativeDevice, {shader_light_gpu_driven_slang, std::size(shader_light_gpu_driven_slang)});
   const auto createFullscreenPipeline = [&](const char* fragmentEntry,
-                                            VkFormat colorFormat,
+                                            rhi::TextureFormat colorFormat,
                                             bool depthTest,
                                             uint32_t variant) -> PipelineHandle {
-    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-        VkPipelineShaderStageCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-                                        .module = lightShaderModule,
-                                        .pName = "vertexMain"},
-        VkPipelineShaderStageCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                        .module = lightShaderModule,
-                                        .pName = fragmentEntry},
+    const std::array<rhi::PipelineShaderStageDesc, 2> stages{{
+        rhi::PipelineShaderStageDesc{.stage = rhi::ShaderStage::vertex,
+                                     .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+                                     .entryPoint = "vertexMain"},
+        rhi::PipelineShaderStageDesc{.stage = rhi::ShaderStage::fragment,
+                                     .shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+                                     .entryPoint = fragmentEntry},
     }};
-    const VkPipelineVertexInputStateCreateInfo vertexInput{.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    };
-    const VkPipelineRasterizationStateCreateInfo rasterizer{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_NONE,
-        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .lineWidth = 1.0f,
-    };
-    const VkPipelineMultisampleStateCreateInfo multisampling{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    };
-    const VkPipelineColorBlendAttachmentState colorBlendAttachment{
-        .blendEnable = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-    };
-    const VkPipelineColorBlendStateCreateInfo colorBlending{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &colorBlendAttachment,
-    };
-    const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
-    const VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    const std::array<rhi::DynamicState, 2> dynamicStates{{
+        rhi::DynamicState::viewport,
+        rhi::DynamicState::scissor,
+    }};
+    const std::array<rhi::BlendAttachmentState, 1> blendStates{{
+        rhi::BlendAttachmentState{.blendEnable = false, .colorWriteMask = rhi::ColorComponentFlags::all},
+    }};
+    const std::array<rhi::TextureFormat, 1> colorFormats{{colorFormat}};
+    rhi::GraphicsPipelineDesc desc{
+        .shaderStages = stages.data(),
+        .shaderStageCount = static_cast<uint32_t>(stages.size()),
+        .vertexInput = rhi::VertexInputLayoutDesc{},
+        .rasterState = rhi::RasterState{},
+        .depthState = rhi::DepthState{depthTest, false, rhi::CompareOp::equal},
+        .blendStates = blendStates.data(),
+        .blendStateCount = static_cast<uint32_t>(blendStates.size()),
+        .dynamicStates = dynamicStates.data(),
         .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
-        .pDynamicStates = dynamicStates.data(),
+        .renderingInfo =
+            {
+                .colorFormats = colorFormats.data(),
+                .colorFormatCount = static_cast<uint32_t>(colorFormats.size()),
+                .depthFormat = depthTest ? toPortableTextureFormat(getSceneDepthFormat()) : rhi::TextureFormat::undefined,
+        },
+        .argumentLayouts = m_lightPipelineArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(m_lightPipelineArgumentLayouts.size()),
+        .specializationVariant = variant,
     };
-    const VkPipelineDepthStencilStateCreateInfo depthStencil{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = depthTest ? VK_TRUE : VK_FALSE,
-        .depthWriteEnable = VK_FALSE,
-        .depthCompareOp = VK_COMPARE_OP_EQUAL,
-    };
-    const VkPipelineViewportStateCreateInfo viewportState{.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    const VkPipelineRenderingCreateInfo renderingInfo{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = &colorFormat,
-        .depthAttachmentFormat = depthTest ? getSceneDepthFormat() : VK_FORMAT_UNDEFINED,
-    };
-    const VkGraphicsPipelineCreateInfo pipelineInfo{
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &renderingInfo,
-        .stageCount = static_cast<uint32_t>(stages.size()),
-        .pStages = stages.data(),
-        .pVertexInputState = &vertexInput,
-        .pInputAssemblyState = &inputAssembly,
-        .pViewportState = &viewportState,
-        .pRasterizationState = &rasterizer,
-        .pMultisampleState = &multisampling,
-        .pDepthStencilState = &depthStencil,
-        .pColorBlendState = &colorBlending,
-        .pDynamicState = &dynamicState,
-        .layout = lightLayoutNative,
-    };
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateGraphicsPipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-    return m_renderer.registerExternalGraphicsPipeline(pipeline, lightLayoutNative, variant);
+    desc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
+    desc.rasterState.cullMode = rhi::CullMode::none;
+    desc.rasterState.frontFace = rhi::FrontFace::counterClockwise;
+    desc.rasterState.sampleCount = rhi::SampleCount::count1;
+    return getRHIDevice().createGraphicsPipeline(desc);
   };
 
   m_gpuDrivenLightHdrPipeline = createFullscreenPipeline("fragmentHdrMain", getSceneColorHdrFormat(), false, 0x6101u);
@@ -3414,57 +3415,45 @@ void GPUDrivenRenderer::initLightingPipelines()
   m_gpuDrivenVelocityPipeline = createFullscreenPipeline("fragmentVelocityMain", getVelocityFormat(), false, 0x6107u);
   m_gpuDrivenBloomUpsamplePipeline = createFullscreenPipeline("fragmentBloomUpsampleMain", SceneResources::kBloomFormat, false, 0x6108u);
 
-  if(m_lightCoarseCullingPipelineLayout)
+  if(!m_lightCoarseCullingArgumentLayout.isNull())
   {
-    const VkPipelineLayout cullingLayout =
-        reinterpret_cast<VkPipelineLayout>(m_lightCoarseCullingPipelineLayout->getNativeHandle());
+    const std::array<rhi::ArgumentLayoutHandle, 1> cullingArgumentLayouts{{m_lightCoarseCullingArgumentLayout}};
     VkShaderModule cullingShaderModule =
         utils::createShaderModule(nativeDevice, {shader_light_culling_slang, std::size(shader_light_culling_slang)});
-    const auto createComputePipeline = [&](const char* entryPoint, uint32_t variant, VkPipeline& outPipeline) {
-      const VkPipelineShaderStageCreateInfo stage{
-          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-          .module = cullingShaderModule,
-          .pName = entryPoint,
+    const auto createComputePipeline = [&](const char* entryPoint, uint32_t variant) {
+      const rhi::ComputePipelineDesc desc{
+          .shaderStage =
+              rhi::PipelineShaderStageDesc{
+                  .stage        = rhi::ShaderStage::compute,
+                  .shaderModule = reinterpret_cast<uint64_t>(cullingShaderModule),
+                  .entryPoint   = entryPoint,
+              },
+          .argumentLayouts = cullingArgumentLayouts.data(),
+          .argumentLayoutCount = static_cast<uint32_t>(cullingArgumentLayouts.size()),
+          .specializationVariant = variant,
       };
-      const VkComputePipelineCreateInfo pipelineInfo{
-          .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-          .stage = stage,
-          .layout = cullingLayout,
-      };
-      VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline));
-      // Phase 6: register as a real registry handle (with layout) so passes bind via
-      // cmd->bindPipeline/bindBindGroup. Ownership stays here (unregistered + destroyed
-      // in shutdownLightingPipelines).
-      return m_renderer.registerExternalComputePipeline(outPipeline, cullingLayout, variant);
+      return getRHIDevice().createComputePipeline(desc);
     };
     m_pointLightCoarseCullingPipeline =
-        createComputePipeline("kernelPointLightCoarseCulling", 0x6201u, m_pointLightCoarseCullingVkPipeline);
+        createComputePipeline("kernelPointLightCoarseCulling", 0x6201u);
     m_spotLightCoarseCullingPipeline =
-        createComputePipeline("kernelSpotLightCoarseCulling", 0x6202u, m_spotLightCoarseCullingVkPipeline);
+        createComputePipeline("kernelSpotLightCoarseCulling", 0x6202u);
     vkDestroyShaderModule(nativeDevice, cullingShaderModule, nullptr);
 
     VkShaderModule clusteredShaderModule =
         utils::createShaderModule(nativeDevice, {clustered_light_cull_slang, std::size(clustered_light_cull_slang)});
-    const VkPipelineShaderStageCreateInfo clusteredStage{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = clusteredShaderModule,
-        .pName = "kernelClusteredLightCulling",
+    const rhi::ComputePipelineDesc clusteredDesc{
+        .shaderStage =
+            rhi::PipelineShaderStageDesc{
+                .stage        = rhi::ShaderStage::compute,
+                .shaderModule = reinterpret_cast<uint64_t>(clusteredShaderModule),
+                .entryPoint   = "kernelClusteredLightCulling",
+            },
+        .argumentLayouts = cullingArgumentLayouts.data(),
+        .argumentLayoutCount = static_cast<uint32_t>(cullingArgumentLayouts.size()),
+        .specializationVariant = 0x6203u,
     };
-    const VkComputePipelineCreateInfo clusteredPipelineInfo{
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = clusteredStage,
-        .layout = cullingLayout,
-    };
-    VK_CHECK(vkCreateComputePipelines(nativeDevice,
-                                      VK_NULL_HANDLE,
-                                      1,
-                                      &clusteredPipelineInfo,
-                                      nullptr,
-                                      &m_clusteredLightCullingVkPipeline));
-    m_clusteredLightCullingPipeline =
-        m_renderer.registerExternalComputePipeline(m_clusteredLightCullingVkPipeline, cullingLayout, 0x6203u);
+    m_clusteredLightCullingPipeline = getRHIDevice().createComputePipeline(clusteredDesc);
     vkDestroyShaderModule(nativeDevice, clusteredShaderModule, nullptr);
   }
   vkDestroyShaderModule(nativeDevice, lightShaderModule, nullptr);
@@ -3473,7 +3462,7 @@ void GPUDrivenRenderer::initLightingPipelines()
 
 void GPUDrivenRenderer::shutdownLightingPipelines()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   if(nativeDevice == VK_NULL_HANDLE)
   {
     return;
@@ -3484,30 +3473,15 @@ void GPUDrivenRenderer::shutdownLightingPipelines()
       handle = {};
     }
   };
-  // The 8 fullscreen graphics pipelines now live in the device pipeline registry
-  // (registered via registerExternalGraphicsPipeline) and are destroyed by
-  // RenderDevice::destroyPipelines(), so they are not freed here.
-  m_renderer.unregisterExternalPipeline(m_pointLightCoarseCullingPipeline);
-  m_renderer.unregisterExternalPipeline(m_spotLightCoarseCullingPipeline);
-  m_renderer.unregisterExternalPipeline(m_clusteredLightCullingPipeline);
+  // Fullscreen graphics pipelines live in the device pipeline registry and are
+  // destroyed by RenderDevice::destroyPipelines(); compute culling pipelines are
+  // backend-owned handles destroyed here.
+  getRHIDevice().destroyPipeline(m_pointLightCoarseCullingPipeline);
+  getRHIDevice().destroyPipeline(m_spotLightCoarseCullingPipeline);
+  getRHIDevice().destroyPipeline(m_clusteredLightCullingPipeline);
   m_pointLightCoarseCullingPipeline = {};
   m_spotLightCoarseCullingPipeline  = {};
   m_clusteredLightCullingPipeline   = {};
-  if(m_pointLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_pointLightCoarseCullingVkPipeline, nullptr);
-    m_pointLightCoarseCullingVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_spotLightCoarseCullingVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_spotLightCoarseCullingVkPipeline, nullptr);
-    m_spotLightCoarseCullingVkPipeline = VK_NULL_HANDLE;
-  }
-  if(m_clusteredLightCullingVkPipeline != VK_NULL_HANDLE)
-  {
-    vkDestroyPipeline(nativeDevice, m_clusteredLightCullingVkPipeline, nullptr);
-    m_clusteredLightCullingVkPipeline = VK_NULL_HANDLE;
-  }
   destroyGraphicsPipeline(m_gpuDrivenLightHdrPipeline);
   destroyGraphicsPipeline(m_gpuDrivenSkyboxPipeline);
   destroyGraphicsPipeline(m_gpuDrivenTAAResolvePipeline);
@@ -3525,19 +3499,20 @@ void GPUDrivenRenderer::updateOwnershipDiagnostics(uint32_t frameIndex,
                                                    bool     sceneRenderingSuspended,
                                                    uint32_t safeObjectCount)
 {
-  const bool hasSceneAttachments = m_sceneView.sceneDepthImage != VK_NULL_HANDLE
+  const bool hasSceneAttachments = !m_sceneView.sceneDepthImage.isNull()
                                    && !m_sceneView.sceneDepthView.isNull()
-                                   && m_sceneView.outputImage != VK_NULL_HANDLE
+                                   && !m_sceneView.outputImage.isNull()
                                    && !m_sceneView.outputView.isNull()
-                                   && m_sceneView.sceneColorHdrImage != VK_NULL_HANDLE
+                                   && !m_sceneView.sceneColorHdrImage.isNull()
                                    && !m_sceneView.sceneColorHdrView.isNull()
-                                   && m_sceneView.gbufferImages[0] != VK_NULL_HANDLE
+                                   && !m_sceneView.gbufferImages[0].isNull()
                                    && !m_sceneView.gbufferViews[0].isNull();
   const bool hasLightingResources = !getGPUDrivenLightHdrPipelineHandle().isNull()
-                                    && getLightingInputDescriptorSet() != 0;
+                                    && frameIndex < m_lightingInputArgumentTables.size()
+                                    && !m_lightingInputArgumentTables[frameIndex].isNull();
   const bool hasShadowResources = !getCSMShadowPipelineHandle().isNull()
-                                  && getCSMShadowResources().getCascadeImage() != VK_NULL_HANDLE;
-  const bool hasMaterialDescriptors = getGraphicsMaterialDescriptorSet() != 0;
+                                  && !getCSMShadowResources().getCascadeImage().isNull();
+  const bool hasMaterialDescriptors = !getGraphicsMaterialArgumentTable().isNull();
   const bool hasCurrentVisibility = m_sceneView.usePersistentCullingObjects
                                     && getGPUCullingObjectCount(frameIndex) == safeObjectCount
                                     && safeObjectCount > 0u;
@@ -3687,7 +3662,7 @@ void GPUDrivenRenderer::initVisibilitySortResources()
 {
   shutdownVisibilitySortResources();
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   if(nativeDevice == VK_NULL_HANDLE)
   {
     return;
@@ -3696,60 +3671,51 @@ void GPUDrivenRenderer::initVisibilitySortResources()
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
 
   // 2 storage buffers (key + value), compute. RHI ArgumentLayout + per-frame owned tables.
-  const std::array<rhi::BindGroupLayoutEntry, 2> sortEntries{{
+  const std::array<ArgumentLayoutEntry, 2> sortEntries{{
       {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
       {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
   }};
-  m_visibilitySortArgumentLayout = m_renderer.createBindGroupLayout(
-      rhi::BindGroupLayoutDesc{.entries = sortEntries.data(), .entryCount = static_cast<uint32_t>(sortEntries.size())});
-
-  {
-    const std::array<rhi::vulkan::VulkanPipelineLayoutBindingMapping, 1> mappings{{
-        rhi::vulkan::makePipelineLayoutBindingMapping(0, m_renderer.getBindGroupLayoutHandleNative(m_visibilitySortArgumentLayout)),
-    }};
-    const rhi::vulkan::VulkanPipelineLayoutLowering lowering{.setLayouts = mappings.data(), .setLayoutCount = 1};
-    rhi::PipelineLayoutDesc desc{};
-    desc.debugName = "gpu-driven-visibility-sort";
-    desc.pushConstantRanges.push_back(rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute, .offset = 0, .size = sizeof(shaderio::BitonicSortPushConstants)});
-    auto layout = std::make_unique<rhi::vulkan::VulkanPipelineLayout>();
-    layout->init(static_cast<void*>(nativeDevice), desc, lowering);
-    m_visibilitySortPipelineLayout = std::move(layout);
-  }
+  m_visibilitySortArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = sortEntries.data(), .entryCount = static_cast<uint32_t>(sortEntries.size())});
 
 #ifdef USE_SLANG
   VkShaderModule shaderModule =
       utils::createShaderModule(nativeDevice, {shader_bitonic_sort_slang, std::size(shader_bitonic_sort_slang)});
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "bitonicSortMain",
+  const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_visibilitySortArgumentLayout}};
+  const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{{
+      rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute,
+                                     .offset = 0,
+                                     .size   = sizeof(shaderio::BitonicSortPushConstants)},
+  }};
+  const rhi::ComputePipelineDesc desc{
+      .shaderStage =
+          rhi::PipelineShaderStageDesc{
+              .stage        = rhi::ShaderStage::compute,
+              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .entryPoint   = "bitonicSortMain",
+          },
+      .argumentLayouts = argumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+      .pushConstantRanges = pushConstants.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
+      .specializationVariant = 0x6401u,
   };
-  const VkPipelineLayout sortLayoutNative = reinterpret_cast<VkPipelineLayout>(m_visibilitySortPipelineLayout->getNativeHandle());
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStage,
-      .layout = sortLayoutNative,
-  };
-  VK_CHECK(vkCreateComputePipelines(nativeDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_visibilitySortPipeline));
+  m_visibilitySortPipelineHandle = getRHIDevice().createComputePipeline(desc);
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
-  // Phase 6: register the bitonic-sort pipeline (with layout) for cmd->bindPipeline.
-  m_visibilitySortPipelineHandle =
-      m_renderer.registerExternalComputePipeline(m_visibilitySortPipeline, sortLayoutNative, 110u);
 #endif
 
   m_visibilitySortFrames.resize(frameCount);
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_visibilitySortFrames[frameIndex].bindGroup =
-        m_renderer.createPersistentBindGroup(m_visibilitySortArgumentLayout, "gpu-driven-visibility-sort");
+    m_visibilitySortFrames[frameIndex].argumentTable =
+        m_renderer.createPersistentArgumentTable(m_visibilitySortArgumentLayout, "gpu-driven-visibility-sort");
   }
 }
 
 void GPUDrivenRenderer::shutdownVisibilitySortResources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
   rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
   for(VisibilitySortFrameResources& frameResources : m_visibilitySortFrames)
   {
@@ -3764,24 +3730,14 @@ void GPUDrivenRenderer::shutdownVisibilitySortResources()
       if(!frameResources.uploadKeyBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.uploadKeyBufferHandle);
       if(!frameResources.uploadValueBufferHandle.isNull()) resourceTable->removeBuffer(frameResources.uploadValueBufferHandle);
     }
-    frameResources = {};  // owned ArgumentTable freed by RenderDevice::destroyBindGroups
+    frameResources = {};  // owned ArgumentTable freed by RenderDevice::destroyArgumentTablesAndLayouts
   }
   m_visibilitySortFrames.clear();
 
-  m_renderer.unregisterExternalPipeline(m_visibilitySortPipelineHandle);
+  getRHIDevice().destroyPipeline(m_visibilitySortPipelineHandle);
   m_visibilitySortPipelineHandle = {};
   if(nativeDevice != VK_NULL_HANDLE)
   {
-    if(m_visibilitySortPipeline != VK_NULL_HANDLE)
-    {
-      vkDestroyPipeline(nativeDevice, m_visibilitySortPipeline, nullptr);
-      m_visibilitySortPipeline = VK_NULL_HANDLE;
-    }
-    if(m_visibilitySortPipelineLayout)
-    {
-      m_visibilitySortPipelineLayout->deinit();
-      m_visibilitySortPipelineLayout.reset();
-    }
   }
   m_visibilitySortArgumentLayout = {};
 }
@@ -3790,170 +3746,101 @@ void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
 {
   shutdownTransparentVisibilityPatchResources();
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
   if(nativeDevice == VK_NULL_HANDLE)
   {
     return;
   }
 
   const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
-  const std::array<VkDescriptorPoolSize, 1> poolSizes{{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 12u},
+  const std::array<ArgumentLayoutEntry, 6> patchEntries{{
+      {0, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {1, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {2, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {3, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {4, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+      {5, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
   }};
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = frameCount * 2u,
-      .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
-      .pPoolSizes = poolSizes.data(),
-  };
-  VK_CHECK(vkCreateDescriptorPool(nativeDevice, &poolInfo, nullptr, &m_transparentVisibilityPatchDescriptorPool));
-
-  const std::array<VkDescriptorSetLayoutBinding, 6> bindings{{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-      VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-  }};
-  const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings = bindings.data(),
-  };
-  VK_CHECK(vkCreateDescriptorSetLayout(nativeDevice,
-                                       &setLayoutInfo,
-                                       nullptr,
-                                       &m_transparentVisibilityPatchSetLayout));
-
-  const VkPushConstantRange pushConstantRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(shaderio::TransparentVisibilityPatchPushConstants),
-  };
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &m_transparentVisibilityPatchSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &pushConstantRange,
-  };
-  VK_CHECK(vkCreatePipelineLayout(nativeDevice,
-                                  &pipelineLayoutInfo,
-                                  nullptr,
-                                  &m_transparentVisibilityPatchPipelineLayout));
+  m_transparentVisibilityPatchArgumentLayout = m_renderer.createArgumentLayout(
+      ArgumentLayoutDesc{.entries = patchEntries.data(), .entryCount = static_cast<uint32_t>(patchEntries.size())});
 
 #ifdef USE_SLANG
   VkShaderModule shaderModule =
       utils::createShaderModule(nativeDevice,
                                 {shader_transparent_visibility_patch_slang,
                                  std::size(shader_transparent_visibility_patch_slang)});
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName = "transparentVisibilityPatchMain",
+  const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_transparentVisibilityPatchArgumentLayout}};
+  const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{{
+      rhi::PipelinePushConstantRange{.stages = rhi::ShaderStage::compute,
+                                     .offset = 0,
+                                     .size   = sizeof(shaderio::TransparentVisibilityPatchPushConstants)},
+  }};
+  const rhi::ComputePipelineDesc desc{
+      .shaderStage =
+          rhi::PipelineShaderStageDesc{
+              .stage        = rhi::ShaderStage::compute,
+              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .entryPoint   = "transparentVisibilityPatchMain",
+          },
+      .argumentLayouts = argumentLayouts.data(),
+      .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+      .pushConstantRanges = pushConstants.data(),
+      .pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
+      .specializationVariant = 0x7001u,
   };
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = shaderStage,
-      .layout = m_transparentVisibilityPatchPipelineLayout,
-  };
-  VK_CHECK(vkCreateComputePipelines(nativeDevice,
-                                    VK_NULL_HANDLE,
-                                    1,
-                                    &pipelineInfo,
-                                    nullptr,
-                                    &m_transparentVisibilityPatchPipeline));
+  m_transparentVisibilityPatchPipelineHandle = getRHIDevice().createComputePipeline(desc);
   vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
-
-  // Wave 9: adopt the native compute pipeline as a PipelineHandle so the patch dispatch
-  // can move to ComputeEncoder. Behavior-neutral until consumed.
-  if(m_transparentVisibilityPatchPipeline != VK_NULL_HANDLE && m_transparentVisibilityPatchPipelineLayout != VK_NULL_HANDLE)
-  {
-    m_transparentVisibilityPatchPipelineHandle = m_renderer.registerExternalComputePipeline(
-        m_transparentVisibilityPatchPipeline, m_transparentVisibilityPatchPipelineLayout, 0x7001u);
-  }
-
-  std::vector<VkDescriptorSetLayout> layouts(frameCount * 2u, m_transparentVisibilityPatchSetLayout);
-  std::vector<VkDescriptorSet> descriptorSets(frameCount * 2u, VK_NULL_HANDLE);
-  const VkDescriptorSetAllocateInfo allocInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = m_transparentVisibilityPatchDescriptorPool,
-      .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
-      .pSetLayouts = layouts.data(),
-  };
-  VK_CHECK(vkAllocateDescriptorSets(nativeDevice, &allocInfo, descriptorSets.data()));
 
   m_transparentVisibilityPatchFrames.resize(frameCount);
   for(uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
   {
-    m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[0] = descriptorSets[frameIndex * 2u + 0u];
-    m_transparentVisibilityPatchFrames[frameIndex].descriptorSets[1] = descriptorSets[frameIndex * 2u + 1u];
-    // Wave 9: adopt each native set as a (non-owned) ArgumentTable handle. The native set is
-    // still re-written per frame via updateTransparentVisibilityPatchDescriptorSet; the handle
-    // just gives a stable binding identity for the encoder path.
     m_transparentVisibilityPatchFrames[frameIndex].argumentTables[0] =
-        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex * 2u + 0u]), "transparent-visibility-patch");
+        m_renderer.createPersistentArgumentTable(m_transparentVisibilityPatchArgumentLayout, "transparent-visibility-patch-gbuffer");
     m_transparentVisibilityPatchFrames[frameIndex].argumentTables[1] =
-        m_renderer.registerExternalBindGroup(reinterpret_cast<uint64_t>(descriptorSets[frameIndex * 2u + 1u]), "transparent-visibility-patch");
+        m_renderer.createPersistentArgumentTable(m_transparentVisibilityPatchArgumentLayout, "transparent-visibility-patch-forward");
   }
 }
 
 void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
 {
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
   for(TransparentVisibilityFrameResources& frameResources : m_transparentVisibilityPatchFrames)
   {
     destroyBuffer(allocator, frameResources.prefixBuffers[0]);
     destroyBuffer(allocator, frameResources.prefixBuffers[1]);
-    // Wave 9: drop the adopted ArgumentTable handles (non-owned: the native sets die with
-    // the descriptor pool below, this only clears the registry entries).
-    for(BindGroupHandle& table : frameResources.argumentTables)
+    if(resourceTable != nullptr)
     {
-      if(!table.isNull())
+      for(rhi::BufferHandle& handle : frameResources.prefixBufferHandles)
       {
-        m_renderer.destroyBindGroup(table);
-        table = {};
+        if(!handle.isNull()) resourceTable->removeBuffer(handle);
+      }
+      for(rhi::BufferHandle& handle : frameResources.sourceIndirectBufferHandles)
+      {
+        if(!handle.isNull()) resourceTable->removeBuffer(handle);
+      }
+      for(rhi::BufferHandle& handle : frameResources.targetIndirectBufferHandles)
+      {
+        if(!handle.isNull()) resourceTable->removeBuffer(handle);
       }
     }
+    frameResources = {};  // owned ArgumentTables/layout are freed by RenderDevice::destroyArgumentTablesAndLayouts
   }
   m_transparentVisibilityPatchFrames.clear();
 
-  if(!m_transparentVisibilityPatchPipelineHandle.isNull())
-  {
-    m_renderer.unregisterExternalPipeline(m_transparentVisibilityPatchPipelineHandle);
-    m_transparentVisibilityPatchPipelineHandle = {};
-  }
+  getRHIDevice().destroyPipeline(m_transparentVisibilityPatchPipelineHandle);
+  m_transparentVisibilityPatchPipelineHandle = {};
 
   if(nativeDevice != VK_NULL_HANDLE)
   {
-    if(m_transparentVisibilityPatchPipeline != VK_NULL_HANDLE)
-    {
-      vkDestroyPipeline(nativeDevice, m_transparentVisibilityPatchPipeline, nullptr);
-      m_transparentVisibilityPatchPipeline = VK_NULL_HANDLE;
-    }
-    if(m_transparentVisibilityPatchPipelineLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyPipelineLayout(nativeDevice, m_transparentVisibilityPatchPipelineLayout, nullptr);
-      m_transparentVisibilityPatchPipelineLayout = VK_NULL_HANDLE;
-    }
-    if(m_transparentVisibilityPatchSetLayout != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorSetLayout(nativeDevice, m_transparentVisibilityPatchSetLayout, nullptr);
-      m_transparentVisibilityPatchSetLayout = VK_NULL_HANDLE;
-    }
-    if(m_transparentVisibilityPatchDescriptorPool != VK_NULL_HANDLE)
-    {
-      vkDestroyDescriptorPool(nativeDevice, m_transparentVisibilityPatchDescriptorPool, nullptr);
-      m_transparentVisibilityPatchDescriptorPool = VK_NULL_HANDLE;
-    }
+    (void)nativeDevice;
   }
+  m_transparentVisibilityPatchArgumentLayout = {};
 }
 
-void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t frameIndex,
+void GPUDrivenRenderer::updateTransparentVisibilityPatchArgumentTable(uint32_t frameIndex,
                                                                       uint64_t sortKeyBufferHandle,
                                                                       uint64_t sortValueBufferHandle,
                                                                       uint64_t sourceIndirectBufferHandle,
@@ -3964,13 +3851,12 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
     return;
   }
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
   TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
   const uint32_t descriptorSetIndex =
       targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
   const uint64_t prefixABufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[0].buffer);
   const uint64_t prefixBBufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[1].buffer);
-  if(nativeDevice == VK_NULL_HANDLE || frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE || sortKeyBufferHandle == 0
+  if(frameResources.argumentTables[descriptorSetIndex].isNull() || sortKeyBufferHandle == 0
      || sortValueBufferHandle == 0 || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0
      || prefixABufferHandle == 0 || prefixBBufferHandle == 0)
   {
@@ -3987,65 +3873,47 @@ void GPUDrivenRenderer::updateTransparentVisibilityPatchDescriptorSet(uint32_t f
     return;
   }
 
-  const std::array<VkDescriptorBufferInfo, 6> bufferInfos{{
-      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortKeyBufferHandle), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sortValueBufferHandle), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(sourceIndirectBufferHandle), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{reinterpret_cast<VkBuffer>(targetIndirectBufferHandle), 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameResources.prefixBuffers[0].buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{frameResources.prefixBuffers[1].buffer, 0, VK_WHOLE_SIZE},
+  rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+  if(resourceTable == nullptr)
+  {
+    return;
+  }
+  const auto rebind = [&](rhi::BufferHandle& handle, uint64_t nativeBuffer) {
+    if(handle.isNull())
+    {
+      rhi::vulkan::BufferRecord rec{};
+      rec.nativeBuffer = nativeBuffer;
+      rec.owned        = false;
+      handle           = resourceTable->registerBuffer(rec);
+    }
+    else
+    {
+      resourceTable->updateBuffer(handle, nativeBuffer);
+    }
+  };
+  rebind(frameResources.sourceIndirectBufferHandles[descriptorSetIndex], sourceIndirectBufferHandle);
+  rebind(frameResources.targetIndirectBufferHandles[descriptorSetIndex], targetIndirectBufferHandle);
+  rebind(frameResources.prefixBufferHandles[0], prefixABufferHandle);
+  rebind(frameResources.prefixBufferHandles[1], prefixBBufferHandle);
+
+  const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
+  const std::array<rhi::ArgumentWrite, 6> writes{{
+      rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = sortResources.keyBufferHandle},
+      rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = sortResources.valueBufferHandle},
+      rhi::ArgumentWrite{.binding = 2, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.sourceIndirectBufferHandles[descriptorSetIndex]},
+      rhi::ArgumentWrite{.binding = 3, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.targetIndirectBufferHandles[descriptorSetIndex]},
+      rhi::ArgumentWrite{.binding = 4, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.prefixBufferHandles[0]},
+      rhi::ArgumentWrite{.binding = 5, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.prefixBufferHandles[1]},
   }};
-  const std::array<VkWriteDescriptorSet, 6> writes{{
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 0,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[0],
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 1,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[1],
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 2,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[2],
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 3,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[3],
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 4,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[4],
-      },
-      VkWriteDescriptorSet{
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = frameResources.descriptorSets[descriptorSetIndex],
-          .dstBinding = 5,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &bufferInfos[5],
-      },
-  }};
-  vkUpdateDescriptorSets(nativeDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  if(sortResources.keyBufferHandle.isNull() || sortResources.valueBufferHandle.isNull()
+     || frameResources.sourceIndirectBufferHandles[descriptorSetIndex].isNull()
+     || frameResources.targetIndirectBufferHandles[descriptorSetIndex].isNull()
+     || frameResources.prefixBufferHandles[0].isNull()
+     || frameResources.prefixBufferHandles[1].isNull())
+  {
+    return;
+  }
+  m_renderer.updateArgumentTable(frameResources.argumentTables[descriptorSetIndex], writes.data(), static_cast<uint32_t>(writes.size()));
   frameResources.boundSortKeyHandles[descriptorSetIndex] = sortKeyBufferHandle;
   frameResources.boundSortValueHandles[descriptorSetIndex] = sortValueBufferHandle;
   frameResources.boundSourceIndirectHandles[descriptorSetIndex] = sourceIndirectBufferHandle;
@@ -4068,8 +3936,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
 {
   if(frameIndex >= m_transparentVisibilityPatchFrames.size()
       || frameIndex >= m_visibilitySortFrames.size()
-      || m_transparentVisibilityPatchPipeline == VK_NULL_HANDLE
-      || m_transparentVisibilityPatchPipelineLayout == VK_NULL_HANDLE
+      || m_transparentVisibilityPatchPipelineHandle.isNull()
       || targetIndirectBufferHandle == 0)
   {
     return false;
@@ -4087,7 +3954,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
     return false;
   }
 
-  updateTransparentVisibilityPatchDescriptorSet(frameIndex,
+  updateTransparentVisibilityPatchArgumentTable(frameIndex,
                                                 reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
                                                 reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
                                                 sourceIndirectBufferHandle,
@@ -4096,7 +3963,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
   const TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
   const uint32_t descriptorSetIndex =
       targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
-  if(frameResources.descriptorSets[descriptorSetIndex] == VK_NULL_HANDLE
+  if(frameResources.argumentTables[descriptorSetIndex].isNull()
      || frameResources.prefixBuffers[0].buffer == VK_NULL_HANDLE
      || frameResources.prefixBuffers[1].buffer == VK_NULL_HANDLE
      || frameResources.prefixCapacity < sortResources.paddedElementCount)
@@ -4105,7 +3972,7 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
   }
 
   const PipelineHandle  pipelineHandle = m_transparentVisibilityPatchPipelineHandle;
-  const BindGroupHandle tableHandle    = frameResources.argumentTables[descriptorSetIndex];
+  const rhi::ArgumentTableHandle tableHandle    = frameResources.argumentTables[descriptorSetIndex];
   if(pipelineHandle.isNull() || tableHandle.isNull())
   {
     return false;
@@ -4126,13 +3993,12 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
   };
 
   // Each dispatch records in its own compute-pass scope so the inter-dispatch barriers
-  // (which live on the CommandBuffer) can sit between them. The descriptor set is adopted
-  // as a non-owned ArgumentTable; its contents were just refreshed natively above.
+  // (which live on the CommandBuffer) can sit between them.
   const auto dispatchPatch = [&](const shaderio::TransparentVisibilityPatchPushConstants& pc) {
     rhi::ComputeEncoder* enc = cmdBuffer.beginComputePass();
     enc->setPipeline(pipelineHandle);
     enc->setArgumentTable(0, tableHandle);
-    enc->setRootConstants(0, &pc, sizeof(pc));
+    enc->setRootConstants(kPrimaryRootConstantsSlot, &pc, sizeof(pc));
     enc->dispatch(rhi::DispatchDesc{.groupCountX = groupCount, .groupCountY = 1u, .groupCountZ = 1u});
     cmdBuffer.endEncoding();
   };
@@ -4161,7 +4027,8 @@ bool GPUDrivenRenderer::prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cm
   pushConstants.scanBufferIndex = scanBufferIndex;
   dispatchPatch(pushConstants);
 
-  // Final patched indirect args are consumed by drawIndexedIndirect(Count).
+  // Same-pass/local barrier: final patched indirect args are consumed by
+  // drawIndexedIndirect(Count) on the same command stream.
   cmdBuffer.barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
                     rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
   return true;
@@ -4185,8 +4052,8 @@ void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32
     return;
   }
 
-  const VkDevice nativeDevice = getNativeDeviceHandle();
-  const VmaAllocator allocator = getAllocatorHandle();
+  const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
+  const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
   if((growSortBuffers && frameResources.capacity > 0) || (growPatchBuffers && patchFrameResources->prefixCapacity > 0))
   {
     waitForIdle();
@@ -4200,12 +4067,16 @@ void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32
     destroyBuffer(allocator, frameResources.keyBuffer);
     destroyBuffer(allocator, frameResources.valueBuffer);
 
-    frameResources.uploadKeyBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
-    frameResources.uploadValueBuffer = upload::createMappedUploadStagingBuffer(nativeDevice, allocator, bufferSize);
+    const upload::NativeUploadContext uploadContext{
+        .device    = reinterpret_cast<uintptr_t>(nativeDevice),
+        .allocator = reinterpret_cast<uintptr_t>(allocator),
+    };
+    frameResources.uploadKeyBuffer = toUtilsBuffer(upload::createMappedUploadStagingBuffer(uploadContext, bufferSize));
+    frameResources.uploadValueBuffer = toUtilsBuffer(upload::createMappedUploadStagingBuffer(uploadContext, bufferSize));
     frameResources.keyBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
     frameResources.valueBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
     frameResources.capacity = requiredCount;
-    updateVisibilitySortDescriptorSet(frameIndex);
+    updateVisibilitySortArgumentTable(frameIndex);
   }
 
   if(growPatchBuffers)
@@ -4220,7 +4091,7 @@ void GPUDrivenRenderer::ensureVisibilitySortCapacity(uint32_t frameIndex, uint32
   }
 }
 
-void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
+void GPUDrivenRenderer::updateVisibilitySortArgumentTable(uint32_t frameIndex)
 {
   if(frameIndex >= m_visibilitySortFrames.size())
   {
@@ -4228,7 +4099,7 @@ void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
   }
 
   VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
-  if(frameResources.bindGroup.isNull()
+  if(frameResources.argumentTable.isNull()
      || frameResources.keyBuffer.buffer == VK_NULL_HANDLE || frameResources.valueBuffer.buffer == VK_NULL_HANDLE)
   {
     return;
@@ -4260,7 +4131,7 @@ void GPUDrivenRenderer::updateVisibilitySortDescriptorSet(uint32_t frameIndex)
       rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBufferHandle},
       rhi::ArgumentWrite{.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.valueBufferHandle},
   }};
-  m_renderer.updateBindGroup(frameResources.bindGroup, writes.data(), static_cast<uint32_t>(writes.size()));
+  m_renderer.updateArgumentTable(frameResources.argumentTable, writes.data(), static_cast<uint32_t>(writes.size()));
 }
 
 void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
@@ -4295,8 +4166,8 @@ void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
     std::fill(mappedKeys + activeCount, mappedKeys + paddedCount, 0xffffffffu);
     std::fill(mappedValues + activeCount, mappedValues + paddedCount, 0xffffffffu);
   }
-  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadKeyBuffer.allocation, 0, VK_WHOLE_SIZE));
-  VK_CHECK(vmaFlushAllocation(getAllocatorHandle(), frameResources.uploadValueBuffer.allocation, 0, VK_WHOLE_SIZE));
+  VK_CHECK(vmaFlushAllocation(reinterpret_cast<VmaAllocator>(getAllocatorToken()), frameResources.uploadKeyBuffer.allocation, 0, VK_WHOLE_SIZE));
+  VK_CHECK(vmaFlushAllocation(reinterpret_cast<VmaAllocator>(getAllocatorToken()), frameResources.uploadValueBuffer.allocation, 0, VK_WHOLE_SIZE));
 
   frameResources.activeElementCount = activeCount;
   frameResources.paddedElementCount = paddedCount;

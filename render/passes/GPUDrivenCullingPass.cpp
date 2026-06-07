@@ -27,19 +27,19 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenCullingPass::getDependenc
 
 void GPUDrivenCullingPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  rhi::CommandBuffer* cmdBuffer = context.cmdBuffer;
+  rhi::CommandBuffer* cmdBuffer = context.commandBuffer;
   cmdBuffer->beginEvent("GPUDrivenCulling");
 
   const RenderParams& params = *context.params;
   const uint32_t safeObjectCount = m_renderer->getSafePersistentObjectCount();
   const bool useExternalPersistentObjects = params.gpuDrivenSceneView != nullptr
                                             && params.gpuDrivenSceneView->usePersistentCullingObjects
-                                            && params.gpuDrivenSceneView->gpuCullObjectBuffer != VK_NULL_HANDLE
+                                            && params.gpuDrivenSceneView->gpuCullObjectBuffer != 0
                                             && safeObjectCount > 0u;
 
   if(params.cameraUniforms != nullptr && !m_renderer->getGPUCullingPipelineHandle().isNull())
@@ -49,23 +49,22 @@ void GPUDrivenCullingPass::execute(const PassContext& context) const
         useExternalPersistentObjects
             ? safeObjectCount
             : (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
-    const BindGroupHandle bindGroup = m_renderer->getGPUCullingBindGroup(currentFrameIndex);
+    const rhi::ArgumentTableHandle argumentTable = m_renderer->getGPUCullingArgumentTable(currentFrameIndex);
     const uint64_t indirectBuffer = m_renderer->getGPUCullingIndirectBufferOpaque(currentFrameIndex);
     const uint64_t drawCountBuffer = m_renderer->getGPUCullingDrawCountBufferOpaque(currentFrameIndex);
-    if(objectCount != 0u && !bindGroup.isNull() && indirectBuffer != 0 && drawCountBuffer != 0)
+    if(objectCount != 0u && !argumentTable.isNull() && indirectBuffer != 0 && drawCountBuffer != 0)
     {
       rhi::ComputeEncoder* enc = cmdBuffer->beginComputePass();
       enc->setPipeline(m_renderer->getGPUCullingPipelineHandle());
-      // Transitional: pass the legacy bind group's bits as an ArgumentTableHandle (resolved
-      // via the bind-group bridge in VulkanResourceTable; replaced by real ArgumentTable in Wave 8).
-      enc->setArgumentTable(0, rhi::ArgumentTableHandle{bindGroup.index, bindGroup.generation});
+      enc->setArgumentTable(0, argumentTable);
       enc->dispatch(rhi::DispatchDesc{
           .groupCountX = (objectCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount,
           .groupCountY = 1u,
           .groupCountZ = 1u});
       cmdBuffer->endEncoding();
 
-      // Culling output (indirect args + draw count) is consumed by drawIndexedIndirectCount.
+      // Same-pass/local barrier: culling output writes indirect args and draw count
+      // consumed by drawIndexedIndirectCount on the same command stream.
       cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
                          rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
     }

@@ -1,11 +1,10 @@
 #include "VulkanCommandBuffer.h"
 
-#include "../../common/Common.h"
+#include "internal/VulkanCommon.h"
 #include "VulkanResourceTable.h"
 
 #include <array>
 #include <cassert>
-#include <vector>
 #include <vulkan/vulkan.h>
 
 namespace demo::rhi::vulkan {
@@ -49,6 +48,7 @@ namespace {
   {
     case ResourceState::ColorAttachment:        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     case ResourceState::DepthStencilAttachment: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    case ResourceState::DepthStencilReadOnly:   return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     case ResourceState::ShaderRead:             return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     case ResourceState::ShaderWrite:            return VK_IMAGE_LAYOUT_GENERAL;
     case ResourceState::TransferSrc:            return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -84,6 +84,14 @@ namespace {
 
 [[nodiscard]] VkBuffer asBuffer(uint64_t v) { return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(v)); }
 [[nodiscard]] VkImage  asImage(uint64_t v) { return reinterpret_cast<VkImage>(static_cast<uintptr_t>(v)); }
+
+[[nodiscard]] uint32_t indirectStride(uint32_t requestedStride, uint32_t drawCount, uint32_t commandSize)
+{
+  return drawCount > 1 && requestedStride < commandSize ? commandSize : requestedStride;
+}
+
+inline constexpr uint32_t kMaxColorAttachmentsPerPass = 8;
+inline constexpr uint32_t kMaxBarrierBatchSize         = 16;
 
 }  // namespace
 
@@ -189,25 +197,23 @@ void VulkanRenderEncoder::drawIndexed(const DrawIndexedDesc& desc)
 
 void VulkanRenderEncoder::drawIndexedIndirect(const DrawIndirectDesc& desc)
 {
+  const uint32_t stride = indirectStride(desc.stride, desc.drawCount, sizeof(VkDrawIndexedIndirectCommand));
   vkCmdDrawIndexedIndirect(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.offset, desc.drawCount,
-                           desc.stride);
-}
-
-void VulkanRenderEncoder::drawIndexedIndirect(GpuPtr, uint32_t, uint32_t)
-{
-  assert(false && "GpuPtr indirect draw is not supported on Vulkan core; use the BufferHandle overload");
+                           stride);
 }
 
 void VulkanRenderEncoder::drawIndexedIndirectCount(const DrawIndirectCountDesc& desc)
 {
+  const uint32_t stride = indirectStride(desc.stride, desc.maxDrawCount, sizeof(VkDrawIndexedIndirectCommand));
   vkCmdDrawIndexedIndirectCount(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.argsOffset,
                                 asBuffer(m_table->resolveBuffer(desc.countBuffer)), desc.countBufferOffset,
-                                desc.maxDrawCount, desc.stride);
+                                desc.maxDrawCount, stride);
 }
 
 void VulkanRenderEncoder::drawIndirect(const DrawIndirectDesc& desc)
 {
-  vkCmdDrawIndirect(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.offset, desc.drawCount, desc.stride);
+  const uint32_t stride = indirectStride(desc.stride, desc.drawCount, sizeof(VkDrawIndirectCommand));
+  vkCmdDrawIndirect(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.offset, desc.drawCount, stride);
 }
 
 void VulkanRenderEncoder::drawMeshTasks(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
@@ -222,8 +228,9 @@ void VulkanRenderEncoder::drawMeshTasksIndirect(const DrawIndirectDesc& desc)
 {
   if(vkCmdDrawMeshTasksIndirectEXT != nullptr)
   {
+    const uint32_t stride = indirectStride(desc.stride, desc.drawCount, sizeof(VkDrawMeshTasksIndirectCommandEXT));
     vkCmdDrawMeshTasksIndirectEXT(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.offset, desc.drawCount,
-                                  desc.stride);
+                                  stride);
   }
 }
 
@@ -271,11 +278,6 @@ void VulkanComputeEncoder::dispatchIndirect(const DispatchIndirectDesc& desc)
   vkCmdDispatchIndirect(m_cmd, asBuffer(m_table->resolveBuffer(desc.argsBuffer)), desc.offset);
 }
 
-void VulkanComputeEncoder::dispatchIndirect(GpuPtr)
-{
-  assert(false && "GpuPtr indirect dispatch is not supported on Vulkan core; use the BufferHandle overload");
-}
-
 // ---------------------------------------------------------------------------
 // VulkanComputeEncoder: copy / blit command subset (Metal 4-aligned)
 // ---------------------------------------------------------------------------
@@ -315,8 +317,16 @@ void VulkanComputeEncoder::copyTextureToBuffer(const BufferTextureCopyDesc& desc
 
 void VulkanComputeEncoder::blitTexture(const TextureBlitDesc& desc)
 {
-  const VkImageSubresourceLayers sub{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1};
-  VkImageBlit                    region{.srcSubresource = sub, .dstSubresource = sub};
+  VkImageBlit region{
+      .srcSubresource = {.aspectMask = toVkAspect(desc.aspect),
+                         .mipLevel = desc.srcMipLevel,
+                         .baseArrayLayer = desc.srcBaseArrayLayer,
+                         .layerCount = desc.layerCount},
+      .dstSubresource = {.aspectMask = toVkAspect(desc.aspect),
+                         .mipLevel = desc.dstMipLevel,
+                         .baseArrayLayer = desc.dstBaseArrayLayer,
+                         .layerCount = desc.layerCount},
+  };
   region.srcOffsets[0] = {desc.srcOffsets[0].x, desc.srcOffsets[0].y, desc.srcOffsets[0].z};
   region.srcOffsets[1] = {desc.srcOffsets[1].x, desc.srcOffsets[1].y, desc.srcOffsets[1].z};
   region.dstOffsets[0] = {desc.dstOffsets[0].x, desc.dstOffsets[0].y, desc.dstOffsets[0].z};
@@ -343,8 +353,12 @@ void VulkanCommandBuffer::setTarget(VkCommandBuffer cmd, VulkanResourceTable* ta
 
 RenderEncoder* VulkanCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
 {
-  std::vector<VkRenderingAttachmentInfo> colorAttachments(desc.colorTargetCount);
-  for(uint32_t i = 0; i < desc.colorTargetCount; ++i)
+  assert(desc.colorTargetCount <= kMaxColorAttachmentsPerPass);
+  std::array<VkRenderingAttachmentInfo, kMaxColorAttachmentsPerPass> colorAttachments{};
+  const uint32_t colorTargetCount = desc.colorTargetCount <= kMaxColorAttachmentsPerPass
+                                        ? desc.colorTargetCount
+                                        : kMaxColorAttachmentsPerPass;
+  for(uint32_t i = 0; i < colorTargetCount; ++i)
   {
     const RenderTargetDesc& target = desc.colorTargets[i];
     colorAttachments[i]            = VkRenderingAttachmentInfo{
@@ -363,7 +377,7 @@ RenderEncoder* VulkanCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
     depthAttachment = VkRenderingAttachmentInfo{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_table->resolveTextureView(desc.depthTarget->view))),
-        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .imageLayout = toVkImageLayout(desc.depthTarget->state),
         .loadOp      = static_cast<VkAttachmentLoadOp>(desc.depthTarget->loadOp),
         .storeOp     = static_cast<VkAttachmentStoreOp>(desc.depthTarget->storeOp),
     };
@@ -375,8 +389,8 @@ RenderEncoder* VulkanCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
       .renderArea           = {{desc.renderArea.offset.x, desc.renderArea.offset.y},
                                {desc.renderArea.extent.width, desc.renderArea.extent.height}},
       .layerCount           = 1,
-      .colorAttachmentCount = desc.colorTargetCount,
-      .pColorAttachments    = colorAttachments.empty() ? nullptr : colorAttachments.data(),
+      .colorAttachmentCount = colorTargetCount,
+      .pColorAttachments    = colorTargetCount > 0 ? colorAttachments.data() : nullptr,
       .pDepthAttachment     = desc.depthTarget != nullptr ? &depthAttachment : nullptr,
   };
   vkCmdBeginRendering(m_cmd, &renderingInfo);
@@ -430,49 +444,85 @@ void VulkanCommandBuffer::barrier(StageFlags producer, StageFlags consumer, Haza
 void VulkanCommandBuffer::resourceBarrier(const TextureBarrier* textures, uint32_t textureCount,
                                           const BufferBarrier* buffers, uint32_t bufferCount)
 {
-  std::vector<VkImageMemoryBarrier2>  imageBarriers(textureCount);
-  std::vector<VkBufferMemoryBarrier2> bufferBarriers(bufferCount);
-  for(uint32_t i = 0; i < textureCount; ++i)
+  uint32_t textureOffset = 0;
+  uint32_t bufferOffset  = 0;
+  while(textureOffset < textureCount || bufferOffset < bufferCount)
   {
-    const TextureBarrier& b = textures[i];
-    imageBarriers[i]        = VkImageMemoryBarrier2{
-               .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-               .srcStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-               .srcAccessMask    = VK_ACCESS_2_MEMORY_WRITE_BIT,
-               .dstStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-               .dstAccessMask    = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-               .oldLayout        = toVkImageLayout(b.before),
-               .newLayout        = toVkImageLayout(b.after),
-               .image            = asImage(m_table->resolveTexture(b.texture)),
-               .subresourceRange = {.aspectMask     = toVkAspect(b.range.aspect),
-                                    .baseMipLevel   = b.range.baseMipLevel,
-                                    .levelCount     = b.range.levelCount,
-                                    .baseArrayLayer = b.range.baseArrayLayer,
-                                    .layerCount     = b.range.layerCount},
+    std::array<VkImageMemoryBarrier2, kMaxBarrierBatchSize>  imageBarriers{};
+    std::array<VkBufferMemoryBarrier2, kMaxBarrierBatchSize> bufferBarriers{};
+
+    const uint32_t textureRemaining = textureCount - textureOffset;
+    const uint32_t bufferRemaining  = bufferCount - bufferOffset;
+    const uint32_t imageBatch       = textureRemaining < kMaxBarrierBatchSize ? textureRemaining : kMaxBarrierBatchSize;
+    const uint32_t bufferBatch      = bufferRemaining < kMaxBarrierBatchSize ? bufferRemaining : kMaxBarrierBatchSize;
+
+    for(uint32_t i = 0; i < imageBatch; ++i)
+    {
+      const TextureBarrier& b   = textures[textureOffset + i];
+      const uint64_t        nativeImage = m_table->resolveTexture(b.texture);
+      // Queue ownership is mappable in the RHI barrier shape, but v1 records the
+      // renderer on a same-queue path. Keep ownership fields ignored until the
+      // backend enables real multi-queue scheduling.
+      imageBarriers[i] = VkImageMemoryBarrier2{
+          .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+          .srcStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+          .srcAccessMask    = VK_ACCESS_2_MEMORY_WRITE_BIT,
+          .dstStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+          .dstAccessMask    = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+          .oldLayout        = toVkImageLayout(b.before),
+          .newLayout        = toVkImageLayout(b.after),
+          .image            = asImage(nativeImage),
+          .subresourceRange = {.aspectMask     = toVkAspect(b.range.aspect),
+                               .baseMipLevel   = b.range.baseMipLevel,
+                               .levelCount     = b.range.levelCount,
+                               .baseArrayLayer = b.range.baseArrayLayer,
+                               .layerCount     = b.range.layerCount},
+      };
+    }
+    for(uint32_t i = 0; i < bufferBatch; ++i)
+    {
+      const BufferBarrier& b = buffers[bufferOffset + i];
+      // Same-queue v1 behavior: srcQueue/dstQueue are retained in the public RHI
+      // barrier but do not lower to queue-family ownership transfers yet.
+      bufferBarriers[i]      = VkBufferMemoryBarrier2{
+               .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+               .srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+               .dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+               .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+               .buffer        = asBuffer(m_table->resolveBuffer(b.buffer)),
+               .offset        = b.offset,
+               .size          = b.size == 0 ? VK_WHOLE_SIZE : b.size,
+      };
+    }
+
+    const VkDependencyInfo dependencyInfo{
+        .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .bufferMemoryBarrierCount = bufferBatch,
+        .pBufferMemoryBarriers    = bufferBatch > 0 ? bufferBarriers.data() : nullptr,
+        .imageMemoryBarrierCount  = imageBatch,
+        .pImageMemoryBarriers     = imageBatch > 0 ? imageBarriers.data() : nullptr,
     };
+    vkCmdPipelineBarrier2(m_cmd, &dependencyInfo);
+
+    textureOffset += imageBatch;
+    bufferOffset += bufferBatch;
   }
-  for(uint32_t i = 0; i < bufferCount; ++i)
-  {
-    const BufferBarrier& b = buffers[i];
-    bufferBarriers[i]      = VkBufferMemoryBarrier2{
-             .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-             .srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-             .dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-             .buffer        = asBuffer(m_table->resolveBuffer(b.buffer)),
-             .offset        = b.offset,
-             .size          = b.size == 0 ? VK_WHOLE_SIZE : b.size,
-    };
-  }
-  const VkDependencyInfo dependencyInfo{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = bufferCount,
-      .pBufferMemoryBarriers    = bufferBarriers.empty() ? nullptr : bufferBarriers.data(),
-      .imageMemoryBarrierCount  = textureCount,
-      .pImageMemoryBarriers     = imageBarriers.empty() ? nullptr : imageBarriers.data(),
+}
+
+void VulkanCommandBuffer::clearColorTexture(TextureHandle texture,
+                                            const TextureSubresourceRange& range,
+                                            const ClearColorValue& clearColor)
+{
+  const VkClearColorValue value{{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
+  const VkImageSubresourceRange vkRange{
+      .aspectMask     = toVkAspect(range.aspect),
+      .baseMipLevel   = range.baseMipLevel,
+      .levelCount     = range.levelCount,
+      .baseArrayLayer = range.baseArrayLayer,
+      .layerCount     = range.layerCount,
   };
-  vkCmdPipelineBarrier2(m_cmd, &dependencyInfo);
+  vkCmdClearColorImage(m_cmd, asImage(m_table->resolveTexture(texture)), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &vkRange);
 }
 
 void VulkanCommandBuffer::beginEvent(const char* name)

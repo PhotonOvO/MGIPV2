@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../common/Common.h"
+#include "internal/VulkanCommon.h"
 
 namespace demo::rhi::vulkan {
 

@@ -39,7 +39,7 @@ void MetalDevice::deinit()
   // 3. Clear capability state
 }
 
-uint64_t MetalDevice::getNativeInstance() const
+uint64_t MetalDevice::getBackendInstanceHandle() const
 {
   // TODO: Metal implementation
   // NOTES: Metal doesn't have an instance concept like Vulkan
@@ -47,15 +47,15 @@ uint64_t MetalDevice::getNativeInstance() const
   return 0;
 }
 
-uint64_t MetalDevice::getNativePhysicalDevice() const
+uint64_t MetalDevice::getBackendPhysicalDeviceHandle() const
 {
   // TODO: Metal implementation
   // NOTES: Metal doesn't separate physical/logical devices
-  // Return same as getNativeDevice() or 0
+  // Return same as getBackendDeviceHandle() or 0
   return 0;
 }
 
-uint64_t MetalDevice::getNativeDevice() const
+uint64_t MetalDevice::getBackendDeviceHandle() const
 {
   // TODO: Metal implementation
   // NOTES: Cast id<MTLDevice> to uint64_t
@@ -67,7 +67,7 @@ uint32_t MetalDevice::getApiVersion() const
 {
   // TODO: Metal implementation
   // NOTES: Map Metal version to Vulkan-style API version
-  // Metal 3+ on macOS 14+ → ~1.4 equivalent
+  // Metal 3+ on macOS 14+ â†’ ~1.4 equivalent
   // Return 0 or mapped version
   return 0;
 }
@@ -83,7 +83,7 @@ const PhysicalDeviceInfo& MetalDevice::getPhysicalDeviceInfo() const
 {
   // TODO: Metal implementation
   // NOTES: Populate from Metal device properties
-  // - device.name → deviceName
+  // - device.name â†’ deviceName
   // - Map GPU family to deviceType
   // - vendorId/deviceId not applicable (use 0)
   return m_physicalDeviceInfo;

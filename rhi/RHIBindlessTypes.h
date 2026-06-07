@@ -23,7 +23,7 @@ enum class BindlessResourceType : uint8_t
 {
   sampler = 0,
   sampledTexture,
-  sampledImage,  // separate sampled image (VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE), sampler bound elsewhere
+  sampledImage,  // separate sampled image resource, sampler bound elsewhere
   storageTexture,
   uniformBuffer,
   storageBuffer,

@@ -7,7 +7,7 @@ void D3D12Swapchain::init(void* nativeDevice, void* nativeCommandQueue, void* na
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Store parameters: m_d3d12Device, m_commandQueue, m_hwnd
-  // 2. Get DXGI factory: ID3D12Device::GetAdapter() → IDXGIAdapter::GetParent(IID_PPV_ARGS(&factory))
+  // 2. Get DXGI factory: ID3D12Device::GetAdapter() â†’ IDXGIAdapter::GetParent(IID_PPV_ARGS(&factory))
   // 3. Create DXGI_SWAP_CHAIN_DESC1 with flip model
   // 4. Create swapchain: factory->CreateSwapChainForHwnd(queue, hwnd, &desc1, nullptr, nullptr, &swapchain)
   // 5. Query IDXGISwapChain3: swapchain->QueryInterface(IID_PPV_ARGS(&m_swapchain))
@@ -97,14 +97,14 @@ uint32_t D3D12Swapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t D3D12Swapchain::getNativeSwapchain() const
+uint64_t D3D12Swapchain::getBackendSwapchainHandle() const
 {
   // TODO: D3D12 implementation
   // NOTES: Return IDXGISwapChain3 handle
   return reinterpret_cast<uint64_t>(m_swapchain);
 }
 
-uint64_t D3D12Swapchain::getNativeImageView(uint32_t imageIndex) const
+uint64_t D3D12Swapchain::getBackendImageViewHandle(uint32_t imageIndex) const
 {
   // TODO: D3D12 implementation
   // NOTES: D3D12 doesn't have separate image views like Vulkan
@@ -112,7 +112,7 @@ uint64_t D3D12Swapchain::getNativeImageView(uint32_t imageIndex) const
   return 0;
 }
 
-uint64_t D3D12Swapchain::getNativeImage(uint32_t imageIndex) const
+uint64_t D3D12Swapchain::getBackendImageHandle(uint32_t imageIndex) const
 {
   // TODO: D3D12 implementation
   // NOTES: Return ID3D12Resource handle

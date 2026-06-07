@@ -31,7 +31,7 @@ public:
   virtual void                init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window) = 0;
   virtual void                deinit()                                                                           = 0;
   virtual SurfaceCapabilities queryCapabilities() const                                                          = 0;
-  virtual uint64_t            getNativeHandle() const                                                            = 0;
+  virtual uint64_t            getBackendHandle() const                                                            = 0;
 };
 
 }  // namespace rhi

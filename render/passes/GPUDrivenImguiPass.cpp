@@ -19,15 +19,15 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenImguiPass::getDependencie
 
 void GPUDrivenImguiPass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmd == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.params == nullptr)
   {
     return;
   }
 
-  context.cmd->beginEvent("GPUDrivenImgui");
-  m_renderer->executeImGuiPass(*context.cmd, *context.params);
-  m_renderer->endPresentPass(*context.cmd);
-  context.cmd->endEvent();
+  context.commandBuffer->beginEvent("GPUDrivenImgui");
+  m_renderer->executeImGuiPass(*context.commandBuffer, *context.params);
+  m_renderer->endPresentPass(*context.commandBuffer);
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

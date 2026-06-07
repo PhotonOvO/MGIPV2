@@ -1,5 +1,7 @@
 #include "GPUDrivenTAAResolvePass.h"
 
+#include "../ArgumentTables.h"
+
 #include "../GPUDrivenRenderer.h"
 #include "../PassExecutor.h"
 #include "../../shaders/shader_io.h"
@@ -29,39 +31,26 @@ PassNode::HandleSlice<PassResourceDependency> GPUDrivenTAAResolvePass::getDepend
 
 void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
 {
-  if(m_renderer == nullptr || context.cmdBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
+  if(m_renderer == nullptr || context.commandBuffer == nullptr || context.executor == nullptr || context.params == nullptr)
   {
     return;
   }
 
   const bool taaEnabled = context.params->debugOptions.enablePostProcessing && context.params->debugOptions.enableTAA;
   const GPUDrivenSceneView* sceneView = context.params->gpuDrivenSceneView;
-  if(sceneView == nullptr || !taaEnabled || sceneView->sceneColorHistoryWriteImage == VK_NULL_HANDLE
+  if(sceneView == nullptr || !taaEnabled || sceneView->sceneColorHistoryWriteImage.isNull()
      || sceneView->sceneColorHistoryWriteView.isNull())
   {
     return;
   }
 
-  const VkExtent2D extent = m_renderer->getSceneExtent();
+  const rhi::Extent2D extent = m_renderer->getSceneExtent();
   if(extent.width == 0u || extent.height == 0u)
   {
     return;
   }
 
-  context.cmdBuffer->beginEvent("GPUDrivenTAAResolve");
-  const rhi::TextureHandle historyBarrierTex =
-      context.executor->resolveBarrierTexture(reinterpret_cast<uint64_t>(sceneView->sceneColorHistoryWriteImage));
-  const auto transitionHistory = [&](rhi::ResourceState before, rhi::ResourceState after) {
-    const rhi::TextureBarrier barrier{
-        .texture = historyBarrierTex,
-        .before  = before,
-        .after   = after,
-        .range   = {.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = ~0u, .baseArrayLayer = 0, .layerCount = ~0u},
-    };
-    context.cmdBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
-  };
-  transitionHistory(rhi::ResourceState::General, rhi::ResourceState::ColorAttachment);
-
+  context.commandBuffer->beginEvent("GPUDrivenTAAResolve");
   const rhi::RenderTargetDesc colorTarget{
       .texture = {},
       .view = sceneView->sceneColorHistoryWriteView,
@@ -70,23 +59,21 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
       .storeOp = rhi::StoreOp::store,
       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f},
   };
-  const rhi::Extent2D rhiExtent{extent.width, extent.height};
-  rhi::RenderEncoder* enc = context.cmdBuffer->beginRenderPass(rhi::RenderPassDesc{
-      .renderArea = {{0, 0}, rhiExtent},
+  rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
+      .renderArea = {{0, 0}, extent},
       .colorTargets = &colorTarget,
       .colorTargetCount = 1,
       .depthTarget = nullptr,
   });
   enc->setViewport(rhi::Viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f});
-  enc->setScissor(rhi::Rect2D{{0, 0}, rhiExtent});
+  enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
   const PipelineHandle pipelineHandle = m_renderer->getTAAResolvePipelineHandle();
-  const BindGroupHandle inputBindGroup = m_renderer->getLightingInputBindGroup(context.frameIndex);
-  if(!pipelineHandle.isNull() && !inputBindGroup.isNull() && context.cameraAllocValid)
+  const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+  if(!pipelineHandle.isNull() && !inputTable.isNull() && context.cameraAllocValid)
   {
     enc->setPipeline(pipelineHandle);
-    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
-                          rhi::ArgumentTableHandle{inputBindGroup.index, inputBindGroup.generation});  // bridge (Wave 8)
+    enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
     const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
     const shaderio::PostProcessUniforms postProcessUniforms{
@@ -110,23 +97,18 @@ void GPUDrivenTAAResolvePass::execute(const PassContext& context) const
         context.transientAllocator->allocate(sizeof(postProcessUniforms), 256);
     std::memcpy(postProcessAlloc.cpuPtr, &postProcessUniforms, sizeof(postProcessUniforms));
     context.transientAllocator->flushAllocation(postProcessAlloc, sizeof(postProcessUniforms));
-    m_renderer->updateLightingSceneDescriptorSet(context.frameIndex,
-                                                 context.transientAllocator->getBufferOpaque(),
-                                                 cameraAlloc.offset);
-    const BindGroupHandle sceneBindGroup = m_renderer->getLightingSceneBindGroup(context.frameIndex);
-    if(!sceneBindGroup.isNull())
+    const rhi::ArgumentTableHandle sceneTable = m_renderer->getLightingSceneArgumentTable(context.frameIndex);
+    if(!sceneTable.isNull())
     {
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, cameraAlloc.offset, 0);
-      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, shaderio::LSetScene, {}, postProcessAlloc.offset, 0);
-      enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetScene,
-                            rhi::ArgumentTableHandle{sceneBindGroup.index, sceneBindGroup.generation});  // bridge (Wave 8)
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, cameraAlloc.offset, 0);
+      enc->setDynamicBuffer(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, {}, postProcessAlloc.offset, 0);
+      enc->setArgumentTable(rhi::ShaderStage::allGraphics, kSceneDynamicBufferTableSlot, sceneTable);
       enc->draw(rhi::DrawDesc{.vertexCount = 3, .instanceCount = 1, .firstVertex = 0, .firstInstance = 0});
     }
   }
 
-  context.cmdBuffer->endEncoding();
-  transitionHistory(rhi::ResourceState::ColorAttachment, rhi::ResourceState::General);
-  context.cmdBuffer->endEvent();
+  context.commandBuffer->endEncoding();
+  context.commandBuffer->endEvent();
 }
 
 }  // namespace demo

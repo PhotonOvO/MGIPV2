@@ -3,6 +3,7 @@
 #include "../common/Common.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
+#include "../rhi/RHICommandBuffer.h"
 #include "UploadUtils.h"
 
 #include <cstdint>
@@ -19,17 +20,15 @@ struct GltfMeshData;  // Forward declaration
 struct SceneMeshData;
 
 struct MeshRecord {
-    uint64_t vertexBufferHandle = 0;  // Opaque buffer handle (encoded VkBuffer)
-    uint64_t indexBufferHandle = 0;   // Opaque buffer handle (encoded VkBuffer)
-    VmaAllocation vertexAllocation = nullptr;
-    VmaAllocation indexAllocation = nullptr;
+    rhi::BufferHandle vertexBuffer{};
+    rhi::BufferHandle indexBuffer{};
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
     uint32_t firstIndex = 0;
     int32_t vertexOffset = 0;
     uint32_t vertexStride = 48;  // Position(12) + Normal(12) + TexCoord(8) + Tangent(16)
-    VkDeviceSize vertexBufferOffset = 0;
-    VkDeviceSize indexBufferOffset = 0;
+    uint64_t vertexBufferOffset = 0;
+    uint64_t indexBufferOffset = 0;
     glm::mat4 transform = glm::mat4(1.0f);
     int32_t materialIndex = -1;  // -1 = default material
     // Pre-computed alpha mode from material - avoids per-frame per-pass lookup
@@ -59,35 +58,19 @@ struct MeshRecord {
     glm::vec3 worldBoundsMax = glm::vec3(0.0f);
     glm::vec3 worldBoundsCenter = glm::vec3(0.0f);
     float     worldBoundsRadius = 0.0f;
-
-    // Helper to get native VkBuffer from opaque handle
-    VkBuffer getNativeVertexBuffer() const {
-        return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(vertexBufferHandle));
-    }
-    VkBuffer getNativeIndexBuffer() const {
-        return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(indexBufferHandle));
-    }
-
-    // Helper to set from native VkBuffer
-    void setNativeVertexBuffer(VkBuffer buffer) {
-        vertexBufferHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer));
-    }
-    void setNativeIndexBuffer(VkBuffer buffer) {
-        indexBufferHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(buffer));
-    }
 };
 
 class MeshPool {
 public:
     MeshPool() = default;
-    ~MeshPool() { assert(m_device == VK_NULL_HANDLE && "Missing deinit()"); }
+    ~MeshPool() { assert(m_backendDeviceToken == 0 && "Missing deinit()"); }
 
-    void init(VkDevice device, VmaAllocator allocator, rhi::Device* rhiDevice,
+    void init(uintptr_t backendDeviceToken, uintptr_t backendAllocatorToken, rhi::Device* rhiDevice,
               upload::StaticBufferUploadPolicy staticUploadPolicy = {});
     void deinit();
 
-    MeshHandle uploadMesh(const GltfMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
-    MeshHandle uploadMesh(const SceneMeshData& meshData, VkCommandBuffer cmd, BatchUploadContext* batchUpload = nullptr);
+    MeshHandle uploadMesh(const GltfMeshData& meshData, rhi::CommandBuffer& cmd, BatchUploadContext* batchUpload = nullptr);
+    MeshHandle uploadMesh(const SceneMeshData& meshData, rhi::CommandBuffer& cmd, BatchUploadContext* batchUpload = nullptr);
     void destroyMesh(MeshHandle handle);
     void updateTransform(MeshHandle handle, const glm::mat4& transform);
     void setMeshAlphaMode(MeshHandle handle, int32_t alphaMode, float alphaCutoff);
@@ -106,17 +89,16 @@ public:
                             int32_t materialWorkflow);
 
     [[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
-    void reserve(VkDeviceSize additionalVertexBytes, VkDeviceSize additionalIndexBytes, VkCommandBuffer cmd);
-    [[nodiscard]] uint64_t getSharedVertexBufferHandle() const;
-    [[nodiscard]] uint64_t getSharedIndexBufferHandle() const;
+    void reserve(uint64_t additionalVertexBytes, uint64_t additionalIndexBytes, rhi::CommandBuffer& cmd);
     // Stable RHI handles for the shared arenas (rebinds across arena realloc via
     // VulkanResourceTable::updateBuffer). Consumed by RenderEncoder-based passes.
     [[nodiscard]] rhi::BufferHandle getSharedVertexBufferRHIHandle() const { return m_sharedVertexBufferRHI; }
     [[nodiscard]] rhi::BufferHandle getSharedIndexBufferRHIHandle() const { return m_sharedIndexBufferRHI; }
     [[nodiscard]] size_t getDeferredStagingBufferCount() const;
-    [[nodiscard]] VkDeviceSize getDeferredStagingBufferBytes() const;
+    [[nodiscard]] uint64_t getDeferredStagingBufferBytes() const;
 
     // Free staging buffers after GPU sync (call after command buffer completes)
+    void deferStagingBuffer(rhi::BufferHandle buffer);
     void freeStagingBuffers();
 
     template<typename Fn>
@@ -127,19 +109,19 @@ public:
 private:
     struct SharedBufferArena
     {
-        utils::Buffer buffer{};
-        VkDeviceSize capacity{0};
-        VkDeviceSize bytesUsed{0};
+        upload::NativeUploadBuffer buffer{};
+        uint64_t capacity{0};
+        uint64_t bytesUsed{0};
     };
 
     void ensureSharedCapacity(SharedBufferArena& arena,
-                              VkDeviceSize requiredSize,
-                              VkBufferUsageFlags2KHR usage,
-                              VkCommandBuffer cmd);
+                              uint64_t requiredSize,
+                              rhi::BufferUsageFlags usage,
+                              rhi::CommandBuffer& cmd);
     void resetSharedBuffers();
 
-    VkDevice m_device = VK_NULL_HANDLE;
-    VmaAllocator m_allocator = nullptr;
+    uintptr_t m_backendDeviceToken = 0;
+    uintptr_t m_backendAllocatorToken = 0;
     rhi::Device* m_rhiDevice = nullptr;
     rhi::BufferHandle m_sharedVertexBufferRHI{};
     rhi::BufferHandle m_sharedIndexBufferRHI{};
@@ -147,7 +129,8 @@ private:
     HandlePool<MeshHandle, MeshRecord> m_pool;
     SharedBufferArena m_sharedVertexBuffer{};
     SharedBufferArena m_sharedIndexBuffer{};
-    std::vector<utils::Buffer> m_stagingBuffers;  // Deferred deletion after GPU sync
+    std::vector<upload::NativeUploadBuffer> m_stagingBuffers;  // Deferred deletion after GPU sync
+    std::vector<rhi::BufferHandle> m_rhiStagingBuffers;
 };
 
 }  // namespace demo

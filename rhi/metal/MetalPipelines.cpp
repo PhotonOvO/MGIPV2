@@ -4,35 +4,6 @@
 
 namespace demo::rhi::metal {
 
-MetalPipelineLayout::~MetalPipelineLayout()
-{
-  deinit();
-}
-
-void MetalPipelineLayout::init(void* nativeDevice, const PipelineLayoutDesc& desc)
-{
-  // TODO: Metal implementation
-  // NOTES:
-  // Metal doesn't have explicit pipeline layout objects
-  // This method stores metadata for pipeline creation:
-  // 1. Store device reference
-  // 2. Store descriptor
-  // 3. Track bind table layouts (indices for argument buffers)
-  // 4. Track push constant ranges (for setVertexBytes/setFragmentBytes)
-  m_desc = desc;
-  (void)nativeDevice;
-  m_initialized = true;
-}
-
-void MetalPipelineLayout::deinit()
-{
-  // TODO: Metal implementation
-  // NOTES:
-  // Clear metadata only (no native objects to release)
-  m_argumentBufferIndices.clear();
-  m_initialized = false;
-}
-
 void* createGraphicsPipeline(void* nativeDevice, const GraphicsPipelineCreateInfo& createInfo)
 {
   // TODO: Metal implementation
@@ -50,8 +21,9 @@ void* createGraphicsPipeline(void* nativeDevice, const GraphicsPipelineCreateInf
   //
   // Argument Buffer Setup:
   // - Shader declares argument buffers with [[buffer(N)]]
-  // - Bind tables will be set as regular buffers during encoding
-  // - No explicit pipeline layout binding
+  // - Public PipelineArgumentSlotDesc slots map to backend argument buffers/tables
+  // - RootBindingDesc constants and pointers map to encoder bytes or buffers
+  // - No explicit Vulkan-style pipeline layout or push-constant byte offset
   //
   // Returns: id<MTLRenderPipelineState> (as void*)
   (void)nativeDevice;
@@ -69,7 +41,7 @@ void* createComputePipeline(void* nativeDevice, const ComputePipelineCreateInfo&
   // 3. Create MTLComputePipelineState: device.newComputePipelineStateWithFunction
   //
   // NOTES: Compute pipelines are simpler than graphics (no render state)
-  // Argument buffer setup is same as graphics
+  // Argument buffer/root binding lowering is same as graphics
   //
   // Returns: id<MTLComputePipelineState> (as void*)
   (void)nativeDevice;

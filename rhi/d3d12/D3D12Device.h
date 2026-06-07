@@ -15,9 +15,9 @@ public:
   void init(const DeviceCreateInfo& createInfo) override;
   void deinit() override;
 
-  uint64_t getNativeInstance() const override;
-  uint64_t getNativePhysicalDevice() const override;
-  uint64_t getNativeDevice() const override;
+  uint64_t getBackendInstanceHandle() const override;
+  uint64_t getBackendPhysicalDeviceHandle() const override;
+  uint64_t getBackendDeviceHandle() const override;
 
   uint32_t                  getApiVersion() const override;
   const char*               getDeviceName() const override;
@@ -70,7 +70,7 @@ private:
   void detectD3D12Capabilities();
   void validateD3D12Capabilities();
 
-  // NOTES: D3D12 Feature → RHI Capability Mapping
+  // NOTES: D3D12 Feature â†’ RHI Capability Mapping
   // Timeline Semaphore: ID3D12Fence (SetEventOnCompletion, GetCompletedValue)
   // Synchronization2: D3D12_BARRIER_GROUP (Win11 22H2+) or manual barriers
   // Dynamic Rendering: Native (no render passes like Vulkan)

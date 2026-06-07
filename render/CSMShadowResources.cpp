@@ -220,10 +220,9 @@ void snapToTexelGrid(float& left, float& right, float& bottom, float& top, uint3
 
 }  // namespace
 
-void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommandBuffer cmd, const CreateInfo& createInfo)
+void CSMShadowResources::init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo)
 {
-  m_device               = device;
-  m_allocator            = allocator;
+  m_device               = &device;
   m_cascadeCount         = createInfo.cascadeCount;
   m_cascadeResolution    = createInfo.cascadeResolution;
   m_shadowFormat         = createInfo.shadowFormat;
@@ -231,49 +230,25 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
 
   assert(m_cascadeCount <= shaderio::LCascadeCount && "Cascade count exceeds maximum");
 
-  utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
+  m_cascadeArray = device.createTexture(rhi::TextureDesc{
+      .dimension   = rhi::TextureDimension::e2DArray,
+      .format      = m_shadowFormat,
+      .usage       = rhi::TextureUsageFlags::depthAttachment | rhi::TextureUsageFlags::sampled,
+      .extent      = {m_cascadeResolution, m_cascadeResolution, 1},
+      .mipLevels   = 1,
+      .arrayLayers = m_cascadeCount,
+      .sampleCount = rhi::SampleCount::count1,
+      .memoryUsage = rhi::MemoryUsage::gpuOnly,
+      .debugName   = "CSM_CascadeArray",
+  });
 
-  // Create Texture2DArray for all cascades
-  const VkImageCreateInfo cascadeArrayInfo{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .imageType     = VK_IMAGE_TYPE_2D,
-      .format        = m_shadowFormat,
-      .extent        = {m_cascadeResolution, m_cascadeResolution, 1},
-      .mipLevels     = 1,
-      .arrayLayers   = m_cascadeCount,
-      .samples       = VK_SAMPLE_COUNT_1_BIT,
-      .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-  };
-
-  const VmaAllocationCreateInfo imageAllocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-  VK_CHECK(vmaCreateImage(
-      m_allocator, &cascadeArrayInfo, &imageAllocInfo, &m_cascadeArray.image, &m_cascadeArray.allocation, nullptr));
-  dutil.setObjectName(m_cascadeArray.image, "CSM_CascadeArray");
-
-  // The full-array sampling view + per-cascade render-target views are created through the
-  // RHI texture-view registry by RenderDevice; this subsystem owns only the array image.
-
-  // Per-cascade render-target views are created through the RHI texture-view registry
-  // by RenderDevice (see getCSMCascadeViewHandle), so this subsystem no longer owns them.
-
-  // Create uniform buffer for shadow data
-  const VkBufferCreateInfo uniformInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size  = sizeof(shaderio::ShadowUniforms),
-      .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-  };
-
-  VmaAllocationInfo uniformAllocInfo{};
-  const VmaAllocationCreateInfo uniformCreateInfo{
-      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-      .usage = VMA_MEMORY_USAGE_CPU_TO_GPU,
-  };
-  VK_CHECK(vmaCreateBuffer(
-      m_allocator, &uniformInfo, &uniformCreateInfo, &m_shadowUniformBuffer.buffer,
-      &m_shadowUniformBuffer.allocation, &uniformAllocInfo));
-
-  VK_CHECK(vmaMapMemory(m_allocator, m_shadowUniformBuffer.allocation, &m_shadowUniformMapped));
-  dutil.setObjectName(m_shadowUniformBuffer.buffer, "CSM_ShadowUniformBuffer");
+  m_shadowUniformBuffer = device.createBuffer(rhi::BufferDesc{
+      .size        = sizeof(shaderio::ShadowUniforms),
+      .usage       = rhi::BufferUsageFlags::uniform,
+      .memoryUsage = rhi::MemoryUsage::cpuToGpu,
+      .debugName   = "CSM_ShadowUniformBuffer",
+  });
+  m_shadowUniformMapped = device.mapBuffer(m_shadowUniformBuffer);
 
   // Initialize shadow uniforms with defaults
   m_shadowUniformsData.lightDirectionAndIntensity = glm::vec4(0.0f, -1.0f, 0.0f, kShadowIntensity);
@@ -289,53 +264,26 @@ void CSMShadowResources::init(VkDevice device, VmaAllocator allocator, VkCommand
       0.0f);  // normal bias placeholder
 
   std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
-  vmaFlushAllocation(m_allocator, m_shadowUniformBuffer.allocation, 0, sizeof(m_shadowUniformsData));
-
-  // Initialize the cascade image to GENERAL. The shadow render pass will
-  // transition it to attachment usage, and the pass end transitions it back
-  // for sampling.
-  const VkImageMemoryBarrier2 initBarrier{
-      .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-      .srcAccessMask       = VK_ACCESS_2_NONE,
-      .dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
-                             | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-      .dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
-                             | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-      .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
-      .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
-      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-      .image               = m_cascadeArray.image,
-      .subresourceRange    = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, m_cascadeCount},
+  const rhi::TextureBarrier initBarrier{
+      .texture = m_cascadeArray,
+      .before  = rhi::ResourceState::Undefined,
+      .after   = rhi::ResourceState::General,
+      .range   = {.aspect = rhi::TextureAspect::depth, .levelCount = 1, .layerCount = m_cascadeCount},
   };
-
-  const VkDependencyInfo initDepInfo{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &initBarrier,
-  };
-  vkCmdPipelineBarrier2(cmd, &initDepInfo);
+  cmd.resourceBarrier(&initBarrier, 1, nullptr, 0);
 }
 
 void CSMShadowResources::deinit()
 {
-  // Cleanup in reverse order of creation
-
-  if(m_shadowUniformMapped != nullptr)
+  if(m_device != nullptr && !m_shadowUniformBuffer.isNull())
   {
-    vmaUnmapMemory(m_allocator, m_shadowUniformBuffer.allocation);
-    m_shadowUniformMapped = nullptr;
+    m_device->unmapBuffer(m_shadowUniformBuffer);
+    m_device->destroyBuffer(m_shadowUniformBuffer);
   }
 
-  if(m_shadowUniformBuffer.buffer != VK_NULL_HANDLE)
+  if(m_device != nullptr && !m_cascadeArray.isNull())
   {
-    vmaDestroyBuffer(m_allocator, m_shadowUniformBuffer.buffer, m_shadowUniformBuffer.allocation);
-  }
-
-  if(m_cascadeArray.image != VK_NULL_HANDLE)
-  {
-    vmaDestroyImage(m_allocator, m_cascadeArray.image, m_cascadeArray.allocation);
+    m_device->destroyTexture(m_cascadeArray);
   }
 
   *this = CSMShadowResources{};
@@ -552,7 +500,6 @@ void CSMShadowResources::updateCascadeMatrices(const shaderio::CameraUniforms& c
 
   // Upload to GPU
   std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
-  vmaFlushAllocation(m_allocator, m_shadowUniformBuffer.allocation, 0, sizeof(m_shadowUniformsData));
 }
 
 }  // namespace demo
