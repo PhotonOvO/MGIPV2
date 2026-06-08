@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "RHIBoundary.h"
+
 namespace demo::rhi
 {
 	struct ExtensionRequest
@@ -140,7 +142,7 @@ namespace demo::rhi
 		// while renderer call sites migrate.
 		virtual TextureHandle createTexture(const TextureDesc&)
 		{
-			assert(false && "createTexture not implemented");
+			RHI_UNIMPLEMENTED("createTexture");
 			return {};
 		}
 
@@ -162,109 +164,124 @@ namespace demo::rhi
 		// --- Buffer (wraps the existing device-address path) ---
 		virtual BufferHandle createBuffer(const BufferDesc&)
 		{
-			assert(false && "createBuffer not implemented");
+			RHI_UNIMPLEMENTED("createBuffer");
 			return {};
 		}
 
-		virtual void destroyBuffer(BufferHandle) { assert(false && "destroyBuffer not implemented"); }
+		virtual void destroyBuffer(BufferHandle)
+		{
+			RHI_UNIMPLEMENTED("destroyBuffer");
+		}
 		// Adopt an externally-owned backend buffer (owned=false): the registry only mirrors it so
 		// it can be addressed by handle. updateBufferBinding rebinds the handle to a reallocated
 		// backend buffer. destroyBuffer on an owned=false handle only unregisters.
 		virtual BufferHandle registerExternalBuffer(uint64_t /*externalBuffer*/)
 		{
-			assert(false && "registerExternalBuffer not implemented");
+			RHI_UNIMPLEMENTED("registerExternalBuffer");
 			return {};
 		}
 
 		virtual void updateBufferBinding(BufferHandle, uint64_t /*externalBuffer*/)
 		{
-			assert(false && "updateBufferBinding not implemented");
+			RHI_UNIMPLEMENTED("updateBufferBinding");
 		}
 
 		virtual GpuPtr getBufferGpuAddress(BufferHandle) const
 		{
-			assert(false && "getBufferGpuAddress not implemented");
+			RHI_UNIMPLEMENTED("getBufferGpuAddress");
 			return {};
 		}
 
 		virtual void* mapBuffer(BufferHandle)
 		{
-			assert(false && "mapBuffer not implemented");
+			RHI_UNIMPLEMENTED("mapBuffer");
 			return nullptr;
 		}
 
-		virtual void unmapBuffer(BufferHandle) { assert(false && "unmapBuffer not implemented"); }
+		virtual void unmapBuffer(BufferHandle)
+		{
+			RHI_UNIMPLEMENTED("unmapBuffer");
+		}
 
 		// --- Sampler ---
 		virtual SamplerHandle createSampler(const SamplerDesc&)
 		{
-			assert(false && "createSampler not implemented");
+			RHI_UNIMPLEMENTED("createSampler");
 			return {};
 		}
 
-		virtual void destroySampler(SamplerHandle) { assert(false && "destroySampler not implemented"); }
+		virtual void destroySampler(SamplerHandle)
+		{
+			RHI_UNIMPLEMENTED("destroySampler");
+		}
 
 		virtual uint64_t resolveSamplerBackendHandle(SamplerHandle) const
 		{
-			assert(false && "resolveSamplerBackendHandle not implemented");
+			RHI_UNIMPLEMENTED("resolveSamplerBackendHandle");
 			return 0;
 		}
 
 		// --- Argument layout / table ---
 		virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc&)
 		{
-			assert(false && "createArgumentLayout not implemented");
+			RHI_UNIMPLEMENTED("createArgumentLayout");
 			return {};
 		}
 
 		virtual void destroyArgumentLayout(ArgumentLayoutHandle)
 		{
-			assert(false && "destroyArgumentLayout not implemented");
+			RHI_UNIMPLEMENTED("destroyArgumentLayout");
 		}
 
 		virtual ArgumentTableHandle createArgumentTable(ArgumentLayoutHandle)
 		{
-			assert(false && "createArgumentTable not implemented");
+			RHI_UNIMPLEMENTED("createArgumentTable");
 			return {};
 		}
 
 		virtual void destroyArgumentTable(ArgumentTableHandle)
 		{
-			assert(false && "destroyArgumentTable not implemented");
+			RHI_UNIMPLEMENTED("destroyArgumentTable");
 		}
 
 		virtual void updateArgumentTable(ArgumentTableHandle, uint32_t /*writeCount*/, const ArgumentWrite*)
 		{
-			assert(false && "updateArgumentTable not implemented");
+			RHI_UNIMPLEMENTED("updateArgumentTable");
 		}
 
 		// --- Pipeline ---
 		virtual PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc&)
 		{
-			assert(false && "createGraphicsPipeline not implemented");
+			RHI_UNIMPLEMENTED("createGraphicsPipeline");
 			return {};
 		}
 
 		virtual PipelineHandle createComputePipeline(const ComputePipelineDesc&)
 		{
-			assert(false && "createComputePipeline not implemented");
+			RHI_UNIMPLEMENTED("createComputePipeline");
 			return {};
 		}
 
-		virtual void destroyPipeline(PipelineHandle) { assert(false && "destroyPipeline not implemented"); }
+		virtual void destroyPipeline(PipelineHandle)
+		{
+			RHI_UNIMPLEMENTED("destroyPipeline");
+		}
 
 		// --- Query pool ---
 		virtual QueryPoolHandle createQueryPool(uint32_t /*queryCount*/)
 		{
-			assert(false && "createQueryPool not implemented");
+			RHI_UNIMPLEMENTED("createQueryPool");
 			return {};
 		}
 
-		virtual void destroyQueryPool(QueryPoolHandle) { assert(false && "destroyQueryPool not implemented"); }
+		virtual void destroyQueryPool(QueryPoolHandle)
+		{
+			RHI_UNIMPLEMENTED("destroyQueryPool");
+		}
 
 		virtual uint64_t getQueryPoolResult(QueryPoolHandle, uint32_t /*queryIndex*/)
 		{
-			assert(false && "getQueryPoolResult not implemented");
+			RHI_UNIMPLEMENTED("getQueryPoolResult");
 			return 0;
 		}
 
@@ -274,58 +291,64 @@ namespace demo::rhi
 		virtual bool getQueryPoolResultsWithAvailability(QueryPoolHandle, uint32_t /*firstQuery*/,
 		                                                 uint32_t /*queryCount*/, uint64_t* /*outPairs*/)
 		{
-			assert(false && "getQueryPoolResultsWithAvailability not implemented");
+			RHI_UNIMPLEMENTED("getQueryPoolResultsWithAvailability");
 			return false;
 		}
 
 		// --- Future RHI features (capability-gated) ---
 		virtual DescriptorHeapHandle allocateDescriptorHeap(const DescriptorHeapDesc&)
 		{
-			assert(false && "allocateDescriptorHeap not implemented");
+			RHI_UNIMPLEMENTED("allocateDescriptorHeap");
 			return {};
 		}
 
-		virtual void freeDescriptorHeap(DescriptorHeapHandle) { assert(false && "freeDescriptorHeap not implemented"); }
+		virtual void freeDescriptorHeap(DescriptorHeapHandle)
+		{
+			RHI_UNIMPLEMENTED("freeDescriptorHeap");
+		}
 
 		virtual DescriptorAllocation allocateDescriptors(DescriptorHeapHandle, uint32_t /*count*/)
 		{
-			assert(false && "allocateDescriptors not implemented");
+			RHI_UNIMPLEMENTED("allocateDescriptors");
 			return {};
 		}
 
 		virtual void freeDescriptors(const DescriptorAllocation&)
 		{
-			assert(false && "freeDescriptors not implemented");
+			RHI_UNIMPLEMENTED("freeDescriptors");
 		}
 
 		virtual ResidencySetHandle createResidencySet()
 		{
-			assert(false && "createResidencySet not implemented");
+			RHI_UNIMPLEMENTED("createResidencySet");
 			return {};
 		}
 
-		virtual void destroyResidencySet(ResidencySetHandle) { assert(false && "destroyResidencySet not implemented"); }
+		virtual void destroyResidencySet(ResidencySetHandle)
+		{
+			RHI_UNIMPLEMENTED("destroyResidencySet");
+		}
 
 		virtual ShaderLibraryHandle createShaderLibrary(const ShaderLibraryDesc&)
 		{
-			assert(false && "createShaderLibrary not implemented");
+			RHI_UNIMPLEMENTED("createShaderLibrary");
 			return {};
 		}
 
 		virtual void destroyShaderLibrary(ShaderLibraryHandle)
 		{
-			assert(false && "destroyShaderLibrary not implemented");
+			RHI_UNIMPLEMENTED("destroyShaderLibrary");
 		}
 
 		virtual PipelineCompilerHandle createPipelineCompiler(const PipelineCompileOptions&)
 		{
-			assert(false && "createPipelineCompiler not implemented");
+			RHI_UNIMPLEMENTED("createPipelineCompiler");
 			return {};
 		}
 
 		virtual void destroyPipelineCompiler(PipelineCompilerHandle)
 		{
-			assert(false && "destroyPipelineCompiler not implemented");
+			RHI_UNIMPLEMENTED("destroyPipelineCompiler");
 		}
 	};
 } // namespace demo::rhi

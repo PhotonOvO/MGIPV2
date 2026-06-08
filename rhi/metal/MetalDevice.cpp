@@ -1,4 +1,5 @@
 #include "MetalDevice.h"
+#include "RHIBoundary.h"
 
 #include <cassert>
 
@@ -27,7 +28,7 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
   // if (!device) { /* error handling */ }
   // id<MTLCommandQueue> queue = [device newCommandQueue];
   (void)createInfo;
-  assert(false && "Metal implementation not yet available");
+  RHI_UNIMPLEMENTED("MetalDevice::init");
 }
 
 void MetalDevice::deinit()
