@@ -189,7 +189,7 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
     SceneTexture tex{};
     tex.width  = static_cast<uint32_t>(gltfImage.width);
     tex.height = static_cast<uint32_t>(gltfImage.height);
-    tex.format = VK_FORMAT_R8G8B8A8_UNORM;  // Default; KTX2 path overrides in upload
+    tex.format = rhi::TextureFormat::rgba8Unorm;  // Default; KTX2 path overrides in upload
     tex.isKtx2 = gltfImage.isKtx2;
     tex.uri    = gltfImage.uri;
 
