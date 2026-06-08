@@ -1,4 +1,5 @@
 #include "Ktx2Loader.h"
+#include "../render/RHIFormatBridge.h"  // toPortableTextureFormat()
 
 #include <array>
 #include <cstring>
@@ -154,7 +155,12 @@ bool Ktx2Loader::loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& o
     return false;
   }
 
-  outTexture.format    = static_cast<VkFormat>(header.vkFormat);
+  outTexture.format = toPortableTextureFormat(static_cast<VkFormat>(header.vkFormat));
+  if (outTexture.format == rhi::TextureFormat::undefined)
+  {
+    m_lastError = "Unsupported or unknown KTX2 vkFormat";
+    return false;
+  }
   outTexture.width     = header.pixelWidth;
   outTexture.height    = header.pixelHeight;
   outTexture.mipLevels = levelCount;
