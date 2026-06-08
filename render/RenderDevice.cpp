@@ -1124,19 +1124,24 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     }
 #endif
     ASSERT(!filename.empty(), "Could not load texture image!");
-    utils::ImageResource materialImage0   = loadAndCreateImage(rhiCmd, filename);
+    LoadedImageHandles loaded0 = loadAndCreateImage(rhiCmd, filename);
     const TextureHandle  materialTexture0 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
             {
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
-                .sampledImageView   = materialImage0.view,
-                .sampledImageLayout = materialImage0.layout,
-                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage0.view)),
+                // Phase 4 boundary: sampledImageView (VkImageView) resolved from RHI view handle.
+                .sampledImageView   = fromNativeHandle<VkImageView>(
+                    m_device.device->resolveTextureViewBackendHandle(loaded0.view)),
+                .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                // loaded0.view is already registered; use directly (no double-registration).
+                .sampledViewHandle  = loaded0.view,
             },
         .cold =
             {
-                .ownedImage   = materialImage0,
-                .sourceExtent = materialImage0.extent,
+                .ownedTexture      = loaded0.texture,
+                .ownedTextureView  = loaded0.view,
+                .ownedNativeImage  = loaded0.nativeImage,
+                .sourceExtent      = loaded0.extent,
             },
     });
 
@@ -1148,19 +1153,24 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
     }
 #endif
     ASSERT(!filename.empty(), "Could not load texture image!");
-    utils::ImageResource materialImage1   = loadAndCreateImage(rhiCmd, filename);
+    LoadedImageHandles loaded1 = loadAndCreateImage(rhiCmd, filename);
     const TextureHandle  materialTexture1 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
             {
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
-                .sampledImageView   = materialImage1.view,
-                .sampledImageLayout = materialImage1.layout,
-                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage1.view)),
+                // Phase 4 boundary: sampledImageView (VkImageView) resolved from RHI view handle.
+                .sampledImageView   = fromNativeHandle<VkImageView>(
+                    m_device.device->resolveTextureViewBackendHandle(loaded1.view)),
+                .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                // loaded1.view is already registered; use directly (no double-registration).
+                .sampledViewHandle  = loaded1.view,
             },
         .cold =
             {
-                .ownedImage   = materialImage1,
-                .sourceExtent = materialImage1.extent,
+                .ownedTexture      = loaded1.texture,
+                .ownedTextureView  = loaded1.view,
+                .ownedNativeImage  = loaded1.nativeImage,
+                .sourceExtent      = loaded1.extent,
             },
     });
 
@@ -1302,15 +1312,35 @@ void RenderDevice::shutdown(rhi::Surface& surface)
       [&](TextureHandle handle, const MaterialResources::TextureRecord&) { texturesToDestroy.push_back(handle); });
   for(const TextureHandle handle : texturesToDestroy)
   {
+    const MaterialResources::TextureColdData* textureCold = tryGetTextureCold(handle);
+    // Phase 3 (D-03): resolve native VkImageView BEFORE removeTextureView invalidates the handle.
+    // registerExternalTextureView used owned=false, so destroyTextureView/removeTextureView
+    // only unregisters; explicit vkDestroyImageView needed below.
+    VkImageView nativeView{VK_NULL_HANDLE};
+    if(textureCold != nullptr && !textureCold->ownedTextureView.isNull())
+    {
+      nativeView = fromNativeHandle<VkImageView>(
+          m_device.device->resolveTextureViewBackendHandle(textureCold->ownedTextureView));
+    }
     if(const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->sampledViewHandle.isNull())
     {
+      // sampledViewHandle == ownedTextureView for Phase 3 textures; unregisters the handle entry.
       m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
     }
-    const MaterialResources::TextureColdData* textureCold = tryGetTextureCold(handle);
-    if(textureCold != nullptr && textureCold->ownedImage.image != VK_NULL_HANDLE)
+    if(textureCold != nullptr && !textureCold->ownedTexture.isNull())
     {
-      utils::ImageResource image = textureCold->ownedImage;
-      destroyImageResource(device, m_device.allocator, image);
+      // 1. Unregister texture handle (owned=false — does not release VMA).
+      m_device.device->destroyTexture(textureCold->ownedTexture);
+      // 2. Release VMA allocation (vmaDestroyImage — registerExternalTexture owned=false).
+      if(textureCold->ownedNativeImage.image != VK_NULL_HANDLE)
+      {
+        vmaDestroyImage(m_device.allocator, textureCold->ownedNativeImage.image, textureCold->ownedNativeImage.allocation);
+      }
+      // 3. Release VkImageView (registerExternalTextureView owned=false; not released by destroyTextureView).
+      if(nativeView != VK_NULL_HANDLE)
+      {
+        vkDestroyImageView(device, nativeView, nullptr);
+      }
     }
     m_materials.texturePool.destroy(handle);
   }
@@ -5745,7 +5775,7 @@ void RenderDevice::destroyArgumentTablesAndLayouts()
   }
 }
 
-utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
+RenderDevice::LoadedImageHandles RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
 {
   int            w = 0, h = 0, comp = 0, req_comp{4};
   const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
@@ -5781,7 +5811,12 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, c
       .usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
   };
 
+  // D-02: createImage is a .cpp-local native seam (VMA allocation). registerExternalTexture
+  // adopts the native VkImage as an owned=false handle for RHI barrier/upload commands.
+  // The imageHandle is NOT destroyed after upload — it becomes the permanent ownedTexture
+  // stored in TextureColdData (Phase 3 D-03). Destroy path: three steps (see TextureColdData).
   utils::Image nativeImage = createImage(m_device.allocator, imageInfo);
+  DBG_VK_NAME(nativeImage.image);
   const rhi::TextureHandle imageHandle =
       m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(nativeImage.image));
   const rhi::TextureSubresourceRange imageRange{
@@ -5826,7 +5861,7 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, c
       .range = imageRange,
   };
   cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
-  m_device.device->destroyImage(imageHandle);
+  // Note: imageHandle is NOT destroyed here — it becomes the permanent ownedTexture (D-03).
 
   rhi::BufferHandle staging = upload.releaseStagingBuffer();
   if(!staging.isNull())
@@ -5834,22 +5869,22 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, c
     m_device.rhiStagingBuffers.push_back(staging);
   }
 
-  utils::ImageResource image{};
-  image.image = nativeImage.image;
-  image.allocation = nativeImage.allocation;
-  image.layout = VK_IMAGE_LAYOUT_GENERAL;
-  DBG_VK_NAME(image.image);
-  image.extent = {uint32_t(w), uint32_t(h)};
-
+  // D-02: vkCreateImageView is a .cpp-local native seam. registerExternalTextureView
+  // adopts it as owned=false — destroyTextureView only unregisters, does not call
+  // vkDestroyImageView. VkImageView is released in the destroy path via destroyImageResource.
   const VkImageViewCreateInfo viewInfo = {
       .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image            = image.image,
+      .image            = nativeImage.image,
       .viewType         = VK_IMAGE_VIEW_TYPE_2D,
       .format           = format,
       .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
   };
-  VK_CHECK(vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &viewInfo, nullptr, &image.view));
-  DBG_VK_NAME(image.view);
+  VkImageView imageView{VK_NULL_HANDLE};
+  VK_CHECK(vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &viewInfo, nullptr, &imageView));
+  DBG_VK_NAME(imageView);
+  const rhi::TextureViewHandle viewHandle =
+      m_device.device->registerExternalTextureView(reinterpret_cast<uint64_t>(imageView));
+
 #ifdef __ANDROID__
   if(data != fallbackPixels.data())
 #endif
@@ -5857,7 +5892,12 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, c
     stbi_image_free(const_cast<stbi_uc*>(data));
   }
 
-  return image;
+  return LoadedImageHandles{
+      .texture     = imageHandle,
+      .view        = viewHandle,
+      .nativeImage = nativeImage,
+      .extent      = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)},
+  };
 }
 
 void RenderDevice::createPrebuiltComputePipelineVariant()
@@ -7308,15 +7348,35 @@ void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
   {
     invalidateBindlessTexture(gltfTextureBaseIndex + static_cast<uint32_t>(textureIndex));
     TextureHandle handle = result.textures[textureIndex];
+    const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
+    // Phase 3 (D-03): resolve native VkImageView BEFORE removeTextureView invalidates the handle.
+    // registerExternalTextureView used owned=false, so destroyTextureView/removeTextureView
+    // only unregisters; explicit vkDestroyImageView needed below.
+    VkImageView nativeView{VK_NULL_HANDLE};
+    if(cold != nullptr && !cold->ownedTextureView.isNull())
+    {
+      nativeView = fromNativeHandle<VkImageView>(
+          m_device.device->resolveTextureViewBackendHandle(cold->ownedTextureView));
+    }
     if(const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->sampledViewHandle.isNull())
     {
+      // sampledViewHandle == ownedTextureView for Phase 3 textures; unregisters the handle entry.
       m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
     }
-    const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
-    if(cold && cold->ownedImage.image != VK_NULL_HANDLE)
+    if(cold != nullptr && !cold->ownedTexture.isNull())
     {
-      utils::ImageResource image = cold->ownedImage;
-      destroyImageResource(device, m_device.allocator, image);
+      // 1. Unregister texture handle (owned=false — does not release VMA).
+      m_device.device->destroyTexture(cold->ownedTexture);
+      // 2. Release VMA allocation (vmaDestroyImage — registerExternalTexture owned=false).
+      if(cold->ownedNativeImage.image != VK_NULL_HANDLE)
+      {
+        vmaDestroyImage(m_device.allocator, cold->ownedNativeImage.image, cold->ownedNativeImage.allocation);
+      }
+      // 3. Release VkImageView (registerExternalTextureView owned=false; not released by destroyTextureView).
+      if(nativeView != VK_NULL_HANDLE)
+      {
+        vkDestroyImageView(device, nativeView, nullptr);
+      }
     }
     m_materials.texturePool.destroy(handle);
   }

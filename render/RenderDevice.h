@@ -825,7 +825,15 @@ namespace demo
 
 			struct TextureColdData
 			{
-				utils::ImageResource ownedImage{};
+				// Phase 3: loadAndCreateImage 产物改用 RHI handle (D-03)
+				// registerExternalTexture/registerExternalTextureView owned=false:
+				//   destroyTexture + destroyTextureView 只解注册，不释放 VMA / vkDestroyImageView。
+				//   VMA 释放须通过 destroyImageResource(allocator, utils::Image) 独立调用。
+				// Destroy 顺序（必须）：先 destroyTextureView，再 destroyTexture，最后 VMA 释放。
+				rhi::TextureHandle     ownedTexture{};
+				rhi::TextureViewHandle ownedTextureView{};
+				// Native image kept for VMA release in destroy path (registerExternal owned=false).
+				utils::Image           ownedNativeImage{};
 				DEMO_RHI_VK(Extent2D) sourceExtent{};
 				uint32_t mipLevels{1};
 			};
@@ -947,7 +955,17 @@ namespace demo
 		void createIBLResources(rhi::CommandBuffer& cmd);
 		void destroyIBLResources();
 		void destroyArgumentTablesAndLayouts();
-		utils::ImageResource loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
+		// Phase 3 (D-03): loadAndCreateImage returns RHI handles instead of utils::ImageResource.
+		// texture + view are registered as owned=false (external); VMA release requires
+		// destroyImageResource helper to be called separately in destroy path.
+		struct LoadedImageHandles
+		{
+			rhi::TextureHandle     texture{};
+			rhi::TextureViewHandle view{};
+			utils::Image           nativeImage{}; // kept for VMA release (owned=false semantics)
+			DEMO_RHI_VK(Extent2D) extent{};       // image dimensions for sourceExtent
+		};
+		LoadedImageHandles loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
 		const MaterialResources::MaterialRecord* tryGetMaterial(MaterialHandle handle) const;
 		const MaterialResources::TextureHotData* tryGetTextureHot(TextureHandle handle) const;
 		const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;
