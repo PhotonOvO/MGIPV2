@@ -170,6 +170,9 @@ enum class TextureFormat : uint8_t
   d32SfloatS8 = 7,
   rg16Sfloat  = 8,
   r32Sfloat   = 9,
+  // Block-compressed formats for KTX2 asset pipeline (D-01/D-03)
+  bc7UnormBlock = 145,   // VK_FORMAT_BC7_UNORM_BLOCK — normal/metallic/roughness
+  bc7SrgbBlock  = 146,   // VK_FORMAT_BC7_SRGB_BLOCK  — albedo/emissive sRGB
 };
 
 // Describes a texture view to create through the RHI. Fully portable: the source image is
