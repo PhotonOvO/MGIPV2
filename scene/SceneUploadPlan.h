@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../common/Common.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../rhi/RHITypes.h"
 
 #include <array>
 #include <cstdint>
@@ -26,14 +26,14 @@ struct MeshUploadPlan {
   uint32_t vertexCount{0};
   uint32_t indexCount{0};
   uint32_t vertexStride{kSceneUploadVertexStride};
-  VkIndexType indexType{VK_INDEX_TYPE_UINT32};
+  rhi::IndexFormat indexType{rhi::IndexFormat::uint32};
   glm::vec3 localBoundsMin{0.0f};
   glm::vec3 localBoundsMax{0.0f};
 };
 
 struct TextureUploadPlan {
   uint32_t textureIndex{0};
-  VkFormat format{VK_FORMAT_UNDEFINED};
+  rhi::TextureFormat format{rhi::TextureFormat::undefined};
   uint32_t width{0};
   uint32_t height{0};
   uint32_t mipLevels{1};

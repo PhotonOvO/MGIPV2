@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../common/Common.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../rhi/RHITypes.h"
 #include "../rhi/RHIDevice.h"
 #include "SceneLight.h"
 
@@ -68,7 +68,7 @@ struct SceneTexture {
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t mipLevels = 1;
-  VkFormat format = VK_FORMAT_UNDEFINED;
+  rhi::TextureFormat format = rhi::TextureFormat::undefined;
 
   // Payload location inside SceneAsset::texturePayload
   uint64_t payloadOffset = 0;
