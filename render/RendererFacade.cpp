@@ -1,11 +1,10 @@
 #include "RendererFacade.h"
-#include "../rhi/vulkan/VulkanSurface.h"
 
 namespace demo {
 
 std::unique_ptr<rhi::Surface> RendererFacade::createSurface() const
 {
-  return std::make_unique<rhi::vulkan::VulkanSurface>();
+  return gpuDriven().createSurface();
 }
 
 void RendererFacade::init(void* window, rhi::Surface& surface, bool vSync)

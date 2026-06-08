@@ -268,7 +268,7 @@ SceneUploadPlanBuildResult SceneUploadPlanner::build(const SceneAssetView& asset
         .vertexCount = mesh.vertexCount,
         .indexCount = mesh.indexCount,
         .vertexStride = kSceneUploadVertexStride,
-        .indexType = VK_INDEX_TYPE_UINT32,
+        .indexType = rhi::IndexFormat::uint32,
         .localBoundsMin = mesh.localBoundsMin,
         .localBoundsMax = mesh.localBoundsMax,
     });

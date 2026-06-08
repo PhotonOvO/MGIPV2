@@ -73,6 +73,7 @@ namespace demo
 		RenderDevice() = default;
 
 		void init(void* window, rhi::Surface& surface, bool vSync);
+		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const;
 		void shutdown(rhi::Surface& surface);
 		void setVSync(bool enabled);
 		[[nodiscard]] bool getVSync() const { return m_swapchainDependent.vSync; }

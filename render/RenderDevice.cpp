@@ -3,6 +3,7 @@
 #include "../rhi/vulkan/VulkanSwapchain.h"
 #include "../rhi/vulkan/VulkanDevice.h"
 #include "../rhi/vulkan/VulkanFrameContext.h"
+#include "../rhi/vulkan/VulkanSurface.h"
 #include "FrameSubmission.h"
 #include "RHIFormatBridge.h"
 #include "ClipSpaceConvention.h"
@@ -1223,6 +1224,11 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   updateGraphicsArgumentTables();
 }
 
+std::unique_ptr<rhi::Surface> RenderDevice::createSurface() const
+{
+  return std::make_unique<rhi::vulkan::VulkanSurface>();
+}
+
 void RenderDevice::shutdown(rhi::Surface& surface)
 {
   m_device.device->waitIdle();
@@ -2083,9 +2089,9 @@ void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
     LOGW("%s", m_device.iblEnvironmentStatus.c_str());
     return;
   }
-  if(!supportsSampledImageFormat(physicalDevice, ktxTexture.format))
+  if(!supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format)))
   {
-    m_device.iblEnvironmentStatus = "Unsupported IBL KTX2 format: " + std::string(string_VkFormat(ktxTexture.format));
+    m_device.iblEnvironmentStatus = "Unsupported IBL KTX2 format: " + std::string(string_VkFormat(toNativeFormat(ktxTexture.format)));
     LOGW("%s", m_device.iblEnvironmentStatus.c_str());
     return;
   }
@@ -2101,7 +2107,7 @@ void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
   const VkImageCreateInfo imageInfo{
       .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType   = VK_IMAGE_TYPE_2D,
-      .format      = ktxTexture.format,
+      .format      = toNativeFormat(ktxTexture.format),
       .extent      = {ktxTexture.width, ktxTexture.height, 1},
       .mipLevels   = mipLevels,
       .arrayLayers = 1,
@@ -2172,7 +2178,7 @@ void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
       .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image            = environmentImage.image,
       .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-      .format           = ktxTexture.format,
+      .format           = toNativeFormat(ktxTexture.format),
       .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
   };
   VkImageView environmentView = VK_NULL_HANDLE;
@@ -2187,7 +2193,7 @@ void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
   m_device.iblEnvironment.allocation = environmentImage.allocation;
   m_device.iblEnvironment.view = environmentView;
   m_device.iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
-  m_device.iblEnvironmentFormat = toPortableTextureFormat(ktxTexture.format);
+  m_device.iblEnvironmentFormat = ktxTexture.format;  // already rhi::TextureFormat post-02-02
   m_device.iblEnvironmentExtent = {ktxTexture.width, ktxTexture.height};
   m_device.iblEnvironmentMipCount = mipLevels;
   m_device.iblEnvironmentEstimatedBytes = static_cast<uint64_t>(ktxTexture.data.size());
@@ -2199,7 +2205,7 @@ void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
        ktxTexture.width,
        ktxTexture.height,
        mipLevels,
-       string_VkFormat(ktxTexture.format),
+       string_VkFormat(toNativeFormat(ktxTexture.format)),
        static_cast<double>(ktxTexture.data.size()) / (1024.0 * 1024.0));
 }
 
@@ -6302,7 +6308,7 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
 
     const uint8_t* payloadData = asset.texturePayload.data() + texture.payloadOffset;
     const size_t payloadSize = static_cast<size_t>(texture.payloadSize);
-    VkFormat format = texturePlan.format;
+    VkFormat format = toNativeFormat(texturePlan.format);
     uint32_t width = texturePlan.width;
     uint32_t height = texturePlan.height;
     uint32_t mipLevels = std::max(texturePlan.mipLevels, 1u);
@@ -6316,14 +6322,14 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
         LOGW("Skipping SceneAsset KTX2 texture %u: %s", texturePlan.textureIndex, loader.getLastError().c_str());
         continue;
       }
-      if(!supportsSampledImageFormat(physicalDevice, ktxTexture.format))
+      if(!supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format)))
       {
         LOGW("Skipping unsupported SceneAsset KTX2 texture format %s for texture %u",
-             string_VkFormat(ktxTexture.format),
+             string_VkFormat(toNativeFormat(ktxTexture.format)),
              texturePlan.textureIndex);
         continue;
       }
-      format = ktxTexture.format;
+      format = toNativeFormat(ktxTexture.format);
       width = ktxTexture.width;
       height = ktxTexture.height;
       mipLevels = std::max(ktxTexture.mipLevels, 1u);
@@ -6851,11 +6857,11 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     std::filesystem::path   ktx2Path;
     const bool loadedKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
     const bool hasSupportedKtx2Sidecar =
-        loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, ktxTexture.format);
+        loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format));
     if(loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
     {
       LOGW("Skipping unsupported KTX2 format %s for %s, falling back to source image upload",
-           string_VkFormat(ktxTexture.format),
+           string_VkFormat(toNativeFormat(ktxTexture.format)),
            ktx2Path.string().c_str());
     }
     const GltfImageData* rawImageData = hasSupportedKtx2Sidecar ? nullptr : findRawImageFallback(model, imageData);
@@ -6868,7 +6874,7 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
       continue;
     }
 
-    const VkFormat format = hasSupportedKtx2Sidecar ? ktxTexture.format : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkFormat format = hasSupportedKtx2Sidecar ? toNativeFormat(ktxTexture.format) : VK_FORMAT_R8G8B8A8_UNORM;
     const uint32_t width = hasSupportedKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(rawImageData->width);
     const uint32_t height = hasSupportedKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(rawImageData->height);
     const uint32_t requestedMipLevels =

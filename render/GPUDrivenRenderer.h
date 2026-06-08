@@ -274,6 +274,7 @@ namespace demo
 	class GPUDrivenRenderer
 	{
 	public:
+		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const { return m_renderer.createSurface(); }
 		void init(void* window, rhi::Surface& surface, bool vSync);
 		void shutdown(rhi::Surface& surface);
 		void setVSync(bool enabled) { m_renderer.setVSync(enabled); }
