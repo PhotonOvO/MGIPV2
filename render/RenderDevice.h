@@ -577,9 +577,9 @@ namespace demo
 
 			utils::Buffer vertexBuffer;
 			utils::Buffer pointsBuffer;
+			// TODO(Phase4): sink to VulkanDevice -- blocked on VulkanSwapchain::init void* coupling (L1030)
 			DEMO_RHI_VK(CommandPool) transientCmdPool{};
 			DEMO_RHI_VK(CommandPool) uploadCmdPool{};
-			DEMO_RHI_VK(CommandPool) computeCmdPool{};
 			DEMO_RHI_VK(DescriptorPool) descriptorPool{};
 			DEMO_RHI_VK(DescriptorPool) uiDescriptorPool{};
 			utils::ImageResource iblEnvironment{};

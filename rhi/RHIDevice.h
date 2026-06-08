@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -124,6 +125,24 @@ namespace demo::rhi
 		virtual bool isDeviceExtensionSupported(const char* name) const = 0;
 
 		virtual void waitIdle() = 0;
+
+		// --- Immediate upload seam (UPL-02) ---
+		// executeImmediateUpload submits a one-shot upload command to the graphics queue.
+		// The backend (VulkanDevice) owns the upload cmd pool, fence lifecycle, and per-frame
+		// pending queue. D3D12/Metal stubs abort until backend support is added.
+		// Callers must not escape the VkCommandBuffer or fence; use rhi::CommandBuffer& only.
+		virtual void executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn)
+		{
+			RHI_UNIMPLEMENTED("executeImmediateUpload");
+		}
+
+		// flushUploadRetirements polls (waitForCompletion=false) or blocks (true) on all
+		// pending upload fences and recycles their cmd buffers and fences.
+		// Staging buffer retirement (rhiStagingBuffers) stays in the render layer.
+		virtual void flushUploadRetirements(bool waitForCompletion)
+		{
+			RHI_UNIMPLEMENTED("flushUploadRetirements");
+		}
 
 		// --- Texture views ---
 		// createTextureView builds a backend view from the desc and registers an owned handle.
