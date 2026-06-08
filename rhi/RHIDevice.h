@@ -18,6 +18,9 @@
 
 namespace demo::rhi
 {
+	// Forward-declared for executeImmediateUpload's std::function signature (used by reference only).
+	class CommandBuffer;
+
 	struct ExtensionRequest
 	{
 		const char* name{nullptr};
