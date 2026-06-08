@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../common/Common.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../rhi/RHITypes.h"   // rhi::TextureFormat — portable, no Vulkan dependency
 
 #include <filesystem>
 #include <string>
@@ -14,12 +14,12 @@ class Ktx2Loader
 public:
   struct Ktx2Texture
   {
-    VkFormat                format{VK_FORMAT_UNDEFINED};
+    rhi::TextureFormat      format{rhi::TextureFormat::undefined};
     uint32_t                width{0};
     uint32_t                height{0};
     uint32_t                mipLevels{0};
-    std::vector<VkDeviceSize> mipOffsets;
-    std::vector<VkDeviceSize> mipSizes;
+    std::vector<uint64_t>   mipOffsets;   // uint64_t (was platform size type, zero semantic change)
+    std::vector<uint64_t>   mipSizes;     // same
     std::vector<uint8_t>    data;
   };
 
