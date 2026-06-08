@@ -2,25 +2,24 @@
 
 #include "../Pass.h"
 
-namespace demo {
-
-class GPUDrivenRenderer;
-
-class GPUDrivenDebugPass : public RenderPassNode
+namespace demo
 {
-public:
-  explicit GPUDrivenDebugPass(GPUDrivenRenderer* renderer);
+	class GPUDrivenRenderer;
 
-  [[nodiscard]] const char* getName() const override { return "GPUDrivenDebug"; }
-  [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
-  void execute(const PassContext& context) const override;
+	class GPUDrivenDebugPass : public RenderPassNode
+	{
+	public:
+		explicit GPUDrivenDebugPass(GPUDrivenRenderer* renderer);
 
-private:
-  // Relocated debug-overlay recording. Currently not invoked from execute()
-  // (the pass is disabled), matching the prior commented-out call site.
-  void renderDebugOverlay(const PassContext& context) const;
+		[[nodiscard]] const char* getName() const override { return "GPUDrivenDebug"; }
+		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
+		void execute(const PassContext& context) const override;
 
-  GPUDrivenRenderer* m_renderer{nullptr};
-};
+	private:
+		// Relocated debug-overlay recording. Currently not invoked from execute()
+		// (the pass is disabled), matching the prior commented-out call site.
+		void renderDebugOverlay(const PassContext& context) const;
 
-}  // namespace demo
+		GPUDrivenRenderer* m_renderer{nullptr};
+	};
+} // namespace demo

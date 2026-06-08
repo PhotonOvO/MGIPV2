@@ -2,21 +2,20 @@
 
 #include "../Pass.h"
 
-namespace demo {
-
-class GPUDrivenRenderer;
-
-class GPUDrivenSSRPass final : public ComputePassNode
+namespace demo
 {
-public:
-  explicit GPUDrivenSSRPass(GPUDrivenRenderer* renderer);
+	class GPUDrivenRenderer;
 
-  [[nodiscard]] const char* getName() const override { return "GPUDrivenSSRPass"; }
-  [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
-  void execute(const PassContext& context) const override;
+	class GPUDrivenSSRPass final : public ComputePassNode
+	{
+	public:
+		explicit GPUDrivenSSRPass(GPUDrivenRenderer* renderer);
 
-private:
-  GPUDrivenRenderer* m_renderer{nullptr};
-};
+		[[nodiscard]] const char* getName() const override { return "GPUDrivenSSRPass"; }
+		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
+		void execute(const PassContext& context) const override;
 
-}  // namespace demo
+	private:
+		GPUDrivenRenderer* m_renderer{nullptr};
+	};
+} // namespace demo

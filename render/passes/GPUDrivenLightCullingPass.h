@@ -2,21 +2,20 @@
 
 #include "../Pass.h"
 
-namespace demo {
-
-class GPUDrivenRenderer;
-
-class GPUDrivenLightCullingPass : public ComputePassNode
+namespace demo
 {
-public:
-  explicit GPUDrivenLightCullingPass(GPUDrivenRenderer* renderer);
+	class GPUDrivenRenderer;
 
-  [[nodiscard]] const char* getName() const override { return "GPUDrivenLightCulling"; }
-  [[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
-  void execute(const PassContext& context) const override;
+	class GPUDrivenLightCullingPass : public ComputePassNode
+	{
+	public:
+		explicit GPUDrivenLightCullingPass(GPUDrivenRenderer* renderer);
 
-private:
-  GPUDrivenRenderer* m_renderer{nullptr};
-};
+		[[nodiscard]] const char* getName() const override { return "GPUDrivenLightCulling"; }
+		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
+		void execute(const PassContext& context) const override;
 
-}  // namespace demo
+	private:
+		GPUDrivenRenderer* m_renderer{nullptr};
+	};
+} // namespace demo
