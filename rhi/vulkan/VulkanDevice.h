@@ -3,6 +3,7 @@
 #include "../RHIDevice.h"
 #include "../RHIResourceLifetime.h"
 
+#include <functional>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -45,6 +46,10 @@ public:
   bool isDeviceExtensionSupported(const char* name) const override;
 
   void waitIdle() override;
+
+  // --- Immediate upload seam (UPL-02) ---
+  void executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn) override;
+  void flushUploadRetirements(bool waitForCompletion) override;
 
   TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) override;
   TextureViewHandle registerExternalTextureView(uint64_t externalView) override;
@@ -197,6 +202,17 @@ private:
   VmaAllocator         m_allocator{nullptr};
   VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // lazily created for argument tables
   std::vector<NativeRetirement> m_pendingRetirements;
+
+  // Upload cmd pool — migrated from RenderDevice (UPL-02)
+  VkCommandPool m_uploadCmdPool{VK_NULL_HANDLE};
+
+  // Per-frame pending upload cmd buffers + fences — migrated from FrameUserData (UPL-02/03)
+  struct UploadPendingFrame
+  {
+    std::vector<VkCommandBuffer> cmds;
+    std::vector<VkFence>         fences;
+  };
+  std::vector<UploadPendingFrame> m_uploadPendingFrames;
 };
 
 }  // namespace demo::rhi::vulkan

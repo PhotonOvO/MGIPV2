@@ -579,7 +579,6 @@ namespace demo
 			utils::Buffer pointsBuffer;
 			// TODO(Phase4): sink to VulkanDevice -- blocked on VulkanSwapchain::init void* coupling (L1030)
 			DEMO_RHI_VK(CommandPool) transientCmdPool{};
-			DEMO_RHI_VK(CommandPool) uploadCmdPool{};
 			DEMO_RHI_VK(DescriptorPool) descriptorPool{};
 			DEMO_RHI_VK(DescriptorPool) uiDescriptorPool{};
 			utils::ImageResource iblEnvironment{};
@@ -702,8 +701,6 @@ namespace demo
 				uint32_t gpuDrivenPersistentIndirectStreamCapacity{0};
 				std::vector<shaderio::ShadowCullObject> shadowCullingScratchObjects;
 				std::vector<shaderio::DrawUniforms> shadowCullingScratchDrawData;
-				std::vector<DEMO_RHI_VK(CommandBuffer)> pendingUploadCmds;
-				std::vector<DEMO_RHI_VK(Fence)> pendingUploadFences;
 				// Argument tables created via createTemporaryArgumentTable during this frame index's
 				// recording. Recycled (destroyed) the next time this frame index comes around,
 				// after its fence has been waited on, so the descriptor sets are safely idle.

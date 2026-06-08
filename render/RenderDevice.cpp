@@ -1284,12 +1284,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
     vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
     m_device.transientCmdPool = VK_NULL_HANDLE;
   }
-  if(m_device.uploadCmdPool != VK_NULL_HANDLE)
-  {
-    vkDestroyCommandPool(device, m_device.uploadCmdPool, nullptr);
-    m_device.uploadCmdPool = VK_NULL_HANDLE;
-  }
-
   destroyPipelines();
   // Destroy any owned texture views still registered (adopted/external ones are left to
   // their owners). Route through destroyTextureView so each view is both freed and removed
@@ -1915,15 +1909,7 @@ void RenderDevice::createTransientCommandPool()
   };
   VK_CHECK(vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &m_device.transientCmdPool));
   DBG_VK_NAME(m_device.transientCmdPool);
-
-  // Upload command pool for async uploads (separate pool for thread safety)
-  const VkCommandPoolCreateInfo uploadPoolInfo{
-      .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-      .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-      .queueFamilyIndex = graphicsQueueInfo.familyIndex,
-  };
-  VK_CHECK(vkCreateCommandPool(device, &uploadPoolInfo, nullptr, &m_device.uploadCmdPool));
-  DBG_VK_NAME(m_device.uploadCmdPool);
+  // NOTE: uploadCmdPool has been sunk into VulkanDevice::init (UPL-02).
 }
 
 void RenderDevice::createFrameSubmission(uint32_t numFrames)
@@ -6115,112 +6101,26 @@ uintptr_t RenderDevice::getBackendDeviceToken() const
 
 void RenderDevice::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 {
-  flushPendingUploadCommands(true);
-
-  const VkDevice       device       = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-  const rhi::QueueInfo graphicsInfo = m_device.device->getGraphicsQueue();
-  const VkQueue        graphicsQueue = fromNativeHandle<VkQueue>(graphicsInfo.backendHandle);
-
-  VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.uploadCmdPool);
-  rhi::vulkan::VulkanCommandBuffer rhiCmd;
-  rhiCmd.setTarget(cmd, &m_device.resourceTable);
-  uploadFn(rhiCmd);
-  VK_CHECK(vkEndCommandBuffer(cmd));
-
-  // Create fence for this upload (non-blocking submit)
-  const VkFenceCreateInfo fenceInfo{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VkFence uploadFence{VK_NULL_HANDLE};
-  VK_CHECK(vkCreateFence(device, &fenceInfo, nullptr, &uploadFence));
-
-  const VkCommandBufferSubmitInfo cmdBufferInfo{
-      .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-      .commandBuffer = cmd,
-  };
-  const VkSubmitInfo2 submitInfo{
-      .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-      .commandBufferInfoCount = 1,
-      .pCommandBufferInfos   = &cmdBufferInfo,
-  };
-  VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submitInfo, uploadFence));
-
-  // Store cmd buffer and fence for deferred cleanup (checked next frame)
-  const uint32_t frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
-  m_perFrame.frameUserData[frameIndex].pendingUploadCmds.push_back(cmd);
-  m_perFrame.frameUserData[frameIndex].pendingUploadFences.push_back(uploadFence);
+  // Upload cmd pool + fence lifecycle sunk into VulkanDevice (UPL-02).
+  m_device.device->executeImmediateUpload(std::move(uploadFn));
 }
 
 void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
 {
-  if(m_perFrame.frameUserData.empty() || m_device.device == nullptr)
+  if(m_device.device == nullptr)
   {
     return;
   }
+  // Step 1: backend fence/cmd retirement — VulkanDevice polls or blocks on upload fences
+  // and recycles their cmd buffers (UPL-02/03 lifecycle preserved).
+  m_device.device->flushUploadRetirements(waitForCompletion);
 
-  const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-  bool           completedAnyUpload = false;
-  for(auto& frameUserData : m_perFrame.frameUserData)
-  {
-    if(frameUserData.pendingUploadFences.empty())
-    {
-      continue;
-    }
-
-    std::vector<size_t> completedIndices;
-    completedIndices.reserve(frameUserData.pendingUploadFences.size());
-    for(size_t i = 0; i < frameUserData.pendingUploadFences.size(); ++i)
-    {
-      const VkFence fence = frameUserData.pendingUploadFences[i];
-      if(waitForCompletion)
-      {
-        VK_CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
-        completedIndices.push_back(i);
-        continue;
-      }
-
-      if(vkGetFenceStatus(device, fence) == VK_SUCCESS)
-      {
-        completedIndices.push_back(i);
-      }
-    }
-
-    for(auto it = completedIndices.rbegin(); it != completedIndices.rend(); ++it)
-    {
-      vkFreeCommandBuffers(device, m_device.uploadCmdPool, 1, &frameUserData.pendingUploadCmds[*it]);
-      vkDestroyFence(device, frameUserData.pendingUploadFences[*it], nullptr);
-      frameUserData.pendingUploadCmds.erase(frameUserData.pendingUploadCmds.begin() + *it);
-      frameUserData.pendingUploadFences.erase(frameUserData.pendingUploadFences.begin() + *it);
-      completedAnyUpload = true;
-    }
-  }
-
-  if(completedAnyUpload)
-  {
-    bool hasPendingUpload = false;
-    for(const auto& frameUserData : m_perFrame.frameUserData)
-    {
-      hasPendingUpload = hasPendingUpload || !frameUserData.pendingUploadFences.empty();
-    }
-
-    const VkDeviceSize rendererStagingBytes = getStagingBufferBytes(m_device.allocator, m_device.stagingBuffers);
-    const VkDeviceSize meshPoolStagingBytes = m_meshPool.getDeferredStagingBufferBytes();
-    LOGI("Upload memory snapshot: pendingUploads=%d rendererStaging=%zu buffers %.2f MiB meshPoolDeferred=%zu buffers %.2f MiB",
-         hasPendingUpload ? 1 : 0,
-         m_device.stagingBuffers.size(),
-         static_cast<double>(rendererStagingBytes) / (1024.0 * 1024.0),
-         m_meshPool.getDeferredStagingBufferCount(),
-         static_cast<double>(meshPoolStagingBytes) / (1024.0 * 1024.0));
-
-    if(!hasPendingUpload)
-    {
-      freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
-      freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
-      m_meshPool.freeStagingBuffers();
-      LOGI("Upload memory snapshot after renderer staging free: rendererStaging=%zu buffers meshPoolDeferred=%zu buffers %.2f MiB",
-           m_device.stagingBuffers.size(),
-           m_meshPool.getDeferredStagingBufferCount(),
-           static_cast<double>(m_meshPool.getDeferredStagingBufferBytes()) / (1024.0 * 1024.0));
-    }
-  }
+  // Step 2: render-layer staging buffer retirement.
+  // rhiStagingBuffers (rhi::BufferHandle retirement queue) stays here — VulkanDevice
+  // cannot hold render-layer handle vectors (D-05 UPL-03 fence-gated free).
+  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
+  freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
+  m_meshPool.freeStagingBuffers();
 }
 
 GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)

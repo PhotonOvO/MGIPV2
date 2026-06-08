@@ -7,6 +7,7 @@
 
 #include "VulkanDevice.h"
 #include "internal/VulkanCommon.h"
+#include "VulkanCommandBuffer.h"
 #include "VulkanFrameContext.h"
 #include "VulkanPipelines.h"
 #include "VulkanResourceTable.h"
@@ -99,6 +100,14 @@ namespace demo::rhi::vulkan
 		selectPhysicalDevice();
 		initLogicalDevice();
 
+		// Upload command pool for async uploads — migrated from RenderDevice (UPL-02)
+		const VkCommandPoolCreateInfo uploadPoolInfo{
+			.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+			.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+			.queueFamilyIndex = m_graphicsQueue.familyIndex,
+		};
+		VK_CHECK(vkCreateCommandPool(m_device, &uploadPoolInfo, nullptr, &m_uploadCmdPool));
+
 		m_initialized = true;
 		LOGI("VulkanDevice::init: completed");
 	}
@@ -113,6 +122,12 @@ namespace demo::rhi::vulkan
 			{
 				vkDestroyDescriptorPool(m_device, m_argumentPool, nullptr);
 				m_argumentPool = VK_NULL_HANDLE;
+			}
+			// Upload cmd pool — destroy before logical device (UPL-02)
+			if (m_uploadCmdPool != VK_NULL_HANDLE)
+			{
+				vkDestroyCommandPool(m_device, m_uploadCmdPool, nullptr);
+				m_uploadCmdPool = VK_NULL_HANDLE;
 			}
 			vkDestroyDevice(m_device, nullptr);
 			m_device = VK_NULL_HANDLE;
@@ -160,6 +175,7 @@ namespace demo::rhi::vulkan
 		m_initialized = false;
 		m_frameContext = nullptr;
 		m_pendingRetirements.clear();
+		m_uploadPendingFrames.clear();
 	}
 
 	uint64_t VulkanDevice::getBackendInstanceHandle() const
@@ -1926,4 +1942,92 @@ namespace demo::rhi::vulkan
 		}
 		m_resourceTable->destroyPipeline(handle);
 	}
+
+	// --- Immediate upload seam implementation (UPL-02/03) ---
+
+	void VulkanDevice::executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn)
+	{
+		assert(m_device != VK_NULL_HANDLE && "VulkanDevice::executeImmediateUpload called before init");
+		assert(m_uploadCmdPool != VK_NULL_HANDLE && "VulkanDevice::executeImmediateUpload: upload cmd pool not initialized");
+		assert(m_frameContext != nullptr && "VulkanDevice::executeImmediateUpload: frame context not set (call setFrameContext)");
+		assert(m_resourceTable != nullptr && "VulkanDevice::executeImmediateUpload: resource table not set (call setResourceTable)");
+
+		// UPL-03: flush existing pending uploads before submitting a new one
+		flushUploadRetirements(true);
+
+		// Lazy-resize pending frame slots to match current frame count
+		const uint32_t frameCount = m_frameContext->getFrameCount();
+		if (m_uploadPendingFrames.size() < frameCount)
+		{
+			m_uploadPendingFrames.resize(frameCount);
+		}
+
+		VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_device, m_uploadCmdPool);
+		VulkanCommandBuffer rhiCmd;
+		rhiCmd.setTarget(cmd, m_resourceTable);
+		uploadFn(rhiCmd);
+		VK_CHECK(vkEndCommandBuffer(cmd));
+
+		const VkFenceCreateInfo fenceInfo{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+		VkFence uploadFence{VK_NULL_HANDLE};
+		VK_CHECK(vkCreateFence(m_device, &fenceInfo, nullptr, &uploadFence));
+
+		const VkCommandBufferSubmitInfo cmdBufferInfo{
+			.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+			.commandBuffer = cmd,
+		};
+		const VkSubmitInfo2 submitInfo{
+			.sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+			.commandBufferInfoCount = 1,
+			.pCommandBufferInfos    = &cmdBufferInfo,
+		};
+		VK_CHECK(vkQueueSubmit2(m_graphicsQueue.queue, 1, &submitInfo, uploadFence)); // non-blocking
+
+		const uint32_t frameIndex = m_frameContext->getCurrentFrameIndex();
+		m_uploadPendingFrames[frameIndex].cmds.push_back(cmd);
+		m_uploadPendingFrames[frameIndex].fences.push_back(uploadFence);
+	}
+
+	void VulkanDevice::flushUploadRetirements(bool waitForCompletion)
+	{
+		if (m_uploadPendingFrames.empty() || m_device == VK_NULL_HANDLE)
+		{
+			return;
+		}
+
+		for (auto& frame : m_uploadPendingFrames)
+		{
+			if (frame.fences.empty())
+			{
+				continue;
+			}
+
+			std::vector<size_t> completedIndices;
+			completedIndices.reserve(frame.fences.size());
+			for (size_t i = 0; i < frame.fences.size(); ++i)
+			{
+				if (waitForCompletion)
+				{
+					VK_CHECK(vkWaitForFences(m_device, 1, &frame.fences[i], VK_TRUE, UINT64_MAX));
+					completedIndices.push_back(i);
+				}
+				else if (vkGetFenceStatus(m_device, frame.fences[i]) == VK_SUCCESS)
+				{
+					completedIndices.push_back(i);
+				}
+			}
+
+			// Reverse-iterate to keep indices valid while erasing
+			for (auto it = completedIndices.rbegin(); it != completedIndices.rend(); ++it)
+			{
+				vkFreeCommandBuffers(m_device, m_uploadCmdPool, 1, &frame.cmds[*it]);
+				vkDestroyFence(m_device, frame.fences[*it], nullptr);
+				frame.cmds.erase(frame.cmds.begin() + static_cast<ptrdiff_t>(*it));
+				frame.fences.erase(frame.fences.begin() + static_cast<ptrdiff_t>(*it));
+			}
+		}
+		// Note: staging buffer retirement (rhiStagingBuffers) stays in the render layer.
+		// VulkanDevice cannot hold render-layer rhi::BufferHandle vectors (D-05 UPL-03).
+	}
+
 } // namespace demo::rhi::vulkan
