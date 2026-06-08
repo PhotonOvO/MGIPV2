@@ -711,22 +711,6 @@ static void writeHostVisibleBufferRange(const VmaAllocator allocator,
                                         const void*         data,
                                         VkDeviceSize        size);
 
-static upload::NativeUploadContext makeNativeUploadContext(const VkDevice device, const VmaAllocator allocator)
-{
-  return upload::NativeUploadContext{
-      .device    = reinterpret_cast<uintptr_t>(device),
-      .allocator = reinterpret_cast<uintptr_t>(allocator),
-  };
-}
-
-static utils::Buffer toUtilsBuffer(const upload::NativeUploadBuffer& buffer)
-{
-  return utils::Buffer{
-      .buffer     = reinterpret_cast<VkBuffer>(buffer.buffer),
-      .allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
-  };
-}
-
 static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer)
 {
   return utils::Buffer{
@@ -802,9 +786,17 @@ static utils::Buffer createBufferAndUploadData(const VkDevice               devi
                                                const upload::StaticBufferUploadPolicy& uploadPolicy)
 {
   (void)uploadPolicy;
-  upload::NativeUploadBuffer nativeBuffer =
-      upload::createStaticBuffer(makeNativeUploadContext(device, allocator), data.size_bytes(), static_cast<uint64_t>(usage));
-  const rhi::BufferHandle bufferHandle = rhiDevice.registerExternalBuffer(nativeBuffer.buffer);
+  (void)device;
+  utils::Buffer nativeBuffer{};
+  const VkBufferCreateInfo bufferInfo{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size  = static_cast<VkDeviceSize>(data.size_bytes()),
+      .usage = static_cast<VkBufferUsageFlags>(static_cast<VkBufferUsageFlags2KHR>(usage) | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR),
+  };
+  const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
+  VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &nativeBuffer.buffer, &nativeBuffer.allocation, nullptr));
+
+  const rhi::BufferHandle bufferHandle = rhiDevice.registerExternalBuffer(reinterpret_cast<uintptr_t>(nativeBuffer.buffer));
 
   BatchUploadContext upload;
   upload.init(rhiDevice, static_cast<uint64_t>(data.size_bytes()));
@@ -819,7 +811,7 @@ static utils::Buffer createBufferAndUploadData(const VkDevice               devi
   {
     stagingBuffers.push_back(stagingBuffer);
   }
-  return toUtilsBuffer(nativeBuffer);
+  return nativeBuffer;
 }
 
 static utils::Image createImage(const VmaAllocator allocator, const VkImageCreateInfo& imageInfo)
@@ -844,15 +836,6 @@ static void destroyImageResource(const VkDevice device, const VmaAllocator alloc
   image = {};
 }
 
-static void freeStagingBuffers(const VmaAllocator allocator, std::vector<utils::Buffer>& stagingBuffers)
-{
-  for(utils::Buffer& buffer : stagingBuffers)
-  {
-    destroyBuffer(allocator, buffer);
-  }
-  stagingBuffers.clear();
-}
-
 static void freeRhiStagingBuffers(rhi::Device* device, std::vector<rhi::BufferHandle>& stagingBuffers)
 {
   if(device != nullptr)
@@ -866,23 +849,6 @@ static void freeRhiStagingBuffers(rhi::Device* device, std::vector<rhi::BufferHa
     }
   }
   stagingBuffers.clear();
-}
-
-static VkDeviceSize getStagingBufferBytes(const VmaAllocator allocator, const std::vector<utils::Buffer>& stagingBuffers)
-{
-  VkDeviceSize totalBytes = 0;
-  for(const utils::Buffer& buffer : stagingBuffers)
-  {
-    if(buffer.allocation == nullptr)
-    {
-      continue;
-    }
-
-    VmaAllocationInfo allocationInfo{};
-    vmaGetAllocationInfo(allocator, buffer.allocation, &allocationInfo);
-    totalBytes += allocationInfo.size;
-  }
-  return totalBytes;
 }
 
 static rhi::ShaderReflectionData buildRasterShaderReflection()
@@ -1218,7 +1184,6 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 
     utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
   }
-  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
 
   updateGraphicsArgumentTables();
@@ -1361,7 +1326,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   m_csmShadowResources.deinit();
   m_swapchainDependent.sceneResources.deinit();
   m_meshPool.deinit();
-  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
   if(m_device.device)
   {
@@ -6118,7 +6082,6 @@ void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
   // Step 2: render-layer staging buffer retirement.
   // rhiStagingBuffers (rhi::BufferHandle retirement queue) stays here — VulkanDevice
   // cannot hold render-layer handle vectors (D-05 UPL-03 fence-gated free).
-  freeStagingBuffers(m_device.allocator, m_device.stagingBuffers);
   freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
   m_meshPool.freeStagingBuffers();
 }

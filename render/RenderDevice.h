@@ -567,7 +567,6 @@ namespace demo
 		{
 			std::unique_ptr<rhi::Device> device;
 			DEMO_RHI_ALLOCATOR allocator{nullptr};
-			std::vector<utils::Buffer> stagingBuffers;
 			std::vector<rhi::BufferHandle> rhiStagingBuffers;
 			upload::StaticBufferUploadPolicy staticBufferUploadPolicy{};
 			// Shared samplers created through the RHI (rhi::Device::createSampler), held as handles.
