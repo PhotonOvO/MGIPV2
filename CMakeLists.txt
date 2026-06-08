@@ -580,4 +580,18 @@ add_custom_target(copy_demo_resources
 )
 
 add_dependencies(Demo texture_converter copy_demo_resources)
+
+# --- RHI Boundary Guard (VER-01) ---
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_custom_target(check_rhi_boundary
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_LIST_DIR}/tools/check_rhi_boundary.py"
+          "--root" "${CMAKE_CURRENT_LIST_DIR}"
+          "--baseline" "${CMAKE_CURRENT_LIST_DIR}/.rhi-boundary-baseline.json"
+          "--allowlist" "${CMAKE_CURRENT_LIST_DIR}/.rhi-boundary-allow"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  COMMENT "Running RHI boundary guard..."
+  VERBATIM
+)
 endif()
