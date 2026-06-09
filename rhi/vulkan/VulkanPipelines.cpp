@@ -286,7 +286,8 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   const VkPipelineLayout layout = createInfo.layout;
 
   // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
-  // 兼容期回退路径（spirvCode == nullptr）不压入守卫，所有权仍归 caller，避免 double-free。
+  // spirvCode 现为唯一来源（兼容期 shaderModule 字段已移除）；空字节码由下方守卫拒绝，
+  // 压入的 VK_NULL_HANDLE 在析构里被跳过，不会 double-free。
   struct ScopedModuleList
   {
     VkDevice                    device;
@@ -335,8 +336,15 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
     }
 
     // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理，pipeline 创后 scope 退出自动销毁）。
-    VkShaderModule stageModule = utils::createShaderModule(device,
-        std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
+    // 拒绝空字节码：spirvSize=0 会向 vkCreateShaderModule 传 codeSize=0（违反 spec），spirvCode=nullptr 则解引用越界。
+    ASSERT(stageDesc.spirvCode != nullptr && stageDesc.spirvSize >= sizeof(uint32_t),
+           "Graphics pipeline shader stage requires non-empty spirvCode/spirvSize");
+    VkShaderModule stageModule = VK_NULL_HANDLE;
+    if(stageDesc.spirvCode != nullptr && stageDesc.spirvSize >= sizeof(uint32_t))
+    {
+      stageModule = utils::createShaderModule(device,
+          std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
+    }
     scopedModules.modules.push_back(stageModule);
 
     shaderStages.push_back(VkPipelineShaderStageCreateInfo{
@@ -493,7 +501,8 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   const VkPipelineLayout layout = createInfo.layout;
 
   // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
-  // 兼容期回退路径（spirvCode == nullptr）不压入守卫，所有权仍归 caller，避免 double-free。
+  // spirvCode 现为唯一来源（兼容期 shaderModule 字段已移除）；空字节码由下方守卫拒绝，
+  // 压入的 VK_NULL_HANDLE 在析构里被跳过，不会 double-free。
   struct ScopedModuleList
   {
     VkDevice                    device;
@@ -509,8 +518,15 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   } scopedModules{device, {}};
 
   // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理）。
-  VkShaderModule computeModule = utils::createShaderModule(device,
-      std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
+  // 拒绝空字节码：spirvSize=0 会向 vkCreateShaderModule 传 codeSize=0（违反 spec），spirvCode=nullptr 则解引用越界。
+  ASSERT(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize >= sizeof(uint32_t),
+         "Compute pipeline shader stage requires non-empty spirvCode/spirvSize");
+  VkShaderModule computeModule = VK_NULL_HANDLE;
+  if(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize >= sizeof(uint32_t))
+  {
+    computeModule = utils::createShaderModule(device,
+        std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
+  }
   scopedModules.modules.push_back(computeModule);
 
   std::vector<VkSpecializationMapEntry> mapEntries;

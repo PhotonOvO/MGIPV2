@@ -1220,11 +1220,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   // Destroy bind groups FIRST (they use descriptor pools)
   destroyArgumentTablesAndLayouts();
 
-  // Shutdown ImGui bridge (D-08/D-09): bridge handles the correct destruction order
-  // internally: ImGui_ImplVulkan_Shutdown -> platform shutdown -> ImGui::DestroyContext
-  // -> vkDestroyDescriptorPool (uiDescriptorPool).
-  m_debugBridge.shutdown();
-
   // Destroy Vulkan objects that are not managed by smart pointers
   m_device.gpuCullingArgumentTables.clear();
   m_device.shadowCullingArgumentTables.clear();
@@ -1312,6 +1307,14 @@ void RenderDevice::shutdown(rhi::Surface& surface)
 
   m_csmShadowResources.deinit();
   m_swapchainDependent.sceneResources.deinit();
+
+  // Shutdown ImGui bridge (D-08/D-09) AFTER sceneResources.deinit(): the bridge owns the
+  // ImGui context + uiDescriptorPool, and sceneResources.deinit() calls bridge.unregisterTexture()
+  // (which no-ops once the ImGui context is gone). Shutting the bridge down first would silently
+  // leak every ImGui texture descriptor set registered via SceneResources. Bridge handles the
+  // correct internal order: ImGui_ImplVulkan_Shutdown -> DestroyContext -> vkDestroyDescriptorPool.
+  m_debugBridge.shutdown();
+
   m_meshPool.deinit();
   freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
   if(m_device.device)
