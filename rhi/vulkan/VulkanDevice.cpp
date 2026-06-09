@@ -91,7 +91,16 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::init(const DeviceCreateInfo& createInfo)
 	{
-		ensure(!m_initialized, "VulkanDevice::init called twice");
+		// Delegate to initVulkan with only the base fields; Vulkan extension/layer
+		// fields remain empty. RenderDevice calls initVulkan() directly to supply them.
+		VulkanDeviceCreateInfo vkCreateInfo;
+		vkCreateInfo.base = createInfo;
+		initVulkan(vkCreateInfo);
+	}
+
+	void VulkanDevice::initVulkan(const VulkanDeviceCreateInfo& createInfo)
+	{
+		ensure(!m_initialized, "VulkanDevice::initVulkan called twice");
 		m_createInfo = createInfo;
 		LOGI("VulkanDevice::init: begin");
 
@@ -421,7 +430,7 @@ namespace demo::rhi::vulkan
 
 		std::vector<const char*> enabledInstanceExtensions = m_createInfo.instanceExtensions;
 
-		if (m_createInfo.enableValidationLayers && extensionAvailable(
+		if (m_createInfo.base.enableValidationLayers && extensionAvailable(
 			VK_EXT_DEBUG_UTILS_EXTENSION_NAME, m_availableInstanceExtensions))
 		{
 			pushUnique(enabledInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -442,7 +451,7 @@ namespace demo::rhi::vulkan
 		}
 
 		std::vector<const char*> enabledLayers = m_createInfo.instanceLayers;
-		if (m_createInfo.enableValidationLayers)
+		if (m_createInfo.base.enableValidationLayers)
 		{
 			pushUnique(enabledLayers, "VK_LAYER_KHRONOS_validation");
 		}
@@ -465,7 +474,7 @@ namespace demo::rhi::vulkan
 
 		const VkInstanceCreateInfo instanceCreateInfo{
 			.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-			.pNext = m_createInfo.enableValidationLayers ? validationSettings.buildPNextChain() : nullptr,
+			.pNext = m_createInfo.base.enableValidationLayers ? validationSettings.buildPNextChain() : nullptr,
 			.pApplicationInfo = &appInfo,
 			.enabledLayerCount = static_cast<uint32_t>(enabledLayers.size()),
 			.ppEnabledLayerNames = enabledLayers.data(),
@@ -662,7 +671,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::initDebugMessenger()
 	{
-		if (!m_createInfo.enableValidationLayers || vkCreateDebugUtilsMessengerEXT == nullptr)
+		if (!m_createInfo.base.enableValidationLayers || vkCreateDebugUtilsMessengerEXT == nullptr)
 		{
 			return;
 		}
@@ -852,7 +861,7 @@ namespace demo::rhi::vulkan
 
 	RHICapabilityError VulkanDevice::validateCapabilities() const
 	{
-		return evaluateCapabilityRequirements(m_capabilities, m_createInfo.capabilityRequirements);
+		return evaluateCapabilityRequirements(m_capabilities, m_createInfo.base.capabilityRequirements);
 	}
 
 	bool VulkanDevice::extensionAvailable(const char* name, const std::vector<VkExtensionProperties>& extensions)
@@ -1392,6 +1401,25 @@ namespace demo::rhi::vulkan
 	uint64_t VulkanDevice::resolveSamplerBackendHandle(SamplerHandle handle) const
 	{
 		return m_resourceTable != nullptr ? m_resourceTable->resolveSampler(handle) : 0;
+	}
+
+	// -------------------------------------------------------------------------
+	// VulkanDeviceInterop typed resolve accessors (D-07)
+	// -------------------------------------------------------------------------
+
+	VkImage VulkanDevice::resolveTexture(rhi::TextureHandle handle) const
+	{
+		return reinterpret_cast<VkImage>(m_resourceTable != nullptr ? m_resourceTable->resolveTexture(handle) : 0);
+	}
+
+	VkImageView VulkanDevice::resolveTextureView(rhi::TextureViewHandle handle) const
+	{
+		return reinterpret_cast<VkImageView>(m_resourceTable != nullptr ? m_resourceTable->resolveTextureView(handle) : 0);
+	}
+
+	VkSampler VulkanDevice::resolveSampler(rhi::SamplerHandle handle) const
+	{
+		return reinterpret_cast<VkSampler>(m_resourceTable != nullptr ? m_resourceTable->resolveSampler(handle) : 0);
 	}
 
 	QueryPoolHandle VulkanDevice::createQueryPool(uint32_t queryCount)

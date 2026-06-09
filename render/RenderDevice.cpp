@@ -945,14 +945,16 @@ namespace demo
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR
 		};
 
-		rhi::DeviceCreateInfo deviceCreateInfo;
+		// Use VulkanDeviceCreateInfo to hold Vulkan-specific extension/layer fields (D-08 sink).
+		// rhi::DeviceCreateInfo now only carries backend-neutral fields; Vulkan fields live here.
+		rhi::vulkan::VulkanDeviceCreateInfo deviceCreateInfo;
 #ifdef _DEBUG
-		deviceCreateInfo.enableValidationLayers = true;
+		deviceCreateInfo.base.enableValidationLayers = true;
 #else
-		deviceCreateInfo.enableValidationLayers = false;
+		deviceCreateInfo.base.enableValidationLayers = false;
 #endif
 #ifdef __ANDROID__
-		deviceCreateInfo.enableValidationLayers = false;
+		deviceCreateInfo.base.enableValidationLayers = false;
 		deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 		deviceCreateInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #else
@@ -976,7 +978,7 @@ namespace demo
 		deviceCreateInfo.deviceExtensions.push_back({"VK_EXT_full_screen_exclusive", false, nullptr});
 
 		m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
-		m_device.device->init(deviceCreateInfo);
+		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).initVulkan(deviceCreateInfo);
 
 		// The device backs its texture-view/image handles with the render-layer-owned resource
 		// table (the VMA allocator is injected later, once it is created).

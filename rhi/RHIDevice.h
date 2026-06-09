@@ -21,18 +21,10 @@ namespace demo::rhi
 	// Forward-declared for executeImmediateUpload's std::function signature (used by reference only).
 	class CommandBuffer;
 
-	struct ExtensionRequest
-	{
-		const char* name{nullptr};
-		bool required{false};
-		void* featuresStruct{nullptr};
-	};
-
+	// Vulkan-specific fields have been moved to VulkanDeviceCreateInfo (D-08).
+	// D3D12/Metal paths use only these backend-neutral fields.
 	struct DeviceCreateInfo
 	{
-		std::vector<ExtensionRequest> deviceExtensions;
-		std::vector<const char*> instanceExtensions;
-		std::vector<const char*> instanceLayers;
 		CapabilityRequirements capabilityRequirements{};
 		bool enableValidationLayers{true};
 	};

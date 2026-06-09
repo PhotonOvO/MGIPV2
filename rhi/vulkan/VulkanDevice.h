@@ -2,6 +2,8 @@
 
 #include "../RHIDevice.h"
 #include "../RHIResourceLifetime.h"
+#include "VulkanDeviceCreateInfo.h"
+#include "VulkanDeviceInterop.h"
 
 #include <functional>
 #include <vector>
@@ -16,13 +18,17 @@ namespace demo::rhi::vulkan {
 class VulkanResourceTable;
 class VulkanFrameContext;
 
-class VulkanDevice final : public demo::rhi::Device
+class VulkanDevice final : public demo::rhi::Device, public VulkanDeviceInterop
 {
 public:
   VulkanDevice() = default;
   ~VulkanDevice() override;
 
   void init(const DeviceCreateInfo& createInfo) override;
+  // initVulkan accepts the full Vulkan-specific create info (D-08 transition).
+  // RenderDevice calls this instead of init() to supply extension/layer requests.
+  // init() delegates to initVulkan() with only the base fields (no Vulkan extensions).
+  void initVulkan(const VulkanDeviceCreateInfo& createInfo);
   void deinit() override;
 
   uint64_t getBackendInstanceHandle() const override;
@@ -104,6 +110,18 @@ public:
   VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
   VkDevice         device() const { return m_device; }
 
+  // -------------------------------------------------------------------------
+  // VulkanDeviceInterop overrides (D-07 backend-internal native accessor)
+  // -------------------------------------------------------------------------
+  VkInstance          nativeInstance() const override { return m_instance; }
+  VkPhysicalDevice    nativePhysicalDevice() const override { return m_physicalDevice; }
+  VkDevice            nativeDevice() const override { return m_device; }
+  VkBaseOutStructure* nativeFeaturesChainHead() const override { return m_featuresChainHead; }
+
+  VkImage     resolveTexture(rhi::TextureHandle handle) const override;
+  VkImageView resolveTextureView(rhi::TextureViewHandle handle) const override;
+  VkSampler   resolveSampler(rhi::SamplerHandle handle) const override;
+
   uint32_t processRetirements(uint64_t completedTimelineValue);
 
 private:
@@ -155,7 +173,7 @@ private:
                                                       const VkDebugUtilsMessengerCallbackDataEXT* callbackData,
                                                       void*                                       userData);
 
-  DeviceCreateInfo m_createInfo{};
+  VulkanDeviceCreateInfo m_createInfo{};
 
   VkInstance               m_instance{VK_NULL_HANDLE};
   VkPhysicalDevice         m_physicalDevice{VK_NULL_HANDLE};
