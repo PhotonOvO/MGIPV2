@@ -2,6 +2,7 @@
 #include "RHIFormatBridge.h"
 #include "../rhi/RHICommandBuffer.h"
 #include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <array>
@@ -91,7 +92,8 @@ namespace demo
 	{
 		deinit();
 		m_rhiDevice = &device;
-		m_backendDeviceToken = static_cast<uintptr_t>(device.getBackendDeviceHandle());
+		m_backendDeviceToken = reinterpret_cast<uintptr_t>(
+		    static_cast<rhi::vulkan::VulkanDevice&>(device).device());
 		m_backendAllocatorToken = backendAllocatorToken;
 		m_cubeMapSize = createInfo.cubeMapSize;
 		m_dfgLUTSize = createInfo.dfgLUTSize;
@@ -141,10 +143,9 @@ namespace demo
 			desc.layerCount = layerCount;
 			const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
 			m_rhiDevice->destroyImage(imageHandle);
-			dutil.setObjectName(
-				reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->
-					resolveTextureViewBackendHandle(handle))),
-				name);
+			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+			    static_cast<const rhi::vulkan::VulkanDevice&>(*m_rhiDevice));
+			dutil.setObjectName(interop.resolveTextureView(handle), name);
 			return handle;
 		};
 

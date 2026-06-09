@@ -2,6 +2,7 @@
 
 #include "../rhi/RHICommandBuffer.h"
 #include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <array>
@@ -82,7 +83,7 @@ namespace demo
 		shutdown();
 
 		m_rhiDevice = &device;
-		m_device = reinterpret_cast<VkDevice>(static_cast<uintptr_t>(device.getBackendDeviceHandle()));
+		m_device = static_cast<rhi::vulkan::VulkanDevice&>(device).device();
 		m_allocator = allocator;
 		m_frameCount = std::max(frameCount, 1u);
 		m_mobilePolicy = MobilePolicy{

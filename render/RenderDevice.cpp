@@ -583,7 +583,11 @@ namespace demo
 
 	[[nodiscard]] uint64_t resolveNativeImage(const rhi::Device& device, rhi::TextureHandle handle)
 	{
-		return handle.isNull() ? 0u : device.resolveTextureBackendHandle(handle);
+		if (handle.isNull())
+			return 0u;
+		auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+		    static_cast<const rhi::vulkan::VulkanDevice&>(device));
+		return reinterpret_cast<uintptr_t>(interop.resolveTexture(handle));
 	}
 
 	[[nodiscard]] rhi::ResourceVisibility toResourceVisibility(rhi::ShaderStage stages)
@@ -990,10 +994,10 @@ namespace demo
 		ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
 		       "RenderDevice::init requires graphics+compute+bindless capability floor");
 
-		const VkInstance nativeInstance = fromNativeHandle<VkInstance>(m_device.device->getBackendInstanceHandle());
-		const VkPhysicalDevice nativePhysicalDevice = fromNativeHandle<VkPhysicalDevice>(
-			m_device.device->getBackendPhysicalDeviceHandle());
-		const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		auto& vkDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device);
+		const VkInstance nativeInstance = vkDevice.instance();
+		const VkPhysicalDevice nativePhysicalDevice = vkDevice.physicalDevice();
+		const VkDevice nativeDevice = vkDevice.device();
 		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
 		const VkQueue nativeGraphicsQueue = fromNativeHandle<VkQueue>(graphicsQueueInfo.backendHandle);
 
@@ -1021,7 +1025,7 @@ namespace demo
 		                m_device.device.get(),
 		                m_device.staticBufferUploadPolicy);
 
-		const VkSurfaceKHR nativeSurface = reinterpret_cast<VkSurfaceKHR>(surface.getBackendHandle());
+		const VkSurfaceKHR nativeSurface = static_cast<rhi::vulkan::VulkanSurface&>(surface).backendHandle();
 		ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
 		DBG_VK_NAME(nativeSurface);
 		m_swapchainDependent.swapchainImageFormat = toPortableTextureFormat(
@@ -1243,7 +1247,7 @@ namespace demo
 	void RenderDevice::shutdown(rhi::Surface& surface)
 	{
 		m_device.device->waitIdle();
-		VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 
 		if (m_swapchainDependent.swapchain)
 		{
@@ -1656,7 +1660,8 @@ namespace demo
 		// backbuffer's native image into that table instead, caching one handle per image
 		// index and re-registering only when the native image changes (swapchain rebuild).
 		const uint32_t idx = m_swapchainDependent.currentImageIndex;
-		const uint64_t native = m_swapchainDependent.swapchain->getBackendImageHandle(idx);
+		const uint64_t native = reinterpret_cast<uintptr_t>(
+		    static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain).nativeImage(idx));
 		if (native == 0)
 		{
 			return {};
@@ -1840,8 +1845,8 @@ namespace demo
 		const VkExtent2D swapchainExtent = toVkExtent(m_swapchainDependent.windowSize);
 		const VkRenderingAttachmentInfo colorAttachment{
 			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-			.imageView = fromNativeHandle<VkImageView>(
-				m_swapchainDependent.swapchain->getBackendImageViewHandle(m_swapchainDependent.currentImageIndex)),
+			.imageView = static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain)
+			                 .nativeImageView(m_swapchainDependent.currentImageIndex),
 			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 			.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -1904,7 +1909,7 @@ namespace demo
 	void RenderDevice::createTransientCommandPool()
 	{
 		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		const VkCommandPoolCreateInfo commandPoolCreateInfo{
 			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 			.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
@@ -1918,7 +1923,7 @@ namespace demo
 	void RenderDevice::createFrameSubmission(uint32_t numFrames)
 	{
 		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 
 		m_perFrame.frameContext = std::make_unique<rhi::vulkan::VulkanFrameContext>();
 		m_perFrame.frameContext->init(static_cast<void*>(device), graphicsQueueInfo.familyIndex, numFrames);
@@ -2049,9 +2054,8 @@ namespace demo
 		m_device.iblUsingFallback = true;
 		m_device.iblEnvironmentStatus = "Using flat ambient fallback";
 
-		const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-		const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(
-			m_device.device->getBackendPhysicalDeviceHandle());
+		const VkDevice nativeDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
+		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 		const std::filesystem::path environmentPath(kDefaultIBLEnvironmentPath);
 
 		Ktx2Loader loader;
@@ -2193,7 +2197,7 @@ namespace demo
 	void RenderDevice::destroyIBLResources()
 	{
 		const VkDevice nativeDevice = m_device.device
-			                              ? fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle())
+			                              ? static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device()
 			                              : VK_NULL_HANDLE;
 		if (m_device.iblEnvironment.view != VK_NULL_HANDLE || m_device.iblEnvironment.image != VK_NULL_HANDLE)
 		{
@@ -2256,7 +2260,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.gpuCullingObjectBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingIndirectBuffer.
 			buffer != VK_NULL_HANDLE
 			|| frameUserData.gpuCullingDrawCountBuffer.buffer != VK_NULL_HANDLE
@@ -2442,7 +2446,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.shadowCullingObjectBuffer.buffer != VK_NULL_HANDLE
 			|| frameUserData.shadowCullingIndirectBuffer.buffer != VK_NULL_HANDLE
 			|| frameUserData.shadowCullingDrawDataBuffer.buffer != VK_NULL_HANDLE)
@@ -2567,7 +2571,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.gbufferMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
 		{
 			waitForAllFrameSlots();
@@ -2597,7 +2601,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.mdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
 		{
 			waitForAllFrameSlots();
@@ -2627,7 +2631,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.depthMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
 		{
 			waitForAllFrameSlots();
@@ -2657,7 +2661,7 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		if (frameUserData.gpuDrivenPersistentIndirectStreamBuffer.buffer != VK_NULL_HANDLE)
 		{
 			waitForAllFrameSlots();
@@ -3034,7 +3038,7 @@ namespace demo
 
 		VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 		vkGetPhysicalDeviceProperties2(
-			fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()), &deviceProperties2);
+			static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice(), &deviceProperties2);
 
 		m_passGpuProfile.timestampPeriodNs = deviceProperties2.properties.limits.timestampPeriod;
 		m_passGpuProfile.queryCount = static_cast<uint32_t>(passExecutor.getPassCount() * 2);
@@ -3550,7 +3554,7 @@ namespace demo
 			m_perFrame.frameContext->waitForFrame(i);
 		}
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		const VkQueue graphicsQueue = fromNativeHandle<VkQueue>(m_device.device->getGraphicsQueue().backendHandle);
 		VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
 		rhi::vulkan::VulkanCommandBuffer rhiCmd;
@@ -6140,7 +6144,7 @@ namespace demo
 			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
 		};
 		VK_CHECK(
-			vkCreateImageView(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &viewInfo, nullptr,
+			vkCreateImageView(static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device(), &viewInfo, nullptr,
 				&image.view));
 		DBG_VK_NAME(image.view);
 #ifdef __ANDROID__
@@ -6275,7 +6279,9 @@ namespace demo
 
 	uint64_t RenderDevice::resolveTextureViewBackendHandle(rhi::TextureViewHandle handle) const
 	{
-		return m_device.device->resolveTextureViewBackendHandle(handle);
+		auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+		    static_cast<const rhi::vulkan::VulkanDevice&>(*m_device.device));
+		return reinterpret_cast<uintptr_t>(interop.resolveTextureView(handle));
 	}
 
 	void RenderDevice::destroyPipelines()
@@ -6346,7 +6352,7 @@ namespace demo
 		{
 			return 0;
 		}
-		return static_cast<uintptr_t>(m_device.device->getBackendDeviceHandle());
+		return reinterpret_cast<uintptr_t>(static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device());
 	}
 
 	void RenderDevice::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
@@ -6400,9 +6406,8 @@ namespace demo
 		result.materials.resize(asset.materials.size(), kNullMaterialHandle);
 		result.textures.resize(asset.textures.size(), kNullTextureHandle);
 
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-		const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(
-			m_device.device->getBackendPhysicalDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
+		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 
 		VkDeviceSize estimatedTextureUploadBytes = 0;
 		VkDeviceSize estimatedVertexUploadBytes = 0;
@@ -6937,9 +6942,8 @@ namespace demo
 	                                        GltfUploadResult& ioResult,
 	                                        rhi::CommandBuffer& cmd)
 	{
-		const VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-		const VkPhysicalDevice physicalDevice = fromNativeHandle<VkPhysicalDevice>(
-			m_device.device->getBackendPhysicalDeviceHandle());
+		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
+		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 
 		if (ioResult.meshes.size() != model.meshes.size()
 			|| ioResult.materials.size() != model.materials.size()
@@ -7650,7 +7654,7 @@ namespace demo
 
 	void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
 	{
-		VkDevice device = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
+		VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
 
 		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);

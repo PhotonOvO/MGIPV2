@@ -8,6 +8,8 @@
 
 // Native Vulkan headers — only permitted inside this .cpp (D-08).
 #include "../rhi/vulkan/internal/VulkanCommon.h"
+// Backend-internal interop — cast rhi::Device to VulkanDeviceInterop for native accessors.
+#include "../rhi/vulkan/VulkanDevice.h"
 
 // ImGui backends — native interop, allowed only in this bridge file.
 #include <imgui.h>
@@ -60,7 +62,8 @@ namespace demo
 		LOGI("DebugInteropBridge::init: begin");
 
 		// --- 1. Cache native device handle (used in shutdown). ----------------
-		m_nativeDevice = info.rhiDevice->getBackendDeviceHandle();
+		m_nativeDevice = reinterpret_cast<uintptr_t>(
+		    static_cast<rhi::vulkan::VulkanDevice&>(*info.rhiDevice).device());
 
 		// --- 2. Create ImGui-exclusive descriptor pool (D-09). ----------------
 		// Dear ImGui Vulkan backend switched to separate sampled-image + sampler
@@ -110,9 +113,10 @@ namespace demo
 		const rhi::QueueInfo graphicsQueue = info.rhiDevice->getGraphicsQueue();
 		VkFormat imageFormats[] = {toVkFormatBridge(info.swapchainFormat)};
 
+		auto& vkDev = static_cast<rhi::vulkan::VulkanDevice&>(*info.rhiDevice);
 		ImGui_ImplVulkan_InitInfo initInfo = {
-			.Instance = vkHandleFromU64<VkInstance>(info.rhiDevice->getBackendInstanceHandle()),
-			.PhysicalDevice = vkHandleFromU64<VkPhysicalDevice>(info.rhiDevice->getBackendPhysicalDeviceHandle()),
+			.Instance = vkDev.instance(),
+			.PhysicalDevice = vkDev.physicalDevice(),
 			.Device = vkDevice,
 			.QueueFamily = graphicsQueue.familyIndex,
 			.Queue = vkHandleFromU64<VkQueue>(graphicsQueue.backendHandle),
@@ -233,8 +237,9 @@ namespace demo
 			return 0u;
 		}
 
-		const VkImageView vkView = reinterpret_cast<VkImageView>(
-			static_cast<uintptr_t>(device.resolveTextureViewBackendHandle(view)));
+		auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+		    static_cast<const rhi::vulkan::VulkanDevice&>(device));
+		const VkImageView vkView = interop.resolveTextureView(view);
 
 		VkImageLayout vkLayout = VK_IMAGE_LAYOUT_GENERAL;
 		switch (layout)

@@ -1,6 +1,7 @@
 #include "SceneResources.h"
 #include "BatchUploadContext.h"
 #include "RHIFormatBridge.h"
+#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <cmath>
@@ -172,7 +173,9 @@ namespace demo
 		const auto numColor = static_cast<uint32_t>(m_createInfo.color.size());
 		const auto nativeImage = [&](rhi::TextureHandle handle)
 		{
-			return reinterpret_cast<VkImage>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureBackendHandle(handle)));
+			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+			    static_cast<const rhi::vulkan::VulkanDevice&>(*m_rhiDevice));
+			return interop.resolveTexture(handle);
 		};
 
 		// Centralizes RHI view creation + native-handle debug naming. levelCount/baseMip/swizzle
@@ -191,10 +194,9 @@ namespace demo
 			desc.levelCount = levelCount;
 			desc.components = swizzle;
 			const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
-			dutil.setObjectName(
-				reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->
-					resolveTextureViewBackendHandle(handle))),
-				name);
+			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+			    static_cast<const rhi::vulkan::VulkanDevice&>(*m_rhiDevice));
+			dutil.setObjectName(interop.resolveTextureView(handle), name);
 			return handle;
 		};
 		const auto makeTextureDesc = [](rhi::TextureFormat format,

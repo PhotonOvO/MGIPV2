@@ -4,6 +4,7 @@
 #include "UploadUtils.h"
 #include "RHIFormatBridge.h"
 #include "../loader/Ktx2Loader.h"
+#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <cstring>
@@ -119,7 +120,11 @@ namespace demo
 
 		uint64_t resolveNativeTexture(rhi::Device& device, rhi::TextureHandle handle)
 		{
-			return handle.isNull() ? 0u : device.resolveTextureBackendHandle(handle);
+			if (handle.isNull())
+				return 0u;
+			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
+			    static_cast<const rhi::vulkan::VulkanDevice&>(device));
+			return reinterpret_cast<uintptr_t>(interop.resolveTexture(handle));
 		}
 
 		const char* formatDisplayName(VkFormat format)
