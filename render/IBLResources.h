@@ -63,7 +63,8 @@ private:
   };
 
   void createImages(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
-  [[nodiscard]] rhi::PipelineHandle createGenerationPipeline(uintptr_t shaderModule,
+  [[nodiscard]] rhi::PipelineHandle createGenerationPipeline(const uint32_t* spirvCode,
+                                                             size_t spirvSize,
                                                              const char* entryPoint,
                                                              rhi::ArgumentLayoutHandle layout,
                                                              uint32_t variant) const;

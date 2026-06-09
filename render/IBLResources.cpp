@@ -11,11 +11,6 @@ namespace demo {
 
 namespace {
 
-[[nodiscard]] VkDevice toVkDevice(uintptr_t handle)
-{
-  return reinterpret_cast<VkDevice>(handle);
-}
-
 [[nodiscard]] VmaAllocator toVmaAllocator(uintptr_t handle)
 {
   return reinterpret_cast<VmaAllocator>(handle);
@@ -228,7 +223,8 @@ void IBLResources::createImages(rhi::CommandBuffer& rhiCmd, const CreateInfo& cr
   rhiCmd.clearColorTexture(m_dfgLUT.handle, lutRange, rhi::ClearColorValue{0.5f, 0.5f, 0.0f, 1.0f});
 }
 
-rhi::PipelineHandle IBLResources::createGenerationPipeline(uintptr_t shaderModule,
+rhi::PipelineHandle IBLResources::createGenerationPipeline(const uint32_t* spirvCode,
+                                                           size_t spirvSize,
                                                            const char* entryPoint,
                                                            rhi::ArgumentLayoutHandle layout,
                                                            uint32_t variant) const
@@ -242,9 +238,10 @@ rhi::PipelineHandle IBLResources::createGenerationPipeline(uintptr_t shaderModul
   const rhi::ComputePipelineDesc desc{
       .shaderStage =
           rhi::PipelineShaderStageDesc{
-              .stage        = rhi::ShaderStage::compute,
-              .shaderModule = shaderModule,
-              .entryPoint   = entryPoint,
+              .stage     = rhi::ShaderStage::compute,
+              .spirvCode = spirvCode,
+              .spirvSize = spirvSize,
+              .entryPoint = entryPoint,
           },
       .argumentLayouts = argumentLayouts.data(),
       .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
@@ -257,7 +254,6 @@ rhi::PipelineHandle IBLResources::createGenerationPipeline(uintptr_t shaderModul
 
 void IBLResources::generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo)
 {
-  const VkDevice device = toVkDevice(m_backendDeviceToken);
 #ifdef USE_SLANG
   const auto dispatchGeneration = [&](rhi::PipelineHandle pipeline,
                                       rhi::ArgumentTableHandle table,
@@ -306,10 +302,10 @@ void IBLResources::generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo&
   m_lutGenerationArgumentLayout = m_rhiDevice->createArgumentLayout(rhi::ArgumentLayoutDesc{
       .bindings = &lutBinding, .bindingCount = 1, .debugName = "ibl-lut-generation"});
 
-  VkShaderModule dfgModule = utils::createShaderModule(device, {shader_ibl_dfg_slang, std::size(shader_ibl_dfg_slang)});
   m_dfgGenerationPipeline =
-      createGenerationPipeline(reinterpret_cast<uintptr_t>(dfgModule), "dfgLUTMain", m_lutGenerationArgumentLayout, 0x7201u);
-  vkDestroyShaderModule(device, dfgModule, nullptr);
+      createGenerationPipeline(shader_ibl_dfg_slang,
+                               std::size(shader_ibl_dfg_slang) * sizeof(uint32_t),
+                               "dfgLUTMain", m_lutGenerationArgumentLayout, 0x7201u);
 
   const rhi::ArgumentWrite dfgWrite{
       .binding = 0, .type = rhi::ArgumentType::storageTexture, .textureView = m_dfgLUTView,
@@ -331,17 +327,16 @@ void IBLResources::generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo&
     return;
   }
 
-  VkShaderModule irradianceModule = VK_NULL_HANDLE;
-  VkShaderModule prefilterModule = VK_NULL_HANDLE;
-
   if(!createInfo.sourceEnvironmentView.isNull())
   {
-    irradianceModule = utils::createShaderModule(device, {shader_ibl_irradiance_slang, std::size(shader_ibl_irradiance_slang)});
-    prefilterModule = utils::createShaderModule(device, {shader_ibl_prefilter_slang, std::size(shader_ibl_prefilter_slang)});
     m_irradianceGenerationPipeline =
-        createGenerationPipeline(reinterpret_cast<uintptr_t>(irradianceModule), "irradianceConvolutionMain", m_envGenerationArgumentLayout, 0x7202u);
+        createGenerationPipeline(shader_ibl_irradiance_slang,
+                                 std::size(shader_ibl_irradiance_slang) * sizeof(uint32_t),
+                                 "irradianceConvolutionMain", m_envGenerationArgumentLayout, 0x7202u);
     m_prefilterGenerationPipeline =
-        createGenerationPipeline(reinterpret_cast<uintptr_t>(prefilterModule), "prefilterGGXMain", m_envGenerationArgumentLayout, 0x7203u);
+        createGenerationPipeline(shader_ibl_prefilter_slang,
+                                 std::size(shader_ibl_prefilter_slang) * sizeof(uint32_t),
+                                 "prefilterGGXMain", m_envGenerationArgumentLayout, 0x7203u);
 
     std::array<rhi::ArgumentWrite, 2> writes{{
         rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -416,11 +411,6 @@ void IBLResources::generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo&
     }
     m_splitSumReady = true;
   }
-
-  if(prefilterModule != VK_NULL_HANDLE)
-    vkDestroyShaderModule(device, prefilterModule, nullptr);
-  if(irradianceModule != VK_NULL_HANDLE)
-    vkDestroyShaderModule(device, irradianceModule, nullptr);
 #else
   (void)createInfo;
 #endif

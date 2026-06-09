@@ -123,14 +123,13 @@ void HiZDepthPyramid::init(rhi::Device& device, VmaAllocator allocator, uint32_t
     m_perFrame[frameIndex].argumentTable = m_rhiDevice->createArgumentTable(m_argumentLayout);
   }
 
-  const VkShaderModule shaderModule =
-      utils::createShaderModule(m_device, {shader_depth_pyramid_slang, std::size(shader_depth_pyramid_slang)});
   const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_argumentLayout}};
   const rhi::ComputePipelineDesc pipelineDesc{
       .shaderStage =
           rhi::PipelineShaderStageDesc{
               .stage        = rhi::ShaderStage::compute,
-              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+              .spirvCode    = shader_depth_pyramid_slang,
+              .spirvSize    = std::size(shader_depth_pyramid_slang) * sizeof(uint32_t),
               .entryPoint   = "depthPyramid",
           },
       .argumentLayouts = argumentLayouts.data(),
@@ -138,7 +137,6 @@ void HiZDepthPyramid::init(rhi::Device& device, VmaAllocator allocator, uint32_t
       .specializationVariant = 0x7101u,
   };
   m_pipeline = m_rhiDevice->createComputePipeline(pipelineDesc);
-  vkDestroyShaderModule(m_device, shaderModule, nullptr);
 
   recreateResources();
 }
