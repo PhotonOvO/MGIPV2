@@ -33,6 +33,9 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
 
 void MetalDevice::deinit()
 {
+  if (!m_initialized)
+    return;
+  RHI_UNIMPLEMENTED("MetalDevice::deinit");
   // TODO: Metal implementation
   // NOTES:
   // 1. Release Metal queues (ARC handles automatically)
@@ -181,6 +184,7 @@ bool MetalDevice::isDeviceExtensionSupported(const char* name) const
 
 void MetalDevice::waitIdle()
 {
+  RHI_UNIMPLEMENTED("MetalDevice::waitIdle");
   // TODO: Metal implementation
   // NOTES: Use MTLCommandBuffer addCompletedHandler to wait
   // Or use MTLSharedEvent for synchronization

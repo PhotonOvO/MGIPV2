@@ -1,4 +1,5 @@
 #include "D3D12Device.h"
+#include "../RHIBoundary.h"
 
 namespace demo::rhi::d3d12 {
 
@@ -9,6 +10,8 @@ D3D12Device::~D3D12Device()
 
 void D3D12Device::init(const DeviceCreateInfo& createInfo)
 {
+  (void)createInfo;
+  RHI_UNIMPLEMENTED("D3D12Device::init");
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Create DXGIFactory using CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG if validation enabled)
@@ -26,6 +29,9 @@ void D3D12Device::init(const DeviceCreateInfo& createInfo)
 
 void D3D12Device::deinit()
 {
+  if (!m_initialized)
+    return;
+  RHI_UNIMPLEMENTED("D3D12Device::deinit");
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Wait for GPU idle using ID3D12Device::Signal + ID3D12Fence::Wait
@@ -171,6 +177,7 @@ bool D3D12Device::isDeviceExtensionSupported(const char* name) const
 
 void D3D12Device::waitIdle()
 {
+  RHI_UNIMPLEMENTED("D3D12Device::waitIdle");
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Create ID3D12Fence with initial value 0
