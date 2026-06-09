@@ -212,9 +212,15 @@ struct SpecializationData
 
 struct PipelineShaderStageDesc
 {
-  ShaderStage                   stage{ShaderStage::none};
-  uint64_t                      shaderModule{0};
-  const char*                   entryPoint{"main"};
+  ShaderStage     stage{ShaderStage::none};
+  // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module。
+  // spirvSize 单位为字节（非元素数）：std::size(arr) * sizeof(uint32_t)。
+  const uint32_t* spirvCode{nullptr};
+  size_t          spirvSize{0};
+  // DEPRECATED(RDEV-02): 迁移完成后移除。兼容期：backend 优先使用 spirvCode；
+  //   spirvCode == nullptr 时回退此字段。
+  uint64_t        shaderModule{0};
+  const char*     entryPoint{"main"};
   uint32_t                      specializationVariant{0};
   SpecializationData            specializationData{};
   const SpecializationConstant* specializationConstants{nullptr};
