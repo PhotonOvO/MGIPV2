@@ -579,7 +579,8 @@ namespace demo
 			utils::Buffer pointsBuffer;
 			// TODO(Phase4): sink to VulkanDevice -- blocked on VulkanSwapchain::init void* coupling (L1030)
 			DEMO_RHI_VK(CommandPool) transientCmdPool{};
-			DEMO_RHI_VK(DescriptorPool) descriptorPool{};
+			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
+			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
 			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).
 			utils::ImageResource iblEnvironment{};
 			rhi::TextureFormat iblEnvironmentFormat{rhi::TextureFormat::undefined};
@@ -938,7 +939,6 @@ namespace demo
 		void writePassGpuProfileTimestamp(const PassContext& context, uint32_t passIndex, bool isBegin) const;
 		void drawPassGpuProfileOverlay(const RenderParams& params) const;
 		void initImGui(void* window);
-		void createDescriptorPool();
 		void createMaterialArgumentTable(); // Create material argument table early for pipeline layout
 		void createGraphicsArgumentTables();
 		void updateGraphicsArgumentTables();

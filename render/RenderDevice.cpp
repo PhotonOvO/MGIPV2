@@ -1007,7 +1007,6 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
   // Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
   createMaterialArgumentTable();
   createFrameSubmission(m_swapchainDependent.swapchain->getRequestedImageCount());
-  createDescriptorPool();
   initImGui(window);
 
   // Scene sampler: linear mag/min, nearest mip, repeat, maxLod 0 (matches the prior
@@ -1229,11 +1228,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   destroyPassGpuProfileResources();
   m_lightResources.deinit();
   destroyIBLResources();
-  if(m_device.descriptorPool != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorPool(device, m_device.descriptorPool, nullptr);
-    m_device.descriptorPool = VK_NULL_HANDLE;
-  }
   if(m_device.transientCmdPool != VK_NULL_HANDLE)
   {
     vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
@@ -5193,42 +5187,9 @@ void RenderDevice::initImGui(void* window)
   m_debugBridge.init(bridgeInfo);
 }
 
-void RenderDevice::createDescriptorPool()
-{
-  VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-  vkGetPhysicalDeviceProperties2(fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()), &deviceProperties2);
-  const auto& deviceProperties = deviceProperties2.properties;
-
-  {
-    m_materials.maxTextures = std::min(m_materials.maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages);
-    const uint32_t maxDescriptorSets = 32U;
-    const uint32_t dynamicUniformCount =
-        std::max(1U, std::min(maxDescriptorSets, deviceProperties.limits.maxDescriptorSetUniformBuffersDynamic));
-    const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
-    const std::array<VkDescriptorPoolSize, 6> poolSizes{{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_materials.maxTextures},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4U + frameCount * shaderio::LDepthPyramidMaxMips},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, shaderio::LDepthPyramidMaxMips},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dynamicUniformCount},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8U + frameCount * 5U},  // Scene, light, culling, and LightPass fallback UBOs
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, frameCount * 24U},
-    }};
-    const VkDescriptorPoolCreateInfo          poolInfo = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets       = maxDescriptorSets,
-        .poolSizeCount = uint32_t(poolSizes.size()),
-        .pPoolSizes    = poolSizes.data(),
-    };
-    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &poolInfo, nullptr,
-                                    &m_device.descriptorPool));
-    DBG_VK_NAME(m_device.descriptorPool);
-    LOGI("Created application descriptor pool: %u textures, %u dynamic UBOs, %u sets", m_materials.maxTextures,
-         dynamicUniformCount, maxDescriptorSets);
-  }
-  // Note: uiDescriptorPool is now created inside DebugInteropBridge::init() (D-08/D-09).
-  // It is no longer a member of DeviceLifetimeResources.
-}
+// createDescriptorPool() removed (D-05, plan 04-04): VkDescriptorPool was only used for
+// create/destroy — no direct vkAllocateDescriptorSets consumer. Descriptor set allocation
+// now goes through VulkanDevice::m_argumentPool (ArgumentTable backend lazy-created pool).
 
 static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data, const VkDeviceSize size)
 {
