@@ -1218,15 +1218,10 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   // Destroy bind groups FIRST (they use descriptor pools)
   destroyArgumentTablesAndLayouts();
 
-  // Shutdown ImGui Vulkan backend BEFORE destroying uiDescriptorPool
-  // ImGui_ImplVulkan_Shutdown() frees descriptor sets from uiDescriptorPool
-  ImGui_ImplVulkan_Shutdown();
-#ifdef __ANDROID__
-  ImGui_ImplAndroid_Shutdown();
-#else
-  ImGui_ImplGlfw_Shutdown();
-#endif
-  ImGui::DestroyContext();
+  // Shutdown ImGui bridge (D-08/D-09): bridge handles the correct destruction order
+  // internally: ImGui_ImplVulkan_Shutdown -> platform shutdown -> ImGui::DestroyContext
+  // -> vkDestroyDescriptorPool (uiDescriptorPool).
+  m_debugBridge.shutdown();
 
   // Destroy Vulkan objects that are not managed by smart pointers
   m_device.gpuCullingArgumentTables.clear();
@@ -1234,11 +1229,6 @@ void RenderDevice::shutdown(rhi::Surface& surface)
   destroyPassGpuProfileResources();
   m_lightResources.deinit();
   destroyIBLResources();
-  if(m_device.uiDescriptorPool != VK_NULL_HANDLE)
-  {
-    vkDestroyDescriptorPool(device, m_device.uiDescriptorPool, nullptr);
-    m_device.uiDescriptorPool = VK_NULL_HANDLE;
-  }
   if(m_device.descriptorPool != VK_NULL_HANDLE)
   {
     vkDestroyDescriptorPool(device, m_device.descriptorPool, nullptr);
@@ -1672,13 +1662,8 @@ RuntimeProfileSnapshot RenderDevice::getRuntimeProfileSnapshot() const
 
 void RenderDevice::beginUiFrame()
 {
-  ImGui_ImplVulkan_NewFrame();
-#ifdef __ANDROID__
-  ImGui_ImplAndroid_NewFrame();
-#else
-  ImGui_ImplGlfw_NewFrame();
-#endif
-  ImGui::NewFrame();
+  // Delegate UI frame begin to the debug bridge (D-08/D-09).
+  m_debugBridge.newFrame();
 }
 
 void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
@@ -1768,11 +1753,8 @@ void RenderDevice::executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderP
     params.recordUi();
   }
 
-  const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
-  if(vkCmd != VK_NULL_HANDLE)
-  {
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmd);
-  }
+  // Delegate ImGui draw-data rendering to the debug bridge (D-08/D-09).
+  m_debugBridge.renderImGui(cmdBuffer);
 }
 
 void RenderDevice::beginPresentPass(rhi::CommandBuffer& cmdBuffer)
@@ -5199,46 +5181,16 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
 void RenderDevice::initImGui(void* window)
 {
-  LOGI("RenderDevice::initImGui: begin");
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
-  ImGui::StyleColorsDark();
-
-#ifdef __ANDROID__
-  ImGui_ImplAndroid_Init(static_cast<ANativeWindow*>(window));
-#else
-  ImGui_ImplGlfw_InitForVulkan(static_cast<GLFWwindow*>(window), true);
-#endif
-  VkFormat                  imageFormats[] = {toVkFormat(m_swapchainDependent.swapchainImageFormat)};
-  const rhi::QueueInfo      graphicsQueue  = m_device.device->getGraphicsQueue();
-  ImGui_ImplVulkan_InitInfo initInfo       = {
-      .Instance       = fromNativeHandle<VkInstance>(m_device.device->getBackendInstanceHandle()),
-      .PhysicalDevice = fromNativeHandle<VkPhysicalDevice>(m_device.device->getBackendPhysicalDeviceHandle()),
-      .Device         = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-      .QueueFamily    = graphicsQueue.familyIndex,
-      .Queue          = fromNativeHandle<VkQueue>(graphicsQueue.backendHandle),
-      .DescriptorPool = m_device.uiDescriptorPool,
-      .MinImageCount  = 2,
-      .ImageCount     = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
-      .PipelineInfoMain =
-          {
-              .PipelineRenderingCreateInfo =
-                  {
-                      .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-                      .colorAttachmentCount    = 1,
-                      .pColorAttachmentFormats = imageFormats,
-                  },
-          },
-      .UseDynamicRendering = true,
+  // Delegate all ImGui native initialisation to the debug bridge (D-08/D-09).
+  // The bridge creates the ImGui-exclusive descriptor pool internally.
+  DebugInteropBridge::InitInfo bridgeInfo{
+      .rhiDevice       = m_device.device.get(),
+      .swapchainFormat = m_swapchainDependent.swapchainImageFormat,
+      .minImageCount   = 2,
+      .imageCount      = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+      .window          = window,
   };
-
-  initInfo.PipelineInfoForViewports = initInfo.PipelineInfoMain;
-
-  ImGui_ImplVulkan_Init(&initInfo);
-  LOGI("RenderDevice::initImGui: Vulkan backend initialized");
-
-  ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
-  LOGI("RenderDevice::initImGui: completed");
+  m_debugBridge.init(bridgeInfo);
 }
 
 void RenderDevice::createDescriptorPool()
@@ -5274,33 +5226,8 @@ void RenderDevice::createDescriptorPool()
     LOGI("Created application descriptor pool: %u textures, %u dynamic UBOs, %u sets", m_materials.maxTextures,
          dynamicUniformCount, maxDescriptorSets);
   }
-
-  {
-    constexpr uint32_t uiTextureDescriptorCount = 20U;
-    constexpr uint32_t uiSamplerDescriptorCount = 2U;
-    constexpr uint32_t uiMaxDescriptorSets      = uiTextureDescriptorCount + uiSamplerDescriptorCount;
-    const std::array<VkDescriptorPoolSize, 3> poolSizes{{
-        // Dear ImGui Vulkan backend switched to separate sampled-image + sampler
-        // descriptor sets in 2026. Keep combined-image-sampler capacity too so the
-        // pool remains compatible with older backend revisions in existing build trees.
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, uiTextureDescriptorCount},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, uiSamplerDescriptorCount},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, uiTextureDescriptorCount},
-    }};
-    VkDescriptorPoolCreateInfo poolInfo = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets       = uiMaxDescriptorSets,
-        .poolSizeCount = uint32_t(poolSizes.size()),
-        .pPoolSizes    = poolSizes.data(),
-    };
-
-    VK_CHECK(vkCreateDescriptorPool(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), &poolInfo, nullptr,
-                                    &m_device.uiDescriptorPool));
-    DBG_VK_NAME(m_device.uiDescriptorPool);
-    LOGI("Created UI descriptor pool: %u sampled images, %u samplers, %u sets", uiTextureDescriptorCount,
-         uiSamplerDescriptorCount, uiMaxDescriptorSets);
-  }
+  // Note: uiDescriptorPool is now created inside DebugInteropBridge::init() (D-08/D-09).
+  // It is no longer a member of DeviceLifetimeResources.
 }
 
 static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data, const VkDeviceSize size)

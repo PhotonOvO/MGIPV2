@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DebugInteropBridge.h"
 #include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
@@ -579,7 +580,7 @@ namespace demo
 			// TODO(Phase4): sink to VulkanDevice -- blocked on VulkanSwapchain::init void* coupling (L1030)
 			DEMO_RHI_VK(CommandPool) transientCmdPool{};
 			DEMO_RHI_VK(DescriptorPool) descriptorPool{};
-			DEMO_RHI_VK(DescriptorPool) uiDescriptorPool{};
+			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).
 			utils::ImageResource iblEnvironment{};
 			rhi::TextureFormat iblEnvironmentFormat{rhi::TextureFormat::undefined};
 			rhi::Extent2D iblEnvironmentExtent{};
@@ -1033,5 +1034,8 @@ namespace demo
 		std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
 		PassGpuProfileState m_passGpuProfile;
 		PassProfilingHooks m_passProfilingHooks{this};
+		// ImGui/Tracy native interop bridge (D-08/D-09): sanctioned native exception.
+		// All Vulkan/ImGui native calls for UI rendering are confined to this bridge.
+		DebugInteropBridge m_debugBridge;
 	};
 } // namespace demo
