@@ -29,9 +29,6 @@ public:
   uint32_t      getMaxFramesInFlight() const override;
   uint32_t      getRequestedImageCount() const { return m_requestedImageCount; }
 
-  uint64_t                     getBackendSwapchainHandle() const override;
-  uint64_t                     getBackendImageViewHandle(uint32_t imageIndex) const override;
-  uint64_t                     getBackendImageHandle(uint32_t imageIndex) const override;
   [[nodiscard]] VkSwapchainKHR nativeSwapchain() const { return m_swapchain; }
   [[nodiscard]] VkImageView    nativeImageView(uint32_t imageIndex) const;
   [[nodiscard]] VkImage        nativeImage(uint32_t imageIndex) const;

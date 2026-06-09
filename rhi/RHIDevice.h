@@ -99,10 +99,6 @@ namespace demo::rhi
 		virtual void init(const DeviceCreateInfo& createInfo) = 0;
 		virtual void deinit() = 0;
 
-		virtual uint64_t getBackendInstanceHandle() const = 0;
-		virtual uint64_t getBackendPhysicalDeviceHandle() const = 0;
-		virtual uint64_t getBackendDeviceHandle() const = 0;
-
 		virtual uint32_t getApiVersion() const = 0;
 		virtual const char* getDeviceName() const = 0;
 		virtual const PhysicalDeviceInfo& getPhysicalDeviceInfo() const = 0;
@@ -110,14 +106,15 @@ namespace demo::rhi
 		virtual CapabilityReport queryCapabilities() const = 0;
 		virtual bool supports(CapabilityTier tier) const = 0;
 		virtual const MemoryProperties& getPhysicalMemoryProperties() const = 0;
-		virtual void* getFeaturesChainHead() const = 0;
 
 		virtual QueueInfo getGraphicsQueue() const = 0;
 		virtual QueueInfo getComputeQueue() const = 0;
 		virtual QueueInfo getTransferQueue() const = 0;
 
-		virtual bool isInstanceExtensionSupported(const char* name) const = 0;
-		virtual bool isDeviceExtensionSupported(const char* name) const = 0;
+		// D3D12/Metal do not have extension-query APIs — defaults to false.
+		// Vulkan backend overrides to query m_availableInstanceExtensions/m_availableDeviceExtensions.
+		virtual bool isInstanceExtensionSupported(const char* /*name*/) const { return false; }
+		virtual bool isDeviceExtensionSupported(const char* /*name*/) const { return false; }
 
 		virtual void waitIdle() = 0;
 
@@ -142,12 +139,11 @@ namespace demo::rhi
 		// --- Texture views ---
 		// createTextureView builds a backend view from the desc and registers an owned handle.
 		// registerExternalTextureView adopts an externally-owned backend view (e.g. swapchain)
-		// without taking ownership. destroyTextureView frees owned views. resolveTextureViewBackendHandle
-		// returns the backing native handle (as uint64) for descriptor-write / ImGui seams.
+		// without taking ownership. destroyTextureView frees owned views.
+		// Native handle resolution is backend-internal: cast to VulkanDeviceInterop::resolveTextureView.
 		virtual TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) = 0;
 		virtual TextureViewHandle registerExternalTextureView(uint64_t externalView) = 0;
 		virtual void destroyTextureView(TextureViewHandle handle) = 0;
-		virtual uint64_t resolveTextureViewBackendHandle(TextureViewHandle handle) const = 0;
 
 		// --- Textures (images) ---
 		// createTexture creates an RHI-owned texture. registerExternalTexture adopts an
@@ -162,11 +158,10 @@ namespace demo::rhi
 
 		virtual void destroyTexture(TextureHandle handle) { destroyImage(handle); }
 		// registerExternalTexture adopts an externally-owned backend texture (e.g. swapchain)
-		// without taking ownership. destroyImage frees owned images. resolveTextureBackendHandle
-		// returns the backing backend object handle (as uint64) for command/seam paths.
+		// without taking ownership. destroyImage frees owned images.
+		// Native handle resolution is backend-internal: cast to VulkanDeviceInterop::resolveTexture.
 		virtual TextureHandle registerExternalTexture(uint64_t externalImage) = 0;
 		virtual void destroyImage(TextureHandle handle) = 0;
-		virtual uint64_t resolveTextureBackendHandle(TextureHandle handle) const = 0;
 
 		// ----- Modern GPU interface (Wave 0 contract) ----------------------------
 		// Default bodies assert: backends opt in by overriding. Vulkan implements
@@ -228,12 +223,6 @@ namespace demo::rhi
 		virtual void destroySampler(SamplerHandle)
 		{
 			RHI_UNIMPLEMENTED("destroySampler");
-		}
-
-		virtual uint64_t resolveSamplerBackendHandle(SamplerHandle) const
-		{
-			RHI_UNIMPLEMENTED("resolveSamplerBackendHandle");
-			return 0;
 		}
 
 		// --- Argument layout / table ---

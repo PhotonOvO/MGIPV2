@@ -15,8 +15,9 @@ public:
   void                init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window) override;
   void                deinit() override;
   SurfaceCapabilities queryCapabilities() const override;
-  uint64_t            getBackendHandle() const override;
 
+  // Typed typed accessor for backend-internal callers (e.g. swapchain init via cast).
+  // Upper-layer code must not call this directly — cast to VulkanSurface first.
   [[nodiscard]] VkSurfaceKHR backendHandle() const { return m_surface; }
 
 private:

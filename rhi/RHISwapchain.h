@@ -46,10 +46,8 @@ public:
   virtual Extent2D      getExtent() const            = 0;
   virtual uint32_t      getMaxFramesInFlight() const = 0;
   virtual uint32_t      getRequestedImageCount() const = 0;
-
-  virtual uint64_t getBackendSwapchainHandle() const { return 0; }
-  virtual uint64_t getBackendImageViewHandle(uint32_t) const { return 0; }
-  virtual uint64_t getBackendImageHandle(uint32_t) const { return 0; }
+  // Native swapchain handles are backend-internal. Cast to VulkanSwapchain for
+  // nativeSwapchain() / nativeImage() / nativeImageView() typed accessors.
 };
 
 }  // namespace demo::rhi

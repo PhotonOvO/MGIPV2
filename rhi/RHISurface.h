@@ -31,7 +31,8 @@ public:
   virtual void                init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window) = 0;
   virtual void                deinit()                                                                           = 0;
   virtual SurfaceCapabilities queryCapabilities() const                                                          = 0;
-  virtual uint64_t            getBackendHandle() const                                                            = 0;
+  // Native surface handle is backend-internal. VulkanSurface exposes backendHandle() for
+  // backend-internal swapchain init; upper layers must not call getBackendHandle() directly.
 };
 
 }  // namespace rhi

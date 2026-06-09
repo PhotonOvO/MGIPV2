@@ -59,11 +59,6 @@ SurfaceCapabilities VulkanSurface::queryCapabilities() const
   return capabilities;
 }
 
-uint64_t VulkanSurface::getBackendHandle() const
-{
-  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m_surface));
-}
-
 }  // namespace vulkan
 }  // namespace rhi
 }  // namespace demo

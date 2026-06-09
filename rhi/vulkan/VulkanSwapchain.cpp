@@ -294,21 +294,6 @@ uint32_t VulkanSwapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t VulkanSwapchain::getBackendSwapchainHandle() const
-{
-  return toNativeU64(reinterpret_cast<uintptr_t>(m_swapchain));
-}
-
-uint64_t VulkanSwapchain::getBackendImageViewHandle(uint32_t imageIndex) const
-{
-  return toNativeU64(reinterpret_cast<uintptr_t>(nativeImageView(imageIndex)));
-}
-
-uint64_t VulkanSwapchain::getBackendImageHandle(uint32_t imageIndex) const
-{
-  return toNativeU64(reinterpret_cast<uintptr_t>(nativeImage(imageIndex)));
-}
-
 VkImageView VulkanSwapchain::nativeImageView(uint32_t imageIndex) const
 {
   if(imageIndex >= m_images.size())
