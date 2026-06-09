@@ -2751,7 +2751,6 @@ namespace demo
 			executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 			{
 				m_iblResources.init(getRHIDevice(),
-				                    getAllocatorToken(),
 				                    cmdBuffer,
 				                    fallbackInfo);
 			});
@@ -2897,7 +2896,6 @@ namespace demo
 		executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 		{
 			m_iblResources.init(getRHIDevice(),
-			                    getAllocatorToken(),
 			                    cmdBuffer,
 			                    iblCreateInfo);
 		});

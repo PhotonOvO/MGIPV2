@@ -29,10 +29,9 @@ namespace demo
 		};
 
 		IBLResources() = default;
-		~IBLResources() { assert(m_backendDeviceToken == 0 && "Missing deinit()"); }
+		~IBLResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
 
-		void init(rhi::Device& device, uintptr_t backendAllocatorToken, rhi::CommandBuffer& rhiCmd,
-		          const CreateInfo& createInfo);
+		void init(rhi::Device& device, rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
 		void deinit();
 
 		[[nodiscard]] rhi::TextureViewHandle getPrefilteredMapView() const { return m_prefilteredMapView; }
@@ -41,7 +40,7 @@ namespace demo
 		[[nodiscard]] rhi::SamplerHandle getCubeMapSampler() const { return m_cubeMapSampler; }
 		[[nodiscard]] rhi::SamplerHandle getLUTSampler() const { return m_lutSampler; }
 		[[nodiscard]] uint32_t getMaxMipLevel() const { return m_maxMipLevel; }
-		[[nodiscard]] bool isInitialized() const { return m_backendDeviceToken != 0; }
+		[[nodiscard]] bool isInitialized() const { return m_rhiDevice != nullptr; }
 		[[nodiscard]] bool isSplitSumReady() const { return m_splitSumReady; }
 
 	private:
@@ -57,13 +56,6 @@ namespace demo
 			uint32_t reserved{0};
 		};
 
-		struct NativeImageResource
-		{
-			uintptr_t image{0};
-			uintptr_t allocation{0};
-			rhi::TextureHandle handle{};
-		};
-
 		void createImages(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
 		[[nodiscard]] rhi::PipelineHandle createGenerationPipeline(const uint32_t* spirvCode,
 		                                                           size_t spirvSize,
@@ -73,18 +65,16 @@ namespace demo
 		void generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
 		void transitionGeneratedImagesForSampling(rhi::CommandBuffer& rhiCmd) const;
 
-		uintptr_t m_backendDeviceToken{0};
 		rhi::Device* m_rhiDevice{nullptr};
-		uintptr_t m_backendAllocatorToken{0};
 
-		NativeImageResource m_prefilteredMap{};
+		rhi::TextureHandle m_prefilteredMap{};
 		rhi::TextureViewHandle m_prefilteredMapView{};
 
-		NativeImageResource m_irradianceMap{};
+		rhi::TextureHandle m_irradianceMap{};
 		rhi::TextureViewHandle m_irradianceMapView{};
 		rhi::TextureViewHandle m_irradianceStorageView{};
 
-		NativeImageResource m_dfgLUT{};
+		rhi::TextureHandle m_dfgLUT{};
 		rhi::TextureViewHandle m_dfgLUTView{};
 
 		rhi::SamplerHandle m_cubeMapSampler{};
