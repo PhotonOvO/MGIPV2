@@ -11,8 +11,7 @@
 
 #include <glm/glm.hpp>
 
-namespace demo::ui {
-
-void DrawAxisInRect(const glm::vec4& rect, const glm::mat4& modelView, float size = 28.0f);
-
-}  // namespace demo::ui
+namespace demo::ui
+{
+	void DrawAxisInRect(const glm::vec4& rect, const glm::mat4& modelView, float size = 28.0f);
+} // namespace demo::ui

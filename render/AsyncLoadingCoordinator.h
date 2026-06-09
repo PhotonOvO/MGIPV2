@@ -4,83 +4,82 @@
 #include "../scene/SceneAssetView.h"
 #include "../scene/SceneUploadPlan.h"
 
-namespace demo {
-
-class AsyncLoadingCoordinator
+namespace demo
 {
-public:
-  struct UploadBatch
-  {
-    std::vector<uint32_t> textureIndices;
-    std::vector<uint32_t> materialIndices;
-    std::vector<uint32_t> meshIndices;
-    std::vector<uint32_t> instanceIndices;
-    std::vector<uint32_t> drawCommandIndices;
-    bool                  scenePlanBatch{false};
-    bool                  criticalBatch{false};
-    bool                  finalBatch{false};
-  };
+	class AsyncLoadingCoordinator
+	{
+	public:
+		struct UploadBatch
+		{
+			std::vector<uint32_t> textureIndices;
+			std::vector<uint32_t> materialIndices;
+			std::vector<uint32_t> meshIndices;
+			std::vector<uint32_t> instanceIndices;
+			std::vector<uint32_t> drawCommandIndices;
+			bool scenePlanBatch{false};
+			bool criticalBatch{false};
+			bool finalBatch{false};
+		};
 
-  struct LoadProgress
-  {
-    uint32_t texturesLoaded{0};
-    uint32_t texturesTotal{0};
-    uint32_t materialsLoaded{0};
-    uint32_t materialsTotal{0};
-    uint32_t meshesLoaded{0};
-    uint32_t meshesTotal{0};
-    uint32_t instancesLoaded{0};
-    uint32_t instancesTotal{0};
-    uint32_t drawCommandsLoaded{0};
-    uint32_t drawCommandsTotal{0};
-    float    progressPercent{0.0f};
-    bool     isComplete{false};
-  };
+		struct LoadProgress
+		{
+			uint32_t texturesLoaded{0};
+			uint32_t texturesTotal{0};
+			uint32_t materialsLoaded{0};
+			uint32_t materialsTotal{0};
+			uint32_t meshesLoaded{0};
+			uint32_t meshesTotal{0};
+			uint32_t instancesLoaded{0};
+			uint32_t instancesTotal{0};
+			uint32_t drawCommandsLoaded{0};
+			uint32_t drawCommandsTotal{0};
+			float progressPercent{0.0f};
+			bool isComplete{false};
+		};
 
-  void begin(const GltfModel& model,
-             const glm::vec3& cameraPos,
-             uint32_t         firstBatchMeshBudget = 24,
-             uint32_t         batchMeshBudget      = 64);
-  void begin(const SceneAssetView&  asset,
-             const SceneUploadPlan& plan,
-             const glm::vec3&       cameraPos,
-             uint32_t               firstBatchMeshBudget = 24,
-             uint32_t               batchMeshBudget = 64);
+		void begin(const GltfModel& model,
+		           const glm::vec3& cameraPos,
+		           uint32_t firstBatchMeshBudget = 24,
+		           uint32_t batchMeshBudget = 64);
+		void begin(const SceneAssetView& asset,
+		           const SceneUploadPlan& plan,
+		           const glm::vec3& cameraPos,
+		           uint32_t firstBatchMeshBudget = 24,
+		           uint32_t batchMeshBudget = 64);
 
-  // One-shot loading: upload all assets in single batch
-  void beginOneShot(const GltfModel& model);
+		// One-shot loading: upload all assets in single batch
+		void beginOneShot(const GltfModel& model);
 
-  [[nodiscard]] bool hasPendingBatches() const;
-  [[nodiscard]] UploadBatch takeNextBatch();
-  void markBatchUploaded(const UploadBatch& batch);
-  [[nodiscard]] const LoadProgress& getProgress() const { return m_progress; }
+		[[nodiscard]] bool hasPendingBatches() const;
+		[[nodiscard]] UploadBatch takeNextBatch();
+		void markBatchUploaded(const UploadBatch& batch);
+		[[nodiscard]] const LoadProgress& getProgress() const { return m_progress; }
 
-private:
-  bool                     m_scenePlanMode{false};
-  const GltfModel*         m_model{nullptr};
-  SceneAssetView           m_sceneAssetView{};
-  const SceneUploadPlan*   m_scenePlan{nullptr};
-  std::vector<uint32_t>    m_sortedMeshIndices;
-  std::vector<bool>        m_queuedTextures;
-  std::vector<bool>        m_queuedMaterials;
-  std::vector<bool>        m_queuedMeshes;
-  std::vector<bool>        m_queuedInstances;
-  std::vector<bool>        m_queuedDrawCommands;
-  std::vector<bool>        m_uploadedTextures;
-  std::vector<bool>        m_uploadedMaterials;
-  std::vector<bool>        m_uploadedMeshes;
-  std::vector<bool>        m_uploadedInstances;
-  std::vector<bool>        m_uploadedDrawCommands;
-  size_t                   m_nextMeshCursor{0};
-  uint32_t                 m_firstBatchMeshBudget{24};
-  uint32_t                 m_batchMeshBudget{64};
-  uint64_t                 m_firstBatchTextureBudgetBytes{32ull << 20};
-  uint64_t                 m_batchTextureBudgetBytes{64ull << 20};
-  uint64_t                 m_firstBatchMeshUploadBudgetBytes{16ull << 20};
-  uint64_t                 m_batchMeshUploadBudgetBytes{32ull << 20};
-  LoadProgress             m_progress{};
+	private:
+		bool m_scenePlanMode{false};
+		const GltfModel* m_model{nullptr};
+		SceneAssetView m_sceneAssetView{};
+		const SceneUploadPlan* m_scenePlan{nullptr};
+		std::vector<uint32_t> m_sortedMeshIndices;
+		std::vector<bool> m_queuedTextures;
+		std::vector<bool> m_queuedMaterials;
+		std::vector<bool> m_queuedMeshes;
+		std::vector<bool> m_queuedInstances;
+		std::vector<bool> m_queuedDrawCommands;
+		std::vector<bool> m_uploadedTextures;
+		std::vector<bool> m_uploadedMaterials;
+		std::vector<bool> m_uploadedMeshes;
+		std::vector<bool> m_uploadedInstances;
+		std::vector<bool> m_uploadedDrawCommands;
+		size_t m_nextMeshCursor{0};
+		uint32_t m_firstBatchMeshBudget{24};
+		uint32_t m_batchMeshBudget{64};
+		uint64_t m_firstBatchTextureBudgetBytes{32ull << 20};
+		uint64_t m_batchTextureBudgetBytes{64ull << 20};
+		uint64_t m_firstBatchMeshUploadBudgetBytes{16ull << 20};
+		uint64_t m_batchMeshUploadBudgetBytes{32ull << 20};
+		LoadProgress m_progress{};
 
-  void refreshProgress();
-};
-
-}  // namespace demo
+		void refreshProgress();
+	};
+} // namespace demo

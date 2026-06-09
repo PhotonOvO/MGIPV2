@@ -1,32 +1,31 @@
 #include "FrameSubmission.h"
 
-namespace demo {
-
-bool acquireSwapchainImage(rhi::Swapchain& swapchain, uint32_t& imageIndexOut)
+namespace demo
 {
-  const rhi::AcquireResult acquireResult = swapchain.acquireNextImage();
-  if(acquireResult.status == rhi::AcquireResult::Status::outOfDate)
-  {
-    return false;
-  }
+	bool acquireSwapchainImage(rhi::Swapchain& swapchain, uint32_t& imageIndexOut)
+	{
+		const rhi::AcquireResult acquireResult = swapchain.acquireNextImage();
+		if (acquireResult.status == rhi::AcquireResult::Status::outOfDate)
+		{
+			return false;
+		}
 
-  if(acquireResult.status == rhi::AcquireResult::Status::notReady)
-  {
-    return false;
-  }
+		if (acquireResult.status == rhi::AcquireResult::Status::notReady)
+		{
+			return false;
+		}
 
-  imageIndexOut = acquireResult.imageIndex;
-  return true;
-}
+		imageIndexOut = acquireResult.imageIndex;
+		return true;
+	}
 
-rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandBuffer& commandBuffer)
-{
-  return frameContext.endFrame(&commandBuffer);
-}
+	rhi::SubmissionReceipt submitFrame(rhi::FrameContext& frameContext, rhi::CommandBuffer& commandBuffer)
+	{
+		return frameContext.endFrame(&commandBuffer);
+	}
 
-rhi::PresentResult presentFrame(rhi::Swapchain& swapchain)
-{
-  return swapchain.present();
-}
-
-}  // namespace demo
+	rhi::PresentResult presentFrame(rhi::Swapchain& swapchain)
+	{
+		return swapchain.present();
+	}
+} // namespace demo

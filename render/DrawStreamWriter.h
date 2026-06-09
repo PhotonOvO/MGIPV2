@@ -3,42 +3,42 @@
 #include "DrawStream.h"
 #include "../rhi/RHIBindlessTypes.h"
 
-namespace demo {
-
-class DrawStreamWriter
+namespace demo
 {
-public:
-  struct State
-  {
-    PipelineHandle           pipeline{};
-    demo::rhi::ResourceIndex materialIndex{kDrawStreamInvalidResourceIndex};
-    MeshHandle               mesh{};
-    demo::rhi::ResourceIndex dynamicBufferIndex{kDrawStreamInvalidResourceIndex};
-    uint32_t                 dynamicOffset{kDrawStreamInvalidDynamicOffset};
-  };
+	class DrawStreamWriter
+	{
+	public:
+		struct State
+		{
+			PipelineHandle pipeline{};
+			demo::rhi::ResourceIndex materialIndex{kDrawStreamInvalidResourceIndex};
+			MeshHandle mesh{};
+			demo::rhi::ResourceIndex dynamicBufferIndex{kDrawStreamInvalidResourceIndex};
+			uint32_t dynamicOffset{kDrawStreamInvalidDynamicOffset};
+		};
 
-  DrawStreamWriter() = default;
+		DrawStreamWriter() = default;
 
-  void clear();
+		void clear();
 
-  void setPipeline(PipelineHandle pipeline);
-  void setMaterialIndex(demo::rhi::ResourceIndex materialIndex);
-  void setMesh(MeshHandle mesh);
-  void setDynamicBufferIndex(demo::rhi::ResourceIndex dynamicBufferIndex);
-  void setDynamicOffset(uint32_t dynamicOffset);
-  void draw(uint32_t vertexOffset, uint32_t vertexCount, uint32_t instanceCount);
-  void drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
+		void setPipeline(PipelineHandle pipeline);
+		void setMaterialIndex(demo::rhi::ResourceIndex materialIndex);
+		void setMesh(MeshHandle mesh);
+		void setDynamicBufferIndex(demo::rhi::ResourceIndex dynamicBufferIndex);
+		void setDynamicOffset(uint32_t dynamicOffset);
+		void draw(uint32_t vertexOffset, uint32_t vertexCount, uint32_t instanceCount);
+		void drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset,
+		                 uint32_t firstInstance);
 
-  [[nodiscard]] const State&      state() const;
-  [[nodiscard]] const DrawStream& entries() const;
+		[[nodiscard]] const State& state() const;
+		[[nodiscard]] const DrawStream& entries() const;
 
-private:
-  [[nodiscard]] uint32_t emitCurrentState();
+	private:
+		[[nodiscard]] uint32_t emitCurrentState();
 
-  State      m_state{};
-  State      m_lastEmittedState{};
-  bool       m_hasEmittedDraw{false};
-  DrawStream m_entries;
-};
-
-}  // namespace demo
+		State m_state{};
+		State m_lastEmittedState{};
+		bool m_hasEmittedDraw{false};
+		DrawStream m_entries;
+	};
+} // namespace demo

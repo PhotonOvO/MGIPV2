@@ -4054,14 +4054,18 @@ namespace demo
 			destroyBuffer(allocator, frameResources.valueBuffer);
 			if (resourceTable != nullptr)
 			{
-				if (!frameResources.keyBufferHandle.isNull()) resourceTable->removeBuffer(
-					frameResources.keyBufferHandle);
-				if (!frameResources.valueBufferHandle.isNull()) resourceTable->removeBuffer(
-					frameResources.valueBufferHandle);
-				if (!frameResources.uploadKeyBufferHandle.isNull()) resourceTable->removeBuffer(
-					frameResources.uploadKeyBufferHandle);
-				if (!frameResources.uploadValueBufferHandle.isNull()) resourceTable->removeBuffer(
-					frameResources.uploadValueBufferHandle);
+				if (!frameResources.keyBufferHandle.isNull())
+					resourceTable->removeBuffer(
+						frameResources.keyBufferHandle);
+				if (!frameResources.valueBufferHandle.isNull())
+					resourceTable->removeBuffer(
+						frameResources.valueBufferHandle);
+				if (!frameResources.uploadKeyBufferHandle.isNull())
+					resourceTable->removeBuffer(
+						frameResources.uploadKeyBufferHandle);
+				if (!frameResources.uploadValueBufferHandle.isNull())
+					resourceTable->removeBuffer(
+						frameResources.uploadValueBufferHandle);
 			}
 			frameResources = {}; // owned ArgumentTable freed by RenderDevice::destroyArgumentTablesAndLayouts
 		}

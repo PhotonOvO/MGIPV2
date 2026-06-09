@@ -194,6 +194,7 @@ namespace demo::rhi
 		{
 			RHI_UNIMPLEMENTED("destroyBuffer");
 		}
+
 		// Adopt an externally-owned backend buffer (owned=false): the registry only mirrors it so
 		// it can be addressed by handle. updateBufferBinding rebinds the handle to a reallocated
 		// backend buffer. destroyBuffer on an owned=false handle only unregisters.

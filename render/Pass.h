@@ -8,171 +8,172 @@
 #include <cstdint>
 #include <vector>
 
-namespace demo {
-
-// Forward declaration to allow PassContext to carry render params without a
-// hard dependency on the full RenderParams type from RenderDevice.
-struct RenderParams;
-struct SceneUploadResult;
-class PassExecutor;
-
-struct PassContext
+namespace demo
 {
-  TransientAllocator* transientAllocator{nullptr};
-  uint32_t            frameIndex{0};
-  uint32_t            passIndex{0};
-  // Optional per-pass rendering parameters. This enables passes to access
-  // high-level render state without needing direct access to RenderDevice.
-  const RenderParams*       params{nullptr};
-  std::vector<StreamEntry>* drawStream{nullptr};
-  // glTF model data for rendering meshes
-  const SceneUploadResult*  gltfModel{nullptr};
-  // Global bindless resource (bind once at pass start)
-  rhi::ArgumentTableHandle  globalBindlessGroup{};
-  // Shared camera uniform allocation (set once per frame by RenderDevice)
-  TransientAllocator::Allocation cameraAlloc{};
-  bool cameraAllocValid{false};
-  // One-shot recording facade for the frame.
-  rhi::CommandBuffer* commandBuffer{nullptr};
-  // Wave 9 (P0-3): lets a pass mirror a native image into the backend registry so its
-  // own layout transitions can be expressed with handle-based barriers.
-  // Set by the executor.
-  const PassExecutor* executor{nullptr};
-};
+	// Forward declaration to allow PassContext to carry render params without a
+	// hard dependency on the full RenderParams type from RenderDevice.
+	struct RenderParams;
+	struct SceneUploadResult;
+	class PassExecutor;
 
-enum class ResourceAccess : uint8_t
-{
-  read,
-  write,
-  readWrite,
-};
+	struct PassContext
+	{
+		TransientAllocator* transientAllocator{nullptr};
+		uint32_t frameIndex{0};
+		uint32_t passIndex{0};
+		// Optional per-pass rendering parameters. This enables passes to access
+		// high-level render state without needing direct access to RenderDevice.
+		const RenderParams* params{nullptr};
+		std::vector<StreamEntry>* drawStream{nullptr};
+		// glTF model data for rendering meshes
+		const SceneUploadResult* gltfModel{nullptr};
+		// Global bindless resource (bind once at pass start)
+		rhi::ArgumentTableHandle globalBindlessGroup{};
+		// Shared camera uniform allocation (set once per frame by RenderDevice)
+		TransientAllocator::Allocation cameraAlloc{};
+		bool cameraAllocValid{false};
+		// One-shot recording facade for the frame.
+		rhi::CommandBuffer* commandBuffer{nullptr};
+		// Wave 9 (P0-3): lets a pass mirror a native image into the backend registry so its
+		// own layout transitions can be expressed with handle-based barriers.
+		// Set by the executor.
+		const PassExecutor* executor{nullptr};
+	};
 
-enum class PassResourceType : uint8_t
-{
-  texture,
-  buffer,
-};
+	enum class ResourceAccess : uint8_t
+	{
+		read,
+		write,
+		readWrite,
+	};
 
-struct PassResourceDependency
-{
-  PassResourceType type{PassResourceType::buffer};
-  ResourceAccess   access{ResourceAccess::read};
-  rhi::ShaderStage stageMask{rhi::ShaderStage::none};
-  rhi::StageFlags  stages{rhi::StageFlags::none};
-  rhi::HazardFlags hazards{rhi::HazardFlags::none};
-  rhi::ResourceState requiredState{rhi::ResourceState::Undefined};
-  TextureHandle    textureHandle{};
-  BufferHandle     bufferHandle{};
+	enum class PassResourceType : uint8_t
+	{
+		texture,
+		buffer,
+	};
 
-  static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages,
-                                        rhi::ResourceState textureState = rhi::ResourceState::Undefined)
-  {
-    PassResourceDependency dependency{};
-    dependency.type          = PassResourceType::texture;
-    dependency.access        = accessMode;
-    dependency.stageMask     = stages;
-    dependency.hazards       = rhi::HazardFlags::textureWrites;
-    dependency.requiredState = textureState;
-    dependency.textureHandle = handle;
-    return dependency;
-  }
+	struct PassResourceDependency
+	{
+		PassResourceType type{PassResourceType::buffer};
+		ResourceAccess access{ResourceAccess::read};
+		rhi::ShaderStage stageMask{rhi::ShaderStage::none};
+		rhi::StageFlags stages{rhi::StageFlags::none};
+		rhi::HazardFlags hazards{rhi::HazardFlags::none};
+		rhi::ResourceState requiredState{rhi::ResourceState::Undefined};
+		TextureHandle textureHandle{};
+		BufferHandle bufferHandle{};
 
-  static PassResourceDependency buffer(BufferHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages)
-  {
-    PassResourceDependency dependency{};
-    dependency.type         = PassResourceType::buffer;
-    dependency.access       = accessMode;
-    dependency.stageMask    = stages;
-    dependency.hazards      = rhi::HazardFlags::bufferWrites;
-    dependency.bufferHandle = handle;
-    return dependency;
-  }
+		static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages,
+		                                      rhi::ResourceState textureState = rhi::ResourceState::Undefined)
+		{
+			PassResourceDependency dependency{};
+			dependency.type = PassResourceType::texture;
+			dependency.access = accessMode;
+			dependency.stageMask = stages;
+			dependency.hazards = rhi::HazardFlags::textureWrites;
+			dependency.requiredState = textureState;
+			dependency.textureHandle = handle;
+			return dependency;
+		}
 
-  static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode, rhi::StageFlags dependencyStages,
-                                        rhi::HazardFlags dependencyHazards,
-                                        rhi::ResourceState textureState = rhi::ResourceState::Undefined)
-  {
-    PassResourceDependency dependency = texture(handle, accessMode, rhi::ShaderStage::none, textureState);
-    dependency.stages                = dependencyStages;
-    dependency.hazards               = dependencyHazards;
-    return dependency;
-  }
+		static PassResourceDependency buffer(BufferHandle handle, ResourceAccess accessMode, rhi::ShaderStage stages)
+		{
+			PassResourceDependency dependency{};
+			dependency.type = PassResourceType::buffer;
+			dependency.access = accessMode;
+			dependency.stageMask = stages;
+			dependency.hazards = rhi::HazardFlags::bufferWrites;
+			dependency.bufferHandle = handle;
+			return dependency;
+		}
 
-  static PassResourceDependency buffer(BufferHandle handle, ResourceAccess accessMode, rhi::StageFlags dependencyStages,
-                                       rhi::HazardFlags dependencyHazards)
-  {
-    PassResourceDependency dependency = buffer(handle, accessMode, rhi::ShaderStage::none);
-    dependency.stages                = dependencyStages;
-    dependency.hazards               = dependencyHazards;
-    return dependency;
-  }
-};
+		static PassResourceDependency texture(TextureHandle handle, ResourceAccess accessMode,
+		                                      rhi::StageFlags dependencyStages,
+		                                      rhi::HazardFlags dependencyHazards,
+		                                      rhi::ResourceState textureState = rhi::ResourceState::Undefined)
+		{
+			PassResourceDependency dependency = texture(handle, accessMode, rhi::ShaderStage::none, textureState);
+			dependency.stages = dependencyStages;
+			dependency.hazards = dependencyHazards;
+			return dependency;
+		}
 
-inline constexpr BufferHandle  kPassVertexBufferHandle{0xF001u, 1u};
-inline constexpr BufferHandle  kPassPointLightBufferHandle{0xF002u, 1u};
-inline constexpr BufferHandle  kPassSpotLightBufferHandle{0xF003u, 1u};
-inline constexpr BufferHandle  kPassPointLightCoarseBoundsHandle{0xF004u, 1u};
-inline constexpr BufferHandle  kPassSpotLightCoarseBoundsHandle{0xF005u, 1u};
-inline constexpr BufferHandle  kPassLightCoarseCullingUniformHandle{0xF006u, 1u};
-inline constexpr BufferHandle  kPassGPUCullObjectBufferHandle{0xF007u, 1u};
-inline constexpr BufferHandle  kPassGPUCullIndirectBufferHandle{0xF008u, 1u};
-inline constexpr BufferHandle  kPassGPUCullStatsBufferHandle{0xF009u, 1u};
-inline constexpr BufferHandle  kPassGPUCullUniformBufferHandle{0xF00Au, 1u};
-inline constexpr BufferHandle  kPassGPUCullResultBufferHandle{0xF00Bu, 1u};
-inline constexpr BufferHandle  kPassGPUDrivenSortKeyBufferHandle{0xF00Cu, 1u};
-inline constexpr BufferHandle  kPassGPUDrivenSortValueBufferHandle{0xF00Du, 1u};
-inline constexpr BufferHandle  kPassClusterLightCountsHandle{0xF00Eu, 1u};
-inline constexpr BufferHandle  kPassClusterLightIndicesHandle{0xF00Fu, 1u};
-inline constexpr BufferHandle  kPassClusterLightStatsHandle{0xF010u, 1u};
-inline constexpr BufferHandle  kPassClusteredLightUniformHandle{0xF011u, 1u};
-inline constexpr uint32_t      kPackedGBufferTargetCount = 3u;
-inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
-inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
-inline constexpr TextureHandle kPassGBuffer2Handle{0xF103u, 1u};
-inline constexpr TextureHandle kPassSceneDepthHandle{0xF104u, 1u};
-inline constexpr TextureHandle kPassShadowHandle{0xF105u, 1u};
-inline constexpr TextureHandle kPassOutputHandle{0xF106u, 1u};      // OutputTexture (PBR result)
-inline constexpr TextureHandle kPassCSMShadowHandle{0xF107u, 1u};    // CSM cascade array
-inline constexpr TextureHandle kPassDepthPyramidHandle{0xF108u, 1u};
-inline constexpr TextureHandle kPassSceneColorHdrHandle{0xF109u, 1u};
-inline constexpr TextureHandle kPassBloomHalfHandle{0xF10Au, 1u};
-inline constexpr TextureHandle kPassBloomQuarterHandle{0xF10Bu, 1u};
-inline constexpr TextureHandle kPassVelocityHandle{0xF10Cu, 1u};
-inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
-inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
-inline constexpr TextureHandle kPassGPUDrivenShadowAtlasHandle{0xF10Fu, 1u};
-inline constexpr TextureHandle kPassBloomEighthHandle{0xF110u, 1u};
-inline constexpr TextureHandle kPassBloomSixteenthHandle{0xF111u, 1u};
-inline constexpr TextureHandle kPassBloomThirtySecondHandle{0xF112u, 1u};
-inline constexpr TextureHandle kPassBloomUpsampleSixteenthHandle{0xF113u, 1u};
-inline constexpr TextureHandle kPassBloomUpsampleEighthHandle{0xF114u, 1u};
-inline constexpr TextureHandle kPassBloomUpsampleQuarterHandle{0xF115u, 1u};
-inline constexpr TextureHandle kPassBloomOutputHandle{0xF116u, 1u};
-inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
+		static PassResourceDependency buffer(BufferHandle handle, ResourceAccess accessMode,
+		                                     rhi::StageFlags dependencyStages,
+		                                     rhi::HazardFlags dependencyHazards)
+		{
+			PassResourceDependency dependency = buffer(handle, accessMode, rhi::ShaderStage::none);
+			dependency.stages = dependencyStages;
+			dependency.hazards = dependencyHazards;
+			return dependency;
+		}
+	};
 
-class PassNode
-{
-public:
-  template <typename T>
-  struct HandleSlice
-  {
-    const T* data{nullptr};
-    uint32_t count{0};
-  };
+	inline constexpr BufferHandle kPassVertexBufferHandle{0xF001u, 1u};
+	inline constexpr BufferHandle kPassPointLightBufferHandle{0xF002u, 1u};
+	inline constexpr BufferHandle kPassSpotLightBufferHandle{0xF003u, 1u};
+	inline constexpr BufferHandle kPassPointLightCoarseBoundsHandle{0xF004u, 1u};
+	inline constexpr BufferHandle kPassSpotLightCoarseBoundsHandle{0xF005u, 1u};
+	inline constexpr BufferHandle kPassLightCoarseCullingUniformHandle{0xF006u, 1u};
+	inline constexpr BufferHandle kPassGPUCullObjectBufferHandle{0xF007u, 1u};
+	inline constexpr BufferHandle kPassGPUCullIndirectBufferHandle{0xF008u, 1u};
+	inline constexpr BufferHandle kPassGPUCullStatsBufferHandle{0xF009u, 1u};
+	inline constexpr BufferHandle kPassGPUCullUniformBufferHandle{0xF00Au, 1u};
+	inline constexpr BufferHandle kPassGPUCullResultBufferHandle{0xF00Bu, 1u};
+	inline constexpr BufferHandle kPassGPUDrivenSortKeyBufferHandle{0xF00Cu, 1u};
+	inline constexpr BufferHandle kPassGPUDrivenSortValueBufferHandle{0xF00Du, 1u};
+	inline constexpr BufferHandle kPassClusterLightCountsHandle{0xF00Eu, 1u};
+	inline constexpr BufferHandle kPassClusterLightIndicesHandle{0xF00Fu, 1u};
+	inline constexpr BufferHandle kPassClusterLightStatsHandle{0xF010u, 1u};
+	inline constexpr BufferHandle kPassClusteredLightUniformHandle{0xF011u, 1u};
+	inline constexpr uint32_t kPackedGBufferTargetCount = 3u;
+	inline constexpr TextureHandle kPassGBuffer0Handle{0xF101u, 1u};
+	inline constexpr TextureHandle kPassGBuffer1Handle{0xF102u, 1u};
+	inline constexpr TextureHandle kPassGBuffer2Handle{0xF103u, 1u};
+	inline constexpr TextureHandle kPassSceneDepthHandle{0xF104u, 1u};
+	inline constexpr TextureHandle kPassShadowHandle{0xF105u, 1u};
+	inline constexpr TextureHandle kPassOutputHandle{0xF106u, 1u}; // OutputTexture (PBR result)
+	inline constexpr TextureHandle kPassCSMShadowHandle{0xF107u, 1u}; // CSM cascade array
+	inline constexpr TextureHandle kPassDepthPyramidHandle{0xF108u, 1u};
+	inline constexpr TextureHandle kPassSceneColorHdrHandle{0xF109u, 1u};
+	inline constexpr TextureHandle kPassBloomHalfHandle{0xF10Au, 1u};
+	inline constexpr TextureHandle kPassBloomQuarterHandle{0xF10Bu, 1u};
+	inline constexpr TextureHandle kPassVelocityHandle{0xF10Cu, 1u};
+	inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
+	inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
+	inline constexpr TextureHandle kPassGPUDrivenShadowAtlasHandle{0xF10Fu, 1u};
+	inline constexpr TextureHandle kPassBloomEighthHandle{0xF110u, 1u};
+	inline constexpr TextureHandle kPassBloomSixteenthHandle{0xF111u, 1u};
+	inline constexpr TextureHandle kPassBloomThirtySecondHandle{0xF112u, 1u};
+	inline constexpr TextureHandle kPassBloomUpsampleSixteenthHandle{0xF113u, 1u};
+	inline constexpr TextureHandle kPassBloomUpsampleEighthHandle{0xF114u, 1u};
+	inline constexpr TextureHandle kPassBloomUpsampleQuarterHandle{0xF115u, 1u};
+	inline constexpr TextureHandle kPassBloomOutputHandle{0xF116u, 1u};
+	inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
 
-  virtual ~PassNode() = default;
+	class PassNode
+	{
+	public:
+		template <typename T>
+		struct HandleSlice
+		{
+			const T* data{nullptr};
+			uint32_t count{0};
+		};
 
-  [[nodiscard]] virtual const char*                         getName() const                           = 0;
-  [[nodiscard]] virtual HandleSlice<PassResourceDependency> getDependencies() const                   = 0;
-  virtual void                                              execute(const PassContext& context) const = 0;
-};
+		virtual ~PassNode() = default;
 
-class ComputePassNode : public PassNode
-{
-};
+		[[nodiscard]] virtual const char* getName() const = 0;
+		[[nodiscard]] virtual HandleSlice<PassResourceDependency> getDependencies() const = 0;
+		virtual void execute(const PassContext& context) const = 0;
+	};
 
-class RenderPassNode : public PassNode
-{
-};
+	class ComputePassNode : public PassNode
+	{
+	};
 
-}  // namespace demo
+	class RenderPassNode : public PassNode
+	{
+	};
+} // namespace demo

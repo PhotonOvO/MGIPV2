@@ -5,93 +5,93 @@
 
 #include <meshoptimizer.h>
 
-namespace demo {
-
-namespace {
-constexpr float kMeshletConeWeight = 0.0f;
-
-}  // namespace
-
-MeshletConversionResult MeshletConverter::convert(const GltfMeshData& mesh, uint32_t maxVertices, uint32_t maxTriangles)
+namespace demo
 {
-  MeshletConversionResult result;
-  if(mesh.indices.empty() || mesh.positions.empty() || maxVertices == 0u || maxTriangles == 0u)
-  {
-    return result;
-  }
+	namespace
+	{
+		constexpr float kMeshletConeWeight = 0.0f;
+	} // namespace
 
-  const size_t vertexCount = mesh.positions.size() / 3u;
-  if(vertexCount == 0u)
-  {
-    return result;
-  }
+	MeshletConversionResult MeshletConverter::convert(const GltfMeshData& mesh, uint32_t maxVertices,
+	                                                  uint32_t maxTriangles)
+	{
+		MeshletConversionResult result;
+		if (mesh.indices.empty() || mesh.positions.empty() || maxVertices == 0u || maxTriangles == 0u)
+		{
+			return result;
+		}
 
-  maxVertices = std::clamp(maxVertices, 1u, 255u);
-  maxTriangles = std::max(1u, maxTriangles);
+		const size_t vertexCount = mesh.positions.size() / 3u;
+		if (vertexCount == 0u)
+		{
+			return result;
+		}
 
-  const size_t meshletBound = meshopt_buildMeshletsBound(mesh.indices.size(), maxVertices, maxTriangles);
-  if(meshletBound == 0u)
-  {
-    return result;
-  }
+		maxVertices = std::clamp(maxVertices, 1u, 255u);
+		maxTriangles = std::max(1u, maxTriangles);
 
-  std::vector<meshopt_Meshlet> meshlets(meshletBound);
-  std::vector<unsigned int>    meshletVertices(meshletBound * maxVertices);
-  std::vector<unsigned char>   meshletTriangles(meshletBound * maxTriangles * 3u);
+		const size_t meshletBound = meshopt_buildMeshletsBound(mesh.indices.size(), maxVertices, maxTriangles);
+		if (meshletBound == 0u)
+		{
+			return result;
+		}
 
-  const size_t meshletCount = meshopt_buildMeshlets(meshlets.data(),
-                                                    meshletVertices.data(),
-                                                    meshletTriangles.data(),
-                                                    mesh.indices.data(),
-                                                    mesh.indices.size(),
-                                                    mesh.positions.data(),
-                                                    vertexCount,
-                                                    sizeof(float) * 3u,
-                                                    maxVertices,
-                                                    maxTriangles,
-                                                    kMeshletConeWeight);
-  result.meshlets.reserve(meshletCount);
-  result.packedIndices.reserve(mesh.indices.size());
+		std::vector<meshopt_Meshlet> meshlets(meshletBound);
+		std::vector<unsigned int> meshletVertices(meshletBound * maxVertices);
+		std::vector<unsigned char> meshletTriangles(meshletBound * maxTriangles * 3u);
 
-  for(size_t meshletIndex = 0; meshletIndex < meshletCount; ++meshletIndex)
-  {
-    meshopt_Meshlet& sourceMeshlet = meshlets[meshletIndex];
-    unsigned int*    vertices = meshletVertices.data() + sourceMeshlet.vertex_offset;
-    unsigned char*   triangles = meshletTriangles.data() + sourceMeshlet.triangle_offset;
+		const size_t meshletCount = meshopt_buildMeshlets(meshlets.data(),
+		                                                  meshletVertices.data(),
+		                                                  meshletTriangles.data(),
+		                                                  mesh.indices.data(),
+		                                                  mesh.indices.size(),
+		                                                  mesh.positions.data(),
+		                                                  vertexCount,
+		                                                  sizeof(float) * 3u,
+		                                                  maxVertices,
+		                                                  maxTriangles,
+		                                                  kMeshletConeWeight);
+		result.meshlets.reserve(meshletCount);
+		result.packedIndices.reserve(mesh.indices.size());
 
-    meshopt_optimizeMeshlet(vertices, triangles, sourceMeshlet.triangle_count, sourceMeshlet.vertex_count);
-    const meshopt_Bounds bounds = meshopt_computeMeshletBounds(vertices,
-                                                               triangles,
-                                                               sourceMeshlet.triangle_count,
-                                                               mesh.positions.data(),
-                                                               vertexCount,
-                                                               sizeof(float) * 3u);
+		for (size_t meshletIndex = 0; meshletIndex < meshletCount; ++meshletIndex)
+		{
+			meshopt_Meshlet& sourceMeshlet = meshlets[meshletIndex];
+			unsigned int* vertices = meshletVertices.data() + sourceMeshlet.vertex_offset;
+			unsigned char* triangles = meshletTriangles.data() + sourceMeshlet.triangle_offset;
 
-    shaderio::Meshlet meshlet{};
-    meshlet.boundsSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
-    meshlet.coneAxisCutoff =
-        glm::vec4(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2], bounds.cone_cutoff);
-    meshlet.vertexOffset = 0u;
-    meshlet.indexOffset = static_cast<uint32_t>(result.packedIndices.size());
-    meshlet.indexCount = sourceMeshlet.triangle_count * 3u;
-    meshlet.materialIndex = mesh.materialIndex >= 0 ? static_cast<uint32_t>(mesh.materialIndex) : UINT32_MAX;
-    meshlet.objectIndex = UINT32_MAX;
-    meshlet.flags = 0u;
-    meshlet.localIndex = static_cast<uint32_t>(meshletIndex);
-    result.meshlets.push_back(meshlet);
+			meshopt_optimizeMeshlet(vertices, triangles, sourceMeshlet.triangle_count, sourceMeshlet.vertex_count);
+			const meshopt_Bounds bounds = meshopt_computeMeshletBounds(vertices,
+			                                                           triangles,
+			                                                           sourceMeshlet.triangle_count,
+			                                                           mesh.positions.data(),
+			                                                           vertexCount,
+			                                                           sizeof(float) * 3u);
 
-    for(uint32_t triangleIndex = 0; triangleIndex < sourceMeshlet.triangle_count; ++triangleIndex)
-    {
-      for(uint32_t corner = 0; corner < 3u; ++corner)
-      {
-        const uint32_t localVertexIndex = triangles[triangleIndex * 3u + corner];
-        result.packedIndices.push_back(vertices[localVertexIndex]);
-      }
-    }
-    result.triangleCount += sourceMeshlet.triangle_count;
-  }
+			shaderio::Meshlet meshlet{};
+			meshlet.boundsSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+			meshlet.coneAxisCutoff =
+				glm::vec4(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2], bounds.cone_cutoff);
+			meshlet.vertexOffset = 0u;
+			meshlet.indexOffset = static_cast<uint32_t>(result.packedIndices.size());
+			meshlet.indexCount = sourceMeshlet.triangle_count * 3u;
+			meshlet.materialIndex = mesh.materialIndex >= 0 ? static_cast<uint32_t>(mesh.materialIndex) : UINT32_MAX;
+			meshlet.objectIndex = UINT32_MAX;
+			meshlet.flags = 0u;
+			meshlet.localIndex = static_cast<uint32_t>(meshletIndex);
+			result.meshlets.push_back(meshlet);
 
-  return result;
-}
+			for (uint32_t triangleIndex = 0; triangleIndex < sourceMeshlet.triangle_count; ++triangleIndex)
+			{
+				for (uint32_t corner = 0; corner < 3u; ++corner)
+				{
+					const uint32_t localVertexIndex = triangles[triangleIndex * 3u + corner];
+					result.packedIndices.push_back(vertices[localVertexIndex]);
+				}
+			}
+			result.triangleCount += sourceMeshlet.triangle_count;
+		}
 
-}  // namespace demo
+		return result;
+	}
+} // namespace demo

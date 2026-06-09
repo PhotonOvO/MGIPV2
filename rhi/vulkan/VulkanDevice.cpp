@@ -102,8 +102,8 @@ namespace demo::rhi::vulkan
 
 		// Upload command pool for async uploads — migrated from RenderDevice (UPL-02)
 		const VkCommandPoolCreateInfo uploadPoolInfo{
-			.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-			.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+			.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
 			.queueFamilyIndex = m_graphicsQueue.familyIndex,
 		};
 		VK_CHECK(vkCreateCommandPool(m_device, &uploadPoolInfo, nullptr, &m_uploadCmdPool));
@@ -1948,9 +1948,15 @@ namespace demo::rhi::vulkan
 	void VulkanDevice::executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{
 		assert(m_device != VK_NULL_HANDLE && "VulkanDevice::executeImmediateUpload called before init");
-		assert(m_uploadCmdPool != VK_NULL_HANDLE && "VulkanDevice::executeImmediateUpload: upload cmd pool not initialized");
-		assert(m_frameContext != nullptr && "VulkanDevice::executeImmediateUpload: frame context not set (call setFrameContext)");
-		assert(m_resourceTable != nullptr && "VulkanDevice::executeImmediateUpload: resource table not set (call setResourceTable)");
+		assert(
+			m_uploadCmdPool != VK_NULL_HANDLE &&
+			"VulkanDevice::executeImmediateUpload: upload cmd pool not initialized");
+		assert(
+			m_frameContext != nullptr &&
+			"VulkanDevice::executeImmediateUpload: frame context not set (call setFrameContext)");
+		assert(
+			m_resourceTable != nullptr &&
+			"VulkanDevice::executeImmediateUpload: resource table not set (call setResourceTable)");
 
 		// UPL-03: flush existing pending uploads before submitting a new one
 		flushUploadRetirements(true);
@@ -1973,13 +1979,13 @@ namespace demo::rhi::vulkan
 		VK_CHECK(vkCreateFence(m_device, &fenceInfo, nullptr, &uploadFence));
 
 		const VkCommandBufferSubmitInfo cmdBufferInfo{
-			.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
 			.commandBuffer = cmd,
 		};
 		const VkSubmitInfo2 submitInfo{
-			.sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
 			.commandBufferInfoCount = 1,
-			.pCommandBufferInfos    = &cmdBufferInfo,
+			.pCommandBufferInfos = &cmdBufferInfo,
 		};
 		VK_CHECK(vkQueueSubmit2(m_graphicsQueue.queue, 1, &submitInfo, uploadFence)); // non-blocking
 
@@ -2029,5 +2035,4 @@ namespace demo::rhi::vulkan
 		// Note: staging buffer retirement (rhiStagingBuffers) stays in the render layer.
 		// VulkanDevice cannot hold render-layer rhi::BufferHandle vectors (D-05 UPL-03).
 	}
-
 } // namespace demo::rhi::vulkan
