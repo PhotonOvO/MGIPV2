@@ -45,7 +45,7 @@ results = []
 # Helpers
 # ---------------------------------------------------------------------------
 
-def step(name, argv, gate="hard", skip_reason=None):
+def step(name, argv, gate="hard", skip_reason=None, cwd=None):
     """Execute one verification step and record the result.
 
     Parameters
@@ -59,6 +59,8 @@ def step(name, argv, gate="hard", skip_reason=None):
         Hard gates flip the global failed flag; best-effort steps do not.
     skip_reason : str or None
         If provided the step is recorded as SKIP without running argv.
+    cwd : str or None
+        Working directory for the subprocess (default: inherit caller's cwd).
 
     Returns
     -------
@@ -88,6 +90,7 @@ def step(name, argv, gate="hard", skip_reason=None):
             text=True,
             encoding="utf-8",
             errors="replace",
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         results.append({
@@ -321,6 +324,7 @@ def main():
             name="Android assembleDebug",
             argv=["cmd", "/c", gradlew, "assembleDebug"],
             gate="best-effort",
+            cwd=android_dir,
         )
         # Note: best-effort — FAIL in this step does NOT set hard_gate_failed
     else:
