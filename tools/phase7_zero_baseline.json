@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "Phase 7 freeze — zero gate. Any violation above 0 is a regression. Do not use as the live baseline until Phase 7 acceptance is confirmed.",
+  "signals": {
+    "backend_include": {
+      "total": 0,
+      "header_only": 0,
+      "files": {}
+    },
+    "vk_token": {
+      "total": 0,
+      "header_only": 0,
+      "files": {}
+    },
+    "native_getter": {
+      "total": 0,
+      "header_only": 0,
+      "files": {}
+    }
+  }
+}
