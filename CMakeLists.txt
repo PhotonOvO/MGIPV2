@@ -260,6 +260,8 @@ add_library(demo_core STATIC
   render/RenderDevice.cpp
   render/RenderDevice.h
   render/RenderTypes.h
+  render/DebugInteropBridge.h
+  render/DebugInteropBridge.cpp
   render/RendererFacade.h
   render/RendererFacade.cpp
   render/AsyncLoadingCoordinator.h  
