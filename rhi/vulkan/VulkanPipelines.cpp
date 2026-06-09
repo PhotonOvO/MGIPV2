@@ -285,6 +285,23 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   const GraphicsPipelineDesc& desc = *createInfo.desc;
   const VkPipelineLayout layout = createInfo.layout;
 
+  // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
+  // 兼容期回退路径（spirvCode == nullptr）不压入守卫，所有权仍归 caller，避免 double-free。
+  struct ScopedModuleList
+  {
+    VkDevice                    device;
+    std::vector<VkShaderModule> modules;
+    ~ScopedModuleList()
+    {
+      for(VkShaderModule m : modules)
+      {
+        if(m != VK_NULL_HANDLE)
+          vkDestroyShaderModule(device, m, nullptr);
+      }
+    }
+  } scopedModules{device, {}};
+  scopedModules.modules.reserve(desc.shaderStageCount);
+
   std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
   shaderStages.reserve(desc.shaderStageCount);
 
@@ -317,10 +334,25 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
       };
     }
 
+    // RDEV-02: spirvCode 非空 → backend 建临时 module（RAII 管理，pipeline 创后 scope 退出自动销毁）。
+    //          spirvCode 为空 → 兼容期回退，直接 reinterpret_cast，所有权仍归 caller。
+    VkShaderModule stageModule = VK_NULL_HANDLE;
+    if(stageDesc.spirvCode != nullptr && stageDesc.spirvSize > 0)
+    {
+      stageModule = utils::createShaderModule(device,
+          std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
+      scopedModules.modules.push_back(stageModule);
+    }
+    else
+    {
+      // 兼容期：不压入 ScopedModuleList，避免与 renderer 侧 vkDestroyShaderModule double-free。
+      stageModule = reinterpret_cast<VkShaderModule>(static_cast<uintptr_t>(stageDesc.shaderModule));
+    }
+
     shaderStages.push_back(VkPipelineShaderStageCreateInfo{
         .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage               = toVkShaderStage(stageDesc.stage),
-        .module              = reinterpret_cast<VkShaderModule>(stageDesc.shaderModule),
+        .module              = stageModule,
         .pName               = stageDesc.entryPoint,
         .pSpecializationInfo = stageDesc.specializationConstantCount > 0 ? &specializationInfos[stageIndex] : nullptr,
     });
@@ -470,6 +502,36 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   const ComputePipelineDesc& desc = *createInfo.desc;
   const VkPipelineLayout layout = createInfo.layout;
 
+  // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
+  // 兼容期回退路径（spirvCode == nullptr）不压入守卫，所有权仍归 caller，避免 double-free。
+  struct ScopedModuleList
+  {
+    VkDevice                    device;
+    std::vector<VkShaderModule> modules;
+    ~ScopedModuleList()
+    {
+      for(VkShaderModule m : modules)
+      {
+        if(m != VK_NULL_HANDLE)
+          vkDestroyShaderModule(device, m, nullptr);
+      }
+    }
+  } scopedModules{device, {}};
+
+  // RDEV-02: spirvCode 非空 → backend 建临时 module（RAII 管理）；spirvCode 为空 → 兼容期回退。
+  VkShaderModule computeModule = VK_NULL_HANDLE;
+  if(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize > 0)
+  {
+    computeModule = utils::createShaderModule(device,
+        std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
+    scopedModules.modules.push_back(computeModule);
+  }
+  else
+  {
+    // 兼容期：不压入 ScopedModuleList，避免与 renderer 侧 vkDestroyShaderModule double-free。
+    computeModule = reinterpret_cast<VkShaderModule>(static_cast<uintptr_t>(desc.shaderStage.shaderModule));
+  }
+
   std::vector<VkSpecializationMapEntry> mapEntries;
   mapEntries.reserve(desc.shaderStage.specializationConstantCount);
   for(uint32_t i = 0; i < desc.shaderStage.specializationConstantCount; ++i)
@@ -492,7 +554,7 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   const VkPipelineShaderStageCreateInfo shaderStageInfo{
       .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage               = toVkShaderStage(desc.shaderStage.stage),
-      .module              = reinterpret_cast<VkShaderModule>(desc.shaderStage.shaderModule),
+      .module              = computeModule,
       .pName               = desc.shaderStage.entryPoint,
       .pSpecializationInfo = mapEntries.empty() ? nullptr : &specializationInfo,
   };
