@@ -2714,7 +2714,6 @@ namespace demo
 			h = {};
 			viewToken = 0;
 		};
-		dropView(m_iblEnvViewHandle, m_iblEnvViewToken);
 		dropView(m_aoViewHandle, m_aoViewToken);
 		dropView(m_ssrViewHandle, m_ssrViewToken);
 		m_lightingInputBufferHandles.clear();
@@ -2741,7 +2740,6 @@ namespace demo
 		m_iblEnvironmentStatus = "Using flat ambient fallback";
 		m_iblUsingFallback = true;
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
 		const auto initFallbackSplitSumResources = [&]()
 		{
 			IBLResources::CreateInfo fallbackInfo{
@@ -2774,28 +2772,16 @@ namespace demo
 			return;
 		}
 
-		const VkImageCreateInfo imageInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = toNativeFormat(texture.format),
+		m_iblEnvironmentImage = getRHIDevice().createTexture(rhi::TextureDesc{
+			.dimension = rhi::TextureDimension::e2D,
+			.format = texture.format,
+			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
 			.extent = {texture.width, texture.height, 1},
 			.mipLevels = std::max(1u, texture.mipLevels),
 			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.tiling = VK_IMAGE_TILING_OPTIMAL,
-			.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		};
-		VmaAllocationCreateInfo allocInfo{};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		utils::Image image{};
-		VK_CHECK(
-			vmaCreateImage(reinterpret_cast<VmaAllocator>(getAllocatorToken()), &imageInfo, &allocInfo, &image.image, &
-				image.allocation, nullptr));
-
-		rhi::TextureHandle environmentImageHandle =
-			getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+			.debugName = "IBL_Environment",
+		});
+		const rhi::TextureHandle environmentImageHandle = m_iblEnvironmentImage;
 		executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 		{
 			BatchUploadContext upload;
@@ -2856,39 +2842,25 @@ namespace demo
 				m_gpuDrivenRhiStagingBuffers.push_back(staging);
 			}
 		});
-		getRHIDevice().destroyImage(environmentImageHandle);
 
-		const VkImageViewCreateInfo viewInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image = image.image,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = toNativeFormat(texture.format),
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
-				.levelCount = std::max(1u, texture.mipLevels), .baseArrayLayer = 0, .layerCount = 1
-			},
-		};
-		VkImageView view = VK_NULL_HANDLE;
-		VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &view));
-		m_iblEnvironment = {};
-		m_iblEnvironment.image = image.image;
-		m_iblEnvironment.allocation = image.allocation;
-		m_iblEnvironment.view = view;
-		m_iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
+		m_iblEnvironmentView = getRHIDevice().createTextureView(rhi::TextureViewCreateDesc{
+			.image = m_iblEnvironmentImage,
+			.format = texture.format,
+			.viewType = rhi::ImageViewType::e2D,
+			.aspect = rhi::TextureAspect::color,
+			.levelCount = std::max(1u, texture.mipLevels),
+			.layerCount = 1,
+		});
 		m_iblEnvironmentFormat = texture.format;
 		m_iblEnvironmentExtent = {texture.width, texture.height};
 		m_iblEnvironmentMipCount = std::max(1u, texture.mipLevels);
 		m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
 		m_iblEnvironmentLoaded = true;
 		m_iblUsingFallback = false;
-		// The environment view stays a native, GPUDrivenRenderer-owned view (utils::ImageResource).
-		// Wrap it as a transient non-owned RHI handle just for IBL generation, then unregister.
-		const rhi::TextureViewHandle envViewHandle =
-			getRHIDevice().registerExternalTextureView(reinterpret_cast<uint64_t>(view));
 		IBLResources::CreateInfo iblCreateInfo{
 			.cubeMapSize = 128,
 			.dfgLUTSize = 256,
-			.sourceEnvironmentView = envViewHandle,
+			.sourceEnvironmentView = m_iblEnvironmentView,
 			.sourceWidth = texture.width,
 			.sourceHeight = texture.height,
 			.sourceMipCount = std::max(1u, texture.mipLevels),
@@ -2899,7 +2871,6 @@ namespace demo
 			                    cmdBuffer,
 			                    iblCreateInfo);
 		});
-		getRHIDevice().destroyTextureView(envViewHandle);
 
 		m_iblEnvironmentStatus = m_iblResources.isSplitSumReady()
 			                         ? "Loaded GPUDriven equirect HDR KTX2 with split-sum IBL"
@@ -2915,21 +2886,16 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownIBLResources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
 		m_iblResources.deinit();
-		if (nativeDevice != VK_NULL_HANDLE && (m_iblEnvironment.view != VK_NULL_HANDLE || m_iblEnvironment.image !=
-			VK_NULL_HANDLE))
+		if (!m_iblEnvironmentView.isNull())
 		{
-			if (m_iblEnvironment.view != VK_NULL_HANDLE)
-			{
-				vkDestroyImageView(nativeDevice, m_iblEnvironment.view, nullptr);
-			}
-			if (m_iblEnvironment.image != VK_NULL_HANDLE)
-			{
-				vmaDestroyImage(reinterpret_cast<VmaAllocator>(getAllocatorToken()), m_iblEnvironment.image,
-				                m_iblEnvironment.allocation);
-			}
-			m_iblEnvironment = {};
+			getRHIDevice().destroyTextureView(m_iblEnvironmentView);
+			m_iblEnvironmentView = {};
+		}
+		if (!m_iblEnvironmentImage.isNull())
+		{
+			getRHIDevice().destroyImage(m_iblEnvironmentImage);
+			m_iblEnvironmentImage = {};
 		}
 		m_iblEnvironmentFormat = rhi::TextureFormat::undefined;
 		m_iblEnvironmentExtent = {};
@@ -3579,9 +3545,7 @@ namespace demo
 		texViews[kGPUDrivenLightPassVelocityIndex] = viewOr(sceneView.velocityView, fallbackColor);
 		texViews[kGPUDrivenLightPassHistoryReadIndex] = viewOr(sceneView.sceneColorHistoryReadView, fallbackColor);
 		texViews[kGPUDrivenLightPassHistoryWriteIndex] = viewOr(sceneView.sceneColorHistoryWriteView, fallbackColor);
-		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] =
-			adoptViewToken(reinterpret_cast<uintptr_t>(m_iblEnvironment.view), m_iblEnvViewHandle, m_iblEnvViewToken,
-			               fallbackColor);
+		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
 		texViews[kGPUDrivenLightPassAOIndex] =
 			adoptViewToken(reinterpret_cast<uintptr_t>(m_aoDenoised.view), m_aoViewHandle, m_aoViewToken,
 			               fallbackDepth);

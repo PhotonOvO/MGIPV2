@@ -1295,8 +1295,6 @@ namespace demo
 		rhi::SamplerHandle m_iblLutSamplerHandle{};
 		// Adopted (owned=false) RHI view handles for per-frame backend views fed into
 		// the lighting-input set; re-registered when the underlying backend token changes.
-		rhi::TextureViewHandle m_iblEnvViewHandle{};
-		uintptr_t m_iblEnvViewToken{0};
 		rhi::TextureViewHandle m_aoViewHandle{};
 		uintptr_t m_aoViewToken{0};
 		rhi::TextureViewHandle m_ssrViewHandle{};
@@ -1345,7 +1343,8 @@ namespace demo
 		uint32_t m_shadowAtlasAllocatedTiles{0};
 		std::vector<shaderio::LightData> m_gpuDrivenPointLights;
 		std::vector<shaderio::LightData> m_gpuDrivenSpotLights;
-		utils::ImageResource m_iblEnvironment{};
+		rhi::TextureHandle m_iblEnvironmentImage{};
+		rhi::TextureViewHandle m_iblEnvironmentView{};
 		IBLResources m_iblResources{};
 		std::vector<utils::Buffer> m_gpuDrivenStagingBuffers;
 		std::vector<rhi::BufferHandle> m_gpuDrivenRhiStagingBuffers;
