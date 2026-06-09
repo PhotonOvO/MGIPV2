@@ -6305,30 +6305,24 @@ SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, c
     VkImageView imageView = VK_NULL_HANDLE;
     VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
 
-    // Phase 3 (D-03): register permanent owned=false handles for TextureColdData.
-    // imageHandle (in textureUploadStates) is a temporary upload handle destroyed at L6609.
-    // ownedTexHandle is a separate permanent registration of the same native VkImage.
-    // registerExternal*: owned=false — destroy path must call destroyTexture/destroyTextureView
-    // (unregister only) + vmaDestroyImage + vkDestroyImageView explicitly (see destroy path).
-    const rhi::TextureHandle ownedTexHandle =
-        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
-    const rhi::TextureViewHandle viewHandle =
-        m_device.device->registerExternalTextureView(reinterpret_cast<uint64_t>(imageView));
+    utils::ImageResource imageResource{};
+    imageResource.image = image.image;
+    imageResource.allocation = image.allocation;
+    imageResource.view = imageView;
+    imageResource.layout = VK_IMAGE_LAYOUT_GENERAL;
+    imageResource.extent = {width, height};
 
     result.textures[texturePlan.textureIndex] = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot = {
             .runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
             .sampledImageView = imageView,
             .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-            // viewHandle is already registered; use directly (no double-registration).
-            .sampledViewHandle = viewHandle,
+            .sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
         },
         .cold = {
-            .ownedTexture     = ownedTexHandle,
-            .ownedTextureView = viewHandle,
-            .ownedNativeImage = image,
-            .sourceExtent     = {width, height},
-            .mipLevels        = mipLevels,
+            .ownedImage = imageResource,
+            .sourceExtent = {width, height},
+            .mipLevels = mipLevels,
         },
     });
   }
@@ -6874,15 +6868,12 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
     VkImageView imageView = VK_NULL_HANDLE;
     VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
 
-    // Phase 3 (D-03): register permanent owned=false handles for TextureColdData.
-    // imageHandle (in textureUploadStates) is a temporary upload handle destroyed at L7015.
-    // ownedTexHandle is a separate permanent registration of the same native VkImage.
-    // registerExternal*: owned=false — destroy path must call destroyTexture/destroyTextureView
-    // (unregister only) + vmaDestroyImage + vkDestroyImageView explicitly (see destroy path).
-    const rhi::TextureHandle ownedTexHandle =
-        m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
-    const rhi::TextureViewHandle viewHandle =
-        m_device.device->registerExternalTextureView(reinterpret_cast<uint64_t>(imageView));
+    utils::ImageResource imageResource{};
+    imageResource.image      = image.image;
+    imageResource.allocation = image.allocation;
+    imageResource.view       = imageView;
+    imageResource.layout     = VK_IMAGE_LAYOUT_GENERAL;
+    imageResource.extent     = {width, height};
 
     ioResult.textures[textureIndex] = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
         .hot =
@@ -6890,16 +6881,13 @@ void RenderDevice::uploadGltfModelBatch(const GltfModel&          model,
                 .runtimeKind        = MaterialResources::TextureRuntimeKind::materialSampled,
                 .sampledImageView   = imageView,
                 .sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                // viewHandle is already registered; use directly (no double-registration).
-                .sampledViewHandle  = viewHandle,
+                .sampledViewHandle  = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
             },
         .cold =
             {
-                .ownedTexture     = ownedTexHandle,
-                .ownedTextureView = viewHandle,
-                .ownedNativeImage = image,
-                .sourceExtent     = {width, height},
-                .mipLevels        = mipLevels,
+                .ownedImage   = imageResource,
+                .sourceExtent = {width, height},
+                .mipLevels    = mipLevels,
             },
     });
   }
