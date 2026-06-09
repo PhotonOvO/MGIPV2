@@ -334,20 +334,10 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
       };
     }
 
-    // RDEV-02: spirvCode 非空 → backend 建临时 module（RAII 管理，pipeline 创后 scope 退出自动销毁）。
-    //          spirvCode 为空 → 兼容期回退，直接 reinterpret_cast，所有权仍归 caller。
-    VkShaderModule stageModule = VK_NULL_HANDLE;
-    if(stageDesc.spirvCode != nullptr && stageDesc.spirvSize > 0)
-    {
-      stageModule = utils::createShaderModule(device,
-          std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
-      scopedModules.modules.push_back(stageModule);
-    }
-    else
-    {
-      // 兼容期：不压入 ScopedModuleList，避免与 renderer 侧 vkDestroyShaderModule double-free。
-      stageModule = reinterpret_cast<VkShaderModule>(static_cast<uintptr_t>(stageDesc.shaderModule));
-    }
+    // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理，pipeline 创后 scope 退出自动销毁）。
+    VkShaderModule stageModule = utils::createShaderModule(device,
+        std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
+    scopedModules.modules.push_back(stageModule);
 
     shaderStages.push_back(VkPipelineShaderStageCreateInfo{
         .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -518,19 +508,10 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
     }
   } scopedModules{device, {}};
 
-  // RDEV-02: spirvCode 非空 → backend 建临时 module（RAII 管理）；spirvCode 为空 → 兼容期回退。
-  VkShaderModule computeModule = VK_NULL_HANDLE;
-  if(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize > 0)
-  {
-    computeModule = utils::createShaderModule(device,
-        std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
-    scopedModules.modules.push_back(computeModule);
-  }
-  else
-  {
-    // 兼容期：不压入 ScopedModuleList，避免与 renderer 侧 vkDestroyShaderModule double-free。
-    computeModule = reinterpret_cast<VkShaderModule>(static_cast<uintptr_t>(desc.shaderStage.shaderModule));
-  }
+  // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理）。
+  VkShaderModule computeModule = utils::createShaderModule(device,
+      std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
+  scopedModules.modules.push_back(computeModule);
 
   std::vector<VkSpecializationMapEntry> mapEntries;
   mapEntries.reserve(desc.shaderStage.specializationConstantCount);

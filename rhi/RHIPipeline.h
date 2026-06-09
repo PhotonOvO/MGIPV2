@@ -217,9 +217,6 @@ struct PipelineShaderStageDesc
   // spirvSize 单位为字节（非元素数）：std::size(arr) * sizeof(uint32_t)。
   const uint32_t* spirvCode{nullptr};
   size_t          spirvSize{0};
-  // DEPRECATED(RDEV-02): 迁移完成后移除。兼容期：backend 优先使用 spirvCode；
-  //   spirvCode == nullptr 时回退此字段。
-  uint64_t        shaderModule{0};
   const char*     entryPoint{"main"};
   uint32_t                      specializationVariant{0};
   SpecializationData            specializationData{};
