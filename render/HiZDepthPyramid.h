@@ -1,6 +1,5 @@
 #pragma once
 
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../common/Handles.h"
 #include "../rhi/RHIDevice.h"
 
@@ -23,22 +22,22 @@ namespace demo
 			uint32_t minMipSize{1};
 		};
 
-		void init(rhi::Device& device, VmaAllocator allocator, uint32_t frameCount, VkExtent2D sourceSize);
+		void init(rhi::Device& device, uint32_t frameCount, rhi::Extent2D sourceSize);
 		void shutdown();
 		void configureMobilePolicy(MobilePolicy policy);
-		void resize(VkExtent2D sourceSize);
+		void resize(rhi::Extent2D sourceSize);
 		void generate(uint32_t frameIndex,
 		              rhi::CommandBuffer& rhiCmd,
-		              VkExtent2D sourceSize,
+		              rhi::Extent2D sourceSize,
 		              rhi::TextureViewHandle sourceDepthView,
 		              TextureHandle sourceDepth,
 		              rhi::TextureHandle sourceDepthRHI);
 		void markBoundForCulling(rhi::ArgumentTableHandle table, uint32_t binding);
 		[[nodiscard]] uint32_t getMipCount() const { return m_mipCount; }
 		[[nodiscard]] uint32_t getFullMipCount() const { return m_fullMipCount; }
-		[[nodiscard]] VkExtent2D getExtent() const { return m_size; }
-		[[nodiscard]] VkExtent2D getSourceExtent() const { return m_sourceSize; }
-		[[nodiscard]] VkImage getImage() const { return m_image; }
+		[[nodiscard]] rhi::Extent2D getExtent() const { return m_size; }
+		[[nodiscard]] rhi::Extent2D getSourceExtent() const { return m_sourceSize; }
+		[[nodiscard]] rhi::TextureHandle getImageHandle() const { return m_imageHandle; }
 		[[nodiscard]] rhi::TextureViewHandle getMipView(uint32_t mipLevel) const;
 
 		[[nodiscard]] const rhi::TextureViewHandle* getMipViewsData() const
@@ -57,7 +56,6 @@ namespace demo
 	private:
 		struct PerFrameResources
 		{
-			utils::Buffer uniformBuffer{};
 			rhi::BufferHandle uniformBufferHandle{};
 			rhi::ArgumentTableHandle argumentTable{};
 		};
@@ -66,17 +64,13 @@ namespace demo
 		void recreateResources();
 		void destroyImageResources();
 
-		VkDevice m_device{VK_NULL_HANDLE};
 		rhi::Device* m_rhiDevice{nullptr};
-		VmaAllocator m_allocator{VK_NULL_HANDLE};
 		uint32_t m_frameCount{0};
 		MobilePolicy m_mobilePolicy{};
-		VkExtent2D m_sourceSize{};
-		VkExtent2D m_size{};
+		rhi::Extent2D m_sourceSize{};
+		rhi::Extent2D m_size{};
 		uint32_t m_fullMipCount{0};
 		uint32_t m_mipCount{0};
-		VkImage m_image{VK_NULL_HANDLE};
-		VmaAllocation m_imageAllocation{nullptr};
 		rhi::TextureHandle m_imageHandle{};
 		TextureHandle m_sourceDepth{};
 		std::vector<rhi::TextureViewHandle> m_mipViews;
