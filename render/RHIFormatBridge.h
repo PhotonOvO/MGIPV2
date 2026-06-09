@@ -31,6 +31,7 @@ namespace demo
 		case VK_FORMAT_D32_SFLOAT_S8_UINT:
 			return rhi::TextureFormat::d32SfloatS8;
 		// Block-compressed formats (D-01/D-03)
+		case VK_FORMAT_BC6H_UFLOAT_BLOCK: return rhi::TextureFormat::bc6hUfloatBlock;
 		case VK_FORMAT_BC6H_SFLOAT_BLOCK: return rhi::TextureFormat::bc6hSfloatBlock;
 		case VK_FORMAT_BC7_UNORM_BLOCK: return rhi::TextureFormat::bc7UnormBlock;
 		case VK_FORMAT_BC7_SRGB_BLOCK: return rhi::TextureFormat::bc7SrgbBlock;
@@ -58,6 +59,7 @@ namespace demo
 		case rhi::TextureFormat::d32Sfloat: return VK_FORMAT_D32_SFLOAT;
 		case rhi::TextureFormat::d24UnormS8: return VK_FORMAT_D24_UNORM_S8_UINT;
 		case rhi::TextureFormat::d32SfloatS8: return VK_FORMAT_D32_SFLOAT_S8_UINT;
+		case rhi::TextureFormat::bc6hUfloatBlock: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
 		case rhi::TextureFormat::bc6hSfloatBlock: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
 		case rhi::TextureFormat::bc7UnormBlock: return VK_FORMAT_BC7_UNORM_BLOCK;
 		case rhi::TextureFormat::bc7SrgbBlock: return VK_FORMAT_BC7_SRGB_BLOCK;

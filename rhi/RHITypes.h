@@ -171,7 +171,9 @@ enum class TextureFormat : uint8_t
   rg16Sfloat  = 8,
   r32Sfloat   = 9,
   // Block-compressed formats for KTX2 asset pipeline (D-01/D-03)
-  bc6hSfloatBlock = 143,   // VK_FORMAT_BC6H_SFLOAT_BLOCK — HDR environment maps (signed)
+  // Enum values mirror the real VkFormat numeric values (Vulkan SDK 1.4.x).
+  bc6hUfloatBlock = 143,   // VK_FORMAT_BC6H_UFLOAT_BLOCK — HDR environment maps (unsigned)
+  bc6hSfloatBlock = 144,   // VK_FORMAT_BC6H_SFLOAT_BLOCK — HDR environment maps (signed)
   bc7UnormBlock   = 145,   // VK_FORMAT_BC7_UNORM_BLOCK   — normal/metallic/roughness
   bc7SrgbBlock    = 146,   // VK_FORMAT_BC7_SRGB_BLOCK    — albedo/emissive sRGB
 };
