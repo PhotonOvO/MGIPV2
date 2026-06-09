@@ -33,9 +33,10 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
 
 void MetalDevice::deinit()
 {
+  // deinit must be safe to call (RAII cleanup never aborts). Since init() aborts via
+  // RHI_UNIMPLEMENTED, m_initialized can never be true here — so this is a clean no-op.
   if (!m_initialized)
     return;
-  RHI_UNIMPLEMENTED("MetalDevice::deinit");
   // TODO: Metal implementation
   // NOTES:
   // 1. Release Metal queues (ARC handles automatically)

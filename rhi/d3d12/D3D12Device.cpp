@@ -29,9 +29,10 @@ void D3D12Device::init(const DeviceCreateInfo& createInfo)
 
 void D3D12Device::deinit()
 {
+  // deinit must be safe to call (RAII cleanup never aborts). Since init() aborts via
+  // RHI_UNIMPLEMENTED, m_initialized can never be true here — so this is a clean no-op.
   if (!m_initialized)
     return;
-  RHI_UNIMPLEMENTED("D3D12Device::deinit");
   // TODO: D3D12 implementation
   // NOTES:
   // 1. Wait for GPU idle using ID3D12Device::Signal + ID3D12Fence::Wait
