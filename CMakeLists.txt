@@ -596,4 +596,14 @@ add_custom_target(check_rhi_boundary
   COMMENT "Running RHI boundary guard..."
   VERBATIM
 )
+
+# --- D-11: Promote boundary guard to default build dependency (Phase 7 freeze) ---
+# check_rhi_boundary runs on every 'cmake --build ... --target Demo' invocation.
+# Disable with -DDEMO_SKIP_BOUNDARY_CHECK=ON for inner-loop speed.
+# SEQUENCING: This wiring is safe only after .rhi-boundary-baseline.json is zeroed
+#             (Phase 7 Plan 02). Do not enable earlier — wedges builds during Phases 2-6.
+option(DEMO_SKIP_BOUNDARY_CHECK "Skip RHI boundary guard during normal builds (for inner-loop speed; not for acceptance gate)" OFF)
+if(NOT DEMO_SKIP_BOUNDARY_CHECK)
+  add_dependencies(Demo check_rhi_boundary)
+endif()
 endif()
