@@ -4414,23 +4414,19 @@ void RenderDevice::prebuildRequiredPipelineVariants()
 void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 {
 #ifdef USE_SLANG
-  const char* vertEntryName = "vertexMain";
-  const char* fragEntryName = "fragmentMain";
-
-  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                              {shader_rast_slang, std::size(shader_rast_slang)});
-  DBG_VK_NAME(vertShaderModule);
-  VkShaderModule fragShaderModule = vertShaderModule;
+  const char*          vertEntryName = "vertexMain";
+  const char*          fragEntryName = "fragmentMain";
+  const uint32_t*      vertSpirvCode = shader_rast_slang;
+  const size_t         vertSpirvSize = std::size(shader_rast_slang) * sizeof(uint32_t);
+  const uint32_t*      fragSpirvCode = shader_rast_slang;
+  const size_t         fragSpirvSize = std::size(shader_rast_slang) * sizeof(uint32_t);
 #else
-  const char* vertEntryName = "main";
-  const char* fragEntryName = "main";
-
-  VkShaderModule vertShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                              {shader_vert_glsl, std::size(shader_vert_glsl)});
-  DBG_VK_NAME(vertShaderModule);
-  VkShaderModule fragShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                              {shader_frag_glsl, std::size(shader_frag_glsl)});
-  DBG_VK_NAME(fragShaderModule);
+  const char*          vertEntryName = "main";
+  const char*          fragEntryName = "main";
+  const uint32_t*      vertSpirvCode = shader_vert_glsl;
+  const size_t         vertSpirvSize = std::size(shader_vert_glsl) * sizeof(uint32_t);
+  const uint32_t*      fragSpirvCode = shader_frag_glsl;
+  const size_t         fragSpirvSize = std::size(shader_frag_glsl) * sizeof(uint32_t);
 #endif
 
   const auto bindingDescription    = Vertex::getBindingDescription();
@@ -4504,13 +4500,15 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
   std::array<rhi::PipelineShaderStageDesc, 2> shaderStages{{
       rhi::PipelineShaderStageDesc{
-          .stage        = rhi::ShaderStage::vertex,
-          .shaderModule = reinterpret_cast<uint64_t>(vertShaderModule),
-          .entryPoint   = vertEntryName,
+          .stage      = rhi::ShaderStage::vertex,
+          .spirvCode  = vertSpirvCode,
+          .spirvSize  = vertSpirvSize,
+          .entryPoint = vertEntryName,
       },
       rhi::PipelineShaderStageDesc{
           .stage                 = rhi::ShaderStage::fragment,
-          .shaderModule          = reinterpret_cast<uint64_t>(fragShaderModule),
+          .spirvCode             = fragSpirvCode,
+          .spirvSize             = fragSpirvSize,
           .entryPoint            = fragEntryName,
           .specializationVariant = 1,
       },
@@ -4570,11 +4568,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
   shaderStages[1].specializationConstantCount = 1;
   const PipelineHandle graphicsPipelineWithoutTexture = m_device.device->createGraphicsPipeline(graphicsDesc);
   m_device.prebuiltPipelines.graphicsNonTextured = graphicsPipelineWithoutTexture;
-
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), vertShaderModule, nullptr);
-#ifndef USE_SLANG
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), fragShaderModule, nullptr);
-#endif
 
   // Create GBuffer pipeline layout with uniform buffer bindings
   {
@@ -4676,10 +4669,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
   // Create depth prepass pipelines (Opaque + AlphaTest variants)
   {
-    VkShaderModule depthPrepassShaderModule =
-        utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                  {shader_depth_prepass_slang, std::size(shader_depth_prepass_slang)});
-    DBG_VK_NAME(depthPrepassShaderModule);
+    const uint32_t* depthPrepassSpirvCode = shader_depth_prepass_slang;
+    const size_t    depthPrepassSpirvSize = std::size(shader_depth_prepass_slang) * sizeof(uint32_t);
 
     const std::array<rhi::VertexBindingDesc, 1> depthBindings{{
         {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
@@ -4702,12 +4693,12 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         rhi::DynamicState::scissor,
     }};
     const std::array<rhi::PipelineShaderStageDesc, 2> depthStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "vertexMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "fragmentMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = depthPrepassSpirvCode, .spirvSize = depthPrepassSpirvSize, .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = depthPrepassSpirvCode, .spirvSize = depthPrepassSpirvSize, .entryPoint = "fragmentMain"},
     }};
     const std::array<rhi::PipelineShaderStageDesc, 2> depthMdiStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "vertexMdiMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(depthPrepassShaderModule), .entryPoint = "fragmentMdiMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = depthPrepassSpirvCode, .spirvSize = depthPrepassSpirvSize, .entryPoint = "vertexMdiMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = depthPrepassSpirvCode, .spirvSize = depthPrepassSpirvSize, .entryPoint = "fragmentMdiMain"},
     }};
 
     rhi::GraphicsPipelineDesc depthDesc{
@@ -4772,14 +4763,12 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     m_depthPrepassAlphaTestMDIPipeline = m_device.device->createGraphicsPipeline(depthMdiDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), depthPrepassShaderModule, nullptr);
   }
 
   // Create GBuffer pipelines (Opaque + AlphaTest variants)
   {
-    VkShaderModule gbufferShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                                {shader_gbuffer_slang, std::size(shader_gbuffer_slang)});
-    DBG_VK_NAME(gbufferShaderModule);
+    const uint32_t* gbufferSpirvCode = shader_gbuffer_slang;
+    const size_t    gbufferSpirvSize = std::size(shader_gbuffer_slang) * sizeof(uint32_t);
 
     // GBuffer vertex input: Position(12) + Normal(12) + TexCoord(8) + Tangent(16) = 48 bytes
     const std::array<rhi::VertexBindingDesc, 1> gbufferBindings{{
@@ -4824,25 +4813,29 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
     std::array<rhi::PipelineShaderStageDesc, 2> gbufferShaderStages{{
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .stage     = rhi::ShaderStage::vertex,
+            .spirvCode = gbufferSpirvCode,
+            .spirvSize = gbufferSpirvSize,
             .entryPoint = "vertexMain",
         },
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .stage     = rhi::ShaderStage::fragment,
+            .spirvCode = gbufferSpirvCode,
+            .spirvSize = gbufferSpirvSize,
             .entryPoint = "fragmentMain",
         },
     }};
     std::array<rhi::PipelineShaderStageDesc, 2> gbufferMdiShaderStages{{
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .stage     = rhi::ShaderStage::vertex,
+            .spirvCode = gbufferSpirvCode,
+            .spirvSize = gbufferSpirvSize,
             .entryPoint = "vertexMdiMain",
         },
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(gbufferShaderModule),
+            .stage     = rhi::ShaderStage::fragment,
+            .spirvCode = gbufferSpirvCode,
+            .spirvSize = gbufferSpirvSize,
             .entryPoint = "fragmentMdiMain",
         },
     }};
@@ -4906,14 +4899,12 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     m_gbufferAlphaTestMDIPipeline = m_device.device->createGraphicsPipeline(gbufferMdiGraphicsDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), gbufferShaderModule, nullptr);
   }
 
   // Create Shadow pipeline
   {
-    VkShaderModule shadowShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                                  {shader_shadow_slang, std::size(shader_shadow_slang)});
-    DBG_VK_NAME(shadowShaderModule);
+    const uint32_t* shadowSpirvCode = shader_shadow_slang;
+    const size_t    shadowSpirvSize = std::size(shader_shadow_slang) * sizeof(uint32_t);
 
     const std::array<rhi::VertexBindingDesc, 1> shadowBindings{{
         {.binding = 0, .stride = 48, .inputRate = rhi::VertexInputRate::perVertex}
@@ -4935,8 +4926,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         rhi::DynamicState::scissor,
     }};
     const std::array<rhi::PipelineShaderStageDesc, 2> shadowStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "vertexMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize, .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize, .entryPoint = "fragmentMain"},
     }};
     rhi::GraphicsPipelineDesc shadowDesc{
         .shaderStages      = shadowStages.data(),
@@ -4966,8 +4957,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     m_shadowPipeline = m_device.device->createGraphicsPipeline(shadowDesc);
 
     std::array<rhi::PipelineShaderStageDesc, 2> shadowMdiStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "vertexMdiMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(shadowShaderModule), .entryPoint = "fragmentMdiMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize, .entryPoint = "vertexMdiMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize, .entryPoint = "fragmentMdiMain"},
     }};
     rhi::GraphicsPipelineDesc shadowMdiDesc = shadowDesc;
     shadowMdiDesc.shaderStages = shadowMdiStages.data();
@@ -4977,14 +4968,12 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     shadowMdiDesc.specializationVariant = 7;
     m_csmShadowPipeline = m_device.device->createGraphicsPipeline(shadowMdiDesc);
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), shadowShaderModule, nullptr);
   }
 
   // Create Forward pipeline for transparent objects
   {
-    VkShaderModule forwardShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                                {shader_forward_slang, std::size(shader_forward_slang)});
-    DBG_VK_NAME(forwardShaderModule);
+    const uint32_t* forwardSpirvCode = shader_forward_slang;
+    const size_t    forwardSpirvSize = std::size(shader_forward_slang) * sizeof(uint32_t);
 
     // Same vertex input as GBuffer
     const std::array<rhi::VertexBindingDesc, 1> forwardBindings{{
@@ -5024,25 +5013,29 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 
     std::array<rhi::PipelineShaderStageDesc, 2> forwardShaderStages{{
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .stage     = rhi::ShaderStage::vertex,
+            .spirvCode = forwardSpirvCode,
+            .spirvSize = forwardSpirvSize,
             .entryPoint = "vertexMain",
         },
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .stage     = rhi::ShaderStage::fragment,
+            .spirvCode = forwardSpirvCode,
+            .spirvSize = forwardSpirvSize,
             .entryPoint = "fragmentMain",
         },
     }};
     std::array<rhi::PipelineShaderStageDesc, 2> forwardMdiShaderStages{{
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::vertex,
-            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .stage     = rhi::ShaderStage::vertex,
+            .spirvCode = forwardSpirvCode,
+            .spirvSize = forwardSpirvSize,
             .entryPoint = "vertexMdiMain",
         },
         rhi::PipelineShaderStageDesc{
-            .stage = rhi::ShaderStage::fragment,
-            .shaderModule = reinterpret_cast<uint64_t>(forwardShaderModule),
+            .stage     = rhi::ShaderStage::fragment,
+            .spirvCode = forwardSpirvCode,
+            .spirvSize = forwardSpirvSize,
             .entryPoint = "fragmentMdiMain",
         },
     }};
@@ -5091,14 +5084,12 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     m_forwardMDIPipeline = m_device.device->createGraphicsPipeline(forwardMdiGraphicsDesc);
     }
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), forwardShaderModule, nullptr);
   }
 
   // Create Debug line pipeline
   {
-    VkShaderModule debugShaderModule = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                                 {shader_debug_slang, std::size(shader_debug_slang)});
-    DBG_VK_NAME(debugShaderModule);
+    const uint32_t* debugSpirvCode = shader_debug_slang;
+    const size_t    debugSpirvSize = std::size(shader_debug_slang) * sizeof(uint32_t);
 
     const std::array<rhi::VertexBindingDesc, 1> debugBindings{{
         {.binding = 0, .stride = sizeof(shaderio::DebugLineVertex), .inputRate = rhi::VertexInputRate::perVertex}
@@ -5130,8 +5121,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
         .colorWriteMask      = rhi::ColorComponentFlags::all,
     };
     const std::array<rhi::PipelineShaderStageDesc, 2> debugStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize, .entryPoint = "vertexMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize, .entryPoint = "fragmentMain"},
     }};
     const std::array<rhi::PipelinePushConstantRange, 1> debugPushConstants{{
         rhi::PipelinePushConstantRange{
@@ -5171,8 +5162,8 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     m_debugPipeline = m_device.device->createGraphicsPipeline(debugDesc);
 
     const std::array<rhi::PipelineShaderStageDesc, 2> debugCullStages{{
-        {.stage = rhi::ShaderStage::vertex, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "vertexCullMain"},
-        {.stage = rhi::ShaderStage::fragment, .shaderModule = reinterpret_cast<uint64_t>(debugShaderModule), .entryPoint = "fragmentMain"},
+        {.stage = rhi::ShaderStage::vertex, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize, .entryPoint = "vertexCullMain"},
+        {.stage = rhi::ShaderStage::fragment, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize, .entryPoint = "fragmentMain"},
     }};
     rhi::GraphicsPipelineDesc debugCullDesc{
         .shaderStages      = debugCullStages.data(),
@@ -5203,7 +5194,6 @@ void RenderDevice::createPrebuiltGraphicsPipelineVariants()
     debugCullDesc.specializationVariant = 8;
     m_gpuCullingDebugPipeline = m_device.device->createGraphicsPipeline(debugCullDesc);
 
-    vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), debugShaderModule, nullptr);
   }
 }
 
@@ -5863,13 +5853,12 @@ utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, c
 void RenderDevice::createPrebuiltComputePipelineVariant()
 {
 #ifdef USE_SLANG
-  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                     {shader_comp_slang, std::size(shader_comp_slang)});
+  const uint32_t* computeSpirvCode = shader_comp_slang;
+  const size_t    computeSpirvSize = std::size(shader_comp_slang) * sizeof(uint32_t);
 #else
-  VkShaderModule compute = utils::createShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()),
-                                                     {shader_comp_glsl, std::size(shader_comp_glsl)});
+  const uint32_t* computeSpirvCode = shader_comp_glsl;
+  const size_t    computeSpirvSize = std::size(shader_comp_glsl) * sizeof(uint32_t);
 #endif
-  DBG_VK_NAME(compute);
 
   const std::array<rhi::PipelinePushConstantRange, 1> computePushConstants{{
       rhi::PipelinePushConstantRange{
@@ -5881,16 +5870,15 @@ void RenderDevice::createPrebuiltComputePipelineVariant()
   const rhi::ComputePipelineDesc computeDesc{
       .shaderStage =
           {
-              .stage        = rhi::ShaderStage::compute,
-              .shaderModule = reinterpret_cast<uint64_t>(compute),
-              .entryPoint   = "main",
+              .stage      = rhi::ShaderStage::compute,
+              .spirvCode  = computeSpirvCode,
+              .spirvSize  = computeSpirvSize,
+              .entryPoint = "main",
           },
       .pushConstantRanges  = computePushConstants.data(),
       .pushConstantRangeCount = static_cast<uint32_t>(computePushConstants.size()),
   };
   m_device.prebuiltPipelines.compute = m_device.device->createComputePipeline(computeDesc);
-
-  vkDestroyShaderModule(fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle()), compute, nullptr);
 }
 
 
@@ -5903,10 +5891,6 @@ void RenderDevice::createGPUCullingPipeline()
   }
 
 #ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-  VkShaderModule shaderModule =
-      utils::createShaderModule(nativeDevice, {shader_gpu_culling_slang, std::size(shader_gpu_culling_slang)});
-  DBG_VK_NAME(shaderModule);
   const rhi::vulkan::ArgumentTableRecord* tableRecord =
       m_device.resourceTable.tryGetArgumentTable(m_device.gpuCullingArgumentTables.front());
   ASSERT(tableRecord != nullptr, "GPU culling pipeline requires an argument layout");
@@ -5915,17 +5899,16 @@ void RenderDevice::createGPUCullingPipeline()
   const rhi::ComputePipelineDesc computeDesc{
       .shaderStage =
           {
-              .stage        = rhi::ShaderStage::compute,
-              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
-              .entryPoint   = "gpuCullingMain",
+              .stage      = rhi::ShaderStage::compute,
+              .spirvCode  = shader_gpu_culling_slang,
+              .spirvSize  = std::size(shader_gpu_culling_slang) * sizeof(uint32_t),
+              .entryPoint = "gpuCullingMain",
       },
       .argumentLayouts     = argumentLayouts.data(),
       .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
       .specializationVariant = 13,
   };
   m_gpuCullingPipeline = m_device.device->createComputePipeline(computeDesc);
-
-  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 }
 
@@ -5937,10 +5920,6 @@ void RenderDevice::createShadowCullingPipeline()
   }
 
 #ifdef USE_SLANG
-  const VkDevice nativeDevice = fromNativeHandle<VkDevice>(m_device.device->getBackendDeviceHandle());
-  VkShaderModule shaderModule =
-      utils::createShaderModule(nativeDevice, {shader_shadow_culling_slang, std::size(shader_shadow_culling_slang)});
-  DBG_VK_NAME(shaderModule);
   const rhi::vulkan::ArgumentTableRecord* tableRecord =
       m_device.resourceTable.tryGetArgumentTable(m_device.shadowCullingArgumentTables.front());
   ASSERT(tableRecord != nullptr, "Shadow culling pipeline requires an argument layout");
@@ -5954,9 +5933,10 @@ void RenderDevice::createShadowCullingPipeline()
   const rhi::ComputePipelineDesc computeDesc{
       .shaderStage =
           {
-              .stage        = rhi::ShaderStage::compute,
-              .shaderModule = reinterpret_cast<uint64_t>(shaderModule),
-              .entryPoint   = "shadowCullingMain",
+              .stage      = rhi::ShaderStage::compute,
+              .spirvCode  = shader_shadow_culling_slang,
+              .spirvSize  = std::size(shader_shadow_culling_slang) * sizeof(uint32_t),
+              .entryPoint = "shadowCullingMain",
           },
       .argumentLayouts     = argumentLayouts.data(),
       .argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
@@ -5965,8 +5945,6 @@ void RenderDevice::createShadowCullingPipeline()
       .specializationVariant = 14,
   };
   m_shadowCullingPipeline = m_device.device->createComputePipeline(computeDesc);
-
-  vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 }
 
