@@ -2780,7 +2780,7 @@ namespace demo
 		const VkImageCreateInfo imageInfo{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 			.imageType = VK_IMAGE_TYPE_2D,
-			.format = texture.format,
+			.format = toNativeFormat(texture.format),
 			.extent = {texture.width, texture.height, 1},
 			.mipLevels = std::max(1u, texture.mipLevels),
 			.arrayLayers = 1,
@@ -2865,7 +2865,7 @@ namespace demo
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 			.image = image.image,
 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = texture.format,
+			.format = toNativeFormat(texture.format),
 			.subresourceRange = {
 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0,
 				.levelCount = std::max(1u, texture.mipLevels), .baseArrayLayer = 0, .layerCount = 1
@@ -2878,7 +2878,7 @@ namespace demo
 		m_iblEnvironment.allocation = image.allocation;
 		m_iblEnvironment.view = view;
 		m_iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
-		m_iblEnvironmentFormat = toPortableTextureFormat(texture.format);
+		m_iblEnvironmentFormat = texture.format;
 		m_iblEnvironmentExtent = {texture.width, texture.height};
 		m_iblEnvironmentMipCount = std::max(1u, texture.mipLevels);
 		m_iblEnvironmentEstimatedBytes = static_cast<uint64_t>(texture.data.size());
