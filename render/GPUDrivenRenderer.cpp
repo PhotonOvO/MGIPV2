@@ -3205,8 +3205,7 @@ namespace demo
 	void GPUDrivenRenderer::initPhase7Pipelines()
 	{
 		shutdownPhase7Pipelines();
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
+		if (getBackendDeviceToken() == 0 || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
 		{
 			return;
 		}
@@ -3218,10 +3217,6 @@ namespace demo
 		                                       uint32_t pushSize,
 		                                       uint32_t variant)
 		{
-			VkShaderModule shaderModule = utils::createShaderModule(nativeDevice, {
-				                                                        static_cast<const uint32_t*>(shaderData),
-				                                                        shaderSize
-			                                                        });
 			const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{layout}};
 			const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{
 				{
@@ -3232,7 +3227,8 @@ namespace demo
 				.shaderStage =
 				rhi::PipelineShaderStageDesc{
 					.stage = rhi::ShaderStage::compute,
-					.shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+					.spirvCode = static_cast<const uint32_t*>(shaderData),
+					.spirvSize = shaderSize * sizeof(uint32_t),
 					.entryPoint = entryPoint,
 				},
 				.argumentLayouts = argumentLayouts.data(),
@@ -3241,9 +3237,7 @@ namespace demo
 				.pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
 				.specializationVariant = variant,
 			};
-			const PipelineHandle handle = getRHIDevice().createComputePipeline(desc);
-			vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
-			return handle;
+			return getRHIDevice().createComputePipeline(desc);
 		};
 
 		m_gtaoPipelineHandle = createComputePipeline(gtao_slang, std::size(gtao_slang), "kernelGTAO",
@@ -3652,18 +3646,13 @@ namespace demo
 
 	void GPUDrivenRenderer::initLightingPipelines()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE || m_lightPipelineArgumentLayouts[0].isNull()
+		if (getBackendDeviceToken() == 0 || m_lightPipelineArgumentLayouts[0].isNull()
 			|| m_lightPipelineArgumentLayouts[1].isNull())
 		{
 			return;
 		}
 
 #ifdef USE_SLANG
-		VkShaderModule lightShaderModule =
-			utils::createShaderModule(nativeDevice, {
-				                          shader_light_gpu_driven_slang, std::size(shader_light_gpu_driven_slang)
-			                          });
 		const auto createFullscreenPipeline = [&](const char* fragmentEntry,
 		                                          rhi::TextureFormat colorFormat,
 		                                          bool depthTest,
@@ -3673,12 +3662,14 @@ namespace demo
 				{
 					rhi::PipelineShaderStageDesc{
 						.stage = rhi::ShaderStage::vertex,
-						.shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+						.spirvCode = shader_light_gpu_driven_slang,
+						.spirvSize = std::size(shader_light_gpu_driven_slang) * sizeof(uint32_t),
 						.entryPoint = "vertexMain"
 					},
 					rhi::PipelineShaderStageDesc{
 						.stage = rhi::ShaderStage::fragment,
-						.shaderModule = reinterpret_cast<uint64_t>(lightShaderModule),
+						.spirvCode = shader_light_gpu_driven_slang,
+						.spirvSize = std::size(shader_light_gpu_driven_slang) * sizeof(uint32_t),
 						.entryPoint = fragmentEntry
 					},
 				}
@@ -3744,17 +3735,14 @@ namespace demo
 		if (!m_lightCoarseCullingArgumentLayout.isNull())
 		{
 			const std::array<rhi::ArgumentLayoutHandle, 1> cullingArgumentLayouts{{m_lightCoarseCullingArgumentLayout}};
-			VkShaderModule cullingShaderModule =
-				utils::createShaderModule(nativeDevice, {
-					                          shader_light_culling_slang, std::size(shader_light_culling_slang)
-				                          });
 			const auto createComputePipeline = [&](const char* entryPoint, uint32_t variant)
 			{
 				const rhi::ComputePipelineDesc desc{
 					.shaderStage =
 					rhi::PipelineShaderStageDesc{
 						.stage = rhi::ShaderStage::compute,
-						.shaderModule = reinterpret_cast<uint64_t>(cullingShaderModule),
+						.spirvCode = shader_light_culling_slang,
+						.spirvSize = std::size(shader_light_culling_slang) * sizeof(uint32_t),
 						.entryPoint = entryPoint,
 					},
 					.argumentLayouts = cullingArgumentLayouts.data(),
@@ -3767,17 +3755,13 @@ namespace demo
 				createComputePipeline("kernelPointLightCoarseCulling", 0x6201u);
 			m_spotLightCoarseCullingPipeline =
 				createComputePipeline("kernelSpotLightCoarseCulling", 0x6202u);
-			vkDestroyShaderModule(nativeDevice, cullingShaderModule, nullptr);
 
-			VkShaderModule clusteredShaderModule =
-				utils::createShaderModule(nativeDevice, {
-					                          clustered_light_cull_slang, std::size(clustered_light_cull_slang)
-				                          });
 			const rhi::ComputePipelineDesc clusteredDesc{
 				.shaderStage =
 				rhi::PipelineShaderStageDesc{
 					.stage = rhi::ShaderStage::compute,
-					.shaderModule = reinterpret_cast<uint64_t>(clusteredShaderModule),
+					.spirvCode = clustered_light_cull_slang,
+					.spirvSize = std::size(clustered_light_cull_slang) * sizeof(uint32_t),
 					.entryPoint = "kernelClusteredLightCulling",
 				},
 				.argumentLayouts = cullingArgumentLayouts.data(),
@@ -3785,9 +3769,7 @@ namespace demo
 				.specializationVariant = 0x6203u,
 			};
 			m_clusteredLightCullingPipeline = getRHIDevice().createComputePipeline(clusteredDesc);
-			vkDestroyShaderModule(nativeDevice, clusteredShaderModule, nullptr);
 		}
-		vkDestroyShaderModule(nativeDevice, lightShaderModule, nullptr);
 #endif
 	}
 
@@ -4009,8 +3991,7 @@ namespace demo
 	{
 		shutdownVisibilitySortResources();
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE)
+		if (getBackendDeviceToken() == 0)
 		{
 			return;
 		}
@@ -4028,8 +4009,6 @@ namespace demo
 			ArgumentLayoutDesc{.entries = sortEntries.data(), .entryCount = static_cast<uint32_t>(sortEntries.size())});
 
 #ifdef USE_SLANG
-		VkShaderModule shaderModule =
-			utils::createShaderModule(nativeDevice, {shader_bitonic_sort_slang, std::size(shader_bitonic_sort_slang)});
 		const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_visibilitySortArgumentLayout}};
 		const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{
 			{
@@ -4044,7 +4023,8 @@ namespace demo
 			.shaderStage =
 			rhi::PipelineShaderStageDesc{
 				.stage = rhi::ShaderStage::compute,
-				.shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+				.spirvCode = shader_bitonic_sort_slang,
+				.spirvSize = std::size(shader_bitonic_sort_slang) * sizeof(uint32_t),
 				.entryPoint = "bitonicSortMain",
 			},
 			.argumentLayouts = argumentLayouts.data(),
@@ -4054,7 +4034,6 @@ namespace demo
 			.specializationVariant = 0x6401u,
 		};
 		m_visibilitySortPipelineHandle = getRHIDevice().createComputePipeline(desc);
-		vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 
 		m_visibilitySortFrames.resize(frameCount);
@@ -4103,8 +4082,7 @@ namespace demo
 	{
 		shutdownTransparentVisibilityPatchResources();
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE)
+		if (getBackendDeviceToken() == 0)
 		{
 			return;
 		}
@@ -4126,12 +4104,6 @@ namespace demo
 			});
 
 #ifdef USE_SLANG
-		VkShaderModule shaderModule =
-			utils::createShaderModule(nativeDevice,
-			                          {
-				                          shader_transparent_visibility_patch_slang,
-				                          std::size(shader_transparent_visibility_patch_slang)
-			                          });
 		const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_transparentVisibilityPatchArgumentLayout}};
 		const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{
 			{
@@ -4146,7 +4118,8 @@ namespace demo
 			.shaderStage =
 			rhi::PipelineShaderStageDesc{
 				.stage = rhi::ShaderStage::compute,
-				.shaderModule = reinterpret_cast<uint64_t>(shaderModule),
+				.spirvCode = shader_transparent_visibility_patch_slang,
+				.spirvSize = std::size(shader_transparent_visibility_patch_slang) * sizeof(uint32_t),
 				.entryPoint = "transparentVisibilityPatchMain",
 			},
 			.argumentLayouts = argumentLayouts.data(),
@@ -4156,7 +4129,6 @@ namespace demo
 			.specializationVariant = 0x7001u,
 		};
 		m_transparentVisibilityPatchPipelineHandle = getRHIDevice().createComputePipeline(desc);
-		vkDestroyShaderModule(nativeDevice, shaderModule, nullptr);
 #endif
 
 		m_transparentVisibilityPatchFrames.resize(frameCount);
