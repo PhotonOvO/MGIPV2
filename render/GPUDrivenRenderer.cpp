@@ -455,7 +455,8 @@ namespace demo
 			                     getAllocatorToken(),
 			                     &m_renderer.getRHIDevice());
 		}
-		m_hiZDepthPyramid.init(getRHIDevice(), getSwapchainImageCount(), getSceneExtent());
+		m_hiZDepthPyramid.init(getRHIDevice(), reinterpret_cast<VmaAllocator>(getAllocatorToken()),
+		                       getSwapchainImageCount(), toVkExtent(getSceneExtent()));
 
 		m_depthPrepass = std::make_unique<GPUDrivenDepthPrepass>(this);
 		m_depthPyramidPass = std::make_unique<GPUDrivenDepthPyramidPass>(this);
@@ -510,7 +511,7 @@ namespace demo
 		bindStaticPassResources();
 		m_passExecutor.bindTexture({
 			.handle = kPassDepthPyramidHandle,
-			.backendImageToken = resolveNativeTexture(getRHIDevice(), m_hiZDepthPyramid.getImageHandle()),
+			.backendImageToken = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = rhi::ResourceState::Undefined,
 			.isSwapchain = false,
@@ -574,13 +575,13 @@ namespace demo
 	void GPUDrivenRenderer::resize(rhi::Extent2D size)
 	{
 		m_renderer.resize(size);
-		m_hiZDepthPyramid.resize(getSceneExtent());
+		m_hiZDepthPyramid.resize(toVkExtent(getSceneExtent()));
 		resizePhase7Resources();
 		m_passExecutor.clearResourceBindings();
 		bindStaticPassResources();
 		m_passExecutor.bindTexture({
 			.handle = kPassDepthPyramidHandle,
-			.backendImageToken = resolveNativeTexture(getRHIDevice(), m_hiZDepthPyramid.getImageHandle()),
+			.backendImageToken = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = rhi::ResourceState::Undefined,
 			.isSwapchain = false,
@@ -592,7 +593,7 @@ namespace demo
 	{
 		const bool sceneRenderingSuspended = m_suspendSceneRendering;
 		{
-			m_hiZDepthPyramid.resize(getSceneExtent());
+			m_hiZDepthPyramid.resize(toVkExtent(getSceneExtent()));
 		}
 		{
 			flushPendingSceneUploads();
@@ -855,7 +856,8 @@ namespace demo
 		}
 		const rhi::ArgumentTableHandle gpuCullingArgumentTable = getGPUCullingArgumentTable(frameIndex);
 		{
-			m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImageHandle();
+			m_sceneView.depthPyramidImage =
+				getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()));
 			m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
 			m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
 			m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
@@ -873,8 +875,8 @@ namespace demo
 				&& m_hiZDepthPyramid.getLastBoundArgumentTable().generation == gpuCullingArgumentTable.generation
 				&& m_hiZDepthPyramid.getLastBoundBinding() == 5;
 			const HiZDepthPyramid::MobilePolicy& hiZPolicy = m_hiZDepthPyramid.getMobilePolicy();
-			const rhi::Extent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
-			const rhi::Extent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
+			const VkExtent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
+			const VkExtent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
 			m_runtimeStats.hiZDiagnostics = GPUDrivenHiZDiagnostics{
 				.sourceWidth = hiZSourceExtent.width,
 				.sourceHeight = hiZSourceExtent.height,
@@ -1088,9 +1090,10 @@ namespace demo
 		const uint32_t frameIndex = getCurrentFrameIndexHint();
 		const rhi::TextureViewHandle sourceDepthView = m_sceneView.sceneDepthView;
 		const rhi::TextureHandle sourceDepthRHI = m_passExecutor.getTextureRHIHandle(kPassSceneDepthHandle);
+		const VkExtent2D sourceDepthExtent = toVkExtent(m_sceneView.sceneDepthExtent);
 		m_hiZDepthPyramid.generate(frameIndex,
 		                           cmdBuffer,
-		                           m_sceneView.sceneDepthExtent,
+		                           sourceDepthExtent,
 		                           sourceDepthView,
 		                           kPassSceneDepthHandle,
 		                           sourceDepthRHI);
@@ -1104,7 +1107,7 @@ namespace demo
 		}
 		m_passExecutor.bindTexture({
 			.handle = kPassDepthPyramidHandle,
-			.backendImageToken = resolveNativeTexture(getRHIDevice(), m_hiZDepthPyramid.getImageHandle()),
+			.backendImageToken = reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = rhi::ResourceState::Undefined,
 			.isSwapchain = false,
@@ -1307,7 +1310,7 @@ namespace demo
 		if (firstSceneBuild)
 		{
 			clearGPUDrivenScene();
-			m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
+			m_hiZDepthPyramid.resize(toVkExtent(m_renderer.getSceneExtent()));
 		}
 		m_activeUploadResult = &uploadResult;
 
@@ -1489,7 +1492,7 @@ namespace demo
 		if (firstSceneBuild)
 		{
 			clearGPUDrivenScene();
-			m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
+			m_hiZDepthPyramid.resize(toVkExtent(m_renderer.getSceneExtent()));
 		}
 		m_activeUploadResult = &uploadResult;
 
@@ -2232,7 +2235,8 @@ namespace demo
 		m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(1);
 		m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(0);
 		m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(0);
-		m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImageHandle();
+		m_sceneView.depthPyramidImage =
+			getRHIDevice().registerExternalTexture(reinterpret_cast<uint64_t>(m_hiZDepthPyramid.getImage()));
 		m_sceneView.depthPyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
 		m_sceneView.depthPyramidMipCount = m_hiZDepthPyramid.getMipCount();
 		m_sceneView.depthPyramidSourceDepth = m_hiZDepthPyramid.getSourceDepth();
@@ -2290,8 +2294,8 @@ namespace demo
 		m_runtimeStats.ownsHiZVisibilityChain = false;
 		m_runtimeStats.hiZGeneration = 0;
 		const HiZDepthPyramid::MobilePolicy& hiZPolicy = m_hiZDepthPyramid.getMobilePolicy();
-		const rhi::Extent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
-		const rhi::Extent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
+		const VkExtent2D hiZSourceExtent = m_hiZDepthPyramid.getSourceExtent();
+		const VkExtent2D hiZPyramidExtent = m_hiZDepthPyramid.getExtent();
 		m_runtimeStats.hiZDiagnostics = GPUDrivenHiZDiagnostics{
 			.sourceWidth = hiZSourceExtent.width,
 			.sourceHeight = hiZSourceExtent.height,
