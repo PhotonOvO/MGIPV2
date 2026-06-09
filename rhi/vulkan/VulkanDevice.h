@@ -31,10 +31,6 @@ public:
   void initVulkan(const VulkanDeviceCreateInfo& createInfo);
   void deinit() override;
 
-  uint64_t getBackendInstanceHandle() const override;
-  uint64_t getBackendPhysicalDeviceHandle() const override;
-  uint64_t getBackendDeviceHandle() const override;
-
   uint32_t                  getApiVersion() const override;
   const char*               getDeviceName() const override;
   const PhysicalDeviceInfo& getPhysicalDeviceInfo() const override;
@@ -42,7 +38,6 @@ public:
   CapabilityReport          queryCapabilities() const override;
   bool                      supports(CapabilityTier tier) const override;
   const MemoryProperties&   getPhysicalMemoryProperties() const override;
-  void*                     getFeaturesChainHead() const override;
 
   QueueInfo getGraphicsQueue() const override;
   QueueInfo getComputeQueue() const override;
@@ -60,13 +55,11 @@ public:
   TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) override;
   TextureViewHandle registerExternalTextureView(uint64_t externalView) override;
   void              destroyTextureView(TextureViewHandle handle) override;
-  uint64_t          resolveTextureViewBackendHandle(TextureViewHandle handle) const override;
 
   TextureHandle createTexture(const TextureDesc& desc) override;
   void          destroyTexture(TextureHandle handle) override;
   TextureHandle registerExternalTexture(uint64_t externalImage) override;
   void          destroyImage(TextureHandle handle) override;
-  uint64_t      resolveTextureBackendHandle(TextureHandle handle) const override;
 
   // --- Modern GPU interface (Wave 1: buffers / samplers / query pools) ---
   BufferHandle createBuffer(const BufferDesc& desc) override;
@@ -79,7 +72,6 @@ public:
 
   SamplerHandle createSampler(const SamplerDesc& desc) override;
   void          destroySampler(SamplerHandle handle) override;
-  uint64_t      resolveSamplerBackendHandle(SamplerHandle handle) const override;
 
   QueryPoolHandle createQueryPool(uint32_t queryCount) override;
   void            destroyQueryPool(QueryPoolHandle handle) override;

@@ -41,28 +41,6 @@ void D3D12Device::deinit()
   // 5. Release adapter and factory
 }
 
-uint64_t D3D12Device::getBackendInstanceHandle() const
-{
-  // TODO: D3D12 implementation
-  // NOTES: D3D12 doesn't have a separate instance like Vulkan
-  // Return 0 or DXGI factory handle if needed for interop
-  return 0;
-}
-
-uint64_t D3D12Device::getBackendPhysicalDeviceHandle() const
-{
-  // TODO: D3D12 implementation
-  // NOTES: Return DXGI adapter handle
-  return reinterpret_cast<uint64_t>(m_dxgiAdapter);
-}
-
-uint64_t D3D12Device::getBackendDeviceHandle() const
-{
-  // TODO: D3D12 implementation
-  // NOTES: Return ID3D12Device handle
-  return reinterpret_cast<uint64_t>(m_d3d12Device);
-}
-
 uint32_t D3D12Device::getApiVersion() const
 {
   // TODO: D3D12 implementation
@@ -130,14 +108,6 @@ const MemoryProperties& D3D12Device::getPhysicalMemoryProperties() const
   return m_memoryProperties;
 }
 
-void* D3D12Device::getFeaturesChainHead() const
-{
-  // TODO: D3D12 implementation
-  // NOTES: D3D12 uses D3D12_FEATURE_DATA_* structures, not a chain
-  // Return nullptr or construct feature chain if needed
-  return nullptr;
-}
-
 QueueInfo D3D12Device::getGraphicsQueue() const
 {
   // TODO: D3D12 implementation
@@ -157,22 +127,6 @@ QueueInfo D3D12Device::getTransferQueue() const
   // TODO: D3D12 implementation
   // NOTES: Return queue info from m_transferQueue
   return m_transferQueue.toRhi();
-}
-
-bool D3D12Device::isInstanceExtensionSupported(const char* name) const
-{
-  // TODO: D3D12 implementation
-  // NOTES: D3D12 doesn't have instance extensions like Vulkan
-  // Return true for known capabilities or query DXGI
-  return false;
-}
-
-bool D3D12Device::isDeviceExtensionSupported(const char* name) const
-{
-  // TODO: D3D12 implementation
-  // NOTES: D3D12 doesn't have device extensions like Vulkan
-  // Features are determined by feature level and D3D12_FEATURE_DATA_*
-  return false;
 }
 
 void D3D12Device::waitIdle()

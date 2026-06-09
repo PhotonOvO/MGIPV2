@@ -187,21 +187,6 @@ namespace demo::rhi::vulkan
 		m_uploadPendingFrames.clear();
 	}
 
-	uint64_t VulkanDevice::getBackendInstanceHandle() const
-	{
-		return asNativeU64(m_instance);
-	}
-
-	uint64_t VulkanDevice::getBackendPhysicalDeviceHandle() const
-	{
-		return asNativeU64(m_physicalDevice);
-	}
-
-	uint64_t VulkanDevice::getBackendDeviceHandle() const
-	{
-		return asNativeU64(m_device);
-	}
-
 	uint32_t VulkanDevice::getApiVersion() const
 	{
 		return m_apiVersion;
@@ -235,11 +220,6 @@ namespace demo::rhi::vulkan
 	const MemoryProperties& VulkanDevice::getPhysicalMemoryProperties() const
 	{
 		return m_memoryProperties;
-	}
-
-	void* VulkanDevice::getFeaturesChainHead() const
-	{
-		return m_featuresChainHead;
 	}
 
 	QueueInfo VulkanDevice::getGraphicsQueue() const
@@ -1022,10 +1002,10 @@ namespace demo::rhi::vulkan
 	TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
 	{
 		assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTextureView");
-		const uint64_t nativeImage = resolveTextureBackendHandle(desc.image);
+		const VkImage nativeImage = resolveTexture(desc.image);
 		const VkImageViewCreateInfo info{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image = reinterpret_cast<VkImage>(static_cast<uintptr_t>(nativeImage)),
+			.image = nativeImage,
 			.viewType = toVkImageViewType(desc.viewType),
 			.format = toVkViewFormat(desc.format),
 			.components = {
@@ -1068,11 +1048,6 @@ namespace demo::rhi::vulkan
 				.owned = true,
 			});
 		}
-	}
-
-	uint64_t VulkanDevice::resolveTextureViewBackendHandle(TextureViewHandle handle) const
-	{
-		return m_resourceTable != nullptr ? m_resourceTable->resolveTextureView(handle) : 0;
 	}
 
 	namespace
@@ -1189,11 +1164,6 @@ namespace demo::rhi::vulkan
 				.owned = true,
 			});
 		}
-	}
-
-	uint64_t VulkanDevice::resolveTextureBackendHandle(TextureHandle handle) const
-	{
-		return m_resourceTable != nullptr ? m_resourceTable->resolveTexture(handle) : 0;
 	}
 
 	namespace
@@ -1396,11 +1366,6 @@ namespace demo::rhi::vulkan
 				.owned = true,
 			});
 		}
-	}
-
-	uint64_t VulkanDevice::resolveSamplerBackendHandle(SamplerHandle handle) const
-	{
-		return m_resourceTable != nullptr ? m_resourceTable->resolveSampler(handle) : 0;
 	}
 
 	// -------------------------------------------------------------------------

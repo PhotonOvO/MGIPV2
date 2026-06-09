@@ -43,30 +43,6 @@ void MetalDevice::deinit()
   // 3. Clear capability state
 }
 
-uint64_t MetalDevice::getBackendInstanceHandle() const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have an instance concept like Vulkan
-  // Return 0 or opaque handle if needed for interop
-  return 0;
-}
-
-uint64_t MetalDevice::getBackendPhysicalDeviceHandle() const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't separate physical/logical devices
-  // Return same as getBackendDeviceHandle() or 0
-  return 0;
-}
-
-uint64_t MetalDevice::getBackendDeviceHandle() const
-{
-  // TODO: Metal implementation
-  // NOTES: Cast id<MTLDevice> to uint64_t
-  // Use __bridge_retained or similar for ARC interop
-  return 0;
-}
-
 uint32_t MetalDevice::getApiVersion() const
 {
   // TODO: Metal implementation
@@ -132,14 +108,6 @@ const MemoryProperties& MetalDevice::getPhysicalMemoryProperties() const
   return m_memoryProperties;
 }
 
-void* MetalDevice::getFeaturesChainHead() const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have feature chains like Vulkan
-  // Return nullptr
-  return nullptr;
-}
-
 QueueInfo MetalDevice::getGraphicsQueue() const
 {
   // TODO: Metal implementation
@@ -162,24 +130,6 @@ QueueInfo MetalDevice::getTransferQueue() const
   // NOTES: Metal doesn't have separate transfer queues
   // Return same as graphics (use blit encoder for transfers)
   return m_transferQueue.toRhi();
-}
-
-bool MetalDevice::isInstanceExtensionSupported(const char* name) const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have instance extensions like Vulkan
-  // Return false or check Metal framework availability
-  (void)name;
-  return false;
-}
-
-bool MetalDevice::isDeviceExtensionSupported(const char* name) const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have device extensions like Vulkan
-  // Return false or check Metal feature sets
-  (void)name;
-  return false;
 }
 
 void MetalDevice::waitIdle()

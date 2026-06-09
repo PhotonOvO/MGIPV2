@@ -15,10 +15,6 @@ public:
   void init(const DeviceCreateInfo& createInfo) override;
   void deinit() override;
 
-  uint64_t getBackendInstanceHandle() const override;
-  uint64_t getBackendPhysicalDeviceHandle() const override;
-  uint64_t getBackendDeviceHandle() const override;
-
   uint32_t                  getApiVersion() const override;
   const char*               getDeviceName() const override;
   const PhysicalDeviceInfo& getPhysicalDeviceInfo() const override;
@@ -26,14 +22,10 @@ public:
   CapabilityReport          queryCapabilities() const override;
   bool                      supports(CapabilityTier tier) const override;
   const MemoryProperties&   getPhysicalMemoryProperties() const override;
-  void*                     getFeaturesChainHead() const override;
 
   QueueInfo getGraphicsQueue() const override;
   QueueInfo getComputeQueue() const override;
   QueueInfo getTransferQueue() const override;
-
-  bool isInstanceExtensionSupported(const char* name) const override;
-  bool isDeviceExtensionSupported(const char* name) const override;
 
   void waitIdle() override;
 
