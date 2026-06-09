@@ -8,7 +8,6 @@
 #include "MeshletConverter.h"
 #include "passes/GPUDrivenCSMShadowPass.h"
 #include "passes/GPUDrivenCullingPass.h"
-#include "passes/GPUDrivenDebugPass.h"
 #include "passes/GPUDrivenDepthPrepass.h"
 #include "passes/GPUDrivenDepthPyramidPass.h"
 #include "passes/GPUDrivenForwardPass.h"
@@ -1255,7 +1254,6 @@ namespace demo
 		std::unique_ptr<GPUDrivenBloomDownsamplePass> m_bloomDownsamplePass;
 		std::unique_ptr<GPUDrivenFinalColorPass> m_finalColorPass;
 		std::unique_ptr<GPUDrivenForwardPass> m_forwardPass;
-		std::unique_ptr<GPUDrivenDebugPass> m_debugPass;
 		std::unique_ptr<GPUDrivenPresentPass> m_presentPass;
 		std::unique_ptr<GPUDrivenImguiPass> m_imguiPass;
 		GPUDrivenSceneView m_sceneView{};

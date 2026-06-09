@@ -475,7 +475,6 @@ namespace demo
 		m_bloomPrefilterPass = std::make_unique<GPUDrivenBloomPrefilterPass>(this);
 		m_bloomDownsamplePass = std::make_unique<GPUDrivenBloomDownsamplePass>(this);
 		m_finalColorPass = std::make_unique<GPUDrivenFinalColorPass>(this);
-		m_debugPass = std::make_unique<GPUDrivenDebugPass>(this);
 		m_presentPass = std::make_unique<GPUDrivenPresentPass>(this);
 		m_imguiPass = std::make_unique<GPUDrivenImguiPass>(this);
 
@@ -502,7 +501,6 @@ namespace demo
 		m_passExecutor.addPass(*m_bloomPrefilterPass);
 		m_passExecutor.addPass(*m_bloomDownsamplePass);
 		m_passExecutor.addPass(*m_finalColorPass);
-		m_passExecutor.addPass(*m_debugPass);
 		m_passExecutor.addPass(*m_presentPass);
 		m_passExecutor.addPass(*m_imguiPass);
 		bindStaticPassResources();
@@ -539,7 +537,6 @@ namespace demo
 		m_passExecutor.clear();
 		m_imguiPass.reset();
 		m_presentPass.reset();
-		m_debugPass.reset();
 		m_taaResolvePass.reset();
 		m_velocityPass.reset();
 		m_forwardPass.reset();
