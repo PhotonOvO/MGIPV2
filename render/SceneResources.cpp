@@ -91,8 +91,9 @@ std::vector<uint8_t> generateBuiltInColorGradingLut()
 void SceneResources::init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo)
 {
   ASSERT(m_createInfo.color.empty(), "Missing deinit()");
-  m_rhiDevice  = &device;
-  m_createInfo = createInfo;
+  m_rhiDevice   = &device;
+  m_createInfo  = createInfo;
+  m_debugBridge = createInfo.debugBridge;
   create(cmd);
 }
 
@@ -167,13 +168,9 @@ float SceneResources::getAspectRatio() const
 void SceneResources::create(rhi::CommandBuffer& cmdBuffer)
 {
   utils::DebugUtil&   dutil    = utils::DebugUtil::getInstance();
-  const VkImageLayout layout   = VK_IMAGE_LAYOUT_GENERAL;
   const auto          numColor = static_cast<uint32_t>(m_createInfo.color.size());
   const auto nativeImage = [&](rhi::TextureHandle handle) {
     return reinterpret_cast<VkImage>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureBackendHandle(handle)));
-  };
-  const auto nativeSampler = [&](rhi::SamplerHandle handle) {
-    return reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_rhiDevice->resolveSamplerBackendHandle(handle)));
   };
 
   // Centralizes RHI view creation + native-handle debug naming. levelCount/baseMip/swizzle
@@ -193,9 +190,6 @@ void SceneResources::create(rhi::CommandBuffer& cmdBuffer)
     dutil.setObjectName(reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewBackendHandle(handle))),
                         name);
     return handle;
-  };
-  const auto nativeOf = [&](rhi::TextureViewHandle handle) {
-    return reinterpret_cast<VkImageView>(static_cast<uintptr_t>(m_rhiDevice->resolveTextureViewBackendHandle(handle)));
   };
   const auto makeTextureDesc = [](rhi::TextureFormat format,
                                   rhi::Extent2D extent,
@@ -521,23 +515,22 @@ void SceneResources::create(rhi::CommandBuffer& cmdBuffer)
     cmdBuffer.resourceBarrier(&pyramidBarrier, 1, nullptr, 0);
   }
 
-  if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
+  if(m_debugBridge != nullptr && m_debugBridge->isInitialized())
   {
-    const VkSampler sampler = nativeSampler(m_createInfo.linearSampler);
     for(size_t d = 0; d < m_resources.uiImageViews.size(); ++d)
     {
-      m_imguiTextureIds[d] = reinterpret_cast<ImTextureID>(
-          ImGui_ImplVulkan_AddTexture(sampler, nativeOf(m_resources.uiImageViews[d]), layout));
+      m_imguiTextureIds[d] = m_debugBridge->registerTexture(
+          *m_rhiDevice, m_createInfo.linearSampler, m_resources.uiImageViews[d],
+          DebugInteropBridge::ImageLayout::General);
     }
   }
 
   // Create ImGui descriptor for output texture
-  if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
+  if(m_debugBridge != nullptr && m_debugBridge->isInitialized())
   {
-    const VkSampler sampler = nativeSampler(m_createInfo.linearSampler);
-    m_resources.outputTextureImID = reinterpret_cast<ImTextureID>(
-        ImGui_ImplVulkan_AddTexture(sampler, nativeOf(m_resources.outputTextureView),
-                                    VK_IMAGE_LAYOUT_GENERAL));
+    m_resources.outputTextureImID = m_debugBridge->registerTexture(
+        *m_rhiDevice, m_createInfo.linearSampler, m_resources.outputTextureView,
+        DebugInteropBridge::ImageLayout::General);
   }
 }
 
@@ -548,10 +541,9 @@ void SceneResources::destroy()
     return;
   }
 
-  if(m_resources.outputTextureImID && ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().BackendPlatformUserData != nullptr)
+  if(m_resources.outputTextureImID && m_debugBridge != nullptr)
   {
-    using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
-    ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<ImGuiTextureHandle>(m_resources.outputTextureImID));
+    m_debugBridge->unregisterTexture(m_resources.outputTextureImID);
   }
   m_resources.outputTextureImID = {};
 
@@ -588,12 +580,11 @@ void SceneResources::destroy()
     destroyView(historyView);
   }
 
-  if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
+  if(m_debugBridge != nullptr)
   {
-    using ImGuiTextureHandle = decltype(ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL));
     for(ImTextureID textureId : m_imguiTextureIds)
     {
-      ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<ImGuiTextureHandle>(textureId));
+      m_debugBridge->unregisterTexture(textureId);
     }
   }
   m_imguiTextureIds.clear();

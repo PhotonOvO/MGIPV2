@@ -1040,6 +1040,9 @@ void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
         },
         .depth         = toPortableTextureFormat(depthFormat),
         .linearSampler = m_device.sceneLinearSamplerHandle,
+        // Pass the debug bridge so SceneResources can register textures with ImGui
+        // via the sanctioned DebugInteropBridge (RDEV-05 / D-08 / D-09).
+        .debugBridge   = &m_debugBridge,
     };
     LOGI("RenderDevice::init: scene resources begin");
     m_swapchainDependent.sceneResources.init(*m_device.device, rhiCmd, sceneResourcesInit);

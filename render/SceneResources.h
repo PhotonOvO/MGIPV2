@@ -4,6 +4,7 @@
 #include "../rhi/RHIStageBarrier.h"
 #include "../rhi/RHIDevice.h"
 #include "../rhi/RHITypes.h"
+#include "DebugInteropBridge.h"
 #include "Pass.h"
 
 #include <array>
@@ -25,6 +26,10 @@ public:
     rhi::TextureFormat         depth{rhi::TextureFormat::undefined};
     rhi::SamplerHandle         linearSampler{};
     rhi::SampleCount           sampleCount{rhi::SampleCount::count1};
+    /// Optional bridge for ImGui texture registration.
+    /// When non-null, UI image views and the output texture are registered
+    /// with the ImGui Vulkan backend via the bridge (RDEV-05 / D-08 / D-09).
+    DebugInteropBridge*        debugBridge{nullptr};
   };
 
   SceneResources() = default;
@@ -190,6 +195,8 @@ private:
   CreateInfo               m_createInfo{};
   Resources                m_resources{};
   std::vector<ImTextureID> m_imguiTextureIds;
+  /// Non-owning pointer; may be null when ImGui is not initialised.
+  DebugInteropBridge*      m_debugBridge{nullptr};
 };
 
 }  // namespace demo

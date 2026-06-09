@@ -216,4 +216,54 @@ void DebugInteropBridge::shutdown()
     LOGI("DebugInteropBridge::shutdown: completed");
 }
 
+// ---------------------------------------------------------------------------
+// DebugInteropBridge::registerTexture
+// ---------------------------------------------------------------------------
+
+DebugInteropBridge::TextureID DebugInteropBridge::registerTexture(
+    rhi::Device&           device,
+    rhi::SamplerHandle     sampler,
+    rhi::TextureViewHandle view,
+    ImageLayout            layout)
+{
+    if(!m_initialized || ImGui::GetCurrentContext() == nullptr ||
+       ImGui::GetIO().BackendPlatformUserData == nullptr)
+    {
+        return 0u;
+    }
+
+    const VkImageView vkView = reinterpret_cast<VkImageView>(
+        static_cast<uintptr_t>(device.resolveTextureViewBackendHandle(view)));
+
+    VkImageLayout vkLayout = VK_IMAGE_LAYOUT_GENERAL;
+    switch(layout)
+    {
+        case ImageLayout::General: vkLayout = VK_IMAGE_LAYOUT_GENERAL; break;
+    }
+
+    // Note: sampler parameter is accepted for API symmetry but the new
+    // imgui_impl_vulkan API (1.92+) manages its own sampler internally.
+    // VkDescriptorSet is cast to uint64_t (= ImU64 = ImTextureID).
+    VkDescriptorSet descSet = ImGui_ImplVulkan_AddTexture(vkView, vkLayout);
+    return reinterpret_cast<uintptr_t>(descSet);
+}
+
+// ---------------------------------------------------------------------------
+// DebugInteropBridge::unregisterTexture
+// ---------------------------------------------------------------------------
+
+void DebugInteropBridge::unregisterTexture(TextureID id)
+{
+    if(id == 0u)
+        return;
+    if(ImGui::GetCurrentContext() == nullptr ||
+       ImGui::GetIO().BackendPlatformUserData == nullptr)
+    {
+        return;
+    }
+
+    VkDescriptorSet descSet = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(id));
+    ImGui_ImplVulkan_RemoveTexture(descSet);
+}
+
 } // namespace demo

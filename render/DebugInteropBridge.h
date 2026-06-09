@@ -22,6 +22,18 @@ namespace demo
 class DebugInteropBridge
 {
 public:
+    /// Opaque ImGui texture identifier — matches ImTextureID (uint64_t / ImU64).
+    /// Callers store this type; the ImGui/Vulkan backend is never referenced
+    /// outside of DebugInteropBridge.cpp.
+    using TextureID = uint64_t;
+
+    /// Image layout hint for registerTexture.
+    /// Only General is needed today; extend as required.
+    enum class ImageLayout : uint32_t
+    {
+        General = 1,  ///< VK_IMAGE_LAYOUT_GENERAL
+    };
+
     struct InitInfo
     {
         rhi::Device*       rhiDevice{nullptr};
@@ -49,6 +61,19 @@ public:
     void shutdown();
 
     bool isInitialized() const { return m_initialized; }
+
+    /// Register an RHI texture view with the ImGui Vulkan backend.
+    /// Wraps ImGui_ImplVulkan_AddTexture; all native conversion is done internally.
+    /// Returns an opaque TextureID to be stored by the caller and later passed to
+    /// unregisterTexture. Returns nullptr when ImGui is not initialised.
+    TextureID registerTexture(rhi::Device& device,
+                              rhi::SamplerHandle     sampler,
+                              rhi::TextureViewHandle view,
+                              ImageLayout            layout = ImageLayout::General);
+
+    /// Unregister a previously registered texture from the ImGui Vulkan backend.
+    /// Wraps ImGui_ImplVulkan_RemoveTexture. No-op when id is nullptr.
+    void unregisterTexture(TextureID id);
 
 private:
     bool     m_initialized{false};
