@@ -6277,13 +6277,6 @@ namespace demo
 		m_device.device->destroyTextureView(handle);
 	}
 
-	uint64_t RenderDevice::resolveTextureViewBackendHandle(rhi::TextureViewHandle handle) const
-	{
-		auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
-		    static_cast<const rhi::vulkan::VulkanDevice&>(*m_device.device));
-		return reinterpret_cast<uintptr_t>(interop.resolveTextureView(handle));
-	}
-
 	void RenderDevice::destroyPipelines()
 	{
 		std::vector<PipelineHandle> handles;

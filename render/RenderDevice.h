@@ -50,10 +50,6 @@
 #ifndef DEMO_RENDER_JOIN4
 #define DEMO_RENDER_JOIN4(a, b, c, d) a##b##c##d
 #endif
-#ifndef DEMO_RENDER_RTV_BACKEND
-#define DEMO_RENDER_RTV_BACKEND resolveTextureViewBackendHandle
-#endif
-
 #include "../rhi/vulkan/VulkanResourceTable.h"
 
 namespace demo
@@ -978,7 +974,6 @@ namespace demo
 			float farDistance) const;
 		[[nodiscard]] std::array<glm::vec3, 8> computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const;
 		void buildDebugDrawList(const RenderParams& params);
-		[[nodiscard]] uint64_t DEMO_RENDER_RTV_BACKEND(rhi::TextureViewHandle handle) const;
 
 		struct PassGpuProfileFrame
 		{
