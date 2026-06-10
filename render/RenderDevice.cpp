@@ -6865,7 +6865,6 @@ namespace demo
 				},
 			};
 			cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
-			m_device.device->destroyImage(state.texture);
 		}
 
 		rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
@@ -7286,7 +7285,6 @@ namespace demo
 				},
 			};
 			cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
-			m_device.device->destroyImage(state.texture);
 		}
 
 		rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
