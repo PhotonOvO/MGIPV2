@@ -12,3 +12,4 @@ android/local-maven/
 android/local.properties
 .claude/
 imgui.ini
+.planning/
