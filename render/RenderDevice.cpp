@@ -841,28 +841,6 @@ namespace demo
 		return nativeBuffer;
 	}
 
-	static utils::Image createImage(const VmaAllocator allocator, const VkImageCreateInfo& imageInfo)
-	{
-		const VmaAllocationCreateInfo allocationInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-		utils::Image image{};
-		VmaAllocationInfo allocInfo{};
-		VK_CHECK(vmaCreateImage(allocator, &imageInfo, &allocationInfo, &image.image, &image.allocation, &allocInfo));
-		return image;
-	}
-
-	static void destroyImageResource(const VkDevice device, const VmaAllocator allocator, utils::ImageResource& image)
-	{
-		if (image.view != VK_NULL_HANDLE)
-		{
-			vkDestroyImageView(device, image.view, nullptr);
-		}
-		if (image.image != VK_NULL_HANDLE)
-		{
-			vmaDestroyImage(allocator, image.image, image.allocation);
-		}
-		image = {};
-	}
-
 	static void freeRhiStagingBuffers(rhi::Device* device, std::vector<rhi::BufferHandle>& stagingBuffers)
 	{
 		if (device != nullptr)
@@ -2053,7 +2031,6 @@ namespace demo
 		m_device.iblUsingFallback = true;
 		m_device.iblEnvironmentStatus = "Using flat ambient fallback";
 
-		const VkDevice nativeDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 		const std::filesystem::path environmentPath(kDefaultIBLEnvironmentPath);
 
@@ -2088,95 +2065,10 @@ namespace demo
 		LOGI("RenderDevice::createIBLResources: loaded KTX2 payload");
 
 		const uint32_t mipLevels = std::max(ktxTexture.mipLevels, 1u);
-		const VkImageCreateInfo imageInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = toNativeFormat(ktxTexture.format),
-			.extent = {ktxTexture.width, ktxTexture.height, 1},
-			.mipLevels = mipLevels,
-			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-		};
 
-		utils::Image environmentImage = createImage(m_device.allocator, imageInfo);
-		LOGI("RenderDevice::createIBLResources: image created");
-		const rhi::TextureHandle environmentHandle =
-			m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(environmentImage.image));
-		const rhi::TextureSubresourceRange environmentRange{
-			.aspect = rhi::TextureAspect::color,
-			.baseMipLevel = 0,
-			.levelCount = mipLevels,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		};
-		const rhi::TextureBarrier uploadBeginBarrier{
-			.texture = environmentHandle,
-			.before = rhi::ResourceState::Undefined,
-			.after = rhi::ResourceState::TransferDst,
-			.range = environmentRange,
-		};
-		cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
-		LOGI("RenderDevice::createIBLResources: image layout initialized");
-
-		BatchUploadContext batchUpload;
-		batchUpload.init(*m_device.device, static_cast<uint64_t>(ktxTexture.data.size()) + 16u);
-		LOGI("RenderDevice::createIBLResources: upload context initialized");
-		const BatchUploadContext::Slice slice = batchUpload.allocate(ktxTexture.data.size(), 16);
-		std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
-
-		for (uint32_t mip = 0; mip < mipLevels; ++mip)
-		{
-			const rhi::BufferTextureCopyDesc region{
-				.bufferOffset = ktxTexture.mipOffsets[mip],
-				.texture = environmentHandle,
-				.aspect = rhi::TextureAspect::color,
-				.mipLevel = mip,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-				.width = std::max(ktxTexture.width >> mip, 1u),
-				.height = std::max(ktxTexture.height >> mip, 1u),
-				.depth = 1,
-			};
-			batchUpload.recordTextureUpload(slice, environmentHandle, region);
-		}
-		batchUpload.executeUploads(cmd);
-		LOGI("RenderDevice::createIBLResources: upload recorded");
-
-		const rhi::TextureBarrier uploadEndBarrier{
-			.texture = environmentHandle,
-			.before = rhi::ResourceState::TransferDst,
-			.after = rhi::ResourceState::General,
-			.range = environmentRange,
-		};
-		cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
-		m_device.device->destroyImage(environmentHandle);
-
-		rhi::BufferHandle batchStagingBuffer = batchUpload.releaseStagingBuffer();
-		if (!batchStagingBuffer.isNull())
-		{
-			m_device.rhiStagingBuffers.push_back(batchStagingBuffer);
-		}
-
-		const VkImageViewCreateInfo viewInfo{
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image = environmentImage.image,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = toNativeFormat(ktxTexture.format),
-			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
-		};
-		VkImageView environmentView = VK_NULL_HANDLE;
-		VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &environmentView));
-		LOGI("RenderDevice::createIBLResources: view created");
-
-		utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
-		dutil.setObjectName(environmentImage.image, "IBL_EquirectEnvironment");
-		dutil.setObjectName(environmentView, "IBL_EquirectEnvironmentView");
-
-		m_device.iblEnvironment.image = environmentImage.image;
-		m_device.iblEnvironment.allocation = environmentImage.allocation;
-		m_device.iblEnvironment.view = environmentView;
-		m_device.iblEnvironment.layout = VK_IMAGE_LAYOUT_GENERAL;
+		// The equirect environment image itself is consumed by GPUDrivenRenderer's own IBL
+		// split-sum pipeline (m_iblResources); RenderDevice only needs the KTX2 metadata below
+		// for status reporting and the lighting mip-count uniform. No device-side image is kept.
 		m_device.iblEnvironmentFormat = ktxTexture.format; // already rhi::TextureFormat post-02-02
 		m_device.iblEnvironmentExtent = {ktxTexture.width, ktxTexture.height};
 		m_device.iblEnvironmentMipCount = mipLevels;
@@ -2195,13 +2087,6 @@ namespace demo
 
 	void RenderDevice::destroyIBLResources()
 	{
-		const VkDevice nativeDevice = m_device.device
-			                              ? static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device()
-			                              : VK_NULL_HANDLE;
-		if (m_device.iblEnvironment.view != VK_NULL_HANDLE || m_device.iblEnvironment.image != VK_NULL_HANDLE)
-		{
-			destroyImageResource(nativeDevice, m_device.allocator, m_device.iblEnvironment);
-		}
 		m_device.iblEnvironmentFormat = rhi::TextureFormat::undefined;
 		m_device.iblEnvironmentExtent = {};
 		m_device.iblEnvironmentMipCount = 0;

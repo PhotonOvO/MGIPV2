@@ -578,7 +578,6 @@ namespace demo
 			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
 			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
 			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).
-			utils::ImageResource iblEnvironment{};
 			rhi::TextureFormat iblEnvironmentFormat{rhi::TextureFormat::undefined};
 			rhi::Extent2D iblEnvironmentExtent{};
 			uint32_t iblEnvironmentMipCount{0};
