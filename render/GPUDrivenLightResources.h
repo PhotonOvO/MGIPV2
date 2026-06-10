@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "ShaderInterop.h"
 #include "../common/Handles.h"
 #include "../rhi/RHIDevice.h"
 

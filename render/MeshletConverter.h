@@ -1,8 +1,9 @@
 #pragma once
 
-#include "../rhi/vulkan/internal/VulkanCommon.h"
+#include "ShaderInterop.h"
 #include "../loader/GltfLoader.h"
 
+#include <cstdint>
 #include <vector>
 
 namespace demo

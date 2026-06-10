@@ -1,5 +1,7 @@
 #include "GPUDrivenLightResources.h"
 
+#include "../common/Common.h"
+
 #include <algorithm>
 #include <cstring>
 

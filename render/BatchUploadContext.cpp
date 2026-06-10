@@ -1,7 +1,6 @@
 #include "BatchUploadContext.h"
 
 #include "../common/Common.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <cstring>
