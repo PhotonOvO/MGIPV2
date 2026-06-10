@@ -46,6 +46,9 @@ public:
   virtual Extent2D      getExtent() const            = 0;
   virtual uint32_t      getMaxFramesInFlight() const = 0;
   virtual uint32_t      getRequestedImageCount() const = 0;
+  // Returns the negotiated swapchain format as a portable TextureFormat.
+  // D3D12/Metal stubs inherit this default and return undefined until the backend overrides.
+  virtual TextureFormat getFormat() const { return TextureFormat::undefined; }
   // Native swapchain handles are backend-internal. Cast to VulkanSwapchain for
   // nativeSwapchain() / nativeImage() / nativeImageView() typed accessors.
 };

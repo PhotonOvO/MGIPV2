@@ -179,6 +179,22 @@ enum class TextureFormat : uint8_t
   bc7SrgbBlock    = 146,   // VK_FORMAT_BC7_SRGB_BLOCK    — albedo/emissive sRGB
 };
 
+// Feature flags for format capability queries (IFACE-01).
+// Values mirror the corresponding VkFormatFeatureFlagBits for easy mapping.
+enum class FormatFeatureFlag : uint32_t
+{
+  none                    = 0,
+  sampledImage            = 1u << 0u,  // VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+  storageImage            = 1u << 1u,  // VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+  colorAttachment         = 1u << 2u,  // VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+  depthStencilAttachment  = 1u << 3u,  // VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+};
+
+constexpr FormatFeatureFlag operator|(FormatFeatureFlag a, FormatFeatureFlag b)
+{
+  return static_cast<FormatFeatureFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
 // Describes a texture view to create through the RHI. Fully portable: the source image is
 // an RHI handle (adopt a native image via Device::registerExternalTexture) and the format is
 // the portable TextureFormat enum. The handle returned by createTextureView is the only thing

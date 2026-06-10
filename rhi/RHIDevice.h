@@ -116,6 +116,10 @@ namespace demo::rhi
 		virtual bool isInstanceExtensionSupported(const char* /*name*/) const { return false; }
 		virtual bool isDeviceExtensionSupported(const char* /*name*/) const { return false; }
 
+		// D3D12/Metal: conservative default — no capability assumed until backend overrides.
+		// Vulkan backend queries vkGetPhysicalDeviceFormatProperties with optimalTilingFeatures.
+		virtual bool isFormatSupported(TextureFormat /*format*/, FormatFeatureFlag /*feature*/) const { return false; }
+
 		virtual void waitIdle() = 0;
 
 		// --- Immediate upload seam (UPL-02) ---
