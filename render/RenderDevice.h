@@ -814,16 +814,16 @@ namespace demo
 			{
 				TextureRuntimeKind runtimeKind{TextureRuntimeKind::materialSampled};
 				uint32_t viewportAttachmentIndex{0};
-				DEMO_RHI_VK(ImageView) sampledImageView{VK_NULL_HANDLE};
-				DEMO_RHI_VK(ImageLayout) sampledImageLayout{VK_IMAGE_LAYOUT_UNDEFINED};
-				// Wave 8: adopted RHI view handle mirroring sampled image view, for ArgumentWrite-based
-				// material (combinedImageSampler) bindless updates. Released via removeTextureView.
+				// RHI view handle used for ArgumentWrite-based material (combinedImageSampler)
+				// bindless updates. For material-sampled textures this aliases the owning
+				// TextureColdData::ownedTextureView (single owning view, destroyed there).
 				rhi::TextureViewHandle sampledViewHandle{};
 			};
 
 			struct TextureColdData
 			{
-				utils::ImageResource ownedImage{};
+				rhi::TextureHandle ownedTexture{};
+				rhi::TextureViewHandle ownedTextureView{};
 				DEMO_RHI_VK(Extent2D) sourceExtent{};
 				uint32_t mipLevels{1};
 			};
@@ -944,7 +944,15 @@ namespace demo
 		void createIBLResources(rhi::CommandBuffer& cmd);
 		void destroyIBLResources();
 		void destroyArgumentTablesAndLayouts();
-		utils::ImageResource loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
+		// Owning RHI handle pair produced by loadAndCreateImage (replaces utils::ImageResource).
+		struct LoadedImageHandles
+		{
+			rhi::TextureHandle texture{};
+			rhi::TextureViewHandle view{};
+			uint32_t width{0};
+			uint32_t height{0};
+		};
+		LoadedImageHandles loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
 		const MaterialResources::MaterialRecord* tryGetMaterial(MaterialHandle handle) const;
 		const MaterialResources::TextureHotData* tryGetTextureHot(TextureHandle handle) const;
 		const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;

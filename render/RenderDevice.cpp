@@ -1174,19 +1174,18 @@ namespace demo
 			}
 #endif
 			ASSERT(!filename.empty(), "Could not load texture image!");
-			utils::ImageResource materialImage0 = loadAndCreateImage(rhiCmd, filename);
+			const LoadedImageHandles materialImage0 = loadAndCreateImage(rhiCmd, filename);
 			const TextureHandle materialTexture0 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
 				{
 					.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-					.sampledImageView = materialImage0.view,
-					.sampledImageLayout = materialImage0.layout,
-					.sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage0.view)),
+					.sampledViewHandle = materialImage0.view,
 				},
 				.cold =
 				{
-					.ownedImage = materialImage0,
-					.sourceExtent = materialImage0.extent,
+					.ownedTexture = materialImage0.texture,
+					.ownedTextureView = materialImage0.view,
+					.sourceExtent = {materialImage0.width, materialImage0.height},
 				},
 			});
 
@@ -1198,19 +1197,18 @@ namespace demo
 			}
 #endif
 			ASSERT(!filename.empty(), "Could not load texture image!");
-			utils::ImageResource materialImage1 = loadAndCreateImage(rhiCmd, filename);
+			const LoadedImageHandles materialImage1 = loadAndCreateImage(rhiCmd, filename);
 			const TextureHandle materialTexture1 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
 				{
 					.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-					.sampledImageView = materialImage1.view,
-					.sampledImageLayout = materialImage1.layout,
-					.sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(materialImage1.view)),
+					.sampledViewHandle = materialImage1.view,
 				},
 				.cold =
 				{
-					.ownedImage = materialImage1,
-					.sourceExtent = materialImage1.extent,
+					.ownedTexture = materialImage1.texture,
+					.ownedTextureView = materialImage1.view,
+					.sourceExtent = {materialImage1.width, materialImage1.height},
 				},
 			});
 
@@ -1337,16 +1335,17 @@ namespace demo
 			});
 		for (const TextureHandle handle : texturesToDestroy)
 		{
-			if (const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->
-				sampledViewHandle.isNull())
-			{
-				m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
-			}
 			const MaterialResources::TextureColdData* textureCold = tryGetTextureCold(handle);
-			if (textureCold != nullptr && textureCold->ownedImage.image != VK_NULL_HANDLE)
+			if (textureCold != nullptr)
 			{
-				utils::ImageResource image = textureCold->ownedImage;
-				destroyImageResource(device, m_device.allocator, image);
+				if (!textureCold->ownedTextureView.isNull())
+				{
+					m_device.device->destroyTextureView(textureCold->ownedTextureView);
+				}
+				if (!textureCold->ownedTexture.isNull())
+				{
+					m_device.device->destroyTexture(textureCold->ownedTexture);
+				}
 			}
 			m_materials.texturePool.destroy(handle);
 		}
@@ -6038,7 +6037,7 @@ namespace demo
 		}
 	}
 
-	utils::ImageResource RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
+	RenderDevice::LoadedImageHandles RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
 	{
 		int w = 0, h = 0, comp = 0, req_comp{4};
 		const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
@@ -6061,23 +6060,18 @@ namespace demo
 		}
 #endif
 		ASSERT(data != nullptr, "Could not load texture image!");
-		const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 		const uint32_t mipLevels = 1;
 
-		const VkImageCreateInfo imageInfo = {
-			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-			.imageType = VK_IMAGE_TYPE_2D,
-			.format = format,
+		const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
+			.dimension = rhi::TextureDimension::e2D,
+			.format = rhi::TextureFormat::rgba8Unorm,
+			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst |
+				rhi::TextureUsageFlags::transferSrc,
 			.extent = {uint32_t(w), uint32_t(h), 1},
 			.mipLevels = mipLevels,
 			.arrayLayers = 1,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-		};
-
-		utils::Image nativeImage = createImage(m_device.allocator, imageInfo);
-		const rhi::TextureHandle imageHandle =
-			m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(nativeImage.image));
+			.debugName = "MaterialImage",
+		});
 		const rhi::TextureSubresourceRange imageRange{
 			.aspect = rhi::TextureAspect::color,
 			.baseMipLevel = 0,
@@ -6121,7 +6115,6 @@ namespace demo
 			.range = imageRange,
 		};
 		cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
-		m_device.device->destroyImage(imageHandle);
 
 		rhi::BufferHandle staging = upload.releaseStagingBuffer();
 		if (!staging.isNull())
@@ -6129,24 +6122,15 @@ namespace demo
 			m_device.rhiStagingBuffers.push_back(staging);
 		}
 
-		utils::ImageResource image{};
-		image.image = nativeImage.image;
-		image.allocation = nativeImage.allocation;
-		image.layout = VK_IMAGE_LAYOUT_GENERAL;
-		DBG_VK_NAME(image.image);
-		image.extent = {uint32_t(w), uint32_t(h)};
+		const rhi::TextureViewHandle viewHandle = m_device.device->createTextureView(rhi::TextureViewCreateDesc{
+			.image = imageHandle,
+			.format = rhi::TextureFormat::rgba8Unorm,
+			.viewType = rhi::ImageViewType::e2D,
+			.aspect = rhi::TextureAspect::color,
+			.levelCount = mipLevels,
+			.layerCount = 1,
+		});
 
-		const VkImageViewCreateInfo viewInfo = {
-			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image = image.image,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
-			.format = format,
-			.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
-		};
-		VK_CHECK(
-			vkCreateImageView(static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device(), &viewInfo, nullptr,
-				&image.view));
-		DBG_VK_NAME(image.view);
 #ifdef __ANDROID__
 		if (data != fallbackPixels.data())
 #endif
@@ -6154,7 +6138,12 @@ namespace demo
 			stbi_image_free(const_cast<stbi_uc*>(data));
 		}
 
-		return image;
+		return LoadedImageHandles{
+			.texture = imageHandle,
+			.view = viewHandle,
+			.width = static_cast<uint32_t>(w),
+			.height = static_cast<uint32_t>(h),
+		};
 	}
 
 	void RenderDevice::createPrebuiltComputePipelineVariant()
@@ -6445,7 +6434,7 @@ namespace demo
 
 			const uint8_t* payloadData = asset.texturePayload.data() + texture.payloadOffset;
 			const size_t payloadSize = static_cast<size_t>(texture.payloadSize);
-			VkFormat format = toNativeFormat(texturePlan.format);
+			rhi::TextureFormat rhiFormat = texturePlan.format;
 			uint32_t width = texturePlan.width;
 			uint32_t height = texturePlan.height;
 			uint32_t mipLevels = std::max(texturePlan.mipLevels, 1u);
@@ -6467,26 +6456,21 @@ namespace demo
 					     texturePlan.textureIndex);
 					continue;
 				}
-				format = toNativeFormat(ktxTexture.format);
+				rhiFormat = ktxTexture.format;
 				width = ktxTexture.width;
 				height = ktxTexture.height;
 				mipLevels = std::max(ktxTexture.mipLevels, 1u);
 			}
 
-			const VkImageCreateInfo imageInfo = {
-				.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-				.imageType = VK_IMAGE_TYPE_2D,
-				.format = format,
+			const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
+				.dimension = rhi::TextureDimension::e2D,
+				.format = rhiFormat,
+				.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
 				.extent = {width, height, 1},
 				.mipLevels = mipLevels,
 				.arrayLayers = 1,
-				.samples = VK_SAMPLE_COUNT_1_BIT,
-				.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-			};
-
-			utils::Image image = createImage(m_device.allocator, imageInfo);
-			const rhi::TextureHandle imageHandle =
-				m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+				.debugName = "SceneAssetTexture",
+			});
 			const rhi::TextureSubresourceRange imageRange{
 				.aspect = rhi::TextureAspect::color,
 				.baseMipLevel = 0,
@@ -6543,34 +6527,24 @@ namespace demo
 					});
 			}
 
-			const VkImageViewCreateInfo viewInfo = {
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = image.image,
-				.viewType = VK_IMAGE_VIEW_TYPE_2D,
-				.format = format,
-				.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
-			};
-
-			VkImageView imageView = VK_NULL_HANDLE;
-			VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
-
-			utils::ImageResource imageResource{};
-			imageResource.image = image.image;
-			imageResource.allocation = image.allocation;
-			imageResource.view = imageView;
-			imageResource.layout = VK_IMAGE_LAYOUT_GENERAL;
-			imageResource.extent = {width, height};
+			const rhi::TextureViewHandle imageViewHandle = m_device.device->createTextureView(rhi::TextureViewCreateDesc{
+				.image = imageHandle,
+				.format = rhiFormat,
+				.viewType = rhi::ImageViewType::e2D,
+				.aspect = rhi::TextureAspect::color,
+				.levelCount = mipLevels,
+				.layerCount = 1,
+			});
 
 			result.textures[texturePlan.textureIndex] = m_materials.texturePool.emplace(
 				MaterialResources::TextureRecord{
 					.hot = {
 						.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-						.sampledImageView = imageView,
-						.sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-						.sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
+						.sampledViewHandle = imageViewHandle,
 					},
 					.cold = {
-						.ownedImage = imageResource,
+						.ownedTexture = imageHandle,
+						.ownedTextureView = imageViewHandle,
 						.sourceExtent = {width, height},
 						.mipLevels = mipLevels,
 					},
@@ -7050,9 +7024,9 @@ namespace demo
 				continue;
 			}
 
-			const VkFormat format = hasSupportedKtx2Sidecar
-				                        ? toNativeFormat(ktxTexture.format)
-				                        : VK_FORMAT_R8G8B8A8_UNORM;
+			const rhi::TextureFormat rhiFormat = hasSupportedKtx2Sidecar
+				                                     ? ktxTexture.format
+				                                     : rhi::TextureFormat::rgba8Unorm;
 			const uint32_t width = hasSupportedKtx2Sidecar
 				                       ? ktxTexture.width
 				                       : static_cast<uint32_t>(rawImageData->width);
@@ -7065,26 +7039,21 @@ namespace demo
 					: MipmapGenerator::calculateMipLevelCount(width, height);
 			const uint32_t mipLevels = hasSupportedKtx2Sidecar ? requestedMipLevels : 1u;
 
-			VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+			rhi::TextureUsageFlags usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst;
 			if (!hasSupportedKtx2Sidecar && mipLevels > 1)
 			{
-				usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+				usage = usage | rhi::TextureUsageFlags::transferSrc;
 			}
 
-			const VkImageCreateInfo imageInfo = {
-				.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-				.imageType = VK_IMAGE_TYPE_2D,
-				.format = format,
+			const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
+				.dimension = rhi::TextureDimension::e2D,
+				.format = rhiFormat,
+				.usage = usage,
 				.extent = {width, height, 1},
 				.mipLevels = mipLevels,
 				.arrayLayers = 1,
-				.samples = VK_SAMPLE_COUNT_1_BIT,
-				.usage = usage,
-			};
-
-			utils::Image image = createImage(m_device.allocator, imageInfo);
-			const rhi::TextureHandle imageHandle =
-				m_device.device->registerExternalTexture(reinterpret_cast<uint64_t>(image.image));
+				.debugName = "GltfTexture",
+			});
 			const rhi::TextureSubresourceRange imageRange{
 				.aspect = rhi::TextureAspect::color,
 				.baseMipLevel = 0,
@@ -7153,35 +7122,25 @@ namespace demo
 				}
 			}
 
-			const VkImageViewCreateInfo viewInfo = {
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = image.image,
-				.viewType = VK_IMAGE_VIEW_TYPE_2D,
-				.format = format,
-				.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = mipLevels, .layerCount = 1},
-			};
-
-			VkImageView imageView = VK_NULL_HANDLE;
-			VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &imageView));
-
-			utils::ImageResource imageResource{};
-			imageResource.image = image.image;
-			imageResource.allocation = image.allocation;
-			imageResource.view = imageView;
-			imageResource.layout = VK_IMAGE_LAYOUT_GENERAL;
-			imageResource.extent = {width, height};
+			const rhi::TextureViewHandle imageViewHandle = m_device.device->createTextureView(rhi::TextureViewCreateDesc{
+				.image = imageHandle,
+				.format = rhiFormat,
+				.viewType = rhi::ImageViewType::e2D,
+				.aspect = rhi::TextureAspect::color,
+				.levelCount = mipLevels,
+				.layerCount = 1,
+			});
 
 			ioResult.textures[textureIndex] = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
 				{
 					.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-					.sampledImageView = imageView,
-					.sampledImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-					.sampledViewHandle = registerExternalTextureView(reinterpret_cast<uint64_t>(imageView)),
+					.sampledViewHandle = imageViewHandle,
 				},
 				.cold =
 				{
-					.ownedImage = imageResource,
+					.ownedTexture = imageHandle,
+					.ownedTextureView = imageViewHandle,
 					.sourceExtent = {width, height},
 					.mipLevels = mipLevels,
 				},
@@ -7670,16 +7629,17 @@ namespace demo
 		{
 			invalidateBindlessTexture(gltfTextureBaseIndex + static_cast<uint32_t>(textureIndex));
 			TextureHandle handle = result.textures[textureIndex];
-			if (const MaterialResources::TextureHotData* hot = tryGetTextureHot(handle); hot != nullptr && !hot->
-				sampledViewHandle.isNull())
-			{
-				m_device.resourceTable.removeTextureView(hot->sampledViewHandle);
-			}
 			const MaterialResources::TextureColdData* cold = tryGetTextureCold(handle);
-			if (cold && cold->ownedImage.image != VK_NULL_HANDLE)
+			if (cold != nullptr)
 			{
-				utils::ImageResource image = cold->ownedImage;
-				destroyImageResource(device, m_device.allocator, image);
+				if (!cold->ownedTextureView.isNull())
+				{
+					m_device.device->destroyTextureView(cold->ownedTextureView);
+				}
+				if (!cold->ownedTexture.isNull())
+				{
+					m_device.device->destroyTexture(cold->ownedTexture);
+				}
 			}
 			m_materials.texturePool.destroy(handle);
 		}
