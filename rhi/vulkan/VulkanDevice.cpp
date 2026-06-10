@@ -11,6 +11,7 @@
 #include "VulkanFrameContext.h"
 #include "VulkanPipelines.h"
 #include "VulkanResourceTable.h"
+#include "rhi/vulkan/VulkanFormatUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -245,6 +246,38 @@ namespace demo::rhi::vulkan
 	bool VulkanDevice::isDeviceExtensionSupported(const char* name) const
 	{
 		return extensionAvailable(name, m_availableDeviceExtensions);
+	}
+
+	bool VulkanDevice::isFormatSupported(TextureFormat format, FormatFeatureFlag feature) const
+	{
+		const VkFormat vkFmt = vulkan::toNativeFormat(format);
+		if (vkFmt == VK_FORMAT_UNDEFINED)
+		{
+			return false;
+		}
+
+		VkFormatProperties props{};
+		vkGetPhysicalDeviceFormatProperties(m_physicalDevice, vkFmt, &props);
+
+		const auto featureBits = static_cast<uint32_t>(feature);
+		// sampledImage: check optimalTilingFeatures (matches original supportsSampledImageFormat)
+		if ((featureBits & static_cast<uint32_t>(FormatFeatureFlag::sampledImage)) != 0)
+		{
+			return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+		}
+		if ((featureBits & static_cast<uint32_t>(FormatFeatureFlag::colorAttachment)) != 0)
+		{
+			return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
+		}
+		if ((featureBits & static_cast<uint32_t>(FormatFeatureFlag::storageImage)) != 0)
+		{
+			return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+		}
+		if ((featureBits & static_cast<uint32_t>(FormatFeatureFlag::depthStencilAttachment)) != 0)
+		{
+			return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+		}
+		return false;
 	}
 
 	void VulkanDevice::waitIdle()

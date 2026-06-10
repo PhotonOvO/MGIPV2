@@ -97,26 +97,4 @@ uint32_t D3D12Swapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t D3D12Swapchain::getBackendSwapchainHandle() const
-{
-  // TODO: D3D12 implementation
-  // NOTES: Return IDXGISwapChain3 handle
-  return reinterpret_cast<uint64_t>(m_swapchain);
-}
-
-uint64_t D3D12Swapchain::getBackendImageViewHandle(uint32_t imageIndex) const
-{
-  // TODO: D3D12 implementation
-  // NOTES: D3D12 doesn't have separate image views like Vulkan
-  // Return RTV descriptor handle or resource handle
-  return 0;
-}
-
-uint64_t D3D12Swapchain::getBackendImageHandle(uint32_t imageIndex) const
-{
-  // TODO: D3D12 implementation
-  // NOTES: Return ID3D12Resource handle
-  return reinterpret_cast<uint64_t>(m_images[imageIndex].resource);
-}
-
 }  // namespace demo::rhi::d3d12

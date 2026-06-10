@@ -1,4 +1,5 @@
 #include "VulkanSwapchain.h"
+#include "rhi/vulkan/VulkanFormatUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -599,6 +600,11 @@ VkPresentModeKHR VulkanSwapchain::selectSwapPresentMode(const std::vector<VkPres
     return VK_PRESENT_MODE_IMMEDIATE_KHR;
   }
   return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+TextureFormat VulkanSwapchain::getFormat() const
+{
+    return vulkan::toPortableTextureFormat(m_imageFormat);
 }
 
 }  // namespace demo::rhi::vulkan

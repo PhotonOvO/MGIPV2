@@ -45,6 +45,7 @@ public:
 
   bool isInstanceExtensionSupported(const char* name) const override;
   bool isDeviceExtensionSupported(const char* name) const override;
+  bool isFormatSupported(TextureFormat format, FormatFeatureFlag feature) const override;
 
   void waitIdle() override;
 

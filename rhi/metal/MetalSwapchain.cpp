@@ -148,36 +148,6 @@ uint32_t MetalSwapchain::getMaxFramesInFlight() const
   return m_maxFramesInFlight;
 }
 
-uint64_t MetalSwapchain::getBackendSwapchainHandle() const
-{
-  // TODO: Metal implementation
-  // NOTES:
-  // Metal doesn't have a swapchain object
-  // Return opaque handle to CAMetalLayer or 0
-  // Use __bridge_retained for ARC interop
-  return 0;
-}
-
-uint64_t MetalSwapchain::getBackendImageViewHandle(uint32_t imageIndex) const
-{
-  // TODO: Metal implementation
-  // NOTES:
-  // Metal textures are directly used, no separate image views
-  // Return texture handle or 0
-  (void)imageIndex;
-  return 0;
-}
-
-uint64_t MetalSwapchain::getBackendImageHandle(uint32_t imageIndex) const
-{
-  // TODO: Metal implementation
-  // NOTES:
-  // Return opaque handle to MTLTexture at imageIndex
-  // Use __bridge_retained for ARC interop
-  (void)imageIndex;
-  return 0;
-}
-
 void* MetalSwapchain::currentDrawable() const
 {
   // TODO: Metal implementation

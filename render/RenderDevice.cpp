@@ -140,17 +140,6 @@ namespace demo
 				|| (imageData.isKtx2 && (!imageData.ktx2Data.empty() || !imageData.uri.empty()));
 		}
 
-		[[nodiscard]] bool supportsSampledImageFormat(VkPhysicalDevice physicalDevice, VkFormat format)
-		{
-			if (physicalDevice == VK_NULL_HANDLE || format == VK_FORMAT_UNDEFINED)
-			{
-				return false;
-			}
-
-			VkFormatProperties properties{};
-			vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
-			return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
-		}
 
 		[[nodiscard]] bool tryLoadKtx2Texture(const GltfModel& model,
 		                                      const GltfImageData& imageData,
@@ -1661,6 +1650,34 @@ namespace demo
 		return m_swapchainTextureHandles[idx];
 	}
 
+	// Lazily registers (or re-registers on native-change) the VkImageView for the given
+	// swapchain image index as an external TextureViewHandle. Cleared by rebuildSwapchainDependentResources
+	// on swapchain rebuild to prevent stale view handles (IFACE-03 / T-01-02).
+	rhi::TextureViewHandle RenderDevice::getOrRegisterSwapchainViewHandle(uint32_t idx) const
+	{
+		const uint64_t native = reinterpret_cast<uintptr_t>(
+		    static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain).nativeImageView(idx));
+		if (native == 0)
+		{
+			return {};
+		}
+		if (idx >= m_swapchainViewHandles.size())
+		{
+			m_swapchainViewHandles.resize(idx + 1);
+			m_swapchainViewNatives.resize(idx + 1, 0);
+		}
+		if (m_swapchainViewNatives[idx] != native)
+		{
+			if (!m_swapchainViewHandles[idx].isNull())
+			{
+				m_device.device->destroyTextureView(m_swapchainViewHandles[idx]);
+			}
+			m_swapchainViewHandles[idx] = m_device.device->registerExternalTextureView(native);
+			m_swapchainViewNatives[idx] = native;
+		}
+		return m_swapchainViewHandles[idx];
+	}
+
 	rhi::TextureViewHandle RenderDevice::getOutputTextureView() const
 	{
 		return m_swapchainDependent.sceneResources.getOutputTextureView();
@@ -1804,49 +1821,57 @@ namespace demo
 		// resource-barrier verb. The backend emits a conservative ALL_COMMANDS barrier; the
 		// layout transition (General -> ColorAttachment) matches the previous explicit barrier.
 		const rhi::TextureHandle swapchainHandle = getCurrentSwapchainTextureHandle();
-		if (!swapchainHandle.isNull())
-		{
-			const rhi::TextureBarrier barrier{
-				.texture = swapchainHandle,
-				.before = rhi::ResourceState::General,
-				.after = rhi::ResourceState::ColorAttachment,
-			};
-			cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
-		}
-
-		const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
-		if (vkCmd == VK_NULL_HANDLE)
+		if (swapchainHandle.isNull())
 		{
 			return;
 		}
-		const VkExtent2D swapchainExtent = toVkExtent(m_swapchainDependent.windowSize);
-		const VkRenderingAttachmentInfo colorAttachment{
-			.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-			.imageView = static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain)
-			                 .nativeImageView(m_swapchainDependent.currentImageIndex),
-			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+
+		const rhi::TextureBarrier barrier{
+			.texture = swapchainHandle,
+			.before = rhi::ResourceState::General,
+			.after = rhi::ResourceState::ColorAttachment,
 		};
-		const VkRenderingInfo renderingInfo{
-			.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-			.renderArea = {{0, 0}, swapchainExtent},
-			.layerCount = 1,
-			.colorAttachmentCount = 1,
-			.pColorAttachments = &colorAttachment,
+		cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
+
+		const uint32_t idx = m_swapchainDependent.currentImageIndex;
+		const rhi::TextureViewHandle viewHandle = getOrRegisterSwapchainViewHandle(idx);
+		if (viewHandle.isNull())
+		{
+			return;
+		}
+
+		const rhi::RenderTargetDesc colorTarget{
+			.texture  = swapchainHandle,
+			.view     = viewHandle,
+			.state    = rhi::ResourceState::ColorAttachment,
+			.loadOp   = rhi::LoadOp::load,   // matches original VK_ATTACHMENT_LOAD_OP_LOAD
+			.storeOp  = rhi::StoreOp::store, // matches original VK_ATTACHMENT_STORE_OP_STORE
 		};
-		vkCmdBeginRendering(vkCmd, &renderingInfo);
-		const VkViewport viewport{
-			.x = 0.0f,
-			.y = 0.0f,
-			.width = static_cast<float>(swapchainExtent.width),
-			.height = static_cast<float>(swapchainExtent.height),
+		const rhi::RenderPassDesc passDesc{
+			.renderArea       = {.extent = m_swapchainDependent.windowSize},
+			.colorTargets     = &colorTarget,
+			.colorTargetCount = 1,
+		};
+		auto* encoder = cmdBuffer.beginRenderPass(passDesc);
+		if (encoder == nullptr)
+		{
+			return;
+		}
+
+		const rhi::Viewport viewport{
+			.x        = 0.0f,
+			.y        = 0.0f,
+			.width    = static_cast<float>(m_swapchainDependent.windowSize.width),
+			.height   = static_cast<float>(m_swapchainDependent.windowSize.height),
 			.minDepth = 0.0f,
 			.maxDepth = 1.0f,
 		};
-		const VkRect2D scissor{{0, 0}, swapchainExtent};
-		vkCmdSetViewportWithCount(vkCmd, 1, &viewport);
-		vkCmdSetScissorWithCount(vkCmd, 1, &scissor);
+		const rhi::Rect2D scissor{
+			.offset = {0, 0},
+			.extent = m_swapchainDependent.windowSize,
+		};
+		encoder->setViewport(viewport);
+		encoder->setScissor(scissor);
 		m_presentPassActive = true;
 	}
 
@@ -1858,11 +1883,7 @@ namespace demo
 		}
 
 		m_presentPassActive = false;
-		const VkCommandBuffer vkCmd = static_cast<VkCommandBuffer>(cmdBuffer.getBackendHandle());
-		if (vkCmd != VK_NULL_HANDLE)
-		{
-			vkCmdEndRendering(vkCmd);
-		}
+		cmdBuffer.endEncoding();
 
 		// Close the swapchain image layout explicitly at the end of the final UI pass.
 		// This keeps presentation correctness local to the presentation path instead of
@@ -2031,7 +2052,6 @@ namespace demo
 		m_device.iblUsingFallback = true;
 		m_device.iblEnvironmentStatus = "Using flat ambient fallback";
 
-		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 		const std::filesystem::path environmentPath(kDefaultIBLEnvironmentPath);
 
 		Ktx2Loader loader;
@@ -2049,7 +2069,7 @@ namespace demo
 			LOGW("%s", m_device.iblEnvironmentStatus.c_str());
 			return;
 		}
-		if (!supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format)))
+		if (!m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage))
 		{
 			m_device.iblEnvironmentStatus = "Unsupported IBL KTX2 format: " + std::string(
 				string_VkFormat(toNativeFormat(ktxTexture.format)));
@@ -3413,6 +3433,9 @@ namespace demo
 		if (m_swapchainDependent.swapchain->needsRebuild())
 		{
 			m_swapchainDependent.swapchain->rebuild();
+			// Swapchain images/views are recreated; cached view handles are now stale (IFACE-03 T-01-02).
+			m_swapchainViewHandles.clear();
+			m_swapchainViewNatives.clear();
 			const rhi::Extent2D extent = m_swapchainDependent.swapchain->getExtent();
 			m_swapchainDependent.windowSize = extent;
 			m_swapchainDependent.currentImageIndex = 0;
@@ -6274,7 +6297,6 @@ namespace demo
 		result.textures.resize(asset.textures.size(), kNullTextureHandle);
 
 		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 
 		VkDeviceSize estimatedTextureUploadBytes = 0;
 		VkDeviceSize estimatedVertexUploadBytes = 0;
@@ -6334,7 +6356,7 @@ namespace demo
 					     loader.getLastError().c_str());
 					continue;
 				}
-				if (!supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format)))
+				if (!m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage))
 				{
 					LOGW("Skipping unsupported SceneAsset KTX2 texture format %s for texture %u",
 					     string_VkFormat(toNativeFormat(ktxTexture.format)),
@@ -6794,7 +6816,6 @@ namespace demo
 	                                        rhi::CommandBuffer& cmd)
 	{
 		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		const VkPhysicalDevice physicalDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice();
 
 		if (ioResult.meshes.size() != model.meshes.size()
 			|| ioResult.materials.size() != model.materials.size()
@@ -6888,7 +6909,7 @@ namespace demo
 			std::filesystem::path ktx2Path;
 			const bool loadedKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
 			const bool hasSupportedKtx2Sidecar =
-				loadedKtx2Sidecar && supportsSampledImageFormat(physicalDevice, toNativeFormat(ktxTexture.format));
+				loadedKtx2Sidecar && m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage);
 			if (loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
 			{
 				LOGW("Skipping unsupported KTX2 format %s for %s, falling back to source image upload",

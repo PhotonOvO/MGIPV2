@@ -28,6 +28,7 @@ public:
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
   uint32_t      getRequestedImageCount() const { return m_requestedImageCount; }
+  TextureFormat getFormat() const override;
 
   [[nodiscard]] VkSwapchainKHR nativeSwapchain() const { return m_swapchain; }
   [[nodiscard]] VkImageView    nativeImageView(uint32_t imageIndex) const;

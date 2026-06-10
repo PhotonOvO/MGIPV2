@@ -23,10 +23,6 @@ public:
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
 
-  uint64_t getBackendSwapchainHandle() const override;
-  uint64_t getBackendImageViewHandle(uint32_t imageIndex) const override;
-  uint64_t getBackendImageHandle(uint32_t imageIndex) const override;
-
   // D3D12-native accessors (for backend interop)
   // NOTES: Returns opaque handles to D3D12 objects
   void* swapchain() const { return m_swapchain; }  // IDXGISwapChain3

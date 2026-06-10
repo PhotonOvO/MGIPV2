@@ -324,10 +324,14 @@ namespace demo
 
 		uint32_t getSwapchainImageCount() const { return m_swapchainDependent.swapchain->getRequestedImageCount(); }
 		rhi::TextureHandle getCurrentSwapchainTextureHandle() const;
+		rhi::TextureViewHandle getOrRegisterSwapchainViewHandle(uint32_t idx) const;
 		// Per-image-index registry handles mirroring the swapchain backbuffers into the
 		// device resource table (lazily (re)registered by getCurrentSwapchainTextureHandle).
 		mutable std::vector<rhi::TextureHandle> m_swapchainTextureHandles;
 		mutable std::vector<uint64_t> m_swapchainTextureNatives;
+		// Per-image-index view handle cache for the present pass (lazily registered, cleared on swapchain rebuild).
+		mutable std::vector<rhi::TextureViewHandle> m_swapchainViewHandles;
+		mutable std::vector<uint64_t>               m_swapchainViewNatives;
 		rhi::TextureFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
 		rhi::TextureHandle getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
 
