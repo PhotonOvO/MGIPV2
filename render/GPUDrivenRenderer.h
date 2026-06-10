@@ -597,11 +597,11 @@ namespace demo
 		[[nodiscard]] rhi::Extent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
 		[[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return 0; }
 		[[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return 0; }
-		[[nodiscard]] uint64_t getAORawImageOpaque() const { return reinterpret_cast<uint64_t>(m_aoRaw.image); }
+		[[nodiscard]] uint64_t getAORawImageOpaque() const { return m_aoRawImage.isNull() ? 0ull : 1ull; }
 
 		[[nodiscard]] uint64_t getAODenoisedImageOpaque() const
 		{
-			return reinterpret_cast<uint64_t>(m_aoDenoised.image);
+			return m_aoDenoisedImage.isNull() ? 0ull : 1ull;
 		}
 
 		[[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
@@ -620,7 +620,7 @@ namespace demo
 		}
 
 		[[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return 0; }
-		[[nodiscard]] uint64_t getSSRRawImageOpaque() const { return reinterpret_cast<uint64_t>(m_ssrRaw.image); }
+		[[nodiscard]] uint64_t getSSRRawImageOpaque() const { return m_ssrRawImage.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
 		// Builds the SSR compute set as a per-frame temporary argument table (gbuffer/depth/history
 		// sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
@@ -758,15 +758,15 @@ namespace demo
 
 		[[nodiscard]] uint64_t getShadowAtlasImageOpaque() const
 		{
-			return reinterpret_cast<uint64_t>(m_shadowAtlas.image);
+			return m_shadowAtlasImage.isNull() ? 0ull : 1ull;
 		}
 
 		[[nodiscard]] uint64_t getShadowAtlasViewOpaque() const
 		{
-			return reinterpret_cast<uint64_t>(m_shadowAtlas.view);
+			return m_shadowAtlasView.isNull() ? 0ull : 1ull;
 		}
 
-		[[nodiscard]] rhi::TextureViewHandle getShadowAtlasViewHandle() const { return m_shadowAtlasViewHandle; }
+		[[nodiscard]] rhi::TextureViewHandle getShadowAtlasViewHandle() const { return m_shadowAtlasView; }
 
 		[[nodiscard]] rhi::Extent2D getShadowAtlasExtent() const
 		{
@@ -1293,12 +1293,6 @@ namespace demo
 		rhi::SamplerHandle m_linearClampSamplerHandle{};
 		rhi::SamplerHandle m_iblCubeSamplerHandle{};
 		rhi::SamplerHandle m_iblLutSamplerHandle{};
-		// Adopted (owned=false) RHI view handles for per-frame backend views fed into
-		// the lighting-input set; re-registered when the underlying backend token changes.
-		rhi::TextureViewHandle m_aoViewHandle{};
-		uintptr_t m_aoViewToken{0};
-		rhi::TextureViewHandle m_ssrViewHandle{};
-		uintptr_t m_ssrViewToken{0};
 		std::array<rhi::ArgumentLayoutHandle, 2> m_lightPipelineArgumentLayouts{};
 		PipelineHandle m_pointLightCoarseCullingPipeline{};
 		PipelineHandle m_spotLightCoarseCullingPipeline{};
@@ -1315,12 +1309,6 @@ namespace demo
 		PipelineHandle m_clusteredLightCullingPipeline{};
 		// Wave 9: AO/SSR sets are RHI ArgumentLayouts + owned/temporary ArgumentTables.
 		rhi::ArgumentLayoutHandle m_aoArgumentLayout{};
-		// Adopted (owned=false) view handles for the AO raw / denoised storage images, fed into
-		// the AO ArgumentTables; re-registered when the backend view token changes.
-		rhi::TextureViewHandle m_aoRawViewHandle{};
-		uintptr_t m_aoRawViewToken{0};
-		rhi::TextureViewHandle m_aoDenoisedViewHandle{};
-		uintptr_t m_aoDenoisedViewToken{0};
 		// Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
 		// so the AO/SSR passes record through CommandBuffer verbs instead of raw vkCmd*. AO uses
 		// persistent adopted sets; SSR builds a per-frame temporary bind group from
@@ -1329,14 +1317,17 @@ namespace demo
 		PipelineHandle m_aoDenoisePipelineHandle{};
 		PipelineHandle m_ssrTracePipelineHandle{};
 		rhi::ArgumentLayoutHandle m_ssrLayoutHandle{};
-		rhi::TextureViewHandle m_ssrRawViewHandle{}; // Wave 8: adopted storage-image view for SSR temp ArgumentWrite
-		rhi::TextureViewHandle m_shadowAtlasViewHandle{}; // Wave 9: registry handle for the shadow-atlas depth view
 		std::vector<rhi::ArgumentTableHandle> m_aoArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_aoDenoiseArgumentTables;
-		utils::ImageResource m_aoRaw{};
-		utils::ImageResource m_aoDenoised{};
-		utils::ImageResource m_ssrRaw{};
-		utils::ImageResource m_shadowAtlas{};
+		// Phase-7 compute targets: RHI-owned textures + their sampled/storage views.
+		rhi::TextureHandle m_aoRawImage{};
+		rhi::TextureViewHandle m_aoRawView{};
+		rhi::TextureHandle m_aoDenoisedImage{};
+		rhi::TextureViewHandle m_aoDenoisedView{};
+		rhi::TextureHandle m_ssrRawImage{};
+		rhi::TextureViewHandle m_ssrRawView{};
+		rhi::TextureHandle m_shadowAtlasImage{};
+		rhi::TextureViewHandle m_shadowAtlasView{};
 		rhi::Extent2D m_phase7HalfExtent{};
 		rhi::Extent2D m_shadowAtlasExtent{2048u, 2048u};
 		uint32_t m_shadowAtlasTileSize{512u};

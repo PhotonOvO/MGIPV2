@@ -985,6 +985,8 @@ namespace demo::rhi::vulkan
 				return VK_FORMAT_R16G16_SFLOAT;
 			case TextureFormat::r32Sfloat:
 				return VK_FORMAT_R32_SFLOAT;
+			case TextureFormat::r16Sfloat:
+				return VK_FORMAT_R16_SFLOAT;
 			case TextureFormat::d16Unorm:
 				return VK_FORMAT_D16_UNORM;
 			case TextureFormat::d32Sfloat:

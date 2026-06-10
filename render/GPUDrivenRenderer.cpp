@@ -1024,16 +1024,16 @@ namespace demo
 				.ssrHeight = m_phase7HalfExtent.height,
 				.estimatedMemoryBytes = aoBytes + ssrBytes,
 				.aoEnabled = gpuParams.debugOptions.enableAO,
-				.aoReady = m_aoDenoised.view != VK_NULL_HANDLE && !m_gtaoPipelineHandle.isNull() && !
+				.aoReady = !m_aoDenoisedView.isNull() && !m_gtaoPipelineHandle.isNull() && !
 				m_aoDenoisePipelineHandle.isNull(),
 				.ssrEnabled = gpuParams.debugOptions.enableSSR,
-				.ssrReady = m_ssrRaw.view != VK_NULL_HANDLE && !m_ssrTracePipelineHandle.isNull(),
+				.ssrReady = !m_ssrRawView.isNull() && !m_ssrTracePipelineHandle.isNull(),
 			};
 			const uint32_t shadowAtlasTileSize = std::max(1u, m_shadowAtlasTileSize);
 			const uint32_t shadowAtlasCapacity =
 				(m_shadowAtlasExtent.width / shadowAtlasTileSize) * (m_shadowAtlasExtent.height / shadowAtlasTileSize);
 			CSMShadowResources& shadowAtlasCsm = getCSMShadowResources();
-			const bool shadowAtlasReady = m_shadowAtlas.view != VK_NULL_HANDLE && m_shadowAtlas.image != VK_NULL_HANDLE
+			const bool shadowAtlasReady = !m_shadowAtlasView.isNull() && !m_shadowAtlasImage.isNull()
 				&& !getCSMShadowPipelineHandle().isNull();
 			const bool shadowAtlasHasScene = m_sceneView.usePersistentCullingObjects
 				&& m_sceneView.shadowPackedMeshes != nullptr
@@ -2708,14 +2708,6 @@ namespace demo
 			if (!m_iblCubeSamplerHandle.isNull()) resourceTable->removeSampler(m_iblCubeSamplerHandle);
 			if (!m_iblLutSamplerHandle.isNull()) resourceTable->removeSampler(m_iblLutSamplerHandle);
 		}
-		const auto dropView = [&](rhi::TextureViewHandle& h, uintptr_t& viewToken)
-		{
-			if (!h.isNull()) m_renderer.destroyTextureView(h);
-			h = {};
-			viewToken = 0;
-		};
-		dropView(m_aoViewHandle, m_aoViewToken);
-		dropView(m_ssrViewHandle, m_ssrViewToken);
 		m_lightingInputBufferHandles.clear();
 		m_lightingSceneArgumentTables.clear();
 		m_lightingInputArgumentTables.clear();
@@ -2978,45 +2970,18 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownPhase7Resources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
-		const auto destroyImage = [&](utils::ImageResource& image)
+		const auto destroyTarget = [&](rhi::TextureHandle& image, rhi::TextureViewHandle& view)
 		{
-			if (nativeDevice != VK_NULL_HANDLE && image.view != VK_NULL_HANDLE)
-			{
-				vkDestroyImageView(nativeDevice, image.view, nullptr);
-			}
-			if (allocator != nullptr && image.image != VK_NULL_HANDLE)
-			{
-				vmaDestroyImage(allocator, image.image, image.allocation);
-			}
+			if (!view.isNull()) getRHIDevice().destroyTextureView(view);
+			if (!image.isNull()) getRHIDevice().destroyImage(image);
+			view = {};
 			image = {};
 		};
-		destroyImage(m_aoRaw);
-		destroyImage(m_aoDenoised);
-		if (!m_ssrRawViewHandle.isNull())
-		{
-			m_renderer.destroyTextureView(m_ssrRawViewHandle);
-			m_ssrRawViewHandle = {};
-		}
-		destroyImage(m_ssrRaw);
-		if (!m_shadowAtlasViewHandle.isNull())
-		{
-			m_renderer.destroyTextureView(m_shadowAtlasViewHandle);
-			m_shadowAtlasViewHandle = {};
-		}
-		destroyImage(m_shadowAtlas);
+		destroyTarget(m_aoRawImage, m_aoRawView);
+		destroyTarget(m_aoDenoisedImage, m_aoDenoisedView);
+		destroyTarget(m_ssrRawImage, m_ssrRawView);
+		destroyTarget(m_shadowAtlasImage, m_shadowAtlasView);
 
-		(void)nativeDevice;
-		// Drop the adopted AO storage-image view handles (owned=false RHI mirrors).
-		const auto dropView = [&](rhi::TextureViewHandle& h, uintptr_t& viewToken)
-		{
-			if (!h.isNull()) m_renderer.destroyTextureView(h);
-			h = {};
-			viewToken = 0;
-		};
-		dropView(m_aoRawViewHandle, m_aoRawViewToken);
-		dropView(m_aoDenoisedViewHandle, m_aoDenoisedViewToken);
 		// Owned ArgumentTables + layouts are freed by RenderDevice::destroyArgumentTablesAndLayouts at device
 		// shutdown; just drop our handle references here.
 		m_aoArgumentTables.clear();
@@ -3028,9 +2993,7 @@ namespace demo
 
 	void GPUDrivenRenderer::resizePhase7Resources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
-		if (nativeDevice == VK_NULL_HANDLE || allocator == nullptr)
+		if (getBackendDeviceToken() == 0)
 		{
 			return;
 		}
@@ -3040,84 +3003,53 @@ namespace demo
 			std::max(1u, (sceneExtent.height + 1u) / 2u)
 		};
 		if (m_phase7HalfExtent.width == halfExtent.width && m_phase7HalfExtent.height == halfExtent.height
-			&& m_aoRaw.image != VK_NULL_HANDLE && m_aoDenoised.image != VK_NULL_HANDLE && m_ssrRaw.image !=
-			VK_NULL_HANDLE
-			&& m_shadowAtlas.image != VK_NULL_HANDLE)
+			&& !m_aoRawImage.isNull() && !m_aoDenoisedImage.isNull() && !m_ssrRawImage.isNull()
+			&& !m_shadowAtlasImage.isNull())
 		{
 			return;
 		}
 		waitForIdle();
-		const auto destroyOnlyImage = [&](utils::ImageResource& image)
+		const auto destroyTarget = [&](rhi::TextureHandle& image, rhi::TextureViewHandle& view)
 		{
-			if (image.view != VK_NULL_HANDLE)
-			{
-				vkDestroyImageView(nativeDevice, image.view, nullptr);
-			}
-			if (image.image != VK_NULL_HANDLE)
-			{
-				vmaDestroyImage(allocator, image.image, image.allocation);
-			}
+			if (!view.isNull()) getRHIDevice().destroyTextureView(view);
+			if (!image.isNull()) getRHIDevice().destroyImage(image);
+			view = {};
 			image = {};
 		};
-		destroyOnlyImage(m_aoRaw);
-		destroyOnlyImage(m_aoDenoised);
-		if (!m_ssrRawViewHandle.isNull())
-		{
-			m_renderer.destroyTextureView(m_ssrRawViewHandle); // adopted view: unregister only, native freed below
-			m_ssrRawViewHandle = {};
-		}
-		destroyOnlyImage(m_ssrRaw);
-		if (!m_shadowAtlasViewHandle.isNull())
-		{
-			m_renderer.destroyTextureView(m_shadowAtlasViewHandle); // adopted view: unregister only, native freed below
-			m_shadowAtlasViewHandle = {};
-		}
-		destroyOnlyImage(m_shadowAtlas);
+		destroyTarget(m_aoRawImage, m_aoRawView);
+		destroyTarget(m_aoDenoisedImage, m_aoDenoisedView);
+		destroyTarget(m_ssrRawImage, m_ssrRawView);
+		destroyTarget(m_shadowAtlasImage, m_shadowAtlasView);
 		m_phase7HalfExtent = halfExtent;
 
-		const auto createImageResource = [&](VkFormat format, rhi::Extent2D extent, VkImageUsageFlags usage,
-		                                     VkImageAspectFlags aspect)
+		const auto createImageResource = [&](rhi::TextureFormat format, rhi::Extent2D extent,
+		                                     rhi::TextureUsageFlags usage, rhi::TextureAspect aspect,
+		                                     rhi::TextureHandle& outImage, rhi::TextureViewHandle& outView)
 		{
-			const VkImageCreateInfo imageInfo{
-				.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-				.imageType = VK_IMAGE_TYPE_2D,
+			outImage = getRHIDevice().createTexture(rhi::TextureDesc{
+				.dimension = rhi::TextureDimension::e2D,
 				.format = format,
+				.usage = usage,
 				.extent = {extent.width, extent.height, 1},
 				.mipLevels = 1,
 				.arrayLayers = 1,
-				.samples = VK_SAMPLE_COUNT_1_BIT,
-				.tiling = VK_IMAGE_TILING_OPTIMAL,
-				.usage = usage,
-				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-				.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			};
-			const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-			utils::ImageResource resource{};
-			VK_CHECK(vmaCreateImage(allocator, &imageInfo, &allocInfo, &resource.image, &resource.allocation, nullptr));
-			const VkImageViewCreateInfo viewInfo{
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = resource.image,
-				.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			});
+			outView = getRHIDevice().createTextureView(rhi::TextureViewCreateDesc{
+				.image = outImage,
 				.format = format,
-				.subresourceRange = {
-					.aspectMask = aspect, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1
-				},
-			};
-			VK_CHECK(vkCreateImageView(nativeDevice, &viewInfo, nullptr, &resource.view));
-			resource.layout = VK_IMAGE_LAYOUT_GENERAL;
-			resource.extent = toVkExtent(extent);
+				.viewType = rhi::ImageViewType::e2D,
+				.aspect = aspect,
+				.levelCount = 1,
+				.layerCount = 1,
+			});
 			executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 			{
-				rhi::TextureHandle imageHandle = getRHIDevice().registerExternalTexture(
-					reinterpret_cast<uint64_t>(resource.image));
 				const rhi::TextureBarrier barrier{
-					.texture = imageHandle,
+					.texture = outImage,
 					.before = rhi::ResourceState::Undefined,
 					.after = rhi::ResourceState::General,
 					.range = {
-						.aspect = aspect == VK_IMAGE_ASPECT_DEPTH_BIT
-							          ? rhi::TextureAspect::depth
-							          : rhi::TextureAspect::color,
+						.aspect = aspect,
 						.baseMipLevel = 0,
 						.levelCount = 1,
 						.baseArrayLayer = 0,
@@ -3125,42 +3057,36 @@ namespace demo
 					},
 				};
 				cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
-				getRHIDevice().destroyImage(imageHandle);
 			});
-			return resource;
 		};
 
-		m_aoRaw = createImageResource(kGPUDrivenAOFormat, halfExtent,
-		                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-		                              VK_IMAGE_ASPECT_COLOR_BIT);
-		m_aoDenoised = createImageResource(kGPUDrivenAOFormat, halfExtent,
-		                                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-		                                   VK_IMAGE_ASPECT_COLOR_BIT);
-		m_ssrRaw = createImageResource(kGPUDrivenSSRFormat, halfExtent,
-		                               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-		                               VK_IMAGE_ASPECT_COLOR_BIT);
-		m_ssrRawViewHandle = m_renderer.registerExternalTextureView(reinterpret_cast<uint64_t>(m_ssrRaw.view));
-		m_shadowAtlas = createImageResource(kGPUDrivenShadowAtlasFormat,
-		                                    m_shadowAtlasExtent,
-		                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-		                                    VK_IMAGE_ASPECT_DEPTH_BIT);
-		m_shadowAtlasViewHandle = m_renderer.
-			registerExternalTextureView(reinterpret_cast<uint64_t>(m_shadowAtlas.view));
+		constexpr rhi::TextureUsageFlags kStorageColorUsage =
+			rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::storage;
+		createImageResource(rhi::TextureFormat::r16Sfloat, halfExtent, kStorageColorUsage,
+		                    rhi::TextureAspect::color, m_aoRawImage, m_aoRawView);
+		createImageResource(rhi::TextureFormat::r16Sfloat, halfExtent, kStorageColorUsage,
+		                    rhi::TextureAspect::color, m_aoDenoisedImage, m_aoDenoisedView);
+		createImageResource(rhi::TextureFormat::rgba16Sfloat, halfExtent, kStorageColorUsage,
+		                    rhi::TextureAspect::color, m_ssrRawImage, m_ssrRawView);
+		createImageResource(rhi::TextureFormat::d32Sfloat, m_shadowAtlasExtent,
+		                    rhi::TextureUsageFlags::depthAttachment | rhi::TextureUsageFlags::sampled,
+		                    rhi::TextureAspect::depth, m_shadowAtlasImage, m_shadowAtlasView);
 	}
 
 	void GPUDrivenRenderer::bindPhase7PassResources()
 	{
-		if (m_shadowAtlas.image == VK_NULL_HANDLE)
+		if (m_shadowAtlasImage.isNull())
 		{
 			return;
 		}
 
 		m_passExecutor.bindTexture({
 			.handle = kPassGPUDrivenShadowAtlasHandle,
-			.backendImageToken = reinterpret_cast<uint64_t>(m_shadowAtlas.image),
+			.backendImageToken = resolveNativeTexture(getRHIDevice(), m_shadowAtlasImage),
 			.aspect = rhi::TextureAspect::depth,
 			.initialState = rhi::ResourceState::Undefined,
 			.isSwapchain = false,
+			.rhiTexture = m_shadowAtlasImage,
 		});
 	}
 
@@ -3233,27 +3159,13 @@ namespace demo
 		}
 		const GPUDrivenSceneView& sceneView = m_sceneView;
 		if (sceneView.sceneDepthView.isNull() || sceneView.gbufferViews[1].isNull()
-			|| m_aoRaw.view == VK_NULL_HANDLE || m_aoDenoised.view == VK_NULL_HANDLE)
+			|| m_aoRawView.isNull() || m_aoDenoisedView.isNull())
 		{
 			return;
 		}
 
-		const auto adoptViewToken = [&](uintptr_t viewToken, rhi::TextureViewHandle& cachedHandle,
-		                                uintptr_t& cachedToken)
-		{
-			if (viewToken != cachedToken)
-			{
-				if (!cachedHandle.isNull()) m_renderer.destroyTextureView(cachedHandle);
-				cachedHandle = m_renderer.registerExternalTextureView(static_cast<uint64_t>(viewToken));
-				cachedToken = viewToken;
-			}
-			return cachedHandle;
-		};
-		const rhi::TextureViewHandle aoRawView =
-			adoptViewToken(reinterpret_cast<uintptr_t>(m_aoRaw.view), m_aoRawViewHandle, m_aoRawViewToken);
-		const rhi::TextureViewHandle aoDenoisedView =
-			adoptViewToken(reinterpret_cast<uintptr_t>(m_aoDenoised.view), m_aoDenoisedViewHandle,
-			               m_aoDenoisedViewToken);
+		const rhi::TextureViewHandle aoRawView = m_aoRawView;
+		const rhi::TextureViewHandle aoDenoisedView = m_aoDenoisedView;
 
 		// AO trace set: depth + normals sampled, aoRaw storage out.
 		const std::array<rhi::ArgumentWrite, 3> aoWrites{
@@ -3303,7 +3215,7 @@ namespace demo
 			                                           : sceneView.sceneColorHdrView;
 		if (historyView.isNull() || sceneView.sceneDepthView.isNull()
 			|| sceneView.gbufferViews[0].isNull() || sceneView.gbufferViews[1].isNull()
-			|| m_ssrRawViewHandle.isNull())
+			|| m_ssrRawView.isNull())
 		{
 			return rhi::ArgumentTableHandle{};
 		}
@@ -3327,7 +3239,7 @@ namespace demo
 					.binding = 3, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.gbufferViews[0]
 				},
 				rhi::ArgumentWrite{
-					.binding = 4, .type = rhi::ArgumentType::storageTexture, .textureView = m_ssrRawViewHandle
+					.binding = 4, .type = rhi::ArgumentType::storageTexture, .textureView = m_ssrRawView
 				},
 				rhi::ArgumentWrite{
 					.binding = 5, .type = rhi::ArgumentType::uniformBuffer, .buffer = cameraBufferHandle,
@@ -3431,8 +3343,8 @@ namespace demo
 			glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode),
 			          m_iblResources.isSplitSumReady() ? 1.0f : 0.0f, 0.0f, 0.0f);
 		lightingUniforms.light.phase7Info =
-			glm::vec4(params.debugOptions.enableAO && m_aoDenoised.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
-			          params.debugOptions.enableSSR && m_ssrRaw.view != VK_NULL_HANDLE ? 1.0f : 0.0f,
+			glm::vec4(params.debugOptions.enableAO && !m_aoDenoisedView.isNull() ? 1.0f : 0.0f,
+			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() ? 1.0f : 0.0f,
 			          0.0f,
 			          0.0f);
 
@@ -3497,27 +3409,6 @@ namespace demo
 			}
 		}
 
-		// Adopt a per-frame backend view token as an owned=false RHI view handle, re-registering
-		// only when the underlying backend token changes (resize / resource swap).
-		const auto adoptViewToken = [&](uintptr_t viewToken, rhi::TextureViewHandle& cachedHandle,
-		                                uintptr_t& cachedToken,
-		                                rhi::TextureViewHandle fallback) -> rhi::TextureViewHandle
-		{
-			if (viewToken == 0)
-			{
-				return fallback;
-			}
-			if (viewToken != cachedToken)
-			{
-				if (!cachedHandle.isNull())
-				{
-					m_renderer.destroyTextureView(cachedHandle);
-				}
-				cachedHandle = m_renderer.registerExternalTextureView(static_cast<uint64_t>(viewToken));
-				cachedToken = viewToken;
-			}
-			return cachedHandle;
-		};
 		const auto viewOr = [](rhi::TextureViewHandle h, rhi::TextureViewHandle fb) { return h.isNull() ? fb : h; };
 
 		const rhi::TextureViewHandle fallbackColor = sceneView.gbufferViews[0];
@@ -3546,11 +3437,8 @@ namespace demo
 		texViews[kGPUDrivenLightPassHistoryReadIndex] = viewOr(sceneView.sceneColorHistoryReadView, fallbackColor);
 		texViews[kGPUDrivenLightPassHistoryWriteIndex] = viewOr(sceneView.sceneColorHistoryWriteView, fallbackColor);
 		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
-		texViews[kGPUDrivenLightPassAOIndex] =
-			adoptViewToken(reinterpret_cast<uintptr_t>(m_aoDenoised.view), m_aoViewHandle, m_aoViewToken,
-			               fallbackDepth);
-		texViews[kGPUDrivenLightPassSSRIndex] =
-			adoptViewToken(reinterpret_cast<uintptr_t>(m_ssrRaw.view), m_ssrViewHandle, m_ssrViewToken, fallbackColor);
+		texViews[kGPUDrivenLightPassAOIndex] = viewOr(m_aoDenoisedView, fallbackDepth);
+		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrRawView, fallbackColor);
 
 		const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 

@@ -22,6 +22,8 @@ namespace demo
 			return rhi::TextureFormat::rg16Sfloat;
 		case VK_FORMAT_R32_SFLOAT:
 			return rhi::TextureFormat::r32Sfloat;
+		case VK_FORMAT_R16_SFLOAT:
+			return rhi::TextureFormat::r16Sfloat;
 		case VK_FORMAT_D16_UNORM:
 			return rhi::TextureFormat::d16Unorm;
 		case VK_FORMAT_D32_SFLOAT:
@@ -55,6 +57,7 @@ namespace demo
 		case rhi::TextureFormat::rgba16Sfloat: return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case rhi::TextureFormat::rg16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
 		case rhi::TextureFormat::r32Sfloat: return VK_FORMAT_R32_SFLOAT;
+		case rhi::TextureFormat::r16Sfloat: return VK_FORMAT_R16_SFLOAT;
 		case rhi::TextureFormat::d16Unorm: return VK_FORMAT_D16_UNORM;
 		case rhi::TextureFormat::d32Sfloat: return VK_FORMAT_D32_SFLOAT;
 		case rhi::TextureFormat::d24UnormS8: return VK_FORMAT_D24_UNORM_S8_UINT;
