@@ -33,7 +33,7 @@ namespace demo
 
 		GPUMeshletBuffer::BufferRecord createBuffer(VkDevice device,
 		                                            VmaAllocator allocator,
-		                                            VkDeviceSize size,
+		                                            uint64_t size,
 		                                            VkBufferUsageFlags2KHR usage,
 		                                            VmaMemoryUsage memoryUsage,
 		                                            VmaAllocationCreateFlags flags)
@@ -139,10 +139,10 @@ namespace demo
 		const uint32_t meshletUploadCount = newMeshletCount - meshletStart;
 		if (meshletUploadCount > 0)
 		{
-			const VkDeviceSize meshletOffsetBytes =
-				sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(meshletStart);
-			const VkDeviceSize meshletUploadBytes =
-				sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(meshletUploadCount);
+			const uint64_t meshletOffsetBytes =
+				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletStart);
+			const uint64_t meshletUploadBytes =
+				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletUploadCount);
 			std::memcpy(static_cast<std::byte*>(m_meshletDataBuffer.mapped) + meshletOffsetBytes,
 			            meshlets.data() + meshletStart,
 			            static_cast<size_t>(meshletUploadBytes));
@@ -155,9 +155,9 @@ namespace demo
 		{
 			const uint32_t cullObjectUploadCount = std::min(newMeshletCount,
 			                                                static_cast<uint32_t>(meshletCullObjects.size()));
-			const VkDeviceSize cullObjectOffsetBytes = 0;
-			const VkDeviceSize cullObjectUploadBytes =
-				sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(cullObjectUploadCount);
+			const uint64_t cullObjectOffsetBytes = 0;
+			const uint64_t cullObjectUploadBytes =
+				sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(cullObjectUploadCount);
 			std::memcpy(static_cast<std::byte*>(m_meshletCullObjectBuffer.mapped),
 			            meshletCullObjects.data(),
 			            static_cast<size_t>(cullObjectUploadBytes));
@@ -171,8 +171,8 @@ namespace demo
 		const uint32_t indexUploadCount = newIndexCount - indexStart;
 		if (indexUploadCount > 0)
 		{
-			const VkDeviceSize indexOffsetBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(indexStart);
-			const VkDeviceSize indexUploadBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(indexUploadCount);
+			const uint64_t indexOffsetBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexStart);
+			const uint64_t indexUploadBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexUploadCount);
 			std::memcpy(static_cast<std::byte*>(m_meshletIndexBuffer.mapped) + indexOffsetBytes,
 			            meshletIndices.data() + indexStart,
 			            static_cast<size_t>(indexUploadBytes));
@@ -189,15 +189,15 @@ namespace demo
 			destroyBuffer(m_meshletDataBuffer);
 			destroyBuffer(m_meshletCullObjectBuffer);
 			m_meshletCapacity = std::max(requiredMeshletCount, std::max(64u, m_meshletCapacity * 2u));
-			const VkDeviceSize meshletBytes = sizeof(shaderio::Meshlet) * static_cast<VkDeviceSize>(m_meshletCapacity);
+			const uint64_t meshletBytes = sizeof(shaderio::Meshlet) * static_cast<uint64_t>(m_meshletCapacity);
 			m_meshletDataBuffer = createBuffer(toVkDevice(m_device),
 			                                   toVmaAllocator(m_allocator),
 			                                   meshletBytes,
 			                                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
 			                                   VMA_MEMORY_USAGE_CPU_TO_GPU,
 			                                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-			const VkDeviceSize cullObjectBytes =
-				sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(m_meshletCapacity);
+			const uint64_t cullObjectBytes =
+				sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(m_meshletCapacity);
 			m_meshletCullObjectBuffer = createBuffer(toVkDevice(m_device),
 			                                         toVmaAllocator(m_allocator),
 			                                         cullObjectBytes,
@@ -210,7 +210,7 @@ namespace demo
 		{
 			destroyBuffer(m_meshletIndexBuffer);
 			m_meshletIndexCapacity = std::max(requiredIndexCount, std::max(128u, m_meshletIndexCapacity * 2u));
-			const VkDeviceSize indexBytes = sizeof(uint32_t) * static_cast<VkDeviceSize>(m_meshletIndexCapacity);
+			const uint64_t indexBytes = sizeof(uint32_t) * static_cast<uint64_t>(m_meshletIndexCapacity);
 			m_meshletIndexBuffer = createBuffer(toVkDevice(m_device),
 			                                    toVmaAllocator(m_allocator),
 			                                    indexBytes,

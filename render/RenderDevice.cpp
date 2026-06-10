@@ -189,17 +189,17 @@ namespace demo
 			return nullptr;
 		}
 
-		[[nodiscard]] VkDeviceSize rawImageUploadBytes(const GltfModel& model, const GltfImageData& imageData)
+		[[nodiscard]] uint64_t rawImageUploadBytes(const GltfModel& model, const GltfImageData& imageData)
 		{
 			const GltfImageData* rawImage = findRawImageFallback(model, imageData);
-			return rawImage != nullptr ? static_cast<VkDeviceSize>(rawImage->pixels.size()) : 0;
+			return rawImage != nullptr ? static_cast<uint64_t>(rawImage->pixels.size()) : 0;
 		}
 
-		[[nodiscard]] VkDeviceSize computeSelectedBatchUploadSize(const GltfModel& model,
-		                                                          std::span<const uint32_t> textureIndices,
-		                                                          std::span<const uint32_t> meshIndices)
+		[[nodiscard]] uint64_t computeSelectedBatchUploadSize(const GltfModel& model,
+		                                                      std::span<const uint32_t> textureIndices,
+		                                                      std::span<const uint32_t> meshIndices)
 		{
-			VkDeviceSize totalSize = 0;
+			uint64_t totalSize = 0;
 			Ktx2Loader ktx2Loader;
 
 			for (const uint32_t textureIndex : textureIndices)
@@ -215,7 +215,7 @@ namespace demo
 
 				if (hasKtx2Sidecar)
 				{
-					totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
+					totalSize += std::max(static_cast<uint64_t>(ktxTexture.data.size()),
 					                      rawImageUploadBytes(model, imageData));
 					totalSize += 16; // alignment padding for KTX allocations
 				}
@@ -239,19 +239,19 @@ namespace demo
 					continue;
 				}
 
-				const VkDeviceSize vertexCount = static_cast<VkDeviceSize>(meshData.positions.size() / 3);
+				const uint64_t vertexCount = static_cast<uint64_t>(meshData.positions.size() / 3);
 				totalSize += vertexCount * 48ull;
-				totalSize += static_cast<VkDeviceSize>(meshData.indices.size()) * sizeof(uint32_t);
+				totalSize += static_cast<uint64_t>(meshData.indices.size()) * sizeof(uint32_t);
 				totalSize += 8; // alignment padding for vertex (alignof(float)) + index (alignof(uint32_t)) allocations
 			}
 
 			return totalSize;
 		}
 
-		[[nodiscard]] VkDeviceSize computeSelectedTextureUploadSize(const GltfModel& model,
-		                                                            std::span<const uint32_t> textureIndices)
+		[[nodiscard]] uint64_t computeSelectedTextureUploadSize(const GltfModel& model,
+		                                                        std::span<const uint32_t> textureIndices)
 		{
-			VkDeviceSize totalSize = 0;
+			uint64_t totalSize = 0;
 			Ktx2Loader ktx2Loader;
 
 			for (const uint32_t textureIndex : textureIndices)
@@ -267,7 +267,7 @@ namespace demo
 
 				if (hasKtx2Sidecar)
 				{
-					totalSize += std::max(static_cast<VkDeviceSize>(ktxTexture.data.size()),
+					totalSize += std::max(static_cast<uint64_t>(ktxTexture.data.size()),
 					                      rawImageUploadBytes(model, imageData));
 					totalSize += 16;
 				}
@@ -281,10 +281,10 @@ namespace demo
 			return totalSize;
 		}
 
-		[[nodiscard]] VkDeviceSize computeSelectedMeshUploadSize(const GltfModel& model,
-		                                                         std::span<const uint32_t> meshIndices)
+		[[nodiscard]] uint64_t computeSelectedMeshUploadSize(const GltfModel& model,
+		                                                     std::span<const uint32_t> meshIndices)
 		{
-			VkDeviceSize totalSize = 0;
+			uint64_t totalSize = 0;
 
 			for (const uint32_t meshIndex : meshIndices)
 			{
@@ -299,9 +299,9 @@ namespace demo
 					continue;
 				}
 
-				const VkDeviceSize vertexCount = static_cast<VkDeviceSize>(meshData.positions.size() / 3);
+				const uint64_t vertexCount = static_cast<uint64_t>(meshData.positions.size() / 3);
 				totalSize += vertexCount * 48ull;
-				totalSize += static_cast<VkDeviceSize>(meshData.indices.size()) * sizeof(uint32_t);
+				totalSize += static_cast<uint64_t>(meshData.indices.size()) * sizeof(uint32_t);
 				totalSize += 8;
 			}
 
@@ -634,7 +634,7 @@ namespace demo
 
 	static utils::Buffer createBuffer(const VkDevice device,
 	                                  const VmaAllocator allocator,
-	                                  const VkDeviceSize size,
+	                                  const uint64_t size,
 	                                  const VkBufferUsageFlags2KHR usage,
 	                                  const VmaMemoryUsage memoryUsage = VMA_MEMORY_USAGE_AUTO,
 	                                  VmaAllocationCreateFlags flags = {},
@@ -715,12 +715,12 @@ namespace demo
 	}
 
 	static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data,
-	                                   const VkDeviceSize size);
+	                                   const uint64_t size);
 	static void writeHostVisibleBufferRange(const VmaAllocator allocator,
 	                                        utils::Buffer& buffer,
-	                                        VkDeviceSize offset,
+	                                        uint64_t offset,
 	                                        const void* data,
-	                                        VkDeviceSize size);
+	                                        uint64_t size);
 
 	static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer)
 	{
@@ -802,7 +802,7 @@ namespace demo
 		utils::Buffer nativeBuffer{};
 		const VkBufferCreateInfo bufferInfo{
 			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<VkDeviceSize>(data.size_bytes()),
+			.size = static_cast<uint64_t>(data.size_bytes()),
 			.usage = static_cast<VkBufferUsageFlags>(static_cast<VkBufferUsageFlags2KHR>(usage) |
 				VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR),
 		};
@@ -870,7 +870,7 @@ namespace demo
 		};
 		reflection.pushConstantSize = sizeof(shaderio::PushConstant);
 		reflection.specializationConstants = {
-			rhi::SpecializationConstant{0, 0, sizeof(VkBool32)},
+			rhi::SpecializationConstant{0, 0, sizeof(uint32_t)},
 		};
 		return reflection;
 	}
@@ -4614,8 +4614,8 @@ namespace demo
 		};
 
 		// Specialization constants for useTexture (constant_id = 0)
-		// Textured variant: useTexture = true (must be VkBool32 = uint32_t = 4 bytes)
-		uint32_t useTextureTrue = VK_TRUE;
+		// Textured variant: useTexture = true (uint32_t = 4 bytes; Specialization constant)
+		uint32_t useTextureTrue = uint32_t{1};
 		rhi::SpecializationConstant specConstantTrue(0, 0, sizeof(uint32_t));
 		rhi::SpecializationData specDataTrue{&useTextureTrue, sizeof(uint32_t)};
 		shaderStages[1].specializationData = specDataTrue;
@@ -4660,8 +4660,8 @@ namespace demo
 
 		graphicsDesc.specializationVariant = 0;
 		shaderStages[1].specializationVariant = 0;
-		// Non-textured variant: useTexture = false (must be VkBool32 = uint32_t = 4 bytes)
-		uint32_t useTextureFalse = VK_FALSE;
+		// Non-textured variant: useTexture = false (uint32_t = 4 bytes; Specialization constant)
+		uint32_t useTextureFalse = uint32_t{0};
 		rhi::SpecializationConstant specConstantFalse(0, 0, sizeof(uint32_t));
 		rhi::SpecializationData specDataFalse{&useTextureFalse, sizeof(uint32_t)};
 		shaderStages[1].specializationData = specDataFalse;
@@ -4893,7 +4893,7 @@ namespace demo
 			std::array<rhi::PipelineShaderStageDesc, 2> depthShaderStages = depthStages;
 			depthDesc.shaderStages = depthShaderStages.data();
 
-			uint32_t alphaTestFalse = VK_FALSE;
+			uint32_t alphaTestFalse = uint32_t{0};
 			rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
 			depthShaderStages[1].specializationData = specDataFalse;
 			depthShaderStages[1].specializationConstants = &specConstantAlphaTest;
@@ -4902,7 +4902,7 @@ namespace demo
 			depthDesc.specializationVariant = 10;
 			m_depthPrepassOpaquePipeline = m_device.device->createGraphicsPipeline(depthDesc);
 
-			uint32_t alphaTestTrue = VK_TRUE;
+			uint32_t alphaTestTrue = uint32_t{1};
 			rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
 			depthShaderStages[1].specializationData = specDataTrue;
 			depthDesc.specializationVariant = 11;
@@ -4993,7 +4993,7 @@ namespace demo
 				}
 			};
 
-			// Specialization constant for alpha test (must be VkBool32 = uint32_t = 4 bytes)
+			// Specialization constant for alpha test (uint32_t = 4 bytes)
 			rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
 
 			std::array<rhi::PipelineShaderStageDesc, 2> gbufferShaderStages{
@@ -5054,7 +5054,7 @@ namespace demo
 			gbufferGraphicsDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
 			// Variant 0: Opaque (alphaTestEnabled = false)
-			uint32_t alphaTestFalse = VK_FALSE;
+			uint32_t alphaTestFalse = uint32_t{0};
 			rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
 			gbufferShaderStages[1].specializationData = specDataFalse;
 			gbufferShaderStages[1].specializationConstants = &specConstantAlphaTest;
@@ -5064,7 +5064,7 @@ namespace demo
 			m_gbufferOpaquePipeline = m_device.device->createGraphicsPipeline(gbufferGraphicsDesc);
 
 			// Variant 1: AlphaTest (alphaTestEnabled = true)
-			uint32_t alphaTestTrue = VK_TRUE;
+			uint32_t alphaTestTrue = uint32_t{1};
 			rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
 			gbufferShaderStages[1].specializationData = specDataTrue;
 			gbufferGraphicsDesc.specializationVariant = 4; // GBuffer AlphaTest variant
@@ -5493,7 +5493,7 @@ namespace demo
 	// now goes through VulkanDevice::m_argumentPool (ArgumentTable backend lazy-created pool).
 
 	static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data,
-	                                   const VkDeviceSize size)
+	                                   const uint64_t size)
 	{
 		if (buffer.allocation == nullptr || data == nullptr || size == 0)
 		{
@@ -5519,9 +5519,9 @@ namespace demo
 
 	static void writeHostVisibleBufferRange(const VmaAllocator allocator,
 	                                        utils::Buffer& buffer,
-	                                        const VkDeviceSize offset,
+	                                        const uint64_t offset,
 	                                        const void* data,
-	                                        const VkDeviceSize size)
+	                                        const uint64_t size)
 	{
 		if (buffer.allocation == nullptr || data == nullptr || size == 0)
 		{
@@ -6298,9 +6298,9 @@ namespace demo
 
 		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 
-		VkDeviceSize estimatedTextureUploadBytes = 0;
-		VkDeviceSize estimatedVertexUploadBytes = 0;
-		VkDeviceSize estimatedIndexUploadBytes = 0;
+		uint64_t estimatedTextureUploadBytes = 0;
+		uint64_t estimatedVertexUploadBytes = 0;
+		uint64_t estimatedIndexUploadBytes = 0;
 		for (const TextureUploadPlan& texturePlan : plan.textures)
 		{
 			estimatedTextureUploadBytes += texturePlan.payloadByteSize;
@@ -6825,9 +6825,9 @@ namespace demo
 		}
 
 		BatchUploadContext textureBatchUpload;
-		const VkDeviceSize estimatedTextureUploadBytes = computeSelectedTextureUploadSize(model, textureIndices);
-		const VkDeviceSize estimatedMeshUploadBytes = computeSelectedMeshUploadSize(model, meshIndices);
-		const VkDeviceSize estimatedBatchUploadBytes = estimatedTextureUploadBytes + estimatedMeshUploadBytes;
+		const uint64_t estimatedTextureUploadBytes = computeSelectedTextureUploadSize(model, textureIndices);
+		const uint64_t estimatedMeshUploadBytes = computeSelectedMeshUploadSize(model, meshIndices);
+		const uint64_t estimatedBatchUploadBytes = estimatedTextureUploadBytes + estimatedMeshUploadBytes;
 		const TextureUploadDiagnostics textureDiagnostics = gatherTextureUploadDiagnostics(model, textureIndices);
 		LOGI(
 			"glTF upload batch: textures=%zu materials=%zu meshes=%zu textureBytes=%llu meshBytes=%llu totalBytes=%llu mipGenTextures=%u maxTexture=%ux%u",
@@ -6876,8 +6876,8 @@ namespace demo
 		BatchUploadContext meshBatchUpload;
 		meshBatchUpload.init(*m_device.device, static_cast<uint64_t>(estimatedMeshUploadBytes));
 
-		VkDeviceSize selectedVertexBytes = 0;
-		VkDeviceSize selectedIndexBytes = 0;
+		uint64_t selectedVertexBytes = 0;
+		uint64_t selectedIndexBytes = 0;
 		for (const uint32_t meshIndex : meshIndices)
 		{
 			if (meshIndex >= model.meshes.size() || !ioResult.meshes[meshIndex].isNull())
@@ -6886,8 +6886,8 @@ namespace demo
 			}
 
 			const GltfMeshData& meshData = model.meshes[meshIndex];
-			selectedVertexBytes += static_cast<VkDeviceSize>(meshData.positions.size() / 3u) * 48ull;
-			selectedIndexBytes += static_cast<VkDeviceSize>(meshData.indices.size()) * sizeof(uint32_t);
+			selectedVertexBytes += static_cast<uint64_t>(meshData.positions.size() / 3u) * 48ull;
+			selectedIndexBytes += static_cast<uint64_t>(meshData.indices.size()) * sizeof(uint32_t);
 		}
 		m_meshPool.reserve(selectedVertexBytes, selectedIndexBytes, cmd);
 
@@ -7907,7 +7907,7 @@ namespace demo
 
 		writeHostVisibleBufferRange(m_device.allocator,
 		                            frameUserData.mdiDrawDataBuffer,
-		                            static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),
 		                            sizeof(shaderio::DrawUniforms) * drawData.size());
 	}
@@ -7948,7 +7948,7 @@ namespace demo
 
 		writeHostVisibleBufferRange(m_device.allocator,
 		                            frameUserData.gbufferMdiDrawDataBuffer,
-		                            static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),
 		                            sizeof(shaderio::DrawUniforms) * drawData.size());
 	}
@@ -7989,7 +7989,7 @@ namespace demo
 
 		writeHostVisibleBufferRange(m_device.allocator,
 		                            frameUserData.depthMdiDrawDataBuffer,
-		                            static_cast<VkDeviceSize>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
+		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),
 		                            sizeof(shaderio::DrawUniforms) * drawData.size());
 	}

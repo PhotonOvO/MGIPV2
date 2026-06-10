@@ -34,7 +34,7 @@ namespace demo
 
 		GPUSceneRegistry::BufferRecord createBuffer(VkDevice device,
 		                                            VmaAllocator allocator,
-		                                            VkDeviceSize size,
+		                                            uint64_t size,
 		                                            VkBufferUsageFlags2KHR usage,
 		                                            VmaMemoryUsage memoryUsage,
 		                                            VmaAllocationCreateFlags flags)
@@ -91,7 +91,7 @@ namespace demo
 		{
 			for (const GPUSceneRegistry::DirtyRange& range : ranges)
 			{
-				const VkDeviceSize byteCount = sizeof(T) * static_cast<VkDeviceSize>(range.count);
+				const uint64_t byteCount = sizeof(T) * static_cast<uint64_t>(range.count);
 				std::memcpy(stagingBuffer.mapped,
 				            source.data() + range.startIndex,
 				            static_cast<size_t>(byteCount));
@@ -100,7 +100,7 @@ namespace demo
 				copy.copyBuffer(stagingBufferHandle,
 				                0,
 				                destinationBuffer,
-				                sizeof(T) * static_cast<VkDeviceSize>(range.startIndex),
+				                sizeof(T) * static_cast<uint64_t>(range.startIndex),
 				                byteCount);
 			}
 		}
@@ -248,8 +248,8 @@ namespace demo
 
 		ensureCapacity(objectCount);
 		bindBufferHandles();
-		const VkDeviceSize sceneBytes = sizeof(shaderio::GPUSceneObject) * static_cast<VkDeviceSize>(objectCount);
-		const VkDeviceSize cullBytes = sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(objectCount);
+		const uint64_t sceneBytes = sizeof(shaderio::GPUSceneObject) * static_cast<uint64_t>(objectCount);
+		const uint64_t cullBytes = sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(objectCount);
 		rhi::ComputeEncoder* copy = cmd.beginComputePass();
 		if (m_requiresFullUpload)
 		{
@@ -308,13 +308,13 @@ namespace demo
 
 		m_objectBuffer = createBuffer(toVkDevice(m_device),
 		                              toVmaAllocator(m_allocator),
-		                              sizeof(shaderio::GPUSceneObject) * static_cast<VkDeviceSize>(newCapacity),
+		                              sizeof(shaderio::GPUSceneObject) * static_cast<uint64_t>(newCapacity),
 		                              VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR,
 		                              VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
 		                              0);
 		m_cullObjectBuffer = createBuffer(toVkDevice(m_device),
 		                                  toVmaAllocator(m_allocator),
-		                                  sizeof(shaderio::GPUCullObject) * static_cast<VkDeviceSize>(newCapacity),
+		                                  sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(newCapacity),
 		                                  VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR |
 		                                  VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR,
 		                                  VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -322,7 +322,7 @@ namespace demo
 		m_updateBuffer = createBuffer(toVkDevice(m_device),
 		                              toVmaAllocator(m_allocator),
 		                              std::max(sizeof(shaderio::GPUSceneObject), sizeof(shaderio::GPUCullObject))
-		                              * static_cast<VkDeviceSize>(newCapacity),
+		                              * static_cast<uint64_t>(newCapacity),
 		                              VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
 		                              VMA_MEMORY_USAGE_CPU_TO_GPU,
 		                              VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);

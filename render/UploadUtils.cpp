@@ -167,7 +167,7 @@ namespace demo::upload
 		utils::Buffer stagingBuffer{};
 		const VkBufferCreateInfo bufferInfo{
 			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<VkDeviceSize>(size),
+			.size = static_cast<uint64_t>(size),
 			.usage = VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
 		};
 		const VmaAllocationCreateInfo allocInfo{
@@ -191,7 +191,7 @@ namespace demo::upload
 		utils::Buffer buffer{};
 		const VkBufferCreateInfo bufferInfo{
 			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<VkDeviceSize>(size),
+			.size = static_cast<uint64_t>(size),
 			.usage = static_cast<VkBufferUsageFlags>(static_cast<VkBufferUsageFlags2KHR>(usage) |
 				VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR),
 		};

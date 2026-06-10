@@ -312,7 +312,7 @@ namespace demo
 			boundsValid = true;
 		}
 
-		utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
+		utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, uint64_t size)
 		{
 			const VkBufferUsageFlags2CreateInfoKHR usageInfo{
 				.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
@@ -347,7 +347,7 @@ namespace demo
 			return buffer;
 		}
 
-		utils::Buffer createDeviceLocalStorageBuffer(VkDevice device, VmaAllocator allocator, VkDeviceSize size)
+		utils::Buffer createDeviceLocalStorageBuffer(VkDevice device, VmaAllocator allocator, uint64_t size)
 		{
 			const upload::NativeUploadContext context{
 				.device = reinterpret_cast<uintptr_t>(device),
@@ -2777,7 +2777,7 @@ namespace demo
 		executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 		{
 			BatchUploadContext upload;
-			upload.init(getRHIDevice(), static_cast<VkDeviceSize>(texture.data.size()));
+			upload.init(getRHIDevice(), static_cast<uint64_t>(texture.data.size()));
 			const rhi::TextureBarrier initBarrier{
 				.texture = environmentImageHandle,
 				.before = rhi::ResourceState::Undefined,
@@ -2797,8 +2797,8 @@ namespace demo
 				{
 					continue;
 				}
-				const VkDeviceSize offset = texture.mipOffsets[level];
-				const VkDeviceSize size = texture.mipSizes[level];
+				const uint64_t offset = texture.mipOffsets[level];
+				const uint64_t size = texture.mipSizes[level];
 				if (size == 0 || offset + size > texture.data.size())
 				{
 					continue;
@@ -4278,7 +4278,7 @@ namespace demo
 			waitForIdle();
 		}
 
-		const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(requiredCount) * sizeof(uint32_t);
+		const uint64_t bufferSize = static_cast<uint64_t>(requiredCount) * sizeof(uint32_t);
 		if (growSortBuffers)
 		{
 			destroyBuffer(allocator, frameResources.uploadKeyBuffer);
