@@ -612,6 +612,16 @@ namespace demo
 		[[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return m_ssrTracePipelineHandle.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] uint64_t getSSRRawImageOpaque() const { return m_ssrRawImage.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
+		[[nodiscard]] uint64_t getSSRDenoisePipelineOpaque() const { return m_ssrDenoisePipelineHandle.isNull() ? 0ull : 1ull; }
+		[[nodiscard]] uint64_t getSSRDenoisedImageOpaque() const { return m_ssrDenoisedImage.isNull() ? 0ull : 1ull; }
+		[[nodiscard]] PipelineHandle getSSRDenoisePipelineHandle() const { return m_ssrDenoisePipelineHandle; }
+
+		[[nodiscard]] rhi::ArgumentTableHandle getSSRDenoiseArgumentTable(uint32_t frameIndex) const
+		{
+			return frameIndex < m_ssrDenoiseArgumentTables.size()
+				       ? m_ssrDenoiseArgumentTables[frameIndex]
+				       : rhi::ArgumentTableHandle{};
+		}
 		// Builds the SSR compute set as a per-frame temporary argument table (gbuffer/depth/history
 		// sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
 		// frame-lifetime handle; do not cache it across frames.
@@ -1299,9 +1309,12 @@ namespace demo
 		PipelineHandle m_gtaoPipelineHandle{};
 		PipelineHandle m_aoDenoisePipelineHandle{};
 		PipelineHandle m_ssrTracePipelineHandle{};
+		PipelineHandle m_ssrDenoisePipelineHandle{};
 		rhi::ArgumentLayoutHandle m_ssrLayoutHandle{};
 		std::vector<rhi::ArgumentTableHandle> m_aoArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_aoDenoiseArgumentTables;
+		// SSR denoise reuses m_aoArgumentLayout (2 sampled + 1 storage, compute).
+		std::vector<rhi::ArgumentTableHandle> m_ssrDenoiseArgumentTables;
 		// Phase-7 compute targets: RHI-owned textures + their sampled/storage views.
 		rhi::TextureHandle m_aoRawImage{};
 		rhi::TextureViewHandle m_aoRawView{};
@@ -1309,6 +1322,8 @@ namespace demo
 		rhi::TextureViewHandle m_aoDenoisedView{};
 		rhi::TextureHandle m_ssrRawImage{};
 		rhi::TextureViewHandle m_ssrRawView{};
+		rhi::TextureHandle m_ssrDenoisedImage{};
+		rhi::TextureViewHandle m_ssrDenoisedView{};
 		rhi::TextureHandle m_shadowAtlasImage{};
 		rhi::TextureViewHandle m_shadowAtlasView{};
 		rhi::Extent2D m_phase7HalfExtent{};

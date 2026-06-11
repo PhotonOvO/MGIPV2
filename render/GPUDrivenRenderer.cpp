@@ -892,7 +892,7 @@ namespace demo
 				clusteredDescriptorsReady,
 			};
 			const uint64_t aoBytes = estimateImageBytes(m_phase7HalfExtent, 2u) * 2u;
-			const uint64_t ssrBytes = estimateImageBytes(m_phase7HalfExtent, 8u);
+			const uint64_t ssrBytes = estimateImageBytes(m_phase7HalfExtent, 8u) * 2u;
 			m_runtimeStats.aoReflectionDiagnostics = GPUDrivenAOReflectionDiagnostics{
 				.aoWidth = m_phase7HalfExtent.width,
 				.aoHeight = m_phase7HalfExtent.height,
@@ -903,7 +903,8 @@ namespace demo
 				.aoReady = !m_aoDenoisedView.isNull() && !m_gtaoPipelineHandle.isNull() && !
 				m_aoDenoisePipelineHandle.isNull(),
 				.ssrEnabled = gpuParams.debugOptions.enableSSR,
-				.ssrReady = !m_ssrRawView.isNull() && !m_ssrTracePipelineHandle.isNull(),
+				.ssrReady = !m_ssrDenoisedView.isNull() && !m_ssrTracePipelineHandle.isNull() && !
+				m_ssrDenoisePipelineHandle.isNull(),
 			};
 			const uint32_t shadowAtlasTileSize = std::max(1u, m_shadowAtlasTileSize);
 			const uint32_t shadowAtlasCapacity =
@@ -2800,13 +2801,17 @@ namespace demo
 			});
 
 		// Per-frame owned ArgumentTables for AO trace + denoise (written in updatePhase7Descriptors).
+		// SSR denoise shares the same 2-sampled + 1-storage layout shape as the AO sets.
 		m_aoArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		m_aoDenoiseArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
+		m_ssrDenoiseArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		for (uint32_t i = 0; i < frameCount; ++i)
 		{
 			m_aoArgumentTables[i] = m_renderer.createPersistentArgumentTable(m_aoArgumentLayout, "gpu-driven-ao");
 			m_aoDenoiseArgumentTables[i] = m_renderer.createPersistentArgumentTable(
 				m_aoArgumentLayout, "gpu-driven-ao-denoise");
+			m_ssrDenoiseArgumentTables[i] = m_renderer.createPersistentArgumentTable(
+				m_aoArgumentLayout, "gpu-driven-ssr-denoise");
 		}
 
 		resizePhase7Resources();
@@ -2824,12 +2829,14 @@ namespace demo
 		destroyTarget(m_aoRawImage, m_aoRawView);
 		destroyTarget(m_aoDenoisedImage, m_aoDenoisedView);
 		destroyTarget(m_ssrRawImage, m_ssrRawView);
+		destroyTarget(m_ssrDenoisedImage, m_ssrDenoisedView);
 		destroyTarget(m_shadowAtlasImage, m_shadowAtlasView);
 
 		// Owned ArgumentTables + layouts are freed by RenderDevice::destroyArgumentTablesAndLayouts at device
 		// shutdown; just drop our handle references here.
 		m_aoArgumentTables.clear();
 		m_aoDenoiseArgumentTables.clear();
+		m_ssrDenoiseArgumentTables.clear();
 		m_aoArgumentLayout = {};
 		m_phase7HalfExtent = {};
 		m_shadowAtlasAllocatedTiles = 0u;
@@ -2848,7 +2855,7 @@ namespace demo
 		};
 		if (m_phase7HalfExtent.width == halfExtent.width && m_phase7HalfExtent.height == halfExtent.height
 			&& !m_aoRawImage.isNull() && !m_aoDenoisedImage.isNull() && !m_ssrRawImage.isNull()
-			&& !m_shadowAtlasImage.isNull())
+			&& !m_ssrDenoisedImage.isNull() && !m_shadowAtlasImage.isNull())
 		{
 			return;
 		}
@@ -2863,6 +2870,7 @@ namespace demo
 		destroyTarget(m_aoRawImage, m_aoRawView);
 		destroyTarget(m_aoDenoisedImage, m_aoDenoisedView);
 		destroyTarget(m_ssrRawImage, m_ssrRawView);
+		destroyTarget(m_ssrDenoisedImage, m_ssrDenoisedView);
 		destroyTarget(m_shadowAtlasImage, m_shadowAtlasView);
 		m_phase7HalfExtent = halfExtent;
 
@@ -2929,6 +2937,8 @@ namespace demo
 		                    rhi::TextureAspect::color, m_aoDenoisedImage, m_aoDenoisedView, &kAOClearWhite);
 		createImageResource(rhi::TextureFormat::rgba16Sfloat, halfExtent, kStorageColorUsage,
 		                    rhi::TextureAspect::color, m_ssrRawImage, m_ssrRawView, &kSSRClearBlack);
+		createImageResource(rhi::TextureFormat::rgba16Sfloat, halfExtent, kStorageColorUsage,
+		                    rhi::TextureAspect::color, m_ssrDenoisedImage, m_ssrDenoisedView, &kSSRClearBlack);
 		createImageResource(rhi::TextureFormat::d32Sfloat, m_shadowAtlasExtent,
 		                    rhi::TextureUsageFlags::depthAttachment | rhi::TextureUsageFlags::sampled,
 		                    rhi::TextureAspect::depth, m_shadowAtlasImage, m_shadowAtlasView, nullptr);
@@ -2999,6 +3009,10 @@ namespace demo
 		m_ssrTracePipelineHandle = createComputePipeline(ssr_trace_slang, std::size(ssr_trace_slang), "kernelSSRTrace",
 		                                                 m_ssrLayoutHandle, sizeof(shaderio::GPUDrivenSSRPushConstants),
 		                                                 0x6303u);
+		m_ssrDenoisePipelineHandle = createComputePipeline(ssr_denoise_slang, std::size(ssr_denoise_slang),
+		                                                   "kernelSSRDenoise",
+		                                                   m_aoArgumentLayout,
+		                                                   sizeof(shaderio::GPUDrivenSSRPushConstants), 0x6304u);
 #endif
 	}
 
@@ -3007,9 +3021,11 @@ namespace demo
 		getRHIDevice().destroyPipeline(m_gtaoPipelineHandle);
 		getRHIDevice().destroyPipeline(m_aoDenoisePipelineHandle);
 		getRHIDevice().destroyPipeline(m_ssrTracePipelineHandle);
+		getRHIDevice().destroyPipeline(m_ssrDenoisePipelineHandle);
 		m_gtaoPipelineHandle = {};
 		m_aoDenoisePipelineHandle = {};
 		m_ssrTracePipelineHandle = {};
+		m_ssrDenoisePipelineHandle = {};
 	}
 
 	void GPUDrivenRenderer::updatePhase7Descriptors(uint32_t frameIndex)
@@ -3061,6 +3077,30 @@ namespace demo
 		};
 		m_renderer.updateArgumentTable(m_aoDenoiseArgumentTables[frameIndex], denoiseWrites.data(),
 		                               static_cast<uint32_t>(denoiseWrites.size()));
+
+		// SSR denoise set: ssrRaw + depth sampled, ssrDenoised storage out.  ssrRaw was just
+		// written by the trace dispatch via a storage binding and has no graph dependency, so
+		// it stays in GENERAL layout -- declare readWrite intent like the AO denoiser's aoRaw.
+		if (frameIndex < m_ssrDenoiseArgumentTables.size()
+			&& !m_ssrRawView.isNull() && !m_ssrDenoisedView.isNull())
+		{
+			const std::array<rhi::ArgumentWrite, 3> ssrDenoiseWrites{
+				{
+					rhi::ArgumentWrite{
+						.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = m_ssrRawView,
+						.accessIntent = rhi::ArgumentAccessIntent::readWrite
+					},
+					rhi::ArgumentWrite{
+						.binding = 1, .type = rhi::ArgumentType::sampledTexture, .textureView = sceneView.sceneDepthView
+					},
+					rhi::ArgumentWrite{
+						.binding = 2, .type = rhi::ArgumentType::storageTexture, .textureView = m_ssrDenoisedView
+					},
+				}
+			};
+			m_renderer.updateArgumentTable(m_ssrDenoiseArgumentTables[frameIndex], ssrDenoiseWrites.data(),
+			                               static_cast<uint32_t>(ssrDenoiseWrites.size()));
+		}
 	}
 
 	rhi::ArgumentTableHandle GPUDrivenRenderer::acquireSSRTempArgumentTable(
@@ -3210,7 +3250,8 @@ namespace demo
 			glm::vec4(params.debugOptions.enableAO && !m_aoDenoisedView.isNull()
 			              && !m_gtaoPipelineHandle.isNull() && !m_aoDenoisePipelineHandle.isNull()
 			                  ? 1.0f : 0.0f,
-			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() && !m_ssrTracePipelineHandle.isNull() ? 1.0f : 0.0f, // SSR: same guard as AO
+			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() && !m_ssrTracePipelineHandle.isNull()
+			              && !m_ssrDenoisePipelineHandle.isNull() ? 1.0f : 0.0f, // SSR: same guard as AO
 			          0.0f,
 			          0.0f);
 
@@ -3304,7 +3345,7 @@ namespace demo
 		texViews[kGPUDrivenLightPassHistoryWriteIndex] = viewOr(sceneView.sceneColorHistoryWriteView, fallbackColor);
 		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
 		texViews[kGPUDrivenLightPassAOIndex] = viewOr(m_aoDenoisedView, fallbackDepth);
-		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrRawView, fallbackColor);
+		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrDenoisedView, fallbackColor);
 
 		const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 

@@ -83,6 +83,7 @@
 #include "_autogen/gtao.slang.h"
 #include "_autogen/ao_denoise.slang.h"
 #include "_autogen/ssr_trace.slang.h"
+#include "_autogen/ssr_denoise.slang.h"
 #include "_autogen/shader.ibl_dfg.slang.h"
 #include "_autogen/shader.ibl_irradiance.slang.h"
 #include "_autogen/shader.ibl_prefilter.slang.h"
