@@ -119,6 +119,23 @@ void VulkanSwapchain::deinit()
   m_platform_handle = nullptr;
 }
 
+const char* VulkanSwapchain::getPresentModeName() const
+{
+  switch (m_presentMode)
+  {
+  case VK_PRESENT_MODE_IMMEDIATE_KHR:
+    return "Immediate";
+  case VK_PRESENT_MODE_MAILBOX_KHR:
+    return "Mailbox";
+  case VK_PRESENT_MODE_FIFO_KHR:
+    return "FIFO";
+  case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+    return "FIFO Relaxed";
+  default:
+    return "Other";
+  }
+}
+
 void VulkanSwapchain::setVSync(bool vSync)
 {
   if(m_vSync == vSync)

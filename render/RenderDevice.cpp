@@ -937,8 +937,7 @@ namespace demo
 
 		if (m_swapchainDependent.swapchain)
 		{
-			auto* vkSwapchain = static_cast<rhi::vulkan::VulkanSwapchain*>(m_swapchainDependent.swapchain.get());
-			vkSwapchain->deinit();
+			m_swapchainDependent.swapchain->deinit();
 			m_swapchainDependent.swapchain.reset();
 		}
 		if (m_device.device)
@@ -1085,8 +1084,7 @@ namespace demo
 			return;
 		}
 
-		auto* vkSwapchain = static_cast<rhi::vulkan::VulkanSwapchain*>(m_swapchainDependent.swapchain.get());
-		vkSwapchain->setVSync(enabled);
+		m_swapchainDependent.swapchain->setVSync(enabled);
 	}
 
 	void RenderDevice::setFullscreen(bool enabled, void* platformHandle)
@@ -1096,9 +1094,8 @@ namespace demo
 			return;
 		}
 
-		auto* vkSwapchain = static_cast<rhi::vulkan::VulkanSwapchain*>(m_swapchainDependent.swapchain.get());
-		vkSwapchain->set_fullscreen(enabled, platformHandle);
-		vkSwapchain->requestRebuild();
+		m_swapchainDependent.swapchain->setFullscreen(enabled, platformHandle);
+		m_swapchainDependent.swapchain->requestRebuild();
 	}
 
 	const char* RenderDevice::getSwapchainPresentModeName() const
@@ -1108,21 +1105,7 @@ namespace demo
 			return "Unavailable";
 		}
 
-		const auto* vkSwapchain = static_cast<const rhi::vulkan::VulkanSwapchain*>(m_swapchainDependent.swapchain.
-			get());
-		switch (vkSwapchain->getPresentMode())
-		{
-		case VK_PRESENT_MODE_IMMEDIATE_KHR:
-			return "Immediate";
-		case VK_PRESENT_MODE_MAILBOX_KHR:
-			return "Mailbox";
-		case VK_PRESENT_MODE_FIFO_KHR:
-			return "FIFO";
-		case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
-			return "FIFO Relaxed";
-		default:
-			return "Other";
-		}
+		return m_swapchainDependent.swapchain->getPresentModeName();
 	}
 
 	TextureHandle RenderDevice::getViewportTextureHandle() const

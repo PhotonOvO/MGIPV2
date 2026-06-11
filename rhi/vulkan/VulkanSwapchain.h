@@ -13,8 +13,10 @@ public:
   VulkanSwapchain() = default;
 
   void init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync);
-  void deinit();
-  void setVSync(bool vSync);
+  void deinit() override;
+  void setVSync(bool vSync) override;
+  void setFullscreen(bool enabled, void* platformHandle) override { set_fullscreen(enabled, platformHandle); }
+  const char* getPresentModeName() const override;
   [[nodiscard]] bool             getVSync() const { return m_vSync; }
   [[nodiscard]] VkPresentModeKHR getPresentMode() const { return m_presentMode; }
   void                             set_fullscreen(bool fullscreen, void* platform_handle = nullptr);

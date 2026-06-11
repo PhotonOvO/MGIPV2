@@ -39,6 +39,13 @@ public:
 
   virtual AcquireResult acquireNextImage()           = 0;
   virtual PresentResult present()                    = 0;
+  // Releases backend swapchain resources; called by the render layer at shutdown.
+  virtual void          deinit() {}
+  // Present-control knobs; backends without support inherit the no-op defaults.
+  virtual void          setVSync(bool /*vSync*/) {}
+  virtual void          setFullscreen(bool /*enabled*/, void* /*platformHandle*/) {}
+  // Human-readable negotiated present mode (debug/UI display only).
+  virtual const char*   getPresentModeName() const { return "Unknown"; }
   virtual void          requestRebuild()             = 0;
   virtual bool          needsRebuild() const         = 0;
   virtual void          rebuild()                    = 0;
