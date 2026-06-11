@@ -3,6 +3,7 @@
 #include "../rhi/RHIDevice.h"
 #include "ShaderInterop.h"
 
+#include <exception>
 #include <vector>
 
 namespace demo
@@ -18,7 +19,7 @@ namespace demo
 		};
 
 		LightResources() = default;
-		~LightResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
+		~LightResources() { assert((std::uncaught_exceptions() > 0 || m_rhiDevice == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device& device, const CreateInfo& createInfo);
 		void deinit();

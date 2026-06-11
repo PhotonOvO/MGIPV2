@@ -4,6 +4,7 @@
 #include "../common/Handles.h"
 #include "../rhi/RHIDevice.h"
 
+#include <exception>
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -52,7 +53,7 @@ namespace demo
 		};
 
 		GPUDrivenLightResources() = default;
-		~GPUDrivenLightResources() { assert(m_device == nullptr && "Missing deinit()"); }
+		~GPUDrivenLightResources() { assert((std::uncaught_exceptions() > 0 || m_device == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device& device, const CreateInfo& createInfo);
 		void deinit();

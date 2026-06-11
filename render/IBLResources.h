@@ -3,6 +3,8 @@
 #include "../rhi/RHIDevice.h"
 #include "ShaderInterop.h"
 
+#include <exception>
+
 namespace demo
 {
 	namespace rhi
@@ -29,7 +31,7 @@ namespace demo
 		};
 
 		IBLResources() = default;
-		~IBLResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
+		~IBLResources() { assert((std::uncaught_exceptions() > 0 || m_rhiDevice == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device& device, rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo);
 		void deinit();

@@ -7,6 +7,7 @@
 #include "ClipSpaceConvention.h"
 #include "ShaderInterop.h"
 
+#include <exception>
 #include <array>
 #include <cassert>
 #include <glm/glm.hpp>
@@ -62,7 +63,7 @@ namespace demo
 		};
 
 		CSMShadowResources() = default;
-		~CSMShadowResources() { assert(m_device == nullptr && "Missing deinit()"); }
+		~CSMShadowResources() { assert((std::uncaught_exceptions() > 0 || m_device == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo);
 		void deinit();

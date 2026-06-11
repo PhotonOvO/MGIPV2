@@ -7,6 +7,7 @@
 #include "DebugInteropBridge.h"
 #include "Pass.h"
 
+#include <exception>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -33,7 +34,7 @@ namespace demo
 		};
 
 		SceneResources() = default;
-		~SceneResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
+		~SceneResources() { assert((std::uncaught_exceptions() > 0 || m_rhiDevice == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo);
 		void deinit();

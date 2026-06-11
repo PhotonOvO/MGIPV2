@@ -6,6 +6,7 @@
 #include "../rhi/RHICommandBuffer.h"
 #include "UploadUtils.h"
 
+#include <exception>
 #include <cstdint>
 #include <cassert>
 
@@ -66,7 +67,7 @@ namespace demo
 	{
 	public:
 		MeshPool() = default;
-		~MeshPool() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
+		~MeshPool() { assert((std::uncaught_exceptions() > 0 || m_rhiDevice == nullptr) && "Missing deinit()"); }
 
 		void init(rhi::Device* rhiDevice, upload::StaticBufferUploadPolicy staticUploadPolicy = {});
 		void deinit();
