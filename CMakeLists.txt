@@ -230,6 +230,8 @@ add_library(demo_core STATIC
   rhi/RHISynchronization.h
   rhi/RHISwapchain.h
   rhi/RHIDevice.h
+  rhi/RHIFactory.h
+  rhi/RHIFactory.cpp
   rhi/RHISurface.h
   rhi/RHIQueue.h
   rhi/RHIFrameContext.h

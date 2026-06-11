@@ -3,14 +3,18 @@
 #include "RHIArgumentTable.h"
 #include "RHIBindlessTypes.h"
 #include "RHICapabilities.h"
+#include "RHIFrameContext.h"
 #include "RHIHandles.h"
 #include "RHIPipeline.h"
 #include "RHIQueue.h"
+#include "RHISurface.h"
+#include "RHISwapchain.h"
 #include "RHITypes.h"
 
 #include <cassert>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -124,6 +128,33 @@ namespace demo::rhi
 		virtual QueueInfo getGraphicsQueue() const = 0;
 		virtual QueueInfo getComputeQueue() const = 0;
 		virtual QueueInfo getTransferQueue() const = 0;
+
+		// --- Backend object factories (init sink, RDEV-06) ---
+		// initSurface initializes the WSI surface from the backend-internal
+		// instance/physicalDevice; the render layer never touches the natives.
+		virtual void initSurface(Surface& /*surface*/, const WindowHandle& /*window*/)
+		{
+			RHI_UNIMPLEMENTED("initSurface");
+		}
+
+		// createSwapchain builds the backend swapchain for an initialized surface.
+		// All native handles (device/queue/surface/cmd pool) stay backend-internal.
+		virtual std::unique_ptr<Swapchain> createSwapchain(Surface& /*surface*/, bool /*vSync*/)
+		{
+			RHI_UNIMPLEMENTED("createSwapchain");
+			return nullptr;
+		}
+
+		// createFrameContext builds the per-frame submission context, wires it to this
+		// device and to the given swapchain. Returned object is owned by the caller.
+		virtual std::unique_ptr<FrameContext> createFrameContext(Swapchain* /*swapchain*/, uint32_t /*frameCount*/)
+		{
+			RHI_UNIMPLEMENTED("createFrameContext");
+			return nullptr;
+		}
+
+		// GPU timestamp tick period in nanoseconds (for GPU profiling). 0 when unknown.
+		virtual float getTimestampPeriodNs() const { return 0.0f; }
 
 		// --- ImGui debug-interop seam (D-08/D-09) ---
 		// Fills the minimal native objects the Dear ImGui native backend needs for

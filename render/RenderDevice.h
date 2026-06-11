@@ -32,12 +32,6 @@
 #include <string>
 #include <unordered_map>
 
-#ifndef DEMO_RHI_VK
-#define DEMO_RHI_VK(name) V##k##name
-#endif
-#ifndef DEMO_RHI_ALLOCATOR
-#define DEMO_RHI_ALLOCATOR Vma##Allocator
-#endif
 #ifndef DEMO_RHI_VULKAN_NS
 #define DEMO_RHI_VULKAN_NS vulkan
 #endif
@@ -566,7 +560,6 @@ namespace demo
 		struct DeviceLifetimeResources
 		{
 			std::unique_ptr<rhi::Device> device;
-			DEMO_RHI_ALLOCATOR allocator{nullptr};
 			std::vector<rhi::BufferHandle> rhiStagingBuffers;
 			upload::StaticBufferUploadPolicy staticBufferUploadPolicy{};
 			// Shared samplers created through the RHI (rhi::Device::createSampler), held as handles.
@@ -821,7 +814,7 @@ namespace demo
 			{
 				rhi::TextureHandle ownedTexture{};
 				rhi::TextureViewHandle ownedTextureView{};
-				DEMO_RHI_VK(Extent2D) sourceExtent{};
+				rhi::Extent2D sourceExtent{};
 				uint32_t mipLevels{1};
 			};
 

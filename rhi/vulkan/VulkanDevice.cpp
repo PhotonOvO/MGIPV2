@@ -11,6 +11,8 @@
 #include "VulkanFrameContext.h"
 #include "VulkanPipelines.h"
 #include "VulkanResourceTable.h"
+#include "VulkanSurface.h"
+#include "VulkanSwapchain.h"
 #include "rhi/vulkan/VulkanFormatUtils.h"
 
 #include <algorithm>
@@ -105,6 +107,40 @@ namespace demo::rhi::vulkan
 		m_createInfo = createInfo;
 		LOGI("VulkanDevice::init: begin");
 
+		// Vulkan loader bootstrap — sunk from RenderDevice (RDEV-06).
+		VK_CHECK(volkInitialize());
+
+		// Engine-default Vulkan extensions and feature chains (RDEV-06): the render
+		// layer only supplies backend-neutral DeviceCreateInfo fields; everything
+		// Vulkan-specific is appended here. The feature structs only need to live
+		// until initLogicalDevice() consumes the pNext chain below.
+		static VkPhysicalDeviceExtendedDynamicState3FeaturesEXT sDynamicState3Features;
+		static VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR sUnifiedImageLayoutsFeature;
+		sDynamicState3Features = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT
+		};
+		sUnifiedImageLayoutsFeature = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR
+		};
+		// Window-system-integration surface extensions per platform.
+		m_createInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+#ifdef __ANDROID__
+		m_createInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#elif defined(_WIN32)
+		m_createInfo.instanceExtensions.push_back("VK_KHR_win32_surface");
+#endif
+		// Debug utils for event markers (RenderDoc, PIX, etc.)
+		m_createInfo.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+		m_createInfo.deviceExtensions.push_back({VK_KHR_SWAPCHAIN_EXTENSION_NAME, true, nullptr});
+		m_createInfo.deviceExtensions.push_back({VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false, nullptr});
+		m_createInfo.deviceExtensions.push_back({
+			VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false, &sUnifiedImageLayoutsFeature
+		});
+		m_createInfo.deviceExtensions.push_back({
+			VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false, &sDynamicState3Features
+		});
+		m_createInfo.deviceExtensions.push_back({"VK_EXT_full_screen_exclusive", false, nullptr});
+
 		initInstance();
 		ensure(m_instance != VK_NULL_HANDLE, "VulkanDevice::init failed: Vulkan instance is null");
 		selectPhysicalDevice();
@@ -125,6 +161,26 @@ namespace demo::rhi::vulkan
 			.queueFamilyIndex = m_graphicsQueue.familyIndex,
 		};
 		VK_CHECK(vkCreateCommandPool(m_device, &transientPoolInfo, nullptr, &m_transientCmdPool));
+
+		// VMA allocator — created and owned backend-internally (RDEV-06).
+		{
+			VmaAllocatorCreateInfo allocatorInfo{
+				.physicalDevice = m_physicalDevice,
+				.device = m_device,
+				.instance = m_instance,
+				.vulkanApiVersion = m_apiVersion,
+			};
+			allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+			allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE4_BIT;
+			allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE5_BIT;
+
+			const VmaVulkanFunctions functions{
+				.vkGetInstanceProcAddr = vkGetInstanceProcAddr,
+				.vkGetDeviceProcAddr = vkGetDeviceProcAddr,
+			};
+			allocatorInfo.pVulkanFunctions = &functions;
+			VK_CHECK(vmaCreateAllocator(&allocatorInfo, &m_allocator));
+		}
 
 		m_initialized = true;
 		LOGI("VulkanDevice::init: completed");
@@ -152,6 +208,12 @@ namespace demo::rhi::vulkan
 			{
 				vkDestroyCommandPool(m_device, m_transientCmdPool, nullptr);
 				m_transientCmdPool = VK_NULL_HANDLE;
+			}
+			// VMA allocator — destroyed after all retirements drained, before the device.
+			if (m_allocator != nullptr)
+			{
+				vmaDestroyAllocator(m_allocator);
+				m_allocator = nullptr;
 			}
 			vkDestroyDevice(m_device, nullptr);
 			m_device = VK_NULL_HANDLE;
@@ -265,6 +327,48 @@ namespace demo::rhi::vulkan
 		out.graphicsQueue = reinterpret_cast<void*>(static_cast<uintptr_t>(graphicsQueue.backendHandle));
 		out.graphicsQueueFamily = graphicsQueue.familyIndex;
 		return true;
+	}
+
+	void VulkanDevice::initSurface(Surface& surface, const WindowHandle& window)
+	{
+		ensure(m_instance != VK_NULL_HANDLE && m_physicalDevice != VK_NULL_HANDLE,
+		       "VulkanDevice::initSurface requires an initialized device");
+		surface.init(static_cast<void*>(m_instance), static_cast<void*>(m_physicalDevice), window);
+	}
+
+	std::unique_ptr<Swapchain> VulkanDevice::createSwapchain(Surface& surface, bool vSync)
+	{
+		ensure(m_device != VK_NULL_HANDLE, "VulkanDevice::createSwapchain requires an initialized device");
+		const VkSurfaceKHR nativeSurface = static_cast<VulkanSurface&>(surface).backendHandle();
+		ensure(nativeSurface != VK_NULL_HANDLE, "VulkanDevice::createSwapchain requires an initialized surface");
+		DBG_VK_NAME(nativeSurface);
+		auto swapchain = std::make_unique<VulkanSwapchain>();
+		swapchain->init(static_cast<void*>(m_physicalDevice), static_cast<void*>(m_device),
+		                static_cast<void*>(m_graphicsQueue.queue), static_cast<void*>(nativeSurface),
+		                static_cast<void*>(m_transientCmdPool), vSync);
+		return swapchain;
+	}
+
+	std::unique_ptr<FrameContext> VulkanDevice::createFrameContext(Swapchain* swapchain, uint32_t frameCount)
+	{
+		ensure(m_device != VK_NULL_HANDLE, "VulkanDevice::createFrameContext requires an initialized device");
+		auto frameContext = std::make_unique<VulkanFrameContext>();
+		frameContext->init(static_cast<void*>(m_device), m_graphicsQueue.familyIndex, frameCount);
+		frameContext->setSwapchain(swapchain);
+		frameContext->setResourceTable(m_resourceTable);
+		m_frameContext = frameContext.get();
+		return frameContext;
+	}
+
+	float VulkanDevice::getTimestampPeriodNs() const
+	{
+		if (m_physicalDevice == VK_NULL_HANDLE)
+		{
+			return 0.0f;
+		}
+		VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+		vkGetPhysicalDeviceProperties2(m_physicalDevice, &deviceProperties2);
+		return deviceProperties2.properties.limits.timestampPeriod;
 	}
 
 	bool VulkanDevice::isInstanceExtensionSupported(const char* name) const

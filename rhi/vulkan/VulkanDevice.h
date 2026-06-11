@@ -45,6 +45,11 @@ public:
 
   bool queryImGuiNativeContext(ImGuiNativeContext& out) const override;
 
+  void initSurface(Surface& surface, const WindowHandle& window) override;
+  std::unique_ptr<Swapchain> createSwapchain(Surface& surface, bool vSync) override;
+  std::unique_ptr<FrameContext> createFrameContext(Swapchain* swapchain, uint32_t frameCount) override;
+  float getTimestampPeriodNs() const override;
+
   bool isInstanceExtensionSupported(const char* name) const override;
   bool isDeviceExtensionSupported(const char* name) const override;
   bool isFormatSupported(TextureFormat format, FormatFeatureFlag feature) const override;
@@ -97,9 +102,7 @@ public:
   void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
   void setFrameContext(VulkanFrameContext* frameContext) { m_frameContext = frameContext; }
 
-  // The render layer owns the VMA allocator and injects it here so the device can create
-  // images. Must be called before any createImage call.
-  void setAllocator(VmaAllocator allocator) { m_allocator = allocator; }
+  // The VMA allocator is created and owned backend-internally (RDEV-06).
 
   VkInstance       instance() const { return m_instance; }
   VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }

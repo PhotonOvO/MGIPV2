@@ -1,9 +1,8 @@
 #include "RenderDevice.h"
-#include "../rhi/vulkan/VulkanCommandBuffer.h"
+#include "../rhi/RHIFactory.h"
 #include "../rhi/vulkan/VulkanSwapchain.h"
 #include "../rhi/vulkan/VulkanDevice.h"
 #include "../rhi/vulkan/VulkanFrameContext.h"
-#include "../rhi/vulkan/VulkanSurface.h"
 #include "FrameSubmission.h"
 #include "RHIFormatBridge.h"
 #include "ClipSpaceConvention.h"
@@ -349,8 +348,6 @@ namespace demo
 		{
 			TextureUploadDiagnostics diagnostics{};
 			Ktx2Loader ktx2Loader;
-			const VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-			(void)physicalDevice;
 
 			for (const uint32_t textureIndex : textureIndices)
 			{
@@ -517,33 +514,9 @@ namespace demo
 	                                         uint32_t descriptorCount,
 	                                         rhi::ResourceVisibility visibility);
 
-	template <typename T>
-	static T fromNativeHandle(uint64_t handle)
-	{
-		// Always reinterpret the 64-bit handle as the target Vulkan handle type.
-		// This avoids issues when VkInstance/VkDevice/etc. are opaque handles (pointer-like)
-		// and cannot be created via static_cast from a integer.
-		return reinterpret_cast<T>(static_cast<uintptr_t>(handle));
-	}
-
 	static bool isValidExtent(rhi::Extent2D extent)
 	{
 		return extent.width > 0 && extent.height > 0;
-	}
-
-	static bool isValidExtent(VkExtent2D extent)
-	{
-		return extent.width > 0 && extent.height > 0;
-	}
-
-	[[nodiscard]] rhi::Extent2D toRhiExtent(VkExtent2D extent)
-	{
-		return {extent.width, extent.height};
-	}
-
-	[[nodiscard]] VkExtent2D toVkExtent(rhi::Extent2D extent)
-	{
-		return {extent.width, extent.height};
 	}
 
 	[[nodiscard]] uint64_t resolveNativeImage(const rhi::Device& device, rhi::TextureHandle handle)
@@ -579,76 +552,12 @@ namespace demo
 		return a.width != b.width || a.height != b.height;
 	}
 
-	static bool extentChanged(VkExtent2D a, VkExtent2D b)
-	{
-		return a.width != b.width || a.height != b.height;
-	}
-
-	static VmaAllocator createAllocator(const VkPhysicalDevice physicalDevice, const VkDevice device,
-	                                    const VkInstance instance, const uint32_t apiVersion)
-	{
-		VmaAllocatorCreateInfo allocatorInfo{
-			.physicalDevice = physicalDevice,
-			.device = device,
-			.instance = instance,
-			.vulkanApiVersion = apiVersion,
-		};
-		allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-		allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE4_BIT;
-		allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE5_BIT;
-
-		const VmaVulkanFunctions functions{
-			.vkGetInstanceProcAddr = vkGetInstanceProcAddr,
-			.vkGetDeviceProcAddr = vkGetDeviceProcAddr,
-		};
-		allocatorInfo.pVulkanFunctions = &functions;
-
-		VmaAllocator allocator{nullptr};
-		VK_CHECK(vmaCreateAllocator(&allocatorInfo, &allocator));
-		return allocator;
-	}
-
-	static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer);
-
-	static void destroyBuffer(const VmaAllocator allocator, UploadBufferRecord& buffer)
-	{
-		ASSERT(buffer.rhiHandle.isNull(),
-		       "RHI-owned UploadBufferRecord must be destroyed through destroyUploadBufferRecord");
-		VkBuffer vkBuf = reinterpret_cast<VkBuffer>(buffer.buffer);
-		VmaAllocation alloc = reinterpret_cast<VmaAllocation>(buffer.allocation);
-		if (vkBuf != VK_NULL_HANDLE)
-		{
-			vmaDestroyBuffer(allocator, vkBuf, alloc);
-		}
-		buffer = {};
-	}
-
 	static void writeHostVisibleBuffer(rhi::Device& device, rhi::BufferHandle handle, const void* data,
 	                                   uint64_t size);
 	static void writeHostVisibleBufferRange(rhi::Device& device, rhi::BufferHandle handle,
 	                                        uint64_t offset,
 	                                        const void* data,
 	                                        uint64_t size);
-
-	static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer)
-	{
-		return utils::Buffer{
-			.buffer = reinterpret_cast<VkBuffer>(buffer.buffer),
-			.allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
-			.address = static_cast<VkDeviceAddress>(buffer.address),
-			.mapped = buffer.mapped,
-		};
-	}
-
-	static UploadBufferRecord toUploadBufferRecord(const utils::Buffer& buffer)
-	{
-		return UploadBufferRecord{
-			.buffer = reinterpret_cast<uintptr_t>(buffer.buffer),
-			.allocation = reinterpret_cast<uintptr_t>(buffer.allocation),
-			.address = static_cast<uintptr_t>(buffer.address),
-			.mapped = buffer.mapped,
-		};
-	}
 
 	static UploadBufferRecord toUploadBufferRecord(const rhi::vulkan::BufferRecord& buffer, rhi::BufferHandle handle)
 	{
@@ -661,41 +570,28 @@ namespace demo
 		};
 	}
 
-	static void destroyUploadBufferRecord(rhi::Device* device, const VmaAllocator allocator, UploadBufferRecord& buffer)
+	static void destroyUploadBufferRecord(rhi::Device* device, UploadBufferRecord& buffer)
 	{
-		if (!buffer.rhiHandle.isNull())
+		ASSERT(buffer.isNull() || !buffer.rhiHandle.isNull(),
+		       "UploadBufferRecord must be RHI-owned (native VMA records no longer exist)");
+		if (!buffer.rhiHandle.isNull() && device != nullptr)
 		{
-			if (device != nullptr)
-			{
-				device->destroyBuffer(buffer.rhiHandle);
-			}
-			buffer = {};
-			return;
+			device->destroyBuffer(buffer.rhiHandle);
 		}
-
-		destroyBuffer(allocator, buffer);
+		buffer = {};
 	}
 
-	static void destroyUploadBufferRecord(rhi::Device* device, const VmaAllocator allocator,
-	                                      const UploadBufferRecord& buffer)
+	static void destroyUploadBufferRecord(rhi::Device* device, const UploadBufferRecord& buffer)
 	{
 		if (buffer.isNull())
 		{
 			return;
 		}
-		if (!buffer.rhiHandle.isNull())
+		ASSERT(!buffer.rhiHandle.isNull(),
+		       "UploadBufferRecord must be RHI-owned (native VMA records no longer exist)");
+		if (device != nullptr)
 		{
-			if (device != nullptr)
-			{
-				device->destroyBuffer(buffer.rhiHandle);
-			}
-			return;
-		}
-
-		utils::Buffer nativeBuffer = toUtilsBuffer(buffer);
-		if (nativeBuffer.buffer != VK_NULL_HANDLE)
-		{
-			vmaDestroyBuffer(allocator, nativeBuffer.buffer, nativeBuffer.allocation);
+			device->destroyBuffer(buffer.rhiHandle);
 		}
 	}
 
@@ -801,55 +697,23 @@ namespace demo
 
 	void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 	{
-		VK_CHECK(volkInitialize());
-
 		m_swapchainDependent.vSync = vSync;
 		m_materials = MaterialResources{};
 
-		VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynamicState3Features{
-			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT
-		};
-		VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unifiedImageLayoutsFeature{
-			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR
-		};
-
-		// Use VulkanDeviceCreateInfo to hold Vulkan-specific extension/layer fields (D-08 sink).
-		// rhi::DeviceCreateInfo now only carries backend-neutral fields; Vulkan fields live here.
-		rhi::vulkan::VulkanDeviceCreateInfo deviceCreateInfo;
-#ifdef _DEBUG
-		deviceCreateInfo.base.enableValidationLayers = true;
+		// Backend-neutral device creation (RDEV-06): the Vulkan loader bootstrap, WSI /
+		// debug extension lists, feature chains and the VMA allocator all live inside
+		// the Vulkan backend now.
+		rhi::DeviceCreateInfo deviceCreateInfo{};
+#if defined(_DEBUG) && !defined(__ANDROID__)
+		deviceCreateInfo.enableValidationLayers = true;
 #else
-		deviceCreateInfo.base.enableValidationLayers = false;
+		deviceCreateInfo.enableValidationLayers = false;
 #endif
-#ifdef __ANDROID__
-		deviceCreateInfo.base.enableValidationLayers = false;
-		deviceCreateInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-		deviceCreateInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
-#else
-		uint32_t glfwExtensionCount = 0;
-		const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-		for (uint32_t i = 0; i < glfwExtensionCount; ++i)
-		{
-			deviceCreateInfo.instanceExtensions.push_back(glfwExtensions[i]);
-		}
-#endif
-		// Debug utils for event markers (RenderDoc, PIX, etc.)
-		deviceCreateInfo.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-		deviceCreateInfo.deviceExtensions.push_back({VK_KHR_SWAPCHAIN_EXTENSION_NAME, true, nullptr});
-		deviceCreateInfo.deviceExtensions.push_back({VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false, nullptr});
-		deviceCreateInfo.deviceExtensions.push_back({
-			VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false, &unifiedImageLayoutsFeature
-		});
-		deviceCreateInfo.deviceExtensions.push_back({
-			VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false, &dynamicState3Features
-		});
-		deviceCreateInfo.deviceExtensions.push_back({"VK_EXT_full_screen_exclusive", false, nullptr});
+		m_device.device = rhi::createDevice();
+		m_device.device->init(deviceCreateInfo);
 
-		m_device.device = std::make_unique<rhi::vulkan::VulkanDevice>();
-		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).initVulkan(deviceCreateInfo);
-
-		// The device backs its texture-view/image handles with the render-layer-owned resource
-		// table (the VMA allocator is injected later, once it is created).
+		// The device backs its texture-view/image handles with the render-layer-owned
+		// resource table.
 		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setResourceTable(&m_device.resourceTable);
 
 		const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
@@ -858,19 +722,8 @@ namespace demo
 		ASSERT(capabilityReport.coreGraphics && capabilityReport.coreCompute && capabilityReport.coreBindless,
 		       "RenderDevice::init requires graphics+compute+bindless capability floor");
 
-		auto& vkDevice = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device);
-		const VkInstance nativeInstance = vkDevice.instance();
-		const VkPhysicalDevice nativePhysicalDevice = vkDevice.physicalDevice();
-		const VkDevice nativeDevice = vkDevice.device();
-		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-		const VkQueue nativeGraphicsQueue = fromNativeHandle<VkQueue>(graphicsQueueInfo.backendHandle);
+		m_device.device->initSurface(surface, rhi::WindowHandle{window});
 
-		rhi::WindowHandle windowHandle{window};
-		surface.init(static_cast<void*>(nativeInstance), static_cast<void*>(nativePhysicalDevice), windowHandle);
-
-		m_device.allocator = createAllocator(nativePhysicalDevice, nativeDevice, nativeInstance,
-		                                     m_device.device->getApiVersion());
-		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setAllocator(m_device.allocator);
 		m_device.staticBufferUploadPolicy =
 			upload::buildStaticBufferUploadPolicy(m_device.device->getPhysicalMemoryProperties());
 		if (m_device.staticBufferUploadPolicy.allowDirectHostVisibleDeviceLocalUpload)
@@ -886,15 +739,7 @@ namespace demo
 
 		m_meshPool.init(m_device.device.get(), m_device.staticBufferUploadPolicy);
 
-		const VkSurfaceKHR nativeSurface = static_cast<rhi::vulkan::VulkanSurface&>(surface).backendHandle();
-		ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
-		DBG_VK_NAME(nativeSurface);
-		auto& vkDevForSwapchain = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device);
-		auto nativeSwapchain = std::make_unique<rhi::vulkan::VulkanSwapchain>();
-		nativeSwapchain->init(static_cast<void*>(nativePhysicalDevice), static_cast<void*>(nativeDevice),
-		                      static_cast<void*>(nativeGraphicsQueue), static_cast<void*>(nativeSurface),
-		                      static_cast<void*>(vkDevForSwapchain.transientCmdPool()), m_swapchainDependent.vSync);
-		m_swapchainDependent.swapchain = std::move(nativeSwapchain);
+		m_swapchainDependent.swapchain = m_device.device->createSwapchain(surface, m_swapchainDependent.vSync);
 		m_swapchainDependent.swapchain->rebuild();
 		// WR-08: swapchain format comes from the backend after rebuild (authoritative negotiation result).
 		m_swapchainDependent.swapchainImageFormat = m_swapchainDependent.swapchain->getFormat();
@@ -1083,13 +928,12 @@ namespace demo
 
 	std::unique_ptr<rhi::Surface> RenderDevice::createSurface() const
 	{
-		return std::make_unique<rhi::vulkan::VulkanSurface>();
+		return rhi::createSurface();
 	}
 
 	void RenderDevice::shutdown(rhi::Surface& surface)
 	{
 		m_device.device->waitIdle();
-		VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 
 		if (m_swapchainDependent.swapchain)
 		{
@@ -1217,13 +1061,8 @@ namespace demo
 		if (m_device.device)
 		{
 			// RHI destroy calls above enqueue owned native resources for delayed physical
-			// destruction. Drain them while the VMA allocator is still alive.
+			// destruction; VulkanDevice::deinit drains them before destroying its allocator.
 			m_device.device->waitIdle();
-		}
-		if (m_device.allocator != nullptr)
-		{
-			vmaDestroyAllocator(m_device.allocator);
-			m_device.allocator = nullptr;
 		}
 		surface.deinit();
 		if (m_device.device)
@@ -1780,17 +1619,11 @@ namespace demo
 
 	void RenderDevice::createFrameSubmission(uint32_t numFrames)
 	{
-		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-
-		m_perFrame.frameContext = std::make_unique<rhi::vulkan::VulkanFrameContext>();
-		m_perFrame.frameContext->init(static_cast<void*>(device), graphicsQueueInfo.familyIndex, numFrames);
-		m_perFrame.frameContext->setSwapchain(m_swapchainDependent.swapchain.get());
-		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device)
-			.setFrameContext(static_cast<rhi::vulkan::VulkanFrameContext*>(m_perFrame.frameContext.get()));
-		// Inject the resource table so the new CommandBuffer facade (getCommandBuffer) can resolve RHI handles.
-		static_cast<rhi::vulkan::VulkanFrameContext&>(*m_perFrame.frameContext).setResourceTable(
-			&m_device.resourceTable);
+		// Frame context creation/wiring is backend-internal (RDEV-06): native device,
+		// queue family, swapchain hookup and resource-table injection happen inside
+		// VulkanDevice::createFrameContext.
+		m_perFrame.frameContext =
+			m_device.device->createFrameContext(m_swapchainDependent.swapchain.get(), numFrames);
 
 		m_perFrame.frameUserData.resize(numFrames);
 		for (auto& frameUserData : m_perFrame.frameUserData)
@@ -2793,11 +2626,7 @@ namespace demo
 			return;
 		}
 
-		VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-		vkGetPhysicalDeviceProperties2(
-			static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).physicalDevice(), &deviceProperties2);
-
-		m_passGpuProfile.timestampPeriodNs = deviceProperties2.properties.limits.timestampPeriod;
+		m_passGpuProfile.timestampPeriodNs = m_device.device->getTimestampPeriodNs();
 		m_passGpuProfile.queryCount = static_cast<uint32_t>(passExecutor.getPassCount() * 2);
 		m_passGpuProfile.passNames.clear();
 		m_passGpuProfile.latestCpuPassDurationsMs.clear();
@@ -6130,8 +5959,6 @@ namespace demo
 		result.materials.resize(asset.materials.size(), kNullMaterialHandle);
 		result.textures.resize(asset.textures.size(), kNullTextureHandle);
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-
 		uint64_t estimatedTextureUploadBytes = 0;
 		uint64_t estimatedVertexUploadBytes = 0;
 		uint64_t estimatedIndexUploadBytes = 0;
@@ -6649,8 +6476,6 @@ namespace demo
 	                                        GltfUploadResult& ioResult,
 	                                        rhi::CommandBuffer& cmd)
 	{
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-
 		if (ioResult.meshes.size() != model.meshes.size()
 			|| ioResult.materials.size() != model.materials.size()
 			|| ioResult.textures.size() != model.images.size())
@@ -7095,8 +6920,8 @@ namespace demo
 		{
 			waitForAllFrameSlots();
 		}
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedVertexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedIndexBuffer);
 		result.shadowPackedMeshes.clear();
 
 		if (result.shadowCasterIndices.empty())
@@ -7220,8 +7045,8 @@ namespace demo
 		{
 			waitForAllFrameSlots();
 		}
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedVertexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedIndexBuffer);
 		result.shadowPackedMeshes.clear();
 
 		if (result.shadowCasterDrawIndices.empty() && result.shadowCasterIndices.empty())
@@ -7344,11 +7169,10 @@ namespace demo
 
 	void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
 	{
-		VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
 		const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
 
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedVertexBuffer);
-		destroyUploadBufferRecord(m_device.device.get(), m_device.allocator, result.shadowPackedIndexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedVertexBuffer);
+		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedIndexBuffer);
 
 		// Destroy meshes
 		for (MeshHandle handle : result.meshes)
