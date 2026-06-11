@@ -1,7 +1,6 @@
 #include "GPUMeshletBuffer.h"
 
 #include "../rhi/RHIDevice.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -9,100 +8,23 @@
 
 namespace demo
 {
-	namespace
+	void GPUMeshletBuffer::init(rhi::Device* rhiDevice)
 	{
-		[[nodiscard]] VkDevice toVkDevice(uintptr_t handle)
-		{
-			return reinterpret_cast<VkDevice>(handle);
-		}
-
-		[[nodiscard]] VmaAllocator toVmaAllocator(uintptr_t handle)
-		{
-			return reinterpret_cast<VmaAllocator>(handle);
-		}
-
-		[[nodiscard]] VkBuffer toVkBuffer(uintptr_t handle)
-		{
-			return reinterpret_cast<VkBuffer>(handle);
-		}
-
-		[[nodiscard]] VmaAllocation toVmaAllocation(uintptr_t handle)
-		{
-			return reinterpret_cast<VmaAllocation>(handle);
-		}
-
-		GPUMeshletBuffer::BufferRecord createBuffer(VkDevice device,
-		                                            VmaAllocator allocator,
-		                                            uint64_t size,
-		                                            VkBufferUsageFlags2KHR usage,
-		                                            VmaMemoryUsage memoryUsage,
-		                                            VmaAllocationCreateFlags flags)
-		{
-			const VkBufferUsageFlags2CreateInfoKHR usageInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
-				.usage = usage | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
-			};
-			const VkBufferCreateInfo bufferInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-				.pNext = &usageInfo,
-				.size = size,
-				.usage = 0,
-				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			};
-			VmaAllocationCreateInfo allocInfo{.flags = flags, .usage = memoryUsage};
-			if ((allocInfo.flags & VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT) != 0)
-			{
-				allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
-			}
-
-			VkBuffer nativeBuffer{VK_NULL_HANDLE};
-			VmaAllocation nativeAllocation{nullptr};
-			VmaAllocationInfo allocationInfo{};
-			VK_CHECK(
-				vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &nativeBuffer, &nativeAllocation, &allocationInfo));
-
-			const VkBufferDeviceAddressInfo addressInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = nativeBuffer
-			};
-			return GPUMeshletBuffer::BufferRecord{
-				.buffer = reinterpret_cast<uintptr_t>(nativeBuffer),
-				.allocation = reinterpret_cast<uintptr_t>(nativeAllocation),
-				.address = static_cast<uintptr_t>(vkGetBufferDeviceAddress(device, &addressInfo)),
-				.mapped = allocationInfo.pMappedData,
-			};
-		}
-	} // namespace
-
-	void GPUMeshletBuffer::init(uintptr_t device, uintptr_t allocator, rhi::Device* device_)
-	{
-		m_device = device;
-		m_allocator = allocator;
-		m_rhiDevice = device_;
+		m_rhiDevice = rhiDevice;
 	}
 
 	void GPUMeshletBuffer::deinit()
 	{
-		destroyBuffer(m_meshletDataBuffer);
-		destroyBuffer(m_meshletCullObjectBuffer);
-		destroyBuffer(m_meshletIndexBuffer);
-		if (m_rhiDevice != nullptr && !m_meshletIndexBufferRHI.isNull())
-		{
-			m_rhiDevice->destroyBuffer(m_meshletIndexBufferRHI);
-		}
-		m_meshletIndexBufferRHI = {};
+		releaseBuffers();
 		m_meshletCount = 0;
 		m_meshletIndexCount = 0;
 		m_meshletCapacity = 0;
 		m_meshletIndexCapacity = 0;
-		m_device = 0;
-		m_allocator = 0;
 	}
 
 	void GPUMeshletBuffer::clear()
 	{
-		destroyBuffer(m_meshletDataBuffer);
-		destroyBuffer(m_meshletCullObjectBuffer);
-		destroyBuffer(m_meshletIndexBuffer);
+		releaseBuffers();
 		m_meshletCount = 0;
 		m_meshletIndexCount = 0;
 		m_meshletCapacity = 0;
@@ -143,28 +65,20 @@ namespace demo
 				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletStart);
 			const uint64_t meshletUploadBytes =
 				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletUploadCount);
-			std::memcpy(static_cast<std::byte*>(m_meshletDataBuffer.mapped) + meshletOffsetBytes,
+			std::memcpy(static_cast<std::byte*>(m_meshletDataMapped) + meshletOffsetBytes,
 			            meshlets.data() + meshletStart,
 			            static_cast<size_t>(meshletUploadBytes));
-			VK_CHECK(
-				vmaFlushAllocation(toVmaAllocator(m_allocator), toVmaAllocation(m_meshletDataBuffer.allocation),
-					meshletOffsetBytes, meshletUploadBytes));
 		}
 
 		if (!meshletCullObjects.empty())
 		{
 			const uint32_t cullObjectUploadCount = std::min(newMeshletCount,
 			                                                static_cast<uint32_t>(meshletCullObjects.size()));
-			const uint64_t cullObjectOffsetBytes = 0;
 			const uint64_t cullObjectUploadBytes =
 				sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(cullObjectUploadCount);
-			std::memcpy(static_cast<std::byte*>(m_meshletCullObjectBuffer.mapped),
+			std::memcpy(m_meshletCullObjectMapped,
 			            meshletCullObjects.data(),
 			            static_cast<size_t>(cullObjectUploadBytes));
-			VK_CHECK(vmaFlushAllocation(toVmaAllocator(m_allocator),
-				toVmaAllocation(m_meshletCullObjectBuffer.allocation),
-				cullObjectOffsetBytes,
-				cullObjectUploadBytes));
 		}
 
 		const uint32_t indexStart = rewriteAll ? 0u : std::min(previousIndexCount, newIndexCount);
@@ -173,12 +87,9 @@ namespace demo
 		{
 			const uint64_t indexOffsetBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexStart);
 			const uint64_t indexUploadBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexUploadCount);
-			std::memcpy(static_cast<std::byte*>(m_meshletIndexBuffer.mapped) + indexOffsetBytes,
+			std::memcpy(static_cast<std::byte*>(m_meshletIndexMapped) + indexOffsetBytes,
 			            meshletIndices.data() + indexStart,
 			            static_cast<size_t>(indexUploadBytes));
-			VK_CHECK(
-				vmaFlushAllocation(toVmaAllocator(m_allocator), toVmaAllocation(m_meshletIndexBuffer.allocation),
-					indexOffsetBytes, indexUploadBytes));
 		}
 	}
 
@@ -186,63 +97,84 @@ namespace demo
 	{
 		if (requiredMeshletCount > m_meshletCapacity)
 		{
-			destroyBuffer(m_meshletDataBuffer);
-			destroyBuffer(m_meshletCullObjectBuffer);
+			if (!m_meshletDataBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletDataBuffer);
+				m_meshletDataBuffer = {};
+			}
+			if (!m_meshletCullObjectBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletCullObjectBuffer);
+				m_meshletCullObjectBuffer = {};
+			}
 			m_meshletCapacity = std::max(requiredMeshletCount, std::max(64u, m_meshletCapacity * 2u));
 			const uint64_t meshletBytes = sizeof(shaderio::Meshlet) * static_cast<uint64_t>(m_meshletCapacity);
-			m_meshletDataBuffer = createBuffer(toVkDevice(m_device),
-			                                   toVmaAllocator(m_allocator),
-			                                   meshletBytes,
-			                                   VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			                                   VMA_MEMORY_USAGE_CPU_TO_GPU,
-			                                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+			m_meshletDataBuffer = m_rhiDevice->createBuffer(rhi::BufferDesc{
+				.size = meshletBytes,
+				.usage = rhi::BufferUsageFlags::storage,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.allowGpuAddress = true,
+				.debugName = "GPUMeshletBuffer.meshletData",
+			});
+			m_meshletDataMapped = m_rhiDevice->mapBuffer(m_meshletDataBuffer);
+			m_meshletDataAddress = m_rhiDevice->getBufferGpuAddress(m_meshletDataBuffer);
 			const uint64_t cullObjectBytes =
 				sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(m_meshletCapacity);
-			m_meshletCullObjectBuffer = createBuffer(toVkDevice(m_device),
-			                                         toVmaAllocator(m_allocator),
-			                                         cullObjectBytes,
-			                                         VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			                                         VMA_MEMORY_USAGE_CPU_TO_GPU,
-			                                         VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+			m_meshletCullObjectBuffer = m_rhiDevice->createBuffer(rhi::BufferDesc{
+				.size = cullObjectBytes,
+				.usage = rhi::BufferUsageFlags::storage,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.allowGpuAddress = true,
+				.debugName = "GPUMeshletBuffer.cullObjects",
+			});
+			m_meshletCullObjectMapped = m_rhiDevice->mapBuffer(m_meshletCullObjectBuffer);
+			m_meshletCullObjectAddress = m_rhiDevice->getBufferGpuAddress(m_meshletCullObjectBuffer);
 		}
 
 		if (requiredIndexCount > 0 && requiredIndexCount > m_meshletIndexCapacity)
 		{
-			destroyBuffer(m_meshletIndexBuffer);
+			if (!m_meshletIndexBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletIndexBuffer);
+				m_meshletIndexBuffer = {};
+			}
 			m_meshletIndexCapacity = std::max(requiredIndexCount, std::max(128u, m_meshletIndexCapacity * 2u));
 			const uint64_t indexBytes = sizeof(uint32_t) * static_cast<uint64_t>(m_meshletIndexCapacity);
-			m_meshletIndexBuffer = createBuffer(toVkDevice(m_device),
-			                                    toVmaAllocator(m_allocator),
-			                                    indexBytes,
-			                                    VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR |
-			                                    VK_BUFFER_USAGE_2_INDEX_BUFFER_BIT_KHR,
-			                                    VMA_MEMORY_USAGE_CPU_TO_GPU,
-			                                    VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-
-			// Rebind the stable RHI handle to the reallocated index buffer (owned=false:
-			// GPUMeshletBuffer owns the VMA lifetime).
-			if (m_rhiDevice != nullptr)
-			{
-				const uint64_t native = static_cast<uint64_t>(m_meshletIndexBuffer.buffer);
-				if (m_meshletIndexBufferRHI.isNull())
-				{
-					m_meshletIndexBufferRHI = m_rhiDevice->registerExternalBuffer(native);
-				}
-				else
-				{
-					m_rhiDevice->updateBufferBinding(m_meshletIndexBufferRHI, native);
-				}
-			}
+			m_meshletIndexBuffer = m_rhiDevice->createBuffer(rhi::BufferDesc{
+				.size = indexBytes,
+				.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::index,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.allowGpuAddress = true,
+				.debugName = "GPUMeshletBuffer.meshletIndices",
+			});
+			m_meshletIndexMapped = m_rhiDevice->mapBuffer(m_meshletIndexBuffer);
 		}
 	}
 
-	void GPUMeshletBuffer::destroyBuffer(BufferRecord& buffer)
+	void GPUMeshletBuffer::releaseBuffers()
 	{
-		if (buffer.buffer != 0)
+		if (m_rhiDevice != nullptr)
 		{
-			vmaDestroyBuffer(toVmaAllocator(m_allocator), toVkBuffer(buffer.buffer),
-			                 toVmaAllocation(buffer.allocation));
-			buffer = {};
+			if (!m_meshletDataBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletDataBuffer);
+			}
+			if (!m_meshletCullObjectBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletCullObjectBuffer);
+			}
+			if (!m_meshletIndexBuffer.isNull())
+			{
+				m_rhiDevice->destroyBuffer(m_meshletIndexBuffer);
+			}
 		}
+		m_meshletDataBuffer = {};
+		m_meshletCullObjectBuffer = {};
+		m_meshletIndexBuffer = {};
+		m_meshletDataMapped = nullptr;
+		m_meshletCullObjectMapped = nullptr;
+		m_meshletIndexMapped = nullptr;
+		m_meshletDataAddress = {};
+		m_meshletCullObjectAddress = {};
 	}
 } // namespace demo

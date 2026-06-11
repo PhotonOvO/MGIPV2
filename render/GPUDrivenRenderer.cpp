@@ -400,17 +400,13 @@ namespace demo
 	void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 	{
 		m_renderer.init(window, surface, vSync);
-		m_sceneRegistry.init(getBackendDeviceToken(),
-		                     getAllocatorToken(),
-		                     &m_renderer.getRHIDevice());
+		m_sceneRegistry.init(&m_renderer.getRHIDevice());
 		initLightingResources();
 		initIBLResources();
 		m_enableExperimentalMeshletPath = kEnableExperimentalMeshletPath;
 		if (m_enableExperimentalMeshletPath)
 		{
-			m_meshletBuffer.init(getBackendDeviceToken(),
-			                     getAllocatorToken(),
-			                     &m_renderer.getRHIDevice());
+			m_meshletBuffer.init(&m_renderer.getRHIDevice());
 		}
 		m_hiZDepthPyramid.init(getRHIDevice(), getSwapchainImageCount(), getSceneExtent());
 
@@ -2043,7 +2039,7 @@ namespace demo
 		m_sceneView.gpuCullObjectBufferAddress = m_sceneRegistry.getCullBufferAddress();
 		m_sceneView.gpuCullObjectBuffer = m_sceneRegistry.getCullBufferHandle();
 		m_sceneView.gpuCullSceneObjectBuffer = m_sceneRegistry.getBufferHandle();
-		m_sceneView.gpuCullMeshletBuffer = 0;
+		m_sceneView.gpuCullMeshletBuffer = {};
 		m_sceneView.objectCount = m_sceneRegistry.getObjectCount();
 		m_sceneView.overlayObjects = m_sceneRegistry.getOverlayObjects().empty()
 			                             ? nullptr
@@ -2053,7 +2049,8 @@ namespace demo
 		{
 			m_sceneView.overlayObjectCount = m_sceneView.objectCount;
 		}
-		m_sceneView.usePersistentCullingObjects = m_sceneView.gpuCullObjectBuffer != 0 && m_sceneView.objectCount > 0;
+		m_sceneView.usePersistentCullingObjects =
+			m_sceneView.gpuCullObjectBuffer.isValid() && m_sceneView.objectCount > 0;
 		m_sceneView.authority = m_sceneView.usePersistentCullingObjects
 			                        ? GPUDrivenSceneAuthority::persistentCullObjects
 			                        : GPUDrivenSceneAuthority::none;
@@ -2063,7 +2060,7 @@ namespace demo
 		m_sceneView.indirectCommandStride =
 			m_sceneView.usePersistentCullingObjects ? m_renderer.getGPUCullingIndirectCommandStride() : 0;
 		if (m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
-			&& m_meshletBuffer.getMeshletCullObjectBuffer() != 0)
+			&& m_meshletBuffer.getMeshletCullObjectBuffer().isValid())
 		{
 			m_sceneView.gpuCullObjectBufferAddress = m_meshletBuffer.getMeshletCullObjectAddress();
 			m_sceneView.gpuCullObjectBuffer = m_meshletBuffer.getMeshletCullObjectBuffer();

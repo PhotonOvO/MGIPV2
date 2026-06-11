@@ -2112,7 +2112,7 @@ namespace demo
 		const bool useExternalPersistentObjects =
 			params.gpuDrivenSceneView != nullptr
 			&& params.gpuDrivenSceneView->usePersistentCullingObjects
-			&& params.gpuDrivenSceneView->gpuCullObjectBuffer != 0
+			&& params.gpuDrivenSceneView->gpuCullObjectBuffer.isValid()
 			&& params.gpuDrivenSceneView->objectCount > 0;
 		const uint32_t objectCount = useExternalPersistentObjects
 			                             ? params.gpuDrivenSceneView->objectCount
@@ -2131,30 +2131,26 @@ namespace demo
 		}
 
 		frameUserData.useExternalGPUCullingObjectBuffer = useExternalPersistentObjects;
-		frameUserData.externalGPUCullingObjectBuffer =
+		// The external culling buffers are owned RHI handles published by
+		// GPUSceneRegistry / GPUMeshletBuffer; mirror them directly each frame.
+		frameUserData.externalGPUCullingObjectBufferRHI =
 			useExternalPersistentObjects
-				? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullObjectBuffer)
-				: VK_NULL_HANDLE;
-		frameUserData.externalGPUCullingMeshletBuffer =
+				? params.gpuDrivenSceneView->gpuCullObjectBuffer
+				: rhi::BufferHandle{};
+		frameUserData.externalGPUCullingMeshletBufferRHI =
 			useExternalPersistentObjects
-				? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullMeshletBuffer)
-				: VK_NULL_HANDLE;
-		frameUserData.externalGPUCullingSceneObjectBuffer =
+				? params.gpuDrivenSceneView->gpuCullMeshletBuffer
+				: rhi::BufferHandle{};
+		frameUserData.externalGPUCullingSceneObjectBufferRHI =
 			useExternalPersistentObjects
-				? reinterpret_cast<VkBuffer>(params.gpuDrivenSceneView->gpuCullSceneObjectBuffer)
-				: VK_NULL_HANDLE;
+				? params.gpuDrivenSceneView->gpuCullSceneObjectBuffer
+				: rhi::BufferHandle{};
 		frameUserData.externalGPUCullingObjectBufferAddress =
 			useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : 0;
 		frameUserData.useExternalGPUCullingMeshletData =
 			useExternalPersistentObjects
-			&& frameUserData.externalGPUCullingMeshletBuffer != VK_NULL_HANDLE
-			&& frameUserData.externalGPUCullingSceneObjectBuffer != VK_NULL_HANDLE;
-		rebindFrameBufferHandle(frameUserData.externalGPUCullingObjectBufferRHI,
-		                        frameUserData.externalGPUCullingObjectBuffer);
-		rebindFrameBufferHandle(frameUserData.externalGPUCullingMeshletBufferRHI,
-		                        frameUserData.externalGPUCullingMeshletBuffer);
-		rebindFrameBufferHandle(frameUserData.externalGPUCullingSceneObjectBufferRHI,
-		                        frameUserData.externalGPUCullingSceneObjectBuffer);
+			&& frameUserData.externalGPUCullingMeshletBufferRHI.isValid()
+			&& frameUserData.externalGPUCullingSceneObjectBufferRHI.isValid();
 		frameUserData.gpuCullingSourceModel = useExternalPersistentObjects ? nullptr : params.gltfModel;
 		frameUserData.gpuCullingObjectCount = objectCount;
 		m_externalGPUCullingOverlayObjects =
@@ -3612,7 +3608,8 @@ namespace demo
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullObjectBufferHandle,
 				.backendBufferToken = frameUserData.useExternalGPUCullingObjectBuffer
-					                      ? reinterpret_cast<uint64_t>(frameUserData.externalGPUCullingObjectBuffer)
+					                      ? m_device.resourceTable.resolveBuffer(
+						                      frameUserData.externalGPUCullingObjectBufferRHI)
 					                      : m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingObjectBuffer),
 			});
 			passExecutor.bindBuffer({
@@ -4120,8 +4117,8 @@ namespace demo
 		                                 2e-3f);
 		const bool meshletCulling =
 			params.gpuDrivenSceneView != nullptr
-			&& params.gpuDrivenSceneView->gpuCullMeshletBuffer != 0
-			&& params.gpuDrivenSceneView->gpuCullSceneObjectBuffer != 0;
+			&& params.gpuDrivenSceneView->gpuCullMeshletBuffer.isValid()
+			&& params.gpuDrivenSceneView->gpuCullSceneObjectBuffer.isValid();
 		uniforms.cullingControls = glm::vec4(params.debugOptions.enableGPUFrustumCulling ? 1.0f : 0.0f,
 		                                     params.debugOptions.enableGPUOcclusionCulling ? 1.0f : 0.0f,
 		                                     meshletCulling ? 1.0f : 0.0f,
@@ -7555,31 +7552,6 @@ namespace demo
 		}
 		return m_device.resourceTable.resolveBuffer(
 			m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer);
-	}
-
-	void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, VkBuffer buffer)
-	{
-		if (buffer == VK_NULL_HANDLE)
-		{
-			if (!handle.isNull())
-			{
-				m_device.resourceTable.removeBuffer(handle);
-				handle = {};
-			}
-			return;
-		}
-		const uint64_t native = reinterpret_cast<uint64_t>(buffer);
-		if (handle.isNull())
-		{
-			rhi::vulkan::BufferRecord rec{};
-			rec.nativeBuffer = native;
-			rec.owned = false; // FrameUserData owns the VMA lifetime; registry mirrors only.
-			handle = m_device.resourceTable.registerBuffer(rec);
-		}
-		else
-		{
-			m_device.resourceTable.updateBuffer(handle, native);
-		}
 	}
 
 	rhi::BufferHandle RenderDevice::getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const

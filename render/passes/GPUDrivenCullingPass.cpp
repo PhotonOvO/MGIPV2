@@ -44,7 +44,7 @@ namespace demo
 		const uint32_t safeObjectCount = m_renderer->getSafePersistentObjectCount();
 		const bool useExternalPersistentObjects = params.gpuDrivenSceneView != nullptr
 			&& params.gpuDrivenSceneView->usePersistentCullingObjects
-			&& params.gpuDrivenSceneView->gpuCullObjectBuffer != 0
+			&& params.gpuDrivenSceneView->gpuCullObjectBuffer.isValid()
 			&& safeObjectCount > 0u;
 
 		if (params.cameraUniforms != nullptr && !m_renderer->getGPUCullingPipelineHandle().isNull())

@@ -372,12 +372,7 @@ namespace demo
 		[[nodiscard]] bool isMeshletRenderingActive() const
 		{
 			return m_enableExperimentalMeshletPath && m_meshletBuffer.getMeshletCount() > 0u
-				&& m_meshletBuffer.getMeshletIndexBufferHandle() != 0;
-		}
-
-		[[nodiscard]] uint64_t getMeshletIndexBufferHandle() const
-		{
-			return m_meshletBuffer.getMeshletIndexBufferHandle();
+				&& m_meshletBuffer.getMeshletIndexBufferRHIHandle().isValid();
 		}
 
 		[[nodiscard]] rhi::BufferHandle getMeshletIndexBufferRHIHandle() const
@@ -395,11 +390,6 @@ namespace demo
 		[[nodiscard]] rhi::BufferHandle getShadowPackedIndexBufferRHIHandle() const
 		{
 			return m_shadowPackedIndexBufferRHI;
-		}
-
-		[[nodiscard]] uintptr_t getMeshletDataBuffer() const
-		{
-			return m_meshletBuffer.getMeshletDataBuffer();
 		}
 
 		[[nodiscard]] bool tryGetMeshDrawIndex(MeshHandle handle, uint32_t& outDrawIndex) const;

@@ -1,8 +1,8 @@
 #include "GPUSceneRegistry.h"
 
+#include "../common/Common.h"
 #include "../rhi/RHICommandBuffer.h"
 #include "../rhi/RHIDevice.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <cstring>
@@ -12,69 +12,6 @@ namespace demo
 {
 	namespace
 	{
-		[[nodiscard]] VkDevice toVkDevice(uintptr_t handle)
-		{
-			return reinterpret_cast<VkDevice>(handle);
-		}
-
-		[[nodiscard]] VmaAllocator toVmaAllocator(uintptr_t handle)
-		{
-			return reinterpret_cast<VmaAllocator>(handle);
-		}
-
-		[[nodiscard]] VkBuffer toVkBuffer(uintptr_t handle)
-		{
-			return reinterpret_cast<VkBuffer>(handle);
-		}
-
-		[[nodiscard]] VmaAllocation toVmaAllocation(uintptr_t handle)
-		{
-			return reinterpret_cast<VmaAllocation>(handle);
-		}
-
-		GPUSceneRegistry::BufferRecord createBuffer(VkDevice device,
-		                                            VmaAllocator allocator,
-		                                            uint64_t size,
-		                                            VkBufferUsageFlags2KHR usage,
-		                                            VmaMemoryUsage memoryUsage,
-		                                            VmaAllocationCreateFlags flags)
-		{
-			const VkBufferUsageFlags2CreateInfoKHR usageInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
-				.usage = usage | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
-			};
-			const VkBufferCreateInfo bufferInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-				.pNext = &usageInfo,
-				.size = size,
-				.usage = 0,
-				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			};
-
-			VmaAllocationCreateInfo allocInfo{.flags = flags, .usage = memoryUsage};
-			if ((allocInfo.flags & (VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-				| VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT)) != 0)
-			{
-				allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
-			}
-
-			VkBuffer nativeBuffer{VK_NULL_HANDLE};
-			VmaAllocation nativeAllocation{nullptr};
-			VmaAllocationInfo allocationInfo{};
-			VK_CHECK(
-				vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &nativeBuffer, &nativeAllocation, &allocationInfo));
-
-			const VkBufferDeviceAddressInfo addressInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = nativeBuffer
-			};
-			return GPUSceneRegistry::BufferRecord{
-				.buffer = reinterpret_cast<uintptr_t>(nativeBuffer),
-				.allocation = reinterpret_cast<uintptr_t>(nativeAllocation),
-				.address = static_cast<uintptr_t>(vkGetBufferDeviceAddress(device, &addressInfo)),
-				.mapped = allocationInfo.pMappedData,
-			};
-		}
-
 		glm::vec4 packRow(const glm::mat4& matrix, int row)
 		{
 			return glm::vec4(matrix[0][row], matrix[1][row], matrix[2][row], matrix[3][row]);
@@ -82,20 +19,18 @@ namespace demo
 
 		template <typename T>
 		void copyRangesToGpu(rhi::ComputeEncoder& copy,
-		                     GPUSceneRegistry::BufferRecord& stagingBuffer,
+		                     void* stagingMapped,
 		                     rhi::BufferHandle stagingBufferHandle,
 		                     const std::vector<T>& source,
 		                     rhi::BufferHandle destinationBuffer,
-		                     std::span<const GPUSceneRegistry::DirtyRange> ranges,
-		                     VmaAllocator allocator)
+		                     std::span<const GPUSceneRegistry::DirtyRange> ranges)
 		{
 			for (const GPUSceneRegistry::DirtyRange& range : ranges)
 			{
 				const uint64_t byteCount = sizeof(T) * static_cast<uint64_t>(range.count);
-				std::memcpy(stagingBuffer.mapped,
+				std::memcpy(stagingMapped,
 				            source.data() + range.startIndex,
 				            static_cast<size_t>(byteCount));
-				VK_CHECK(vmaFlushAllocation(allocator, toVmaAllocation(stagingBuffer.allocation), 0, byteCount));
 
 				copy.copyBuffer(stagingBufferHandle,
 				                0,
@@ -106,19 +41,14 @@ namespace demo
 		}
 	} // namespace
 
-	void GPUSceneRegistry::init(uintptr_t device, uintptr_t allocator, rhi::Device* rhiDevice)
+	void GPUSceneRegistry::init(rhi::Device* rhiDevice)
 	{
-		m_device = device;
-		m_allocator = allocator;
 		m_rhiDevice = rhiDevice;
 	}
 
 	void GPUSceneRegistry::deinit()
 	{
 		clear();
-		destroyBuffer(m_updateBuffer);
-		destroyBuffer(m_objectBuffer);
-		destroyBuffer(m_cullObjectBuffer);
 		if (m_rhiDevice != nullptr)
 		{
 			if (!m_updateBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_updateBufferRHI);
@@ -128,9 +58,10 @@ namespace demo
 		m_updateBufferRHI = {};
 		m_objectBufferRHI = {};
 		m_cullObjectBufferRHI = {};
+		m_objectBufferAddress = {};
+		m_cullObjectBufferAddress = {};
+		m_updateBufferMapped = nullptr;
 		m_capacity = 0;
-		m_device = 0;
-		m_allocator = 0;
 		m_rhiDevice = nullptr;
 	}
 
@@ -247,33 +178,26 @@ namespace demo
 		}
 
 		ensureCapacity(objectCount);
-		bindBufferHandles();
 		const uint64_t sceneBytes = sizeof(shaderio::GPUSceneObject) * static_cast<uint64_t>(objectCount);
 		const uint64_t cullBytes = sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(objectCount);
 		rhi::ComputeEncoder* copy = cmd.beginComputePass();
 		if (m_requiresFullUpload)
 		{
-			std::memcpy(m_updateBuffer.mapped, m_gpuObjects.data(), static_cast<size_t>(sceneBytes));
-			VK_CHECK(
-				vmaFlushAllocation(toVmaAllocator(m_allocator), toVmaAllocation(m_updateBuffer.allocation), 0,
-					sceneBytes));
+			std::memcpy(m_updateBufferMapped, m_gpuObjects.data(), static_cast<size_t>(sceneBytes));
 
 			copy->copyBuffer(m_updateBufferRHI, 0, m_objectBufferRHI, 0, sceneBytes);
 
-			std::memcpy(m_updateBuffer.mapped, m_cullObjects.data(), static_cast<size_t>(cullBytes));
-			VK_CHECK(
-				vmaFlushAllocation(toVmaAllocator(m_allocator), toVmaAllocation(m_updateBuffer.allocation), 0, cullBytes
-				));
+			std::memcpy(m_updateBufferMapped, m_cullObjects.data(), static_cast<size_t>(cullBytes));
 
 			copy->copyBuffer(m_updateBufferRHI, 0, m_cullObjectBufferRHI, 0, cullBytes);
 		}
 		else if (!m_dirtyDenseIndices.empty())
 		{
 			const std::vector<DirtyRange> dirtyRanges = buildDirtyRanges();
-			copyRangesToGpu(*copy, m_updateBuffer, m_updateBufferRHI, m_gpuObjects, m_objectBufferRHI, dirtyRanges,
-			                toVmaAllocator(m_allocator));
-			copyRangesToGpu(*copy, m_updateBuffer, m_updateBufferRHI, m_cullObjects, m_cullObjectBufferRHI, dirtyRanges,
-			                toVmaAllocator(m_allocator));
+			copyRangesToGpu(*copy, m_updateBufferMapped, m_updateBufferRHI, m_gpuObjects, m_objectBufferRHI,
+			                dirtyRanges);
+			copyRangesToGpu(*copy, m_updateBufferMapped, m_updateBufferRHI, m_cullObjects, m_cullObjectBufferRHI,
+			                dirtyRanges);
 		}
 		cmd.endEncoding();
 		cmd.barrier(rhi::StageFlags::transfer,
@@ -292,62 +216,42 @@ namespace demo
 			return;
 		}
 
+		ASSERT(m_rhiDevice != nullptr, "GPUSceneRegistry requires an RHI device for buffer allocation");
 		const uint32_t newCapacity = std::max(requiredCount, std::max(64u, m_capacity * 2u));
-		if (m_rhiDevice != nullptr)
-		{
-			if (!m_objectBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_objectBufferRHI);
-			if (!m_cullObjectBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_cullObjectBufferRHI);
-			if (!m_updateBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_updateBufferRHI);
-		}
+		if (!m_objectBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_objectBufferRHI);
+		if (!m_cullObjectBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_cullObjectBufferRHI);
+		if (!m_updateBufferRHI.isNull()) m_rhiDevice->destroyBuffer(m_updateBufferRHI);
 		m_objectBufferRHI = {};
 		m_cullObjectBufferRHI = {};
 		m_updateBufferRHI = {};
-		destroyBuffer(m_objectBuffer);
-		destroyBuffer(m_cullObjectBuffer);
-		destroyBuffer(m_updateBuffer);
+		m_updateBufferMapped = nullptr;
 
-		m_objectBuffer = createBuffer(toVkDevice(m_device),
-		                              toVmaAllocator(m_allocator),
-		                              sizeof(shaderio::GPUSceneObject) * static_cast<uint64_t>(newCapacity),
-		                              VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR,
-		                              VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-		                              0);
-		m_cullObjectBuffer = createBuffer(toVkDevice(m_device),
-		                                  toVmaAllocator(m_allocator),
-		                                  sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(newCapacity),
-		                                  VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR |
-		                                  VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR,
-		                                  VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-		                                  0);
-		m_updateBuffer = createBuffer(toVkDevice(m_device),
-		                              toVmaAllocator(m_allocator),
-		                              std::max(sizeof(shaderio::GPUSceneObject), sizeof(shaderio::GPUCullObject))
-		                              * static_cast<uint64_t>(newCapacity),
-		                              VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
-		                              VMA_MEMORY_USAGE_CPU_TO_GPU,
-		                              VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		m_objectBufferRHI = m_rhiDevice->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUSceneObject) * static_cast<uint64_t>(newCapacity),
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.allowGpuAddress = true,
+			.debugName = "GPUSceneRegistry.objects",
+		});
+		m_objectBufferAddress = m_rhiDevice->getBufferGpuAddress(m_objectBufferRHI);
+		m_cullObjectBufferRHI = m_rhiDevice->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(newCapacity),
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.allowGpuAddress = true,
+			.debugName = "GPUSceneRegistry.cullObjects",
+		});
+		m_cullObjectBufferAddress = m_rhiDevice->getBufferGpuAddress(m_cullObjectBufferRHI);
+		m_updateBufferRHI = m_rhiDevice->createBuffer(rhi::BufferDesc{
+			.size = std::max(sizeof(shaderio::GPUSceneObject), sizeof(shaderio::GPUCullObject))
+			        * static_cast<uint64_t>(newCapacity),
+			.usage = rhi::BufferUsageFlags::transferSrc,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.debugName = "GPUSceneRegistry.staging",
+		});
+		m_updateBufferMapped = m_rhiDevice->mapBuffer(m_updateBufferRHI);
 		m_capacity = newCapacity;
 		m_requiresFullUpload = true;
-	}
-
-	void GPUSceneRegistry::bindBufferHandles()
-	{
-		ASSERT(m_rhiDevice != nullptr, "GPUSceneRegistry RHI device is required for command-buffer-only upload");
-		const auto bind = [this](rhi::BufferHandle& handle, uintptr_t buffer)
-		{
-			const uint64_t native = static_cast<uint64_t>(buffer);
-			if (handle.isNull())
-			{
-				handle = m_rhiDevice->registerExternalBuffer(native);
-			}
-			else
-			{
-				m_rhiDevice->updateBufferBinding(handle, native);
-			}
-		};
-		bind(m_objectBufferRHI, m_objectBuffer.buffer);
-		bind(m_cullObjectBufferRHI, m_cullObjectBuffer.buffer);
-		bind(m_updateBufferRHI, m_updateBuffer.buffer);
 	}
 
 	void GPUSceneRegistry::markDirtyDenseIndex(uint32_t denseIndex)
@@ -408,16 +312,6 @@ namespace demo
 		slot.cullObject = packCullObject(slot.desc);
 		m_gpuObjects[slot.denseIndex] = slot.gpuObject;
 		m_cullObjects[slot.denseIndex] = slot.cullObject;
-	}
-
-	void GPUSceneRegistry::destroyBuffer(BufferRecord& buffer)
-	{
-		if (buffer.buffer != 0)
-		{
-			vmaDestroyBuffer(toVmaAllocator(m_allocator), toVkBuffer(buffer.buffer),
-			                 toVmaAllocation(buffer.allocation));
-			buffer = {};
-		}
 	}
 
 	shaderio::GPUSceneObject GPUSceneRegistry::packSceneObject(const GPUSceneRegistrationDesc& desc)

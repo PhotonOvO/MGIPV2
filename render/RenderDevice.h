@@ -646,9 +646,6 @@ namespace demo
 				rhi::BufferHandle gpuCullingStatsBuffer{};
 				rhi::BufferHandle gpuCullingUniformBuffer{};
 				rhi::BufferHandle gpuCullingResultBuffer{};
-				DEMO_RHI_VK(Buffer) externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
-				DEMO_RHI_VK(Buffer) externalGPUCullingMeshletBuffer{VK_NULL_HANDLE};
-				DEMO_RHI_VK(Buffer) externalGPUCullingSceneObjectBuffer{VK_NULL_HANDLE};
 				uint64_t externalGPUCullingObjectBufferAddress{0};
 				bool useExternalGPUCullingObjectBuffer{false};
 				bool useExternalGPUCullingMeshletData{false};
@@ -905,9 +902,6 @@ namespace demo
 		void createGPUCullingPipeline();
 		void waitForAllFrameSlots();
 		void ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
-		// Registers (first call) or rebinds (subsequent) a stable RHI BufferHandle to a
-		// per-frame native buffer; clears the handle when the buffer is null.
-		void rebindFrameBufferHandle(rhi::BufferHandle& handle, DEMO_RHI_VK(Buffer) buffer);
 		void updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
 		void createShadowCullingResources();
 		void updateShadowCullingArgumentTable(uint32_t frameIndex);

@@ -2,6 +2,7 @@
 
 #include "../common/Handles.h"
 #include "../rhi/RHIHandles.h"
+#include "../rhi/RHITypes.h"
 #include "ShaderInterop.h"
 
 #include <cstdint>
@@ -33,21 +34,13 @@ namespace demo
 	class GPUSceneRegistry
 	{
 	public:
-		struct BufferRecord
-		{
-			uintptr_t buffer{0};
-			uintptr_t allocation{0};
-			uintptr_t address{0};
-			void* mapped{nullptr};
-		};
-
 		struct DirtyRange
 		{
 			uint32_t startIndex{0};
 			uint32_t count{0};
 		};
 
-		void init(uintptr_t device, uintptr_t allocator, rhi::Device* rhiDevice);
+		void init(rhi::Device* rhiDevice);
 		void deinit();
 		void clear();
 
@@ -57,15 +50,12 @@ namespace demo
 
 		void syncToGpu(rhi::CommandBuffer& cmd);
 
-		[[nodiscard]] uint64_t getBufferAddress() const { return static_cast<uint64_t>(m_objectBuffer.address); }
-		[[nodiscard]] uintptr_t getBufferHandle() const { return m_objectBuffer.buffer; }
+		[[nodiscard]] uint64_t getBufferAddress() const { return m_objectBufferAddress.value; }
+		[[nodiscard]] rhi::BufferHandle getBufferHandle() const { return m_objectBufferRHI; }
 
-		[[nodiscard]] uint64_t getCullBufferAddress() const
-		{
-			return static_cast<uint64_t>(m_cullObjectBuffer.address);
-		}
+		[[nodiscard]] uint64_t getCullBufferAddress() const { return m_cullObjectBufferAddress.value; }
 
-		[[nodiscard]] uintptr_t getCullBufferHandle() const { return m_cullObjectBuffer.buffer; }
+		[[nodiscard]] rhi::BufferHandle getCullBufferHandle() const { return m_cullObjectBufferRHI; }
 		[[nodiscard]] uint32_t getObjectCount() const { return static_cast<uint32_t>(m_gpuObjects.size()); }
 		[[nodiscard]] bool isDirty() const { return m_dirty; }
 		[[nodiscard]] const std::vector<shaderio::GPUCullObject>& getOverlayObjects() const { return m_cullObjects; }
@@ -81,23 +71,19 @@ namespace demo
 		};
 
 		void ensureCapacity(uint32_t requiredCount);
-		void bindBufferHandles();
 		void markDirtyDenseIndex(uint32_t denseIndex);
 		[[nodiscard]] std::vector<DirtyRange> buildDirtyRanges() const;
 		void rebuildPackedObject(uint32_t objectID);
-		void destroyBuffer(BufferRecord& buffer);
 		static shaderio::GPUSceneObject packSceneObject(const GPUSceneRegistrationDesc& desc);
 		static shaderio::GPUCullObject packCullObject(const GPUSceneRegistrationDesc& desc);
 
-		uintptr_t m_device{0};
-		uintptr_t m_allocator{0};
 		rhi::Device* m_rhiDevice{nullptr};
-		BufferRecord m_objectBuffer{};
-		BufferRecord m_cullObjectBuffer{};
-		BufferRecord m_updateBuffer{};
 		rhi::BufferHandle m_objectBufferRHI{};
 		rhi::BufferHandle m_cullObjectBufferRHI{};
 		rhi::BufferHandle m_updateBufferRHI{};
+		rhi::GpuPtr m_objectBufferAddress{};
+		rhi::GpuPtr m_cullObjectBufferAddress{};
+		void* m_updateBufferMapped{nullptr};
 		uint32_t m_capacity{0};
 		bool m_dirty{false};
 		bool m_requiresFullUpload{true};

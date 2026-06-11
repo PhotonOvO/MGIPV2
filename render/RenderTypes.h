@@ -144,9 +144,9 @@ namespace demo
 		uint64_t gpuSceneObjectBufferAddress{0};
 		// Phase 1 authoritative object source for GPU culling and indirect command generation.
 		uint64_t gpuCullObjectBufferAddress{0};
-		OpaqueGpuBufferHandle gpuCullObjectBuffer{0};
-		OpaqueGpuBufferHandle gpuCullMeshletBuffer{0};
-		OpaqueGpuBufferHandle gpuCullSceneObjectBuffer{0};
+		rhi::BufferHandle gpuCullObjectBuffer{};
+		rhi::BufferHandle gpuCullMeshletBuffer{};
+		rhi::BufferHandle gpuCullSceneObjectBuffer{};
 		uint32_t objectCount{0};
 		const shaderio::GPUCullObject* overlayObjects{nullptr};
 		uint32_t overlayObjectCount{0};

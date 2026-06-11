@@ -2,6 +2,7 @@
 
 #include "../common/Handles.h"
 #include "../rhi/RHIHandles.h"
+#include "../rhi/RHITypes.h"
 #include "ShaderInterop.h"
 
 #include <cstdint>
@@ -17,15 +18,7 @@ namespace demo
 	class GPUMeshletBuffer
 	{
 	public:
-		struct BufferRecord
-		{
-			uintptr_t buffer{0};
-			uintptr_t allocation{0};
-			uintptr_t address{0};
-			void* mapped{nullptr};
-		};
-
-		void init(uintptr_t device, uintptr_t allocator, rhi::Device* device_);
+		void init(rhi::Device* rhiDevice);
 		void deinit();
 		void clear();
 
@@ -33,42 +26,33 @@ namespace demo
 		                    const std::vector<uint32_t>& meshletIndices,
 		                    const std::vector<shaderio::GPUCullObject>& meshletCullObjects);
 
-		[[nodiscard]] uint64_t getMeshletDataAddress() const
-		{
-			return static_cast<uint64_t>(m_meshletDataBuffer.address);
-		}
+		[[nodiscard]] uint64_t getMeshletDataAddress() const { return m_meshletDataAddress.value; }
 
-		[[nodiscard]] uintptr_t getMeshletDataBuffer() const { return m_meshletDataBuffer.buffer; }
+		[[nodiscard]] rhi::BufferHandle getMeshletDataBuffer() const { return m_meshletDataBuffer; }
 
-		[[nodiscard]] uint64_t getMeshletCullObjectAddress() const
-		{
-			return static_cast<uint64_t>(m_meshletCullObjectBuffer.address);
-		}
+		[[nodiscard]] uint64_t getMeshletCullObjectAddress() const { return m_meshletCullObjectAddress.value; }
 
-		[[nodiscard]] uintptr_t getMeshletCullObjectBuffer() const { return m_meshletCullObjectBuffer.buffer; }
+		[[nodiscard]] rhi::BufferHandle getMeshletCullObjectBuffer() const { return m_meshletCullObjectBuffer; }
 
-		[[nodiscard]] uint64_t getMeshletIndexBufferHandle() const
-		{
-			return static_cast<uint64_t>(m_meshletIndexBuffer.buffer);
-		}
-
-		// Stable RHI handle for the meshlet index buffer (rebound across realloc via
-		// VulkanResourceTable::updateBuffer). Consumed by RenderEncoder-based passes.
-		[[nodiscard]] rhi::BufferHandle getMeshletIndexBufferRHIHandle() const { return m_meshletIndexBufferRHI; }
+		// Owned RHI handle for the meshlet index buffer; recreated on realloc, so
+		// consumers (RenderEncoder-based passes) must fetch it each frame.
+		[[nodiscard]] rhi::BufferHandle getMeshletIndexBufferRHIHandle() const { return m_meshletIndexBuffer; }
 		[[nodiscard]] uint32_t getMeshletCount() const { return m_meshletCount; }
 		[[nodiscard]] uint32_t getMeshletIndexCount() const { return m_meshletIndexCount; }
 
 	private:
 		void ensureCapacities(uint32_t requiredMeshletCount, uint32_t requiredIndexCount);
-		void destroyBuffer(BufferRecord& buffer);
+		void releaseBuffers();
 
-		uintptr_t m_device{0};
-		uintptr_t m_allocator{0};
 		rhi::Device* m_rhiDevice{nullptr};
-		rhi::BufferHandle m_meshletIndexBufferRHI{};
-		BufferRecord m_meshletDataBuffer{};
-		BufferRecord m_meshletCullObjectBuffer{};
-		BufferRecord m_meshletIndexBuffer{};
+		rhi::BufferHandle m_meshletDataBuffer{};
+		rhi::BufferHandle m_meshletCullObjectBuffer{};
+		rhi::BufferHandle m_meshletIndexBuffer{};
+		void* m_meshletDataMapped{nullptr};
+		void* m_meshletCullObjectMapped{nullptr};
+		void* m_meshletIndexMapped{nullptr};
+		rhi::GpuPtr m_meshletDataAddress{};
+		rhi::GpuPtr m_meshletCullObjectAddress{};
 		uint32_t m_meshletCount{0};
 		uint32_t m_meshletIndexCount{0};
 		uint32_t m_meshletCapacity{0};
