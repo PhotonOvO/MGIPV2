@@ -16,13 +16,19 @@ namespace demo
 
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenSSRPass::getDependencies() const
 	{
+		// All four inputs are bound as sampled-image descriptors (SHADER_READ_ONLY layout)
+		// in acquireSSRTempArgumentTable; the dependency state must say ShaderRead explicitly,
+		// otherwise PassExecutor defaults unspecified read states to General and the descriptor
+		// layout no longer matches the actual image layout at dispatch time.
 		static const std::array<PassResourceDependency, 4> dependencies = {
 			PassResourceDependency::texture(kPassSceneColorHistoryReadHandle, ResourceAccess::read,
-			                                rhi::ShaderStage::compute),
-			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::compute),
+			                                rhi::ShaderStage::compute, rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::ShaderRead),
-			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::compute),
+			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::ShaderRead),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

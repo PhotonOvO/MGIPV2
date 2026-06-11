@@ -122,7 +122,9 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
 
         const uint2 sampleCoord = min(uint2(sampleUv * float2(inputSize)), inputSize - uint2(1u, 1u));
         const float sceneDepth = depthTexture.Load(int3(sampleCoord, 0));
-        const float depthDelta = rayDepth - sceneDepth;
+        // reversed-Z: larger depth = closer. A hit means the ray point fell behind the
+        // surface at this pixel, i.e. the ray is farther than the scene (rayDepth < sceneDepth).
+        const float depthDelta = sceneDepth - rayDepth;
         if(sceneDepth > 0.0001 && depthDelta > 0.0 && depthDelta < thickness)
         {
             hitColor = sceneColorHistory.Load(int3(sampleCoord, 0)).rgb;
