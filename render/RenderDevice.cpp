@@ -912,7 +912,8 @@ namespace demo
 		initImGui(window);
 
 		// Scene sampler: linear mag/min, nearest mip, repeat, maxLod 0 (matches the prior
-		// zero-initialized VkSamplerCreateInfo). Created through the RHI; held as a handle.
+		// zero-initialized create info). Created through the RHI; held as a handle, and
+		// debug-named by the backend via SamplerDesc::debugName.
 		m_device.sceneLinearSamplerHandle = m_device.device->createSampler(rhi::SamplerDesc{
 			.magFilter = rhi::Filter::linear,
 			.minFilter = rhi::Filter::linear,
@@ -923,10 +924,6 @@ namespace demo
 			.maxLod = 0.0f,
 			.debugName = "SceneLinearSampler",
 		});
-		const VkSampler linearSampler =
-			reinterpret_cast<VkSampler>(static_cast<uintptr_t>(m_device.resourceTable.resolveSampler(
-				m_device.sceneLinearSamplerHandle)));
-		DBG_VK_NAME(linearSampler);
 
 		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
 		{
@@ -5488,7 +5485,7 @@ namespace demo
 				.addressModeU = rhi::AddressMode::repeat,
 				.addressModeV = rhi::AddressMode::repeat,
 				.addressModeW = rhi::AddressMode::repeat,
-				.maxLod = VK_LOD_CLAMP_NONE,
+				// maxLod stays at the SamplerDesc default (1000.0f = full LOD range).
 				.debugName = "MaterialSampler",
 			});
 		}
