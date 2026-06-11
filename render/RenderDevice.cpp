@@ -632,92 +632,24 @@ namespace demo
 		return allocator;
 	}
 
-	static utils::Buffer createBuffer(const VkDevice device,
-	                                  const VmaAllocator allocator,
-	                                  const uint64_t size,
-	                                  const VkBufferUsageFlags2KHR usage,
-	                                  const VmaMemoryUsage memoryUsage = VMA_MEMORY_USAGE_AUTO,
-	                                  VmaAllocationCreateFlags flags = {},
-	                                  bool enableExternalHostMemory = false)
-	{
-		const bool hostAccessibleBuffer = memoryUsage == VMA_MEMORY_USAGE_CPU_ONLY || memoryUsage ==
-			VMA_MEMORY_USAGE_CPU_TO_GPU
-			|| memoryUsage == VMA_MEMORY_USAGE_GPU_TO_CPU
-			|| (flags & (VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-				| VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
-				| VMA_ALLOCATION_CREATE_MAPPED_BIT)) != 0;
-
-		const VkBufferUsageFlags2CreateInfoKHR usageInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
-			.usage = usage | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
-		};
-
-		VkExternalMemoryBufferCreateInfo externalMemoryBufferCreateInfo{
-			.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
-			.pNext = &usageInfo,
-			.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-		};
-
-		const void* bufferCreatePNext = (enableExternalHostMemory && hostAccessibleBuffer)
-			                                ? static_cast<const void*>(&externalMemoryBufferCreateInfo)
-			                                : static_cast<const void*>(&usageInfo);
-
-		const VkBufferCreateInfo bufferInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.pNext = bufferCreatePNext,
-			.size = size,
-			.usage = 0,
-			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		};
-
-		VmaAllocationCreateInfo allocInfo{.flags = flags, .usage = memoryUsage};
-		if ((allocInfo.flags & (VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-			| VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT)) != 0)
-		{
-			allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
-		}
-		if (size > 64ULL * 1024)
-		{
-			allocInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-		}
-
-		utils::Buffer buffer{};
-		VmaAllocationInfo allocationInfo{};
-		VK_CHECK(
-			vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, &allocationInfo));
-		buffer.mapped = allocationInfo.pMappedData;
-
-		const VkBufferDeviceAddressInfo addressInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buffer.buffer
-		};
-		buffer.address = vkGetBufferDeviceAddress(device, &addressInfo);
-		return buffer;
-	}
-
-	static void destroyBuffer(const VmaAllocator allocator, utils::Buffer& buffer)
-	{
-		if (buffer.buffer != VK_NULL_HANDLE)
-		{
-			vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
-			buffer = {};
-		}
-	}
-
 	static utils::Buffer toUtilsBuffer(const UploadBufferRecord& buffer);
 
 	static void destroyBuffer(const VmaAllocator allocator, UploadBufferRecord& buffer)
 	{
 		ASSERT(buffer.rhiHandle.isNull(),
 		       "RHI-owned UploadBufferRecord must be destroyed through destroyUploadBufferRecord");
-		utils::Buffer nativeBuffer = toUtilsBuffer(buffer);
-		destroyBuffer(allocator, nativeBuffer);
+		VkBuffer vkBuf = reinterpret_cast<VkBuffer>(buffer.buffer);
+		VmaAllocation alloc = reinterpret_cast<VmaAllocation>(buffer.allocation);
+		if (vkBuf != VK_NULL_HANDLE)
+		{
+			vmaDestroyBuffer(allocator, vkBuf, alloc);
+		}
 		buffer = {};
 	}
 
-	static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data,
-	                                   const uint64_t size);
-	static void writeHostVisibleBufferRange(const VmaAllocator allocator,
-	                                        utils::Buffer& buffer,
+	static void writeHostVisibleBuffer(rhi::Device& device, rhi::BufferHandle handle, const void* data,
+	                                   uint64_t size);
+	static void writeHostVisibleBufferRange(rhi::Device& device, rhi::BufferHandle handle,
 	                                        uint64_t offset,
 	                                        const void* data,
 	                                        uint64_t size);
@@ -785,7 +717,10 @@ namespace demo
 		}
 
 		utils::Buffer nativeBuffer = toUtilsBuffer(buffer);
-		destroyBuffer(allocator, nativeBuffer);
+		if (nativeBuffer.buffer != VK_NULL_HANDLE)
+		{
+			vmaDestroyBuffer(allocator, nativeBuffer.buffer, nativeBuffer.allocation);
+		}
 	}
 
 	static rhi::BufferHandle createBufferAndUploadData(rhi::Device& rhiDevice,
@@ -1236,21 +1171,21 @@ namespace demo
 		// Just cleanup the transient allocators
 		for (auto& frameUserData : m_perFrame.frameUserData)
 		{
-			destroyBuffer(m_device.allocator, frameUserData.lightingBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.lightCullingBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingDrawCountBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gbufferMdiDrawDataBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer);
-			destroyBuffer(m_device.allocator, frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
+			if (!frameUserData.lightingBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.lightingBuffer);
+			if (!frameUserData.lightCullingBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.lightCullingBuffer);
+			if (!frameUserData.gpuCullingObjectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingObjectBuffer);
+			if (!frameUserData.gpuCullingIndirectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingIndirectBuffer);
+			if (!frameUserData.gpuCullingDrawCountBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingDrawCountBuffer);
+			if (!frameUserData.gpuCullingStatsBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsBuffer);
+			if (!frameUserData.gpuCullingUniformBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingUniformBuffer);
+			if (!frameUserData.gpuCullingResultBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultBuffer);
+			if (!frameUserData.shadowCullingObjectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingObjectBuffer);
+			if (!frameUserData.shadowCullingIndirectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingIndirectBuffer);
+			if (!frameUserData.shadowCullingDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingDrawDataBuffer);
+			if (!frameUserData.mdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.mdiDrawDataBuffer);
+			if (!frameUserData.gbufferMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gbufferMdiDrawDataBuffer);
+			if (!frameUserData.depthMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.depthMdiDrawDataBuffer);
+			if (!frameUserData.gpuDrivenPersistentIndirectStreamBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
 			frameUserData.transientAllocator.destroy();
 		}
 		m_perFrame.frameUserData.clear();
@@ -1573,7 +1508,7 @@ namespace demo
 		{
 			return 0;
 		}
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer.buffer);
+		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer);
 	}
 
 	uint32_t RenderDevice::getShadowCullingMeshCapacity(uint32_t frameIndex) const
@@ -1892,24 +1827,32 @@ namespace demo
 		for (auto& frameUserData : m_perFrame.frameUserData)
 		{
 			frameUserData.transientAllocator.init(*m_device.device, kPerFrameTransientAllocatorSize);
-			frameUserData.lightingBuffer =
-				createBuffer(device, m_device.allocator, sizeof(shaderio::LightingUniforms),
-				             VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
-				             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-			frameUserData.lightCullingBuffer =
-				createBuffer(device, m_device.allocator, sizeof(shaderio::LightCullingUniforms),
-				             VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
-				             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-			frameUserData.gpuCullingUniformBuffer =
-				createBuffer(device, m_device.allocator, sizeof(shaderio::GPUCullingUniforms),
-				             VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT_KHR,
-				             VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+			frameUserData.lightingBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+				.size = sizeof(shaderio::LightingUniforms),
+				.usage = rhi::BufferUsageFlags::uniform,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.debugName = "lightingBuffer",
+			});
+			frameUserData.lightCullingBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+				.size = sizeof(shaderio::LightCullingUniforms),
+				.usage = rhi::BufferUsageFlags::uniform,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.debugName = "lightCullingBuffer",
+			});
+			frameUserData.gpuCullingUniformBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+				.size = sizeof(shaderio::GPUCullingUniforms),
+				.usage = rhi::BufferUsageFlags::uniform,
+				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+				.debugName = "gpuCullingUniformBuffer",
+			});
 
 			// Wave 8: mirror the per-frame UBO buffers (and the stable transient allocator
 			// buffer) as RHI BufferHandles for ArgumentWrite-based bind-group updates.
-			rebindFrameBufferHandle(frameUserData.lightingBufferRHI, frameUserData.lightingBuffer);
-			rebindFrameBufferHandle(frameUserData.lightCullingBufferRHI, frameUserData.lightCullingBuffer);
-			rebindFrameBufferHandle(frameUserData.gpuCullingUniformBufferRHI, frameUserData.gpuCullingUniformBuffer);
+			// Now that the buffer members are rhi::BufferHandle directly, RHI handles are the
+			// same object — assign directly without going through rebindFrameBufferHandle.
+			frameUserData.lightingBufferRHI = frameUserData.lightingBuffer;
+			frameUserData.lightCullingBufferRHI = frameUserData.lightCullingBuffer;
+			frameUserData.gpuCullingUniformBufferRHI = frameUserData.gpuCullingUniformBuffer;
 			frameUserData.transientBufferRHI = frameUserData.transientAllocator.getBufferHandle();
 		}
 
@@ -2080,7 +2023,7 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.lightingBuffer, &lightingUniforms,
+		writeHostVisibleBuffer(*m_device.device, frameUserData.lightingBuffer, &lightingUniforms,
 		                       sizeof(lightingUniforms));
 	}
 
@@ -2093,7 +2036,7 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.lightCullingBuffer, &cullingUniforms,
+		writeHostVisibleBuffer(*m_device.device, frameUserData.lightCullingBuffer, &cullingUniforms,
 		                       sizeof(cullingUniforms));
 	}
 
@@ -2120,67 +2063,67 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.gpuCullingObjectBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingIndirectBuffer.
-			buffer != VK_NULL_HANDLE
-			|| frameUserData.gpuCullingDrawCountBuffer.buffer != VK_NULL_HANDLE
-			|| frameUserData.gpuCullingStatsBuffer.buffer != VK_NULL_HANDLE || frameUserData.gpuCullingResultBuffer.
-			buffer != VK_NULL_HANDLE)
+		if (!frameUserData.gpuCullingObjectBuffer.isNull() || !frameUserData.gpuCullingIndirectBuffer.isNull()
+			|| !frameUserData.gpuCullingDrawCountBuffer.isNull()
+			|| !frameUserData.gpuCullingStatsBuffer.isNull() || !frameUserData.gpuCullingResultBuffer.isNull())
 		{
 			// These per-frame buffers are consumed by submitted graphics work and some
 			// passes read the previous frame's culling outputs. When scene switches force
 			// a capacity jump, retire the whole frame ring before destroying buffers.
 			waitForAllFrameSlots();
 		}
-		destroyBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.gpuCullingIndirectBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.gpuCullingDrawCountBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.gpuCullingResultBuffer);
+		if (!frameUserData.gpuCullingObjectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingObjectBuffer);
+		if (!frameUserData.gpuCullingIndirectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingIndirectBuffer);
+		if (!frameUserData.gpuCullingDrawCountBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingDrawCountBuffer);
+		if (!frameUserData.gpuCullingStatsBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsBuffer);
+		if (!frameUserData.gpuCullingResultBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultBuffer);
 
-		frameUserData.gpuCullingObjectBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullObject) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-		frameUserData.gpuCullingIndirectBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity * 4u,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_GPU_ONLY);
-		frameUserData.gpuCullingDrawCountBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullDrawCounts),
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-		frameUserData.gpuCullingStatsBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullStats),
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-		frameUserData.gpuCullingResultBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(uint32_t) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		frameUserData.gpuCullingObjectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullObject) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "gpuCullingObjectBuffer",
+		});
+		frameUserData.gpuCullingIndirectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity * 4u,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.allowGpuAddress = true,
+			.debugName = "gpuCullingIndirectBuffer",
+		});
+		frameUserData.gpuCullingDrawCountBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullDrawCounts),
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "gpuCullingDrawCountBuffer",
+		});
+		frameUserData.gpuCullingStatsBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullStats),
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "gpuCullingStatsBuffer",
+		});
+		frameUserData.gpuCullingResultBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(uint32_t) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "gpuCullingResultBuffer",
+		});
 		frameUserData.gpuCullingMeshCapacity = requiredCapacity;
 		frameUserData.gpuCullingResults.resize(requiredCapacity, shaderio::LGPUCullResultVisible);
 		frameUserData.gpuCullingScratchObjects.resize(requiredCapacity);
 
-		rebindFrameBufferHandle(frameUserData.gpuCullingIndirectBufferRHI, frameUserData.gpuCullingIndirectBuffer);
-		rebindFrameBufferHandle(frameUserData.gpuCullingDrawCountBufferRHI, frameUserData.gpuCullingDrawCountBuffer);
-		rebindFrameBufferHandle(frameUserData.gpuCullingObjectBufferRHI, frameUserData.gpuCullingObjectBuffer);
-		rebindFrameBufferHandle(frameUserData.gpuCullingStatsBufferRHI, frameUserData.gpuCullingStatsBuffer);
-		rebindFrameBufferHandle(frameUserData.gpuCullingResultBufferRHI, frameUserData.gpuCullingResultBuffer);
+		frameUserData.gpuCullingIndirectBufferRHI = frameUserData.gpuCullingIndirectBuffer;
+		frameUserData.gpuCullingDrawCountBufferRHI = frameUserData.gpuCullingDrawCountBuffer;
+		frameUserData.gpuCullingObjectBufferRHI = frameUserData.gpuCullingObjectBuffer;
+		frameUserData.gpuCullingStatsBufferRHI = frameUserData.gpuCullingStatsBuffer;
+		frameUserData.gpuCullingResultBufferRHI = frameUserData.gpuCullingResultBuffer;
 	}
 
 	void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
@@ -2204,10 +2147,10 @@ namespace demo
 
 		ensureGPUCullingBuffers(frameUserData, objectCount);
 
-		if (frameUserData.gpuCullingObjectBuffer.buffer == VK_NULL_HANDLE
-			|| frameUserData.gpuCullingIndirectBuffer.buffer == VK_NULL_HANDLE
-			|| frameUserData.gpuCullingDrawCountBuffer.buffer == VK_NULL_HANDLE
-			|| frameUserData.gpuCullingStatsBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.gpuCullingObjectBuffer.isNull()
+			|| frameUserData.gpuCullingIndirectBuffer.isNull()
+			|| frameUserData.gpuCullingDrawCountBuffer.isNull()
+			|| frameUserData.gpuCullingStatsBuffer.isNull())
 		{
 			return;
 		}
@@ -2281,20 +2224,20 @@ namespace demo
 
 		if (!useExternalPersistentObjects && !objects.empty())
 		{
-			writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingObjectBuffer, objects.data(),
+			writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingObjectBuffer, objects.data(),
 			                       sizeof(shaderio::GPUCullObject) * objects.size());
 		}
 
 		const shaderio::GPUCullStats zeroStats{};
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingStatsBuffer, &zeroStats, sizeof(zeroStats));
+		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingStatsBuffer, &zeroStats, sizeof(zeroStats));
 		const shaderio::GPUCullDrawCounts zeroDrawCounts{};
-		writeHostVisibleBuffer(m_device.allocator,
+		writeHostVisibleBuffer(*m_device.device,
 		                       frameUserData.gpuCullingDrawCountBuffer,
 		                       &zeroDrawCounts,
 		                       sizeof(zeroDrawCounts));
 
 		const shaderio::GPUCullingUniforms uniforms = buildGPUCullingUniforms(params, objectCount);
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
+		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
 	}
 
 	void RenderDevice::ensureShadowCullingBuffers(PerFrameResources::FrameUserData& frameUserData,
@@ -2306,49 +2249,47 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.shadowCullingObjectBuffer.buffer != VK_NULL_HANDLE
-			|| frameUserData.shadowCullingIndirectBuffer.buffer != VK_NULL_HANDLE
-			|| frameUserData.shadowCullingDrawDataBuffer.buffer != VK_NULL_HANDLE)
+		if (!frameUserData.shadowCullingObjectBuffer.isNull()
+			|| !frameUserData.shadowCullingIndirectBuffer.isNull()
+			|| !frameUserData.shadowCullingDrawDataBuffer.isNull())
 		{
 			// Mirror the GPU culling rule: shadow culling buffers participate in
 			// submitted work across the frame ring, so expand them only after all
 			// frame slots have retired.
 			waitForAllFrameSlots();
 		}
-		destroyBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer);
-		destroyBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer);
+		if (!frameUserData.shadowCullingObjectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingObjectBuffer);
+		if (!frameUserData.shadowCullingIndirectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingIndirectBuffer);
+		if (!frameUserData.shadowCullingDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingDrawDataBuffer);
 
-		frameUserData.shadowCullingObjectBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::ShadowCullObject) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-		frameUserData.shadowCullingIndirectBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
-		frameUserData.shadowCullingDrawDataBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::DrawUniforms) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		frameUserData.shadowCullingObjectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::ShadowCullObject) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "shadowCullingObjectBuffer",
+		});
+		frameUserData.shadowCullingIndirectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "shadowCullingIndirectBuffer",
+		});
+		frameUserData.shadowCullingDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::DrawUniforms) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "shadowCullingDrawDataBuffer",
+		});
 		frameUserData.shadowCullingMeshCapacity = requiredCapacity;
 		frameUserData.shadowCullingScratchObjects.resize(requiredCapacity);
 		frameUserData.shadowCullingScratchDrawData.resize(requiredCapacity);
-		rebindFrameBufferHandle(frameUserData.shadowCullingObjectBufferRHI, frameUserData.shadowCullingObjectBuffer);
-		rebindFrameBufferHandle(frameUserData.shadowCullingIndirectBufferRHI,
-		                        frameUserData.shadowCullingIndirectBuffer);
-		rebindFrameBufferHandle(frameUserData.shadowCullingDrawDataBufferRHI,
-		                        frameUserData.shadowCullingDrawDataBuffer);
+		frameUserData.shadowCullingObjectBufferRHI = frameUserData.shadowCullingObjectBuffer;
+		frameUserData.shadowCullingIndirectBufferRHI = frameUserData.shadowCullingIndirectBuffer;
+		frameUserData.shadowCullingDrawDataBufferRHI = frameUserData.shadowCullingDrawDataBuffer;
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateShadowCullingArgumentTable(frameIndex);
 		updateShadowCullingDrawDataArgumentTable(frameIndex);
@@ -2431,22 +2372,21 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.gbufferMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
+		if (!frameUserData.gbufferMdiDrawDataBuffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
 
-		destroyBuffer(m_device.allocator, frameUserData.gbufferMdiDrawDataBuffer);
-		frameUserData.gbufferMdiDrawDataBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::DrawUniforms) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		if (!frameUserData.gbufferMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gbufferMdiDrawDataBuffer);
+		frameUserData.gbufferMdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::DrawUniforms) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "gbufferMdiDrawDataBuffer",
+		});
 		frameUserData.gbufferMdiDrawCapacity = requiredCapacity;
-		rebindFrameBufferHandle(frameUserData.gbufferMdiDrawDataBufferRHI, frameUserData.gbufferMdiDrawDataBuffer);
+		frameUserData.gbufferMdiDrawDataBufferRHI = frameUserData.gbufferMdiDrawDataBuffer;
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateGBufferMdiDrawDataArgumentTable(frameIndex);
@@ -2461,22 +2401,21 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.mdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
+		if (!frameUserData.mdiDrawDataBuffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
 
-		destroyBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer);
-		frameUserData.mdiDrawDataBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::DrawUniforms) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		if (!frameUserData.mdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.mdiDrawDataBuffer);
+		frameUserData.mdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::DrawUniforms) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "mdiDrawDataBuffer",
+		});
 		frameUserData.mdiDrawCapacity = requiredCapacity;
-		rebindFrameBufferHandle(frameUserData.mdiDrawDataBufferRHI, frameUserData.mdiDrawDataBuffer);
+		frameUserData.mdiDrawDataBufferRHI = frameUserData.mdiDrawDataBuffer;
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateMdiDrawDataArgumentTable(frameIndex);
@@ -2491,22 +2430,21 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.depthMdiDrawDataBuffer.buffer != VK_NULL_HANDLE)
+		if (!frameUserData.depthMdiDrawDataBuffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
 
-		destroyBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer);
-		frameUserData.depthMdiDrawDataBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::DrawUniforms) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_CPU_TO_GPU,
-			             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+		if (!frameUserData.depthMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.depthMdiDrawDataBuffer);
+		frameUserData.depthMdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::DrawUniforms) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.allowGpuAddress = true,
+			.debugName = "depthMdiDrawDataBuffer",
+		});
 		frameUserData.depthMdiDrawCapacity = requiredCapacity;
-		rebindFrameBufferHandle(frameUserData.depthMdiDrawDataBufferRHI, frameUserData.depthMdiDrawDataBuffer);
+		frameUserData.depthMdiDrawDataBufferRHI = frameUserData.depthMdiDrawDataBuffer;
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateDepthMdiDrawDataArgumentTable(frameIndex);
@@ -2521,22 +2459,22 @@ namespace demo
 			return;
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		if (frameUserData.gpuDrivenPersistentIndirectStreamBuffer.buffer != VK_NULL_HANDLE)
+		if (!frameUserData.gpuDrivenPersistentIndirectStreamBuffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
 
-		destroyBuffer(m_device.allocator, frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
-		frameUserData.gpuDrivenPersistentIndirectStreamBuffer =
-			createBuffer(device,
-			             m_device.allocator,
-			             sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
-			             VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR,
-			             VMA_MEMORY_USAGE_GPU_ONLY);
+		if (!frameUserData.gpuDrivenPersistentIndirectStreamBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
+		frameUserData.gpuDrivenPersistentIndirectStreamBuffer = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::indirect | rhi::BufferUsageFlags::storage
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.allowGpuAddress = true,
+			.debugName = "gpuDrivenPersistentIndirectStreamBuffer",
+		});
 		frameUserData.gpuDrivenPersistentIndirectStreamCapacity = requiredCapacity;
-		rebindFrameBufferHandle(frameUserData.gpuDrivenPersistentIndirectStreamBufferRHI,
-		                        frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
+		frameUserData.gpuDrivenPersistentIndirectStreamBufferRHI = frameUserData.gpuDrivenPersistentIndirectStreamBuffer;
 	}
 
 	void RenderDevice::updateGBufferMdiDrawDataArgumentTable(uint32_t frameIndex)
@@ -2547,7 +2485,7 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		if (frameUserData.gbufferMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.gbufferMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
@@ -2576,7 +2514,7 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		if (frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.mdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
@@ -2605,7 +2543,7 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		if (frameUserData.depthMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.depthMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
@@ -2668,8 +2606,8 @@ namespace demo
 
 		ensureShadowCullingBuffers(frameUserData, objectCount);
 
-		if (frameUserData.shadowCullingObjectBuffer.buffer == VK_NULL_HANDLE
-			|| frameUserData.shadowCullingDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.shadowCullingObjectBuffer.isNull()
+			|| frameUserData.shadowCullingDrawDataBuffer.isNull())
 		{
 			return;
 		}
@@ -2727,12 +2665,12 @@ namespace demo
 
 		if (objectCount > 0)
 		{
-			writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingObjectBuffer, objects.data(),
+			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingObjectBuffer, objects.data(),
 			                       sizeof(shaderio::ShadowCullObject) * objectCount);
-			writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingIndirectBuffer,
+			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingIndirectBuffer,
 			                       bootstrapCommands.data(),
 			                       sizeof(shaderio::GPUCullIndirectCommand) * objectCount);
-			writeHostVisibleBuffer(m_device.allocator, frameUserData.shadowCullingDrawDataBuffer, drawData.data(),
+			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingDrawDataBuffer, drawData.data(),
 			                       sizeof(shaderio::DrawUniforms) * objectCount);
 		}
 	}
@@ -2745,30 +2683,25 @@ namespace demo
 		}
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		if (frameUserData.gpuCullingStatsBuffer.allocation == nullptr || frameUserData.gpuCullingStatsBuffer.mapped ==
-			nullptr)
+		void* statsMapped = frameUserData.gpuCullingStatsBuffer.isNull()
+			? nullptr : m_device.device->mapBuffer(frameUserData.gpuCullingStatsBuffer);
+		if (statsMapped == nullptr)
 		{
 			return;
 		}
 
 		{
-			VK_CHECK(
-				vmaInvalidateAllocation(m_device.allocator, frameUserData.gpuCullingStatsBuffer.allocation, 0, sizeof(
-					shaderio::GPUCullStats)));
-			std::memcpy(&m_lastGPUCullingStats, frameUserData.gpuCullingStatsBuffer.mapped,
-			            sizeof(m_lastGPUCullingStats));
+			// cpuToGpu memory is HOST_COHERENT — no vmaInvalidateAllocation needed.
+			std::memcpy(&m_lastGPUCullingStats, statsMapped, sizeof(m_lastGPUCullingStats));
 		}
 		m_lastGPUCullingDrawCounts = {};
-		if (frameUserData.gpuCullingDrawCountBuffer.allocation != nullptr && frameUserData.gpuCullingDrawCountBuffer.
-			mapped != nullptr)
+		if (!frameUserData.gpuCullingDrawCountBuffer.isNull())
 		{
-			VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
-				frameUserData.gpuCullingDrawCountBuffer.allocation,
-				0,
-				sizeof(shaderio::GPUCullDrawCounts)));
-			std::memcpy(&m_lastGPUCullingDrawCounts,
-			            frameUserData.gpuCullingDrawCountBuffer.mapped,
-			            sizeof(m_lastGPUCullingDrawCounts));
+			void* drawCountMapped = m_device.device->mapBuffer(frameUserData.gpuCullingDrawCountBuffer);
+			if (drawCountMapped != nullptr)
+			{
+				std::memcpy(&m_lastGPUCullingDrawCounts, drawCountMapped, sizeof(m_lastGPUCullingDrawCounts));
+			}
 		}
 
 		m_lastGPUCullingOverlayObjects.clear();
@@ -2776,20 +2709,20 @@ namespace demo
 		{
 			return;
 		}
-		if (frameUserData.gpuCullingResultBuffer.allocation == nullptr || frameUserData.gpuCullingResultBuffer.mapped ==
-			nullptr
-			|| frameUserData.gpuCullingResults.empty())
+		if (frameUserData.gpuCullingResultBuffer.isNull() || frameUserData.gpuCullingResults.empty())
 		{
 			return;
 		}
 
 		{
-			VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
-				frameUserData.gpuCullingResultBuffer.allocation,
-				0,
-				sizeof(uint32_t) * frameUserData.gpuCullingResults.size()));
+			void* resultMapped = m_device.device->mapBuffer(frameUserData.gpuCullingResultBuffer);
+			if (resultMapped == nullptr)
+			{
+				return;
+			}
+			// cpuToGpu memory is HOST_COHERENT — no vmaInvalidateAllocation needed.
 			std::memcpy(frameUserData.gpuCullingResults.data(),
-			            frameUserData.gpuCullingResultBuffer.mapped,
+			            resultMapped,
 			            sizeof(uint32_t) * frameUserData.gpuCullingResults.size());
 		}
 
@@ -2812,19 +2745,18 @@ namespace demo
 		}
 		else
 		{
-			if (frameUserData.gpuCullingObjectBuffer.allocation == nullptr || frameUserData.gpuCullingObjectBuffer.
-				mapped == nullptr)
+			if (frameUserData.gpuCullingObjectBuffer.isNull())
 			{
 				return;
 			}
 
+			void* objMapped = m_device.device->mapBuffer(frameUserData.gpuCullingObjectBuffer);
+			if (objMapped == nullptr)
 			{
-				VK_CHECK(vmaInvalidateAllocation(m_device.allocator,
-					frameUserData.gpuCullingObjectBuffer.allocation,
-					0,
-					sizeof(shaderio::GPUCullObject) * objectCount));
+				return;
 			}
-			objectData = static_cast<const shaderio::GPUCullObject*>(frameUserData.gpuCullingObjectBuffer.mapped);
+			// cpuToGpu memory is HOST_COHERENT — no vmaInvalidateAllocation needed.
+			objectData = static_cast<const shaderio::GPUCullObject*>(objMapped);
 		}
 
 		const size_t safeObjectCount = frameUserData.useExternalGPUCullingObjectBuffer
@@ -3696,23 +3628,23 @@ namespace demo
 				.handle = kPassGPUCullObjectBufferHandle,
 				.backendBufferToken = frameUserData.useExternalGPUCullingObjectBuffer
 					                      ? reinterpret_cast<uint64_t>(frameUserData.externalGPUCullingObjectBuffer)
-					                      : reinterpret_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.buffer),
+					                      : m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingObjectBuffer),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullIndirectBufferHandle,
-				.backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingIndirectBuffer.buffer),
+				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingIndirectBuffer),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullStatsBufferHandle,
-				.backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingStatsBuffer.buffer),
+				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingStatsBuffer),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullUniformBufferHandle,
-				.backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingUniformBuffer.buffer),
+				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingUniformBuffer),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullResultBufferHandle,
-				.backendBufferToken = reinterpret_cast<uint64_t>(frameUserData.gpuCullingResultBuffer.buffer),
+				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingResultBuffer),
 			});
 			m_perPass.drawStream.clear();
 		}
@@ -5445,58 +5377,40 @@ namespace demo
 	// create/destroy — no direct vkAllocateDescriptorSets consumer. Descriptor set allocation
 	// now goes through VulkanDevice::m_argumentPool (ArgumentTable backend lazy-created pool).
 
-	static void writeHostVisibleBuffer(const VmaAllocator allocator, utils::Buffer& buffer, const void* data,
+	static void writeHostVisibleBuffer(rhi::Device& device, rhi::BufferHandle handle, const void* data,
 	                                   const uint64_t size)
 	{
-		if (buffer.allocation == nullptr || data == nullptr || size == 0)
+		if (handle.isNull() || data == nullptr || size == 0)
 		{
 			return;
 		}
-
-		void* mappedData = buffer.mapped;
-		bool mappedHere = false;
-		if (mappedData == nullptr)
+		void* mapped = device.mapBuffer(handle);
+		if (mapped == nullptr)
 		{
-			VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
-			mappedHere = true;
+			return;
 		}
-
-		std::memcpy(mappedData, data, static_cast<size_t>(size));
-		VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, 0, size));
-
-		if (mappedHere)
-		{
-			vmaUnmapMemory(allocator, buffer.allocation);
-		}
+		std::memcpy(mapped, data, static_cast<size_t>(size));
+		// cpuToGpu memory uses HOST_COHERENT; no flush required (matches VMA_MEMORY_USAGE_CPU_TO_GPU
+		// path verified in TransientAllocator.cpp — persistent mapping, no flush).
 	}
 
-	static void writeHostVisibleBufferRange(const VmaAllocator allocator,
-	                                        utils::Buffer& buffer,
+	static void writeHostVisibleBufferRange(rhi::Device& device, rhi::BufferHandle handle,
 	                                        const uint64_t offset,
 	                                        const void* data,
 	                                        const uint64_t size)
 	{
-		if (buffer.allocation == nullptr || data == nullptr || size == 0)
+		if (handle.isNull() || data == nullptr || size == 0)
 		{
 			return;
 		}
-
-		void* mappedData = buffer.mapped;
-		bool mappedHere = false;
-		if (mappedData == nullptr)
+		void* mapped = device.mapBuffer(handle);
+		if (mapped == nullptr)
 		{
-			VK_CHECK(vmaMapMemory(allocator, buffer.allocation, &mappedData));
-			mappedHere = true;
+			return;
 		}
-
-		std::byte* dst = static_cast<std::byte*>(mappedData) + offset;
+		std::byte* dst = static_cast<std::byte*>(mapped) + offset;
 		std::memcpy(dst, data, static_cast<size_t>(size));
-		VK_CHECK(vmaFlushAllocation(allocator, buffer.allocation, offset, size));
-
-		if (mappedHere)
-		{
-			vmaUnmapMemory(allocator, buffer.allocation);
-		}
+		// cpuToGpu memory uses HOST_COHERENT; no flush required.
 	}
 
 	void RenderDevice::createMaterialArgumentTable()
@@ -7576,7 +7490,7 @@ namespace demo
 		{
 			return frameUserData.externalGPUCullingObjectBufferAddress;
 		}
-		return static_cast<uint64_t>(frameUserData.gpuCullingObjectBuffer.address);
+		return m_device.device->getBufferGpuAddress(frameUserData.gpuCullingObjectBuffer).value;
 	}
 
 	uint64_t RenderDevice::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
@@ -7585,7 +7499,7 @@ namespace demo
 		{
 			return 0;
 		}
-		return static_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer.address);
+		return m_device.device->getBufferGpuAddress(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer).value;
 	}
 
 	uint64_t RenderDevice::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
@@ -7594,7 +7508,7 @@ namespace demo
 		{
 			return 0;
 		}
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer.buffer);
+		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer);
 	}
 
 	uint64_t RenderDevice::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
@@ -7603,7 +7517,7 @@ namespace demo
 		{
 			return 0;
 		}
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBuffer.buffer);
+		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBuffer);
 	}
 
 	uint32_t RenderDevice::getGPUCullingObjectCount(uint32_t frameIndex) const
@@ -7633,7 +7547,7 @@ namespace demo
 		}
 
 		const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer.buffer);
+		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer);
 	}
 
 	uint64_t RenderDevice::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const
@@ -7645,8 +7559,7 @@ namespace demo
 		}
 
 		const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer.
-			buffer);
+		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer);
 	}
 
 	uint64_t RenderDevice::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
@@ -7655,13 +7568,8 @@ namespace demo
 		{
 			return 0;
 		}
-		return reinterpret_cast<uint64_t>(m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer.
-		                                                                       buffer);
-	}
-
-	void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer)
-	{
-		rebindFrameBufferHandle(handle, buffer.buffer);
+		return m_device.resourceTable.resolveBuffer(
+			m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer);
 	}
 
 	void RenderDevice::rebindFrameBufferHandle(rhi::BufferHandle& handle, VkBuffer buffer)
@@ -7834,12 +7742,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureMdiDrawDataBuffer(frameUserData, static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.mdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.mdiDrawDataBuffer, drawData.data(),
+		writeHostVisibleBuffer(*m_device.device, frameUserData.mdiDrawDataBuffer, drawData.data(),
 		                       sizeof(shaderio::DrawUniforms) * drawData.size());
 	}
 
@@ -7853,12 +7761,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.mdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.mdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBufferRange(m_device.allocator,
+		writeHostVisibleBufferRange(*m_device.device,
 		                            frameUserData.mdiDrawDataBuffer,
 		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),
@@ -7874,12 +7782,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureGBufferMdiDrawDataBuffer(frameUserData, static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.gbufferMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.gbufferMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.gbufferMdiDrawDataBuffer, drawData.data(),
+		writeHostVisibleBuffer(*m_device.device, frameUserData.gbufferMdiDrawDataBuffer, drawData.data(),
 		                       sizeof(shaderio::DrawUniforms) * drawData.size());
 	}
 
@@ -7894,12 +7802,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureGBufferMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.gbufferMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.gbufferMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBufferRange(m_device.allocator,
+		writeHostVisibleBufferRange(*m_device.device,
 		                            frameUserData.gbufferMdiDrawDataBuffer,
 		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),
@@ -7915,12 +7823,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureDepthMdiDrawDataBuffer(frameUserData, static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.depthMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.depthMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBuffer(m_device.allocator, frameUserData.depthMdiDrawDataBuffer, drawData.data(),
+		writeHostVisibleBuffer(*m_device.device, frameUserData.depthMdiDrawDataBuffer, drawData.data(),
 		                       sizeof(shaderio::DrawUniforms) * drawData.size());
 	}
 
@@ -7935,12 +7843,12 @@ namespace demo
 
 		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		ensureDepthMdiDrawDataBuffer(frameUserData, firstDrawIndex + static_cast<uint32_t>(drawData.size()));
-		if (frameUserData.depthMdiDrawDataBuffer.buffer == VK_NULL_HANDLE)
+		if (frameUserData.depthMdiDrawDataBuffer.isNull())
 		{
 			return;
 		}
 
-		writeHostVisibleBufferRange(m_device.allocator,
+		writeHostVisibleBufferRange(*m_device.device,
 		                            frameUserData.depthMdiDrawDataBuffer,
 		                            static_cast<uint64_t>(firstDrawIndex) * sizeof(shaderio::DrawUniforms),
 		                            drawData.data(),

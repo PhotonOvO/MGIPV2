@@ -638,14 +638,14 @@ namespace demo
 				rhi::ArgumentTableHandle gbufferMdiDrawArgumentTable{};
 				rhi::ArgumentTableHandle depthMdiDrawArgumentTable{};
 				std::array<rhi::ArgumentTableHandle, shaderio::LCascadeCount> csmShadowMdiDrawArgumentTables{};
-				utils::Buffer lightingBuffer{};
-				utils::Buffer lightCullingBuffer{};
-				utils::Buffer gpuCullingObjectBuffer{};
-				utils::Buffer gpuCullingIndirectBuffer{};
-				utils::Buffer gpuCullingDrawCountBuffer{};
-				utils::Buffer gpuCullingStatsBuffer{};
-				utils::Buffer gpuCullingUniformBuffer{};
-				utils::Buffer gpuCullingResultBuffer{};
+				rhi::BufferHandle lightingBuffer{};
+				rhi::BufferHandle lightCullingBuffer{};
+				rhi::BufferHandle gpuCullingObjectBuffer{};
+				rhi::BufferHandle gpuCullingIndirectBuffer{};
+				rhi::BufferHandle gpuCullingDrawCountBuffer{};
+				rhi::BufferHandle gpuCullingStatsBuffer{};
+				rhi::BufferHandle gpuCullingUniformBuffer{};
+				rhi::BufferHandle gpuCullingResultBuffer{};
 				DEMO_RHI_VK(Buffer) externalGPUCullingObjectBuffer{VK_NULL_HANDLE};
 				DEMO_RHI_VK(Buffer) externalGPUCullingMeshletBuffer{VK_NULL_HANDLE};
 				DEMO_RHI_VK(Buffer) externalGPUCullingSceneObjectBuffer{VK_NULL_HANDLE};
@@ -657,13 +657,13 @@ namespace demo
 				uint32_t gpuCullingMeshCapacity{0};
 				std::vector<uint32_t> gpuCullingResults;
 				std::vector<shaderio::GPUCullObject> gpuCullingScratchObjects;
-				utils::Buffer shadowCullingObjectBuffer{};
-				utils::Buffer shadowCullingIndirectBuffer{};
-				utils::Buffer shadowCullingDrawDataBuffer{};
-				utils::Buffer mdiDrawDataBuffer{};
-				utils::Buffer gbufferMdiDrawDataBuffer{};
-				utils::Buffer depthMdiDrawDataBuffer{};
-				utils::Buffer gpuDrivenPersistentIndirectStreamBuffer{};
+				rhi::BufferHandle shadowCullingObjectBuffer{};
+				rhi::BufferHandle shadowCullingIndirectBuffer{};
+				rhi::BufferHandle shadowCullingDrawDataBuffer{};
+				rhi::BufferHandle mdiDrawDataBuffer{};
+				rhi::BufferHandle gbufferMdiDrawDataBuffer{};
+				rhi::BufferHandle depthMdiDrawDataBuffer{};
+				rhi::BufferHandle gpuDrivenPersistentIndirectStreamBuffer{};
 				// Stable RHI handles mirroring the per-frame native buffers above (Option B:
 				// allocated once, rebound to the native buffer on each realloc). Consumed by
 				// RenderEncoder-based passes via getXxxBufferRHIHandle().
@@ -907,7 +907,6 @@ namespace demo
 		void ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData, uint32_t requiredMeshCount);
 		// Registers (first call) or rebinds (subsequent) a stable RHI BufferHandle to a
 		// per-frame native buffer; clears the handle when the buffer is null.
-		void rebindFrameBufferHandle(rhi::BufferHandle& handle, const utils::Buffer& buffer);
 		void rebindFrameBufferHandle(rhi::BufferHandle& handle, DEMO_RHI_VK(Buffer) buffer);
 		void updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params);
 		void createShadowCullingResources();
