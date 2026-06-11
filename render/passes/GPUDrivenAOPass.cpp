@@ -30,20 +30,66 @@ namespace demo
 		{
 			return;
 		}
-		if (!context.params->debugOptions.enableAO || m_renderer->getAOTracePipelineOpaque() == 0
-			|| m_renderer->getAODenoisePipelineOpaque() == 0)
+		// [1] enableAO=false is a legitimate off-switch; silent return.
+		if (!context.params->debugOptions.enableAO)
+			return;
+
+		// [2] Pipeline opaque check (one-shot warning).
+		if (m_renderer->getAOTracePipelineOpaque() == 0 || m_renderer->getAODenoisePipelineOpaque() == 0)
 		{
+			static bool s_loggedPipeline = false;
+			if (!s_loggedPipeline)
+			{
+				LOGW("GPUDrivenAOPass skipped: AO pipeline handle not ready (trace=%llu denoise=%llu)",
+				     static_cast<unsigned long long>(m_renderer->getAOTracePipelineOpaque()),
+				     static_cast<unsigned long long>(m_renderer->getAODenoisePipelineOpaque()));
+				s_loggedPipeline = true;
+			}
 			return;
 		}
 
+		// [3] Argument table check (one-shot warning).
 		const uint32_t frameIndex = context.frameIndex;
 		const rhi::ArgumentTableHandle aoTable = m_renderer->getAOArgumentTable(frameIndex);
 		const rhi::ArgumentTableHandle aoDenoiseTable = m_renderer->getAODenoiseArgumentTable(frameIndex);
+		if (aoTable.isNull() || aoDenoiseTable.isNull())
+		{
+			static bool s_loggedArgTable = false;
+			if (!s_loggedArgTable)
+			{
+				LOGW("GPUDrivenAOPass skipped: argument table null (frameIndex=%u trace=%d denoise=%d)",
+				     frameIndex, aoTable.isNull() ? 0 : 1, aoDenoiseTable.isNull() ? 0 : 1);
+				s_loggedArgTable = true;
+			}
+			return;
+		}
+
+		// [4] Pipeline handle check (one-shot warning).
 		const PipelineHandle aoTracePipeline = m_renderer->getAOTracePipelineHandle();
 		const PipelineHandle aoDenoisePipeline = m_renderer->getAODenoisePipelineHandle();
-		if (aoTable.isNull() || aoDenoiseTable.isNull() || aoTracePipeline.isNull() || aoDenoisePipeline.isNull()
-			|| m_renderer->getAORawImageOpaque() == 0 || m_renderer->getAODenoisedImageOpaque() == 0)
+		if (aoTracePipeline.isNull() || aoDenoisePipeline.isNull())
 		{
+			static bool s_loggedHandle = false;
+			if (!s_loggedHandle)
+			{
+				LOGW("GPUDrivenAOPass skipped: pipeline handle null (trace=%d denoise=%d)",
+				     aoTracePipeline.isNull() ? 0 : 1, aoDenoisePipeline.isNull() ? 0 : 1);
+				s_loggedHandle = true;
+			}
+			return;
+		}
+
+		// [5] Image opaque check (one-shot warning).
+		if (m_renderer->getAORawImageOpaque() == 0 || m_renderer->getAODenoisedImageOpaque() == 0)
+		{
+			static bool s_loggedImage = false;
+			if (!s_loggedImage)
+			{
+				LOGW("GPUDrivenAOPass skipped: AO image null (raw=%llu denoised=%llu)",
+				     static_cast<unsigned long long>(m_renderer->getAORawImageOpaque()),
+				     static_cast<unsigned long long>(m_renderer->getAODenoisedImageOpaque()));
+				s_loggedImage = true;
+			}
 			return;
 		}
 
