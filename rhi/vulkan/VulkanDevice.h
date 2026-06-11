@@ -117,6 +117,9 @@ public:
 
   uint32_t processRetirements(uint64_t completedTimelineValue);
 
+  // rhi/vulkan 内部使用——供 RenderDevice::init() 传入 VulkanSwapchain::init（RDEV-01 方案 B）
+  VkCommandPool transientCmdPool() const { return m_transientCmdPool; }
+
 private:
   struct NativeRetirement
   {
@@ -216,6 +219,8 @@ private:
 
   // Upload cmd pool — migrated from RenderDevice (UPL-02)
   VkCommandPool m_uploadCmdPool{VK_NULL_HANDLE};
+  // Transient graphics cmd pool — migrated from RenderDevice (RDEV-01)
+  VkCommandPool m_transientCmdPool{VK_NULL_HANDLE};
 
   // Per-frame pending upload cmd buffers + fences — migrated from FrameUserData (UPL-02/03)
   struct UploadPendingFrame
