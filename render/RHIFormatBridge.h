@@ -47,6 +47,12 @@ namespace demo
 		return format;
 	}
 
+	// KTX2 vkFormat 字段直接传入（字段本身为 uint32_t，无需 static_cast<VkFormat>）
+	[[nodiscard]] inline rhi::TextureFormat toPortableTextureFormat(uint32_t vkFormatValue)
+	{
+		return toPortableTextureFormat(static_cast<VkFormat>(vkFormatValue));
+	}
+
 	// Reverse mapping: portable → VkFormat (Vulkan backend only, call inside render layer)
 	[[nodiscard]] inline VkFormat toNativeFormat(rhi::TextureFormat format)
 	{
