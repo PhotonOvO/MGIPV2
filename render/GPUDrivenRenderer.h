@@ -585,8 +585,8 @@ namespace demo
 		}
 
 		[[nodiscard]] rhi::Extent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
-		[[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return 0; }
-		[[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return 0; }
+		[[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return m_gtaoPipelineHandle.isNull() ? 0ull : 1ull; }
+		[[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return m_aoDenoisePipelineHandle.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] uint64_t getAORawImageOpaque() const { return m_aoRawImage.isNull() ? 0ull : 1ull; }
 
 		[[nodiscard]] uint64_t getAODenoisedImageOpaque() const

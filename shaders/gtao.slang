@@ -61,7 +61,7 @@ void kernelGTAO(uint3 dispatchThreadId : SV_DispatchThreadID)
             const int2 offset = dirs[d] * int(round(float(s) * radius / 5.0));
             const uint2 sampleCoord = uint2(clamp(int2(fullCoord) + offset, int2(0, 0), int2(inputSize) - int2(1, 1)));
             const float sampleDepth = loadDepth(sampleCoord, inputSize);
-            const float depthDelta = centerDepth - sampleDepth;
+            const float depthDelta = sampleDepth - centerDepth; // reversed-Z: larger depth = closer; positive delta means sample is closer than center
             const float rangeWeight = saturate(1.0 - abs(depthDelta) * aoPush.params1.z);
             const float normalWeight = saturate(abs(normal.z) * aoPush.params1.w + (1.0 - aoPush.params1.w));
             const float hit = depthDelta > 0.0008 ? 1.0 : 0.0;
