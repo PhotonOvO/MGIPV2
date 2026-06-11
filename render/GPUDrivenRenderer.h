@@ -609,7 +609,7 @@ namespace demo
 				       : rhi::ArgumentTableHandle{};
 		}
 
-		[[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return 0; }
+		[[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return m_ssrTracePipelineHandle.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] uint64_t getSSRRawImageOpaque() const { return m_ssrRawImage.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
 		// Builds the SSR compute set as a per-frame temporary argument table (gbuffer/depth/history

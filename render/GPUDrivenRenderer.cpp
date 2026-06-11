@@ -2868,7 +2868,8 @@ namespace demo
 
 		const auto createImageResource = [&](rhi::TextureFormat format, rhi::Extent2D extent,
 		                                     rhi::TextureUsageFlags usage, rhi::TextureAspect aspect,
-		                                     rhi::TextureHandle& outImage, rhi::TextureViewHandle& outView)
+		                                     rhi::TextureHandle& outImage, rhi::TextureViewHandle& outView,
+		                                     const rhi::ClearColorValue* clearValue)
 		{
 			outImage = getRHIDevice().createTexture(rhi::TextureDesc{
 				.dimension = rhi::TextureDimension::e2D,
@@ -2888,33 +2889,49 @@ namespace demo
 			});
 			executeUploadCommand([&](rhi::CommandBuffer& cmdBuffer)
 			{
+				const rhi::TextureSubresourceRange clearRange{
+					.aspect = aspect,
+					.baseMipLevel = 0,
+					.levelCount = 1,
+					.baseArrayLayer = 0,
+					.layerCount = 1,
+				};
 				const rhi::TextureBarrier barrier{
 					.texture = outImage,
 					.before = rhi::ResourceState::Undefined,
 					.after = rhi::ResourceState::General,
-					.range = {
-						.aspect = aspect,
-						.baseMipLevel = 0,
-						.levelCount = 1,
-						.baseArrayLayer = 0,
-						.layerCount = 1
-					},
+					.range = clearRange,
 				};
 				cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
+				if (clearValue != nullptr)
+				{
+					cmdBuffer.clearColorTexture(outImage, clearRange, *clearValue);
+					// WAW barrier: clear (transfer write) -> first shader read/write by passes.
+					const rhi::TextureBarrier wawBarrier{
+						.texture = outImage,
+						.before = rhi::ResourceState::General,
+						.after = rhi::ResourceState::General,
+						.range = clearRange,
+					};
+					cmdBuffer.resourceBarrier(&wawBarrier, 1, nullptr, 0);
+				}
 			});
 		};
 
 		constexpr rhi::TextureUsageFlags kStorageColorUsage =
-			rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::storage;
+			rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::storage
+			| rhi::TextureUsageFlags::transferDst;
+		constexpr rhi::ClearColorValue kAOClearWhite{1.0f, 1.0f, 1.0f, 1.0f};
+		constexpr rhi::ClearColorValue kSSRClearBlack{0.0f, 0.0f, 0.0f, 0.0f};
 		createImageResource(rhi::TextureFormat::r16Sfloat, halfExtent, kStorageColorUsage,
-		                    rhi::TextureAspect::color, m_aoRawImage, m_aoRawView);
+		                    rhi::TextureAspect::color, m_aoRawImage, m_aoRawView, &kAOClearWhite);
 		createImageResource(rhi::TextureFormat::r16Sfloat, halfExtent, kStorageColorUsage,
-		                    rhi::TextureAspect::color, m_aoDenoisedImage, m_aoDenoisedView);
+		                    rhi::TextureAspect::color, m_aoDenoisedImage, m_aoDenoisedView, &kAOClearWhite);
 		createImageResource(rhi::TextureFormat::rgba16Sfloat, halfExtent, kStorageColorUsage,
-		                    rhi::TextureAspect::color, m_ssrRawImage, m_ssrRawView);
+		                    rhi::TextureAspect::color, m_ssrRawImage, m_ssrRawView, &kSSRClearBlack);
 		createImageResource(rhi::TextureFormat::d32Sfloat, m_shadowAtlasExtent,
 		                    rhi::TextureUsageFlags::depthAttachment | rhi::TextureUsageFlags::sampled,
-		                    rhi::TextureAspect::depth, m_shadowAtlasImage, m_shadowAtlasView);
+		                    rhi::TextureAspect::depth, m_shadowAtlasImage, m_shadowAtlasView, nullptr);
 	}
 
 	void GPUDrivenRenderer::bindPhase7PassResources()
@@ -3193,7 +3210,7 @@ namespace demo
 			glm::vec4(params.debugOptions.enableAO && !m_aoDenoisedView.isNull()
 			              && !m_gtaoPipelineHandle.isNull() && !m_aoDenoisePipelineHandle.isNull()
 			                  ? 1.0f : 0.0f,
-			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() ? 1.0f : 0.0f,
+			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() && !m_ssrTracePipelineHandle.isNull() ? 1.0f : 0.0f, // SSR: same guard as AO
 			          0.0f,
 			          0.0f);
 
