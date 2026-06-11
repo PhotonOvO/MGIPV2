@@ -56,11 +56,6 @@ namespace demo
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
 
-		uint64_t estimateImageBytes(VkExtent2D extent, uint32_t bytesPerPixel)
-		{
-			return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height) * bytesPerPixel;
-		}
-
 		uint64_t estimateImageBytes(rhi::Extent2D extent, uint32_t bytesPerPixel)
 		{
 			return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height) * bytesPerPixel;
@@ -88,11 +83,6 @@ namespace demo
 		{
 			return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
 				* static_cast<uint64_t>(bytesPerPixelForFormat(format));
-		}
-
-		VkExtent2D toVkExtent(rhi::Extent2D extent)
-		{
-			return {extent.width, extent.height};
 		}
 
 		uint64_t resolveNativeTexture(rhi::Device& device, rhi::TextureHandle handle)
@@ -268,76 +258,6 @@ namespace demo
 			boundsMin = boundsValid ? glm::min(boundsMin, mesh.worldBoundsMin) : mesh.worldBoundsMin;
 			boundsMax = boundsValid ? glm::max(boundsMax, mesh.worldBoundsMax) : mesh.worldBoundsMax;
 			boundsValid = true;
-		}
-
-		utils::Buffer createHostVisibleStorageBuffer(VkDevice device, VmaAllocator allocator, uint64_t size)
-		{
-			const VkBufferUsageFlags2CreateInfoKHR usageInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR,
-				.usage = VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR
-				| VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT_KHR,
-			};
-
-			const VkBufferCreateInfo bufferInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-				.pNext = &usageInfo,
-				.size = size,
-				.usage = 0,
-				.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-			};
-
-			VmaAllocationCreateInfo allocInfo{};
-			allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-			allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-			utils::Buffer buffer{};
-			VmaAllocationInfo allocationInfo{};
-			VK_CHECK(
-				vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, &allocationInfo
-				));
-			buffer.mapped = allocationInfo.pMappedData;
-
-			const VkBufferDeviceAddressInfo addressInfo{
-				.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-				.buffer = buffer.buffer,
-			};
-			buffer.address = vkGetBufferDeviceAddress(device, &addressInfo);
-			return buffer;
-		}
-
-		utils::Buffer createDeviceLocalStorageBuffer(VkDevice device, VmaAllocator allocator, uint64_t size)
-		{
-			const upload::NativeUploadContext context{
-				.device = reinterpret_cast<uintptr_t>(device),
-				.allocator = reinterpret_cast<uintptr_t>(allocator),
-			};
-			const upload::NativeUploadBuffer buffer =
-				upload::createStaticBuffer(context,
-				                           size,
-				                           VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT_KHR |
-				                           VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR
-				                           | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR);
-			return utils::Buffer{
-				.buffer = reinterpret_cast<VkBuffer>(buffer.buffer),
-				.allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
-			};
-		}
-
-		utils::Buffer toUtilsBuffer(const upload::NativeUploadBuffer& buffer)
-		{
-			return utils::Buffer{
-				.buffer = reinterpret_cast<VkBuffer>(buffer.buffer),
-				.allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
-			};
-		}
-
-		void destroyBuffer(VmaAllocator allocator, utils::Buffer& buffer)
-		{
-			if (buffer.buffer != VK_NULL_HANDLE)
-			{
-				vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
-				buffer = {};
-			}
 		}
 
 		uint32_t nextPowerOfTwo(uint32_t value)
@@ -683,13 +603,16 @@ namespace demo
 			if (frameIndex < m_visibilitySortFrames.size())
 			{
 				const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
+				rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
 				m_passExecutor.bindBuffer({
 					.handle = kPassGPUDrivenSortKeyBufferHandle,
-					.backendBufferToken = reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
+					.backendBufferToken =
+						resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.keyBuffer) : 0,
 				});
 				m_passExecutor.bindBuffer({
 					.handle = kPassGPUDrivenSortValueBufferHandle,
-					.backendBufferToken = reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
+					.backendBufferToken =
+						resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.valueBuffer) : 0,
 				});
 			}
 		}
@@ -2298,16 +2221,6 @@ namespace demo
 		return m_iblEnvironmentFormat;
 	}
 
-	uintptr_t GPUDrivenRenderer::getBackendDeviceToken() const
-	{
-		return m_renderer.getBackendDeviceToken();
-	}
-
-	uintptr_t GPUDrivenRenderer::getAllocatorToken() const
-	{
-		return m_renderer.getAllocatorToken();
-	}
-
 	void GPUDrivenRenderer::recordDepthPrepassVisibilitySource(bool usedPreviousFrameIndirect,
 	                                                           bool usedSortedBootstrap,
 	                                                           uint32_t previousObjectCount,
@@ -2352,25 +2265,18 @@ namespace demo
 			                      .frameCount = std::max(1u, getSwapchainImageCount()),
 		                      });
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
 		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
-		const VkSamplerCreateInfo samplerInfo{
-			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-			.magFilter = VK_FILTER_LINEAR,
-			.minFilter = VK_FILTER_LINEAR,
-			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			.maxLod = VK_LOD_CLAMP_NONE,
-		};
-		VkSampler linearClampSampler = VK_NULL_HANDLE;
-		VK_CHECK(vkCreateSampler(nativeDevice, &samplerInfo, nullptr, &linearClampSampler));
-		m_linearClampSampler = reinterpret_cast<uintptr_t>(linearClampSampler);
-		// Register the shared samplers (linear-clamp + IBL cube/LUT) as RHI handles for the
-		// combinedImageSampler ArgumentWrites of the lighting-input set.
-		rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
-		m_linearClampSamplerHandle = resourceTable->registerSampler(static_cast<uint64_t>(m_linearClampSampler));
+		// Shared linear-clamp sampler as an owned RHI handle; createSampler registers it in
+		// the resource table for the combinedImageSampler ArgumentWrites of the lighting set.
+		m_linearClampSamplerHandle = getRHIDevice().createSampler(rhi::SamplerDesc{
+			.magFilter = rhi::Filter::linear,
+			.minFilter = rhi::Filter::linear,
+			.mipmapMode = rhi::MipmapMode::linear,
+			.addressModeU = rhi::AddressMode::clampToEdge,
+			.addressModeV = rhi::AddressMode::clampToEdge,
+			.addressModeW = rhi::AddressMode::clampToEdge,
+			.debugName = "GPUDriven.linearClampSampler",
+		});
 		// IBL samplers are created later in initIBLResources(); their handles are registered
 		// lazily on first use in updateLightingArgumentTable.
 
@@ -2644,21 +2550,15 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownLightingResources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice != VK_NULL_HANDLE)
+		if (!m_linearClampSamplerHandle.isNull())
 		{
-			if (m_linearClampSampler != 0)
-			{
-				vkDestroySampler(nativeDevice, reinterpret_cast<VkSampler>(m_linearClampSampler), nullptr);
-				m_linearClampSampler = 0;
-			}
+			getRHIDevice().destroySampler(m_linearClampSamplerHandle);
 		}
 		// Owned ArgumentTables + layouts (lighting-input/scene/coarse) are freed by
 		// RenderDevice::destroyArgumentTablesAndLayouts(); here we drop the now-stale handles and the
 		// owned=false buffer/view/sampler mirrors registered in the resource table.
 		if (rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable())
 		{
-			if (!m_linearClampSamplerHandle.isNull()) resourceTable->removeSampler(m_linearClampSamplerHandle);
 			if (!m_iblCubeSamplerHandle.isNull()) resourceTable->removeSampler(m_iblCubeSamplerHandle);
 			if (!m_iblLutSamplerHandle.isNull()) resourceTable->removeSampler(m_iblLutSamplerHandle);
 		}
@@ -2849,15 +2749,6 @@ namespace demo
 		m_iblEnvironmentEstimatedBytes = 0;
 		m_iblEnvironmentLoaded = false;
 		m_iblUsingFallback = true;
-		for (utils::Buffer& buffer : m_gpuDrivenStagingBuffers)
-		{
-			if (buffer.buffer != VK_NULL_HANDLE)
-			{
-				vmaDestroyBuffer(reinterpret_cast<VmaAllocator>(getAllocatorToken()), buffer.buffer, buffer.allocation);
-				buffer = {};
-			}
-		}
-		m_gpuDrivenStagingBuffers.clear();
 		for (rhi::BufferHandle staging : m_gpuDrivenRhiStagingBuffers)
 		{
 			if (!staging.isNull())
@@ -2872,8 +2763,7 @@ namespace demo
 	{
 		shutdownPhase7Resources();
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE)
+		if (!m_renderer.hasRHIDevice())
 		{
 			return;
 		}
@@ -2947,11 +2837,11 @@ namespace demo
 
 	void GPUDrivenRenderer::resizePhase7Resources()
 	{
-		if (getBackendDeviceToken() == 0)
+		if (!m_renderer.hasRHIDevice())
 		{
 			return;
 		}
-		const VkExtent2D sceneExtent = toVkExtent(getSceneExtent());
+		const rhi::Extent2D sceneExtent = getSceneExtent();
 		const rhi::Extent2D halfExtent{
 			std::max(1u, (sceneExtent.width + 1u) / 2u),
 			std::max(1u, (sceneExtent.height + 1u) / 2u)
@@ -3047,7 +2937,7 @@ namespace demo
 	void GPUDrivenRenderer::initPhase7Pipelines()
 	{
 		shutdownPhase7Pipelines();
-		if (getBackendDeviceToken() == 0 || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
+		if (!m_renderer.hasRHIDevice() || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
 		{
 			return;
 		}
@@ -3256,7 +3146,7 @@ namespace demo
 		}
 
 		const shaderio::CameraUniforms* camera = params.cameraUniforms;
-		const VkExtent2D extent = toVkExtent(getSceneExtent());
+		const rhi::Extent2D extent = getSceneExtent();
 		const glm::mat4 view = camera != nullptr ? camera->view : glm::mat4(1.0f);
 		const glm::mat4 projection = camera != nullptr ? camera->projection : glm::mat4(1.0f);
 		const glm::mat4 inverseView = glm::inverse(view);
@@ -3448,7 +3338,7 @@ namespace demo
 
 	void GPUDrivenRenderer::initLightingPipelines()
 	{
-		if (getBackendDeviceToken() == 0 || m_lightPipelineArgumentLayouts[0].isNull()
+		if (!m_renderer.hasRHIDevice() || m_lightPipelineArgumentLayouts[0].isNull()
 			|| m_lightPipelineArgumentLayouts[1].isNull())
 		{
 			return;
@@ -3577,8 +3467,7 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownLightingPipelines()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		if (nativeDevice == VK_NULL_HANDLE)
+		if (!m_renderer.hasRHIDevice())
 		{
 			return;
 		}
@@ -3793,7 +3682,7 @@ namespace demo
 	{
 		shutdownVisibilitySortResources();
 
-		if (getBackendDeviceToken() == 0)
+		if (!m_renderer.hasRHIDevice())
 		{
 			return;
 		}
@@ -3848,39 +3737,20 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownVisibilitySortResources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
-		rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
 		for (VisibilitySortFrameResources& frameResources : m_visibilitySortFrames)
 		{
-			destroyBuffer(allocator, frameResources.uploadKeyBuffer);
-			destroyBuffer(allocator, frameResources.uploadValueBuffer);
-			destroyBuffer(allocator, frameResources.keyBuffer);
-			destroyBuffer(allocator, frameResources.valueBuffer);
-			if (resourceTable != nullptr)
-			{
-				if (!frameResources.keyBufferHandle.isNull())
-					resourceTable->removeBuffer(
-						frameResources.keyBufferHandle);
-				if (!frameResources.valueBufferHandle.isNull())
-					resourceTable->removeBuffer(
-						frameResources.valueBufferHandle);
-				if (!frameResources.uploadKeyBufferHandle.isNull())
-					resourceTable->removeBuffer(
-						frameResources.uploadKeyBufferHandle);
-				if (!frameResources.uploadValueBufferHandle.isNull())
-					resourceTable->removeBuffer(
-						frameResources.uploadValueBufferHandle);
-			}
+			if (!frameResources.uploadKeyBuffer.isNull())
+				getRHIDevice().destroyBuffer(frameResources.uploadKeyBuffer);
+			if (!frameResources.uploadValueBuffer.isNull())
+				getRHIDevice().destroyBuffer(frameResources.uploadValueBuffer);
+			if (!frameResources.keyBuffer.isNull()) getRHIDevice().destroyBuffer(frameResources.keyBuffer);
+			if (!frameResources.valueBuffer.isNull()) getRHIDevice().destroyBuffer(frameResources.valueBuffer);
 			frameResources = {}; // owned ArgumentTable freed by RenderDevice::destroyArgumentTablesAndLayouts
 		}
 		m_visibilitySortFrames.clear();
 
 		getRHIDevice().destroyPipeline(m_visibilitySortPipelineHandle);
 		m_visibilitySortPipelineHandle = {};
-		if (nativeDevice != VK_NULL_HANDLE)
-		{
-		}
 		m_visibilitySortArgumentLayout = {};
 	}
 
@@ -3888,7 +3758,7 @@ namespace demo
 	{
 		shutdownTransparentVisibilityPatchResources();
 
-		if (getBackendDeviceToken() == 0)
+		if (!m_renderer.hasRHIDevice())
 		{
 			return;
 		}
@@ -3951,19 +3821,15 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdownTransparentVisibilityPatchResources()
 	{
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
 		rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
 		for (TransparentVisibilityFrameResources& frameResources : m_transparentVisibilityPatchFrames)
 		{
-			destroyBuffer(allocator, frameResources.prefixBuffers[0]);
-			destroyBuffer(allocator, frameResources.prefixBuffers[1]);
+			if (!frameResources.prefixBuffers[0].isNull())
+				getRHIDevice().destroyBuffer(frameResources.prefixBuffers[0]);
+			if (!frameResources.prefixBuffers[1].isNull())
+				getRHIDevice().destroyBuffer(frameResources.prefixBuffers[1]);
 			if (resourceTable != nullptr)
 			{
-				for (rhi::BufferHandle& handle : frameResources.prefixBufferHandles)
-				{
-					if (!handle.isNull()) resourceTable->removeBuffer(handle);
-				}
 				for (rhi::BufferHandle& handle : frameResources.sourceIndirectBufferHandles)
 				{
 					if (!handle.isNull()) resourceTable->removeBuffer(handle);
@@ -3981,16 +3847,12 @@ namespace demo
 		getRHIDevice().destroyPipeline(m_transparentVisibilityPatchPipelineHandle);
 		m_transparentVisibilityPatchPipelineHandle = {};
 
-		if (nativeDevice != VK_NULL_HANDLE)
-		{
-			(void)nativeDevice;
-		}
 		m_transparentVisibilityPatchArgumentLayout = {};
 	}
 
 	void GPUDrivenRenderer::updateTransparentVisibilityPatchArgumentTable(uint32_t frameIndex,
-	                                                                      uint64_t sortKeyBufferHandle,
-	                                                                      uint64_t sortValueBufferHandle,
+	                                                                      rhi::BufferHandle sortKeyBuffer,
+	                                                                      rhi::BufferHandle sortValueBuffer,
 	                                                                      uint64_t sourceIndirectBufferHandle,
 	                                                                      uint64_t targetIndirectBufferHandle)
 	{
@@ -4002,21 +3864,19 @@ namespace demo
 		TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
 		const uint32_t descriptorSetIndex =
 			targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
-		const uint64_t prefixABufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[0].buffer);
-		const uint64_t prefixBBufferHandle = reinterpret_cast<uint64_t>(frameResources.prefixBuffers[1].buffer);
-		if (frameResources.argumentTables[descriptorSetIndex].isNull() || sortKeyBufferHandle == 0
-			|| sortValueBufferHandle == 0 || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0
-			|| prefixABufferHandle == 0 || prefixBBufferHandle == 0)
+		if (frameResources.argumentTables[descriptorSetIndex].isNull() || sortKeyBuffer.isNull()
+			|| sortValueBuffer.isNull() || sourceIndirectBufferHandle == 0 || targetIndirectBufferHandle == 0
+			|| frameResources.prefixBuffers[0].isNull() || frameResources.prefixBuffers[1].isNull())
 		{
 			return;
 		}
 
-		if (frameResources.boundSortKeyHandles[descriptorSetIndex] == sortKeyBufferHandle
-			&& frameResources.boundSortValueHandles[descriptorSetIndex] == sortValueBufferHandle
+		if (frameResources.boundSortKeyHandles[descriptorSetIndex] == sortKeyBuffer
+			&& frameResources.boundSortValueHandles[descriptorSetIndex] == sortValueBuffer
 			&& frameResources.boundSourceIndirectHandles[descriptorSetIndex] == sourceIndirectBufferHandle
 			&& frameResources.boundTargetIndirectHandles[descriptorSetIndex] == targetIndirectBufferHandle
-			&& frameResources.boundPrefixAHandles[descriptorSetIndex] == prefixABufferHandle
-			&& frameResources.boundPrefixBHandles[descriptorSetIndex] == prefixBBufferHandle)
+			&& frameResources.boundPrefixAHandles[descriptorSetIndex] == frameResources.prefixBuffers[0]
+			&& frameResources.boundPrefixBHandles[descriptorSetIndex] == frameResources.prefixBuffers[1])
 		{
 			return;
 		}
@@ -4042,17 +3902,14 @@ namespace demo
 		};
 		rebind(frameResources.sourceIndirectBufferHandles[descriptorSetIndex], sourceIndirectBufferHandle);
 		rebind(frameResources.targetIndirectBufferHandles[descriptorSetIndex], targetIndirectBufferHandle);
-		rebind(frameResources.prefixBufferHandles[0], prefixABufferHandle);
-		rebind(frameResources.prefixBufferHandles[1], prefixBBufferHandle);
 
-		const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
 		const std::array<rhi::ArgumentWrite, 6> writes{
 			{
 				rhi::ArgumentWrite{
-					.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = sortResources.keyBufferHandle
+					.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = sortKeyBuffer
 				},
 				rhi::ArgumentWrite{
-					.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = sortResources.valueBufferHandle
+					.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = sortValueBuffer
 				},
 				rhi::ArgumentWrite{
 					.binding = 2, .type = rhi::ArgumentType::storageBuffer,
@@ -4064,30 +3921,27 @@ namespace demo
 				},
 				rhi::ArgumentWrite{
 					.binding = 4, .type = rhi::ArgumentType::storageBuffer,
-					.buffer = frameResources.prefixBufferHandles[0]
+					.buffer = frameResources.prefixBuffers[0]
 				},
 				rhi::ArgumentWrite{
 					.binding = 5, .type = rhi::ArgumentType::storageBuffer,
-					.buffer = frameResources.prefixBufferHandles[1]
+					.buffer = frameResources.prefixBuffers[1]
 				},
 			}
 		};
-		if (sortResources.keyBufferHandle.isNull() || sortResources.valueBufferHandle.isNull()
-			|| frameResources.sourceIndirectBufferHandles[descriptorSetIndex].isNull()
-			|| frameResources.targetIndirectBufferHandles[descriptorSetIndex].isNull()
-			|| frameResources.prefixBufferHandles[0].isNull()
-			|| frameResources.prefixBufferHandles[1].isNull())
+		if (frameResources.sourceIndirectBufferHandles[descriptorSetIndex].isNull()
+			|| frameResources.targetIndirectBufferHandles[descriptorSetIndex].isNull())
 		{
 			return;
 		}
 		m_renderer.updateArgumentTable(frameResources.argumentTables[descriptorSetIndex], writes.data(),
 		                               static_cast<uint32_t>(writes.size()));
-		frameResources.boundSortKeyHandles[descriptorSetIndex] = sortKeyBufferHandle;
-		frameResources.boundSortValueHandles[descriptorSetIndex] = sortValueBufferHandle;
+		frameResources.boundSortKeyHandles[descriptorSetIndex] = sortKeyBuffer;
+		frameResources.boundSortValueHandles[descriptorSetIndex] = sortValueBuffer;
 		frameResources.boundSourceIndirectHandles[descriptorSetIndex] = sourceIndirectBufferHandle;
 		frameResources.boundTargetIndirectHandles[descriptorSetIndex] = targetIndirectBufferHandle;
-		frameResources.boundPrefixAHandles[descriptorSetIndex] = prefixABufferHandle;
-		frameResources.boundPrefixBHandles[descriptorSetIndex] = prefixBBufferHandle;
+		frameResources.boundPrefixAHandles[descriptorSetIndex] = frameResources.prefixBuffers[0];
+		frameResources.boundPrefixBHandles[descriptorSetIndex] = frameResources.prefixBuffers[1];
 	}
 
 	uint32_t GPUDrivenRenderer::getPreviousFrameIndex(uint32_t frameIndex) const
@@ -4111,7 +3965,7 @@ namespace demo
 		}
 
 		const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
-		if (sortResources.activeElementCount == 0 || sortResources.valueBuffer.buffer == VK_NULL_HANDLE)
+		if (sortResources.activeElementCount == 0 || sortResources.valueBuffer.isNull())
 		{
 			return false;
 		}
@@ -4123,8 +3977,8 @@ namespace demo
 		}
 
 		updateTransparentVisibilityPatchArgumentTable(frameIndex,
-		                                              reinterpret_cast<uint64_t>(sortResources.keyBuffer.buffer),
-		                                              reinterpret_cast<uint64_t>(sortResources.valueBuffer.buffer),
+		                                              sortResources.keyBuffer,
+		                                              sortResources.valueBuffer,
 		                                              sourceIndirectBufferHandle,
 		                                              targetIndirectBufferHandle);
 
@@ -4132,8 +3986,8 @@ namespace demo
 		const uint32_t descriptorSetIndex =
 			targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
 		if (frameResources.argumentTables[descriptorSetIndex].isNull()
-			|| frameResources.prefixBuffers[0].buffer == VK_NULL_HANDLE
-			|| frameResources.prefixBuffers[1].buffer == VK_NULL_HANDLE
+			|| frameResources.prefixBuffers[0].isNull()
+			|| frameResources.prefixBuffers[1].isNull()
 			|| frameResources.prefixCapacity < sortResources.paddedElementCount)
 		{
 			return false;
@@ -4224,8 +4078,6 @@ namespace demo
 			return;
 		}
 
-		const VkDevice nativeDevice = reinterpret_cast<VkDevice>(getBackendDeviceToken());
-		const VmaAllocator allocator = reinterpret_cast<VmaAllocator>(getAllocatorToken());
 		if ((growSortBuffers && frameResources.capacity > 0) || (growPatchBuffers && patchFrameResources->prefixCapacity
 			> 0))
 		{
@@ -4235,31 +4087,55 @@ namespace demo
 		const uint64_t bufferSize = static_cast<uint64_t>(requiredCount) * sizeof(uint32_t);
 		if (growSortBuffers)
 		{
-			destroyBuffer(allocator, frameResources.uploadKeyBuffer);
-			destroyBuffer(allocator, frameResources.uploadValueBuffer);
-			destroyBuffer(allocator, frameResources.keyBuffer);
-			destroyBuffer(allocator, frameResources.valueBuffer);
+			rhi::Device& device = getRHIDevice();
+			if (!frameResources.uploadKeyBuffer.isNull()) device.destroyBuffer(frameResources.uploadKeyBuffer);
+			if (!frameResources.uploadValueBuffer.isNull()) device.destroyBuffer(frameResources.uploadValueBuffer);
+			if (!frameResources.keyBuffer.isNull()) device.destroyBuffer(frameResources.keyBuffer);
+			if (!frameResources.valueBuffer.isNull()) device.destroyBuffer(frameResources.valueBuffer);
 
-			const upload::NativeUploadContext uploadContext{
-				.device = reinterpret_cast<uintptr_t>(nativeDevice),
-				.allocator = reinterpret_cast<uintptr_t>(allocator),
-			};
-			frameResources.uploadKeyBuffer = toUtilsBuffer(
-				upload::createMappedUploadStagingBuffer(uploadContext, bufferSize));
-			frameResources.uploadValueBuffer = toUtilsBuffer(
-				upload::createMappedUploadStagingBuffer(uploadContext, bufferSize));
-			frameResources.keyBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
-			frameResources.valueBuffer = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+			frameResources.uploadKeyBuffer = upload::createMappedUploadStagingBuffer(device, bufferSize);
+			frameResources.uploadValueBuffer = upload::createMappedUploadStagingBuffer(device, bufferSize);
+			frameResources.uploadKeyMapped = device.mapBuffer(frameResources.uploadKeyBuffer);
+			frameResources.uploadValueMapped = device.mapBuffer(frameResources.uploadValueBuffer);
+			frameResources.keyBuffer = device.createBuffer(rhi::BufferDesc{
+				.size = bufferSize,
+				.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferSrc
+					| rhi::BufferUsageFlags::transferDst,
+				.memoryUsage = rhi::MemoryUsage::gpuOnly,
+				.debugName = "VisibilitySort.keys",
+			});
+			frameResources.valueBuffer = device.createBuffer(rhi::BufferDesc{
+				.size = bufferSize,
+				.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferSrc
+					| rhi::BufferUsageFlags::transferDst,
+				.memoryUsage = rhi::MemoryUsage::gpuOnly,
+				.debugName = "VisibilitySort.values",
+			});
 			frameResources.capacity = requiredCount;
 			updateVisibilitySortArgumentTable(frameIndex);
 		}
 
 		if (growPatchBuffers)
 		{
-			destroyBuffer(allocator, patchFrameResources->prefixBuffers[0]);
-			destroyBuffer(allocator, patchFrameResources->prefixBuffers[1]);
-			patchFrameResources->prefixBuffers[0] = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
-			patchFrameResources->prefixBuffers[1] = createDeviceLocalStorageBuffer(nativeDevice, allocator, bufferSize);
+			rhi::Device& device = getRHIDevice();
+			if (!patchFrameResources->prefixBuffers[0].isNull())
+				device.destroyBuffer(patchFrameResources->prefixBuffers[0]);
+			if (!patchFrameResources->prefixBuffers[1].isNull())
+				device.destroyBuffer(patchFrameResources->prefixBuffers[1]);
+			patchFrameResources->prefixBuffers[0] = device.createBuffer(rhi::BufferDesc{
+				.size = bufferSize,
+				.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferSrc
+					| rhi::BufferUsageFlags::transferDst,
+				.memoryUsage = rhi::MemoryUsage::gpuOnly,
+				.debugName = "TransparentVisibilityPatch.prefixA",
+			});
+			patchFrameResources->prefixBuffers[1] = device.createBuffer(rhi::BufferDesc{
+				.size = bufferSize,
+				.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferSrc
+					| rhi::BufferUsageFlags::transferDst,
+				.memoryUsage = rhi::MemoryUsage::gpuOnly,
+				.debugName = "TransparentVisibilityPatch.prefixB",
+			});
 			patchFrameResources->prefixCapacity = requiredCount;
 			patchFrameResources->boundPrefixAHandles = {};
 			patchFrameResources->boundPrefixBHandles = {};
@@ -4275,41 +4151,20 @@ namespace demo
 
 		VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
 		if (frameResources.argumentTable.isNull()
-			|| frameResources.keyBuffer.buffer == VK_NULL_HANDLE || frameResources.valueBuffer.buffer == VK_NULL_HANDLE)
+			|| frameResources.keyBuffer.isNull() || frameResources.valueBuffer.isNull())
 		{
 			return;
 		}
 
-		// key/value buffers grow on capacity change: register the owned=false mirror once, then
-		// update it in place so the ArgumentTable resolves the current native buffer.
-		rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
-		const auto rebind = [&](rhi::BufferHandle& handle, VkBuffer buffer)
-		{
-			const uint64_t native = reinterpret_cast<uint64_t>(buffer);
-			if (handle.isNull())
-			{
-				rhi::vulkan::BufferRecord rec{};
-				rec.nativeBuffer = native;
-				rec.owned = false;
-				handle = resourceTable->registerBuffer(rec);
-			}
-			else
-			{
-				resourceTable->updateBuffer(handle, native);
-			}
-		};
-		rebind(frameResources.keyBufferHandle, frameResources.keyBuffer.buffer);
-		rebind(frameResources.valueBufferHandle, frameResources.valueBuffer.buffer);
-		rebind(frameResources.uploadKeyBufferHandle, frameResources.uploadKeyBuffer.buffer);
-		rebind(frameResources.uploadValueBufferHandle, frameResources.uploadValueBuffer.buffer);
-
+		// key/value buffers are owned RHI handles recreated on capacity growth; rewrite the
+		// ArgumentTable so it resolves the current buffers.
 		const std::array<rhi::ArgumentWrite, 2> writes{
 			{
 				rhi::ArgumentWrite{
-					.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBufferHandle
+					.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBuffer
 				},
 				rhi::ArgumentWrite{
-					.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.valueBufferHandle
+					.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.valueBuffer
 				},
 			}
 		};
@@ -4335,13 +4190,13 @@ namespace demo
 
 		const uint32_t paddedCount = nextPowerOfTwo(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
 		ensureVisibilitySortCapacity(frameIndex, paddedCount);
-		if (frameResources.uploadKeyBuffer.mapped == nullptr || frameResources.uploadValueBuffer.mapped == nullptr)
+		if (frameResources.uploadKeyMapped == nullptr || frameResources.uploadValueMapped == nullptr)
 		{
 			return;
 		}
 
-		auto* mappedKeys = static_cast<uint32_t*>(frameResources.uploadKeyBuffer.mapped);
-		auto* mappedValues = static_cast<uint32_t*>(frameResources.uploadValueBuffer.mapped);
+		auto* mappedKeys = static_cast<uint32_t*>(frameResources.uploadKeyMapped);
+		auto* mappedValues = static_cast<uint32_t*>(frameResources.uploadValueMapped);
 		const uint32_t activeCount = static_cast<uint32_t>(m_visibilitySortInputObjects.size());
 		std::memcpy(mappedKeys, m_visibilitySortInputKeys.data(), activeCount * sizeof(uint32_t));
 		std::memcpy(mappedValues, m_visibilitySortInputObjects.data(), activeCount * sizeof(uint32_t));
@@ -4350,13 +4205,6 @@ namespace demo
 			std::fill(mappedKeys + activeCount, mappedKeys + paddedCount, 0xffffffffu);
 			std::fill(mappedValues + activeCount, mappedValues + paddedCount, 0xffffffffu);
 		}
-		VK_CHECK(
-			vmaFlushAllocation(reinterpret_cast<VmaAllocator>(getAllocatorToken()), frameResources.uploadKeyBuffer.
-				allocation, 0, VK_WHOLE_SIZE));
-		VK_CHECK(
-			vmaFlushAllocation(reinterpret_cast<VmaAllocator>(getAllocatorToken()), frameResources.uploadValueBuffer.
-				allocation, 0, VK_WHOLE_SIZE));
-
 		frameResources.activeElementCount = activeCount;
 		frameResources.paddedElementCount = paddedCount;
 	}

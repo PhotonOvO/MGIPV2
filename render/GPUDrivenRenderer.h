@@ -642,14 +642,13 @@ namespace demo
 			const VisibilitySortFrameResources& f = m_visibilitySortFrames[frameIndex];
 			info.pipelineHandle = m_visibilitySortPipelineHandle;
 			info.argumentTable = f.argumentTable;
-			info.uploadKeyBufferHandle = f.uploadKeyBufferHandle;
-			info.uploadValueBufferHandle = f.uploadValueBufferHandle;
-			info.keyBufferHandle = f.keyBufferHandle;
-			info.valueBufferHandle = f.valueBufferHandle;
+			info.uploadKeyBufferHandle = f.uploadKeyBuffer;
+			info.uploadValueBufferHandle = f.uploadValueBuffer;
+			info.keyBufferHandle = f.keyBuffer;
+			info.valueBufferHandle = f.valueBuffer;
 			info.paddedElementCount = f.paddedElementCount;
 			info.valid = !f.argumentTable.isNull() && f.paddedElementCount > 1u
-				&& reinterpret_cast<uintptr_t>(f.uploadKeyBuffer.buffer) != 0
-				&& reinterpret_cast<uintptr_t>(f.uploadValueBuffer.buffer) != 0;
+				&& !f.uploadKeyBuffer.isNull() && !f.uploadValueBuffer.isNull();
 			return info;
 		}
 
@@ -1004,9 +1003,7 @@ namespace demo
 		}
 
 		[[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
-		[[nodiscard]] uintptr_t getBackendDeviceToken() const;
 		[[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }
-		[[nodiscard]] uintptr_t getAllocatorToken() const;
 		// ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
 		[[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
 		{
@@ -1121,15 +1118,13 @@ namespace demo
 
 		struct VisibilitySortFrameResources
 		{
-			utils::Buffer uploadKeyBuffer{};
-			utils::Buffer uploadValueBuffer{};
-			utils::Buffer keyBuffer{};
-			utils::Buffer valueBuffer{};
+			rhi::BufferHandle uploadKeyBuffer{}; // owned, cpuToGpu (persistently mapped)
+			rhi::BufferHandle uploadValueBuffer{};
+			rhi::BufferHandle keyBuffer{}; // owned, gpuOnly
+			rhi::BufferHandle valueBuffer{};
+			void* uploadKeyMapped{nullptr};
+			void* uploadValueMapped{nullptr};
 			rhi::ArgumentTableHandle argumentTable{}; // owned RHI ArgumentTable
-			rhi::BufferHandle keyBufferHandle{}; // owned=false mirror, rebound on realloc
-			rhi::BufferHandle valueBufferHandle{};
-			rhi::BufferHandle uploadKeyBufferHandle{}; // owned=false mirror of staging buffer
-			rhi::BufferHandle uploadValueBufferHandle{};
 			uint32_t capacity{0};
 			uint32_t activeElementCount{0};
 			uint32_t paddedElementCount{0};
@@ -1137,17 +1132,16 @@ namespace demo
 
 		struct TransparentVisibilityFrameResources
 		{
-			std::array<utils::Buffer, 2> prefixBuffers{};
+			std::array<rhi::BufferHandle, 2> prefixBuffers{}; // owned, gpuOnly
 			std::array<rhi::ArgumentTableHandle, 2> argumentTables{};
-			std::array<rhi::BufferHandle, 2> prefixBufferHandles{};
 			std::array<rhi::BufferHandle, 2> sourceIndirectBufferHandles{};
 			std::array<rhi::BufferHandle, 2> targetIndirectBufferHandles{};
-			std::array<uint64_t, 2> boundSortKeyHandles{0, 0};
-			std::array<uint64_t, 2> boundSortValueHandles{0, 0};
+			std::array<rhi::BufferHandle, 2> boundSortKeyHandles{};
+			std::array<rhi::BufferHandle, 2> boundSortValueHandles{};
 			std::array<uint64_t, 2> boundSourceIndirectHandles{0, 0};
 			std::array<uint64_t, 2> boundTargetIndirectHandles{0, 0};
-			std::array<uint64_t, 2> boundPrefixAHandles{0, 0};
-			std::array<uint64_t, 2> boundPrefixBHandles{0, 0};
+			std::array<rhi::BufferHandle, 2> boundPrefixAHandles{};
+			std::array<rhi::BufferHandle, 2> boundPrefixBHandles{};
 			uint32_t prefixCapacity{0};
 		};
 
@@ -1168,8 +1162,8 @@ namespace demo
 		void initTransparentVisibilityPatchResources();
 		void shutdownTransparentVisibilityPatchResources();
 		void updateTransparentVisibilityPatchArgumentTable(uint32_t frameIndex,
-		                                                   uint64_t sortKeyBufferHandle,
-		                                                   uint64_t sortValueBufferHandle,
+		                                                   rhi::BufferHandle sortKeyBuffer,
+		                                                   rhi::BufferHandle sortValueBuffer,
 		                                                   uint64_t sourceIndirectBufferHandle,
 		                                                   uint64_t targetIndirectBufferHandle);
 		[[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
@@ -1279,7 +1273,6 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_lightCoarseCullingArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
-		uintptr_t m_linearClampSampler{0};
 		rhi::SamplerHandle m_linearClampSamplerHandle{};
 		rhi::SamplerHandle m_iblCubeSamplerHandle{};
 		rhi::SamplerHandle m_iblLutSamplerHandle{};
@@ -1327,7 +1320,6 @@ namespace demo
 		rhi::TextureHandle m_iblEnvironmentImage{};
 		rhi::TextureViewHandle m_iblEnvironmentView{};
 		IBLResources m_iblResources{};
-		std::vector<utils::Buffer> m_gpuDrivenStagingBuffers;
 		std::vector<rhi::BufferHandle> m_gpuDrivenRhiStagingBuffers;
 		rhi::TextureFormat m_iblEnvironmentFormat{rhi::TextureFormat::undefined};
 		rhi::Extent2D m_iblEnvironmentExtent{};

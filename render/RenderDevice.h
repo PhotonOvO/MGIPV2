@@ -118,8 +118,6 @@ namespace demo
 		SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
 		void bindStaticPassResources(PassExecutor& passExecutor) const;
 		void waitForIdle();
-		[[nodiscard]] uintptr_t getBackendDeviceToken() const;
-		[[nodiscard]] uintptr_t getAllocatorToken() const { return reinterpret_cast<uintptr_t>(m_device.allocator); }
 		[[nodiscard]] rhi::Extent2D getSceneExtent() const { return m_swapchainDependent.sceneResources.getSize(); }
 
 		// LightPass support
@@ -559,6 +557,7 @@ namespace demo
 		rhi::TextureViewHandle getShadowMapView() const;
 		shaderio::ShadowUniforms* getShadowUniformsData();
 		[[nodiscard]] rhi::Device& getRHIDevice() const { return *m_device.device; }
+		[[nodiscard]] bool hasRHIDevice() const { return m_device.device != nullptr; }
 
 	private:
 		// Created during RenderDevice::init() after feature negotiation.

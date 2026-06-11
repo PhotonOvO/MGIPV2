@@ -6085,15 +6085,6 @@ namespace demo
 		m_device.device->waitIdle();
 	}
 
-	uintptr_t RenderDevice::getBackendDeviceToken() const
-	{
-		if (m_device.device == nullptr)
-		{
-			return 0;
-		}
-		return reinterpret_cast<uintptr_t>(static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device());
-	}
-
 	void RenderDevice::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{
 		// Upload cmd pool + fence lifecycle sunk into VulkanDevice (UPL-02).
