@@ -1288,6 +1288,10 @@ namespace demo::rhi::vulkan
 		if (isCpuVisible(desc.memoryUsage))
 		{
 			allocInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
+			// 回读路径（gpuCulling stats/results 等）依赖 coherent 内存，以便 CPU 直接
+			// 读取 GPU 写入结果而无需 vmaInvalidateAllocation。Vulkan 规范保证每个实现
+			// 均存在 HOST_VISIBLE|HOST_COHERENT 内存类型，此 requiredFlags 始终可满足。
+			allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 		}
 
 		VkBuffer buffer = VK_NULL_HANDLE;
