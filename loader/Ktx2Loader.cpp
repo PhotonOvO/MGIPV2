@@ -155,10 +155,18 @@ bool Ktx2Loader::loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& o
     return false;
   }
 
-  outTexture.format = toPortableTextureFormat(static_cast<VkFormat>(header.vkFormat));
+  outTexture.format = toPortableTextureFormat(header.vkFormat);
   if (outTexture.format == rhi::TextureFormat::undefined)
   {
-    m_lastError = "Unsupported or unknown KTX2 vkFormat";
+    // ASTC 格式值域：[151, 213]（Vulkan 规范 Table 65，DEFER-04 待支持）
+    if (header.vkFormat >= 151u && header.vkFormat <= 213u)
+    {
+      LOGW("KTX2 ASTC format (vkFormat=%u) not yet supported; skipping texture", header.vkFormat);
+    }
+    else
+    {
+      m_lastError = "Unsupported or unknown KTX2 vkFormat";
+    }
     return false;
   }
   outTexture.width     = header.pixelWidth;
