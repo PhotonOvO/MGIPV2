@@ -118,6 +118,14 @@ namespace demo::rhi::vulkan
 		};
 		VK_CHECK(vkCreateCommandPool(m_device, &uploadPoolInfo, nullptr, &m_uploadCmdPool));
 
+		// Transient graphics cmd pool — migrated from RenderDevice (RDEV-01)
+		const VkCommandPoolCreateInfo transientPoolInfo{
+			.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+			.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+			.queueFamilyIndex = m_graphicsQueue.familyIndex,
+		};
+		VK_CHECK(vkCreateCommandPool(m_device, &transientPoolInfo, nullptr, &m_transientCmdPool));
+
 		m_initialized = true;
 		LOGI("VulkanDevice::init: completed");
 	}
@@ -138,6 +146,12 @@ namespace demo::rhi::vulkan
 			{
 				vkDestroyCommandPool(m_device, m_uploadCmdPool, nullptr);
 				m_uploadCmdPool = VK_NULL_HANDLE;
+			}
+			// Transient cmd pool — destroy before logical device (RDEV-01)
+			if (m_transientCmdPool != VK_NULL_HANDLE)
+			{
+				vkDestroyCommandPool(m_device, m_transientCmdPool, nullptr);
+				m_transientCmdPool = VK_NULL_HANDLE;
 			}
 			vkDestroyDevice(m_device, nullptr);
 			m_device = VK_NULL_HANDLE;
