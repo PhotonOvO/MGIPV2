@@ -61,9 +61,16 @@ namespace demo
 
 		LOGI("DebugInteropBridge::init: begin");
 
-		// --- 1. Cache native device handle (used in shutdown). ----------------
-		m_nativeDevice = reinterpret_cast<uintptr_t>(
-		    static_cast<rhi::vulkan::VulkanDevice&>(*info.rhiDevice).device());
+		// --- 1. Query the ImGui-only native context from the RHI. -------------
+		// queryImGuiNativeContext is the sanctioned ImGui/DebugInterop seam; this
+		// bridge is the only file allowed to cast its void pointers back to Vk*.
+		rhi::ImGuiNativeContext nativeContext{};
+		if (!info.rhiDevice->queryImGuiNativeContext(nativeContext))
+		{
+			LOGE("DebugInteropBridge::init: backend exposes no ImGui native context; UI disabled");
+			return;
+		}
+		m_nativeDevice = reinterpret_cast<uintptr_t>(nativeContext.device);
 
 		// --- 2. Create ImGui-exclusive descriptor pool (D-09). ----------------
 		// Dear ImGui Vulkan backend switched to separate sampled-image + sampler
@@ -110,16 +117,14 @@ namespace demo
 #endif
 
 		// --- 5. Vulkan backend init. ------------------------------------------
-		const rhi::QueueInfo graphicsQueue = info.rhiDevice->getGraphicsQueue();
 		VkFormat imageFormats[] = {toVkFormatBridge(info.swapchainFormat)};
 
-		auto& vkDev = static_cast<rhi::vulkan::VulkanDevice&>(*info.rhiDevice);
 		ImGui_ImplVulkan_InitInfo initInfo = {
-			.Instance = vkDev.instance(),
-			.PhysicalDevice = vkDev.physicalDevice(),
+			.Instance = static_cast<VkInstance>(nativeContext.instance),
+			.PhysicalDevice = static_cast<VkPhysicalDevice>(nativeContext.physicalDevice),
 			.Device = vkDevice,
-			.QueueFamily = graphicsQueue.familyIndex,
-			.Queue = vkHandleFromU64<VkQueue>(graphicsQueue.backendHandle),
+			.QueueFamily = nativeContext.graphicsQueueFamily,
+			.Queue = static_cast<VkQueue>(nativeContext.graphicsQueue),
 			.DescriptorPool = pool,
 			.MinImageCount = info.minImageCount,
 			.ImageCount = info.imageCount,

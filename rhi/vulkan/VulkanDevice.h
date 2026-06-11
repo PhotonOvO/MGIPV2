@@ -43,6 +43,8 @@ public:
   QueueInfo getComputeQueue() const override;
   QueueInfo getTransferQueue() const override;
 
+  bool queryImGuiNativeContext(ImGuiNativeContext& out) const override;
+
   bool isInstanceExtensionSupported(const char* name) const override;
   bool isDeviceExtensionSupported(const char* name) const override;
   bool isFormatSupported(TextureFormat format, FormatFeatureFlag feature) const override;

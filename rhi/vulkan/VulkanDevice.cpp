@@ -252,6 +252,21 @@ namespace demo::rhi::vulkan
 		return m_transferQueue.toRhi();
 	}
 
+	bool VulkanDevice::queryImGuiNativeContext(ImGuiNativeContext& out) const
+	{
+		if (m_device == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		const QueueInfo graphicsQueue = m_graphicsQueue.toRhi();
+		out.instance = static_cast<void*>(m_instance);
+		out.physicalDevice = static_cast<void*>(m_physicalDevice);
+		out.device = static_cast<void*>(m_device);
+		out.graphicsQueue = reinterpret_cast<void*>(static_cast<uintptr_t>(graphicsQueue.backendHandle));
+		out.graphicsQueueFamily = graphicsQueue.familyIndex;
+		return true;
+	}
+
 	bool VulkanDevice::isInstanceExtensionSupported(const char* name) const
 	{
 		return extensionAvailable(name, m_availableInstanceExtensions);

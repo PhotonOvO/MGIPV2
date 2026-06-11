@@ -48,6 +48,20 @@ namespace demo::rhi
 		bool maintenance6{false};
 	};
 
+	// ImGui/DebugInterop-only native context (D-08/D-09). Carries exactly the opaque
+	// native objects the Dear ImGui native backend needs for its initialization —
+	// nothing more. The only sanctioned consumer is render/DebugInteropBridge.cpp,
+	// which casts the void pointers back to backend types. Backends must never expose
+	// allocators or per-resource native handles (buffers/images/samplers) through this.
+	struct ImGuiNativeContext
+	{
+		void* instance{nullptr};
+		void* physicalDevice{nullptr};
+		void* device{nullptr};
+		void* graphicsQueue{nullptr};
+		uint32_t graphicsQueueFamily{0};
+	};
+
 	struct MemoryTypeInfo
 	{
 		uint32_t propertyFlags{0};
@@ -110,6 +124,13 @@ namespace demo::rhi
 		virtual QueueInfo getGraphicsQueue() const = 0;
 		virtual QueueInfo getComputeQueue() const = 0;
 		virtual QueueInfo getTransferQueue() const = 0;
+
+		// --- ImGui debug-interop seam (D-08/D-09) ---
+		// Fills the minimal native objects the Dear ImGui native backend needs for
+		// initialization. ImGui-only escape: render/DebugInteropBridge.cpp is the sole
+		// sanctioned caller; regular render code must not call this. Backends without
+		// ImGui native interop support return false and leave `out` untouched.
+		virtual bool queryImGuiNativeContext(ImGuiNativeContext& /*out*/) const { return false; }
 
 		// D3D12/Metal do not have extension-query APIs — defaults to false.
 		// Vulkan backend overrides to query m_availableInstanceExtensions/m_availableDeviceExtensions.
