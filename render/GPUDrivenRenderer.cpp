@@ -3186,8 +3186,13 @@ namespace demo
 		lightingUniforms.light.iblDebugInfo =
 			glm::vec4(static_cast<float>(params.debugOptions.iblDebugMode),
 			          m_iblResources.isSplitSumReady() ? 1.0f : 0.0f, 0.0f, 0.0f);
+		// phase7Info.x: must mirror GPUDrivenAOPass::execute's early-exit conditions;
+		// if the GTAO pipelines aren't ready the pass never runs, so the AO texture
+		// is unwritten -- multiplying by it would extinguish diffuse lighting.
 		lightingUniforms.light.phase7Info =
-			glm::vec4(params.debugOptions.enableAO && !m_aoDenoisedView.isNull() ? 1.0f : 0.0f,
+			glm::vec4(params.debugOptions.enableAO && !m_aoDenoisedView.isNull()
+			              && !m_gtaoPipelineHandle.isNull() && !m_aoDenoisePipelineHandle.isNull()
+			                  ? 1.0f : 0.0f,
 			          params.debugOptions.enableSSR && !m_ssrRawView.isNull() ? 1.0f : 0.0f,
 			          0.0f,
 			          0.0f);
