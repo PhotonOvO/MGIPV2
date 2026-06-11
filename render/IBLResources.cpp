@@ -140,6 +140,22 @@ namespace demo
 		rhiCmd.clearColorTexture(m_prefilteredMap, cubeRange, rhi::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
 		rhiCmd.clearColorTexture(m_irradianceMap, irradianceRange, rhi::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
 		rhiCmd.clearColorTexture(m_dfgLUT, lutRange, rhi::ClearColorValue{0.5f, 0.5f, 0.0f, 1.0f});
+
+		// Clear (transfer write) -> generation dispatch (compute write) WAW hazard:
+		// make the clear writes available before compute overwrites the same images.
+		//
+		// Why imageBarrier (not rhiCmd.barrier): VulkanCommandBuffer::barrier's
+		// inferConsumerAccess only emits VK_ACCESS_2_MEMORY_READ_BIT on the dst side,
+		// which is insufficient for WAW — the spec requires WRITE access on both sides.
+		// imageBarrier routes through resourceBarrier (ALL_COMMANDS + MEMORY_WRITE ->
+		// MEMORY_READ|MEMORY_WRITE), which is conservatively correct for this hazard.
+		//
+		// Note: these are *not* dead barriers. Unlike the irradiance General->General
+		// removed in 4bade91 (which had no preceding write), these three synchronise
+		// real clearColorTexture writes against the compute dispatch in generateIBLMaps.
+		imageBarrier(rhiCmd, m_prefilteredMap, cubeRange, rhi::ResourceState::General, rhi::ResourceState::General);
+		imageBarrier(rhiCmd, m_irradianceMap, irradianceRange, rhi::ResourceState::General, rhi::ResourceState::General);
+		imageBarrier(rhiCmd, m_dfgLUT, lutRange, rhi::ResourceState::General, rhi::ResourceState::General);
 	}
 
 	rhi::PipelineHandle IBLResources::createGenerationPipeline(const uint32_t* spirvCode,
