@@ -551,6 +551,25 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
     return (diffuse * ao + specular) * intensity;
 }
 
+// Sharpness of the depth weight used by the SSR upsample, in inverse view-space
+// metres: taps whose linear depth differs from the shaded pixel by ~0.25 m are
+// down-weighted to ~e^-1, suppressing reflection bleed across silhouettes.
+STATIC_CONST float kSSRUpsampleDepthSharpness = 4.0;
+
+// Convert a reversed-Z NDC depth to positive view-space distance.  Identical
+// derivation to ssr_trace.slang's extractNear/linearizeDepth pair: for the
+// engine's reversed-Z projection, near = b / (a + 1) with a = projection[2][2]
+// and b = projection[2][3] (GLM [col][row] mapped to Slang row-major), and
+// linearZ = near / ndcDepth.
+float linearizeViewZ(float ndcDepth)
+{
+    const float a = camera.projection[2][2];
+    const float b = camera.projection[2][3];
+    const float denom = a + 1.0;
+    const float near = abs(denom) > 1.0e-5 ? abs(b / denom) : 0.1;
+    return near / max(ndcDepth, 1.0e-7);
+}
+
 // Returns float4(ssrColor * F * fade, confidence).  confidence == 0 when SSR is disabled
 // or no hit was found, allowing evaluateEnvironmentIBL to fall back cleanly to pure IBL.
 float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
@@ -559,7 +578,52 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
-    const vec4 ssrSample = inTexture[kSSRTextureIndex].SampleLevel(uv, 0.0);
+
+    // Depth-aware 4-tap upsample of the half-res SSR texture.  The full-res depth at
+    // the shaded pixel is the reference; each half-res tap is compared against the
+    // full-res depth at its own 2x2 block centre (fullCoord = halfCoord * 2 + 1, the
+    // same half->full mapping used by gtao and ssr_trace).
+    uint ssrWidth, ssrHeight;
+    inTexture[kSSRTextureIndex].GetDimensions(ssrWidth, ssrHeight);
+    uint depthWidth, depthHeight;
+    inTexture[kGBufferDepthIndex].GetDimensions(depthWidth, depthHeight);
+    const int2 ssrMaxCoord   = int2(int(ssrWidth) - 1, int(ssrHeight) - 1);
+    const int2 depthMaxCoord = int2(int(depthWidth) - 1, int(depthHeight) - 1);
+
+    const float refNdc = inTexture[kGBufferDepthIndex].SampleLevel(uv, 0.0).r;
+    const float refViewZ = linearizeViewZ(max(refNdc, 1.0e-7));
+
+    // Bilinear footprint in half-res texel space.
+    const float2 texelPos = uv * float2(ssrWidth, ssrHeight) - 0.5;
+    const float2 baseTexel = floor(texelPos);
+    const float2 lerpW = texelPos - baseTexel;
+    const int2 baseCoord = int2(baseTexel);
+
+    const int2 centerCoord = clamp(int2(texelPos + 0.5), int2(0, 0), ssrMaxCoord);
+    const float4 centerTap = inTexture[kSSRTextureIndex].Load(int3(centerCoord, 0));
+
+    float4 sum = float4(0.0);
+    float weightSum = 0.0;
+    [unroll]
+    for(int i = 0; i < 4; ++i)
+    {
+        const int2 offset = int2(i & 1, i >> 1);
+        const int2 tapCoord = clamp(baseCoord + offset, int2(0, 0), ssrMaxCoord);
+        const float4 tap = inTexture[kSSRTextureIndex].Load(int3(tapCoord, 0));
+        const int2 tapFullCoord = clamp(tapCoord * 2 + int2(1, 1), int2(0, 0), depthMaxCoord);
+        const float tapNdc = inTexture[kGBufferDepthIndex].Load(int3(tapFullCoord, 0)).r;
+        const float tapViewZ = linearizeViewZ(max(tapNdc, 1.0e-7));
+        const float bilinearWeight = (offset.x == 1 ? lerpW.x : 1.0 - lerpW.x)
+                                   * (offset.y == 1 ? lerpW.y : 1.0 - lerpW.y);
+        const float depthWeight = exp(-abs(refViewZ - tapViewZ) * kSSRUpsampleDepthSharpness);
+        const float weight = bilinearWeight * depthWeight;
+        sum += tap * weight;
+        weightSum += weight;
+    }
+    // If every tap was rejected by the depth weight, fall back to the centre tap so
+    // thin features never produce a hard zero where the raw SSR still had a hit.
+    const float4 ssrSample = weightSum > 1.0e-5 ? sum / weightSum : centerTap;
+
     const vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
     const vec3 F = Fresnel_Schlick_Roughness(max(dot(N, V), 0.001), F0, roughness);
     const float roughnessFade = saturate(1.0 - roughness / 0.72);
