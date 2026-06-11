@@ -72,6 +72,27 @@ float linearizeDepth(float ndcDepth, float near)
     return near / max(ndcDepth, 1.0e-7);
 }
 
+// GGX importance sampling -- self-contained so ssr_trace does not depend on ibl_common.
+// Builds a half-vector H in world space distributed according to the GGX NDF.
+// xi: uniform 2D sample in [0,1)^2.  alpha = roughness^2.
+float3 importanceSampleGGX(float2 xi, float alpha, float3 N)
+{
+    const float phi      = 2.0 * 3.14159265359 * xi.x;
+    const float cosTheta = sqrt(max((1.0 - xi.y) / max(1.0 + (alpha * alpha - 1.0) * xi.y, 1.0e-7), 0.0));
+    const float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+
+    // Tangent-space half-vector.
+    const float3 H_ts = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+
+    // Build an orthonormal tangent frame around N.
+    const float3 up     = abs(N.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    const float3 T      = normalize(cross(up, N));
+    const float3 B      = cross(N, T);
+
+    // Transform to world space.
+    return normalize(T * H_ts.x + B * H_ts.y + N * H_ts.z);
+}
+
 // Refine a DDA hit via 6 bisection steps between the last miss (prevUv, prevLinearZ)
 // and the first crossing (hitUv, hitLinearZ).  All UVs are in normalised [0,1] half-res
 // space; the function reads from depthTexture (full-res) by scaling by 2.  The refined
@@ -154,12 +175,6 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 n = decodeNormalOct(normalPacked.rg);
     const float3 worldPos = reconstructWorldPosition(uv, depth);
     const float3 viewDir = normalize(worldPos - camera.cameraPosition);
-    const float3 rayDir = normalize(reflect(viewDir, n));
-    if(dot(rayDir, n) <= 0.0)
-    {
-        ssrRaw[dispatchThreadId.xy] = float4(0.0);
-        return;
-    }
 
     const uint maxSteps = max(uint(ssrPush.params0.z), 1u);
     // thickness is in metres; passed directly from the C++ push constant.
@@ -168,11 +183,46 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float maxDistance = max(ssrPush.params1.y, 0.01);
     const float confidenceScale = ssrPush.params1.z;
     const uint frameIndex = uint(ssrPush.params1.w);
+
+    // Per-pixel jitter applied to the DDA first-step phase; see Stage 2 comment.
+    // Two independent noise values drive GGX sampling (xi0 for phi, xi1 for theta).
+    // The offset uint2(73, 151) ensures xi0 and xi1 are decorrelated spatially.
+    const float xi0 = ign(dispatchThreadId.xy,              frameIndex);
+    const float xi1 = ign(dispatchThreadId.xy + uint2(73u, 151u), frameIndex);
+
+    // GGX importance-sampled ray direction.
+    // For near-mirror surfaces (roughness < 0.05) skip the perturbation entirely
+    // to avoid noise on surfaces where the GGX lobe collapses to a delta function.
+    float3 rayDir;
+    const float3 specularDir = normalize(reflect(viewDir, n));
+    if(roughness < 0.05)
+    {
+        rayDir = specularDir;
+    }
+    else
+    {
+        const float alpha = roughness * roughness;
+        const float3 H = importanceSampleGGX(float2(xi0, xi1), alpha, n);
+        rayDir = normalize(reflect(viewDir, H));
+        // If the perturbed direction faces away from the surface (can happen near
+        // grazing angles), fall back to the mirror direction.
+        if(dot(rayDir, n) <= 0.0)
+        {
+            rayDir = specularDir;
+        }
+    }
+    if(dot(rayDir, n) <= 0.0)
+    {
+        ssrRaw[dispatchThreadId.xy] = float4(0.0);
+        return;
+    }
     const float roughnessFade = saturate(1.0 - roughness / 0.72);
     const float materialFade = saturate(0.35 + metallic * 0.65);
 
-    // Per-pixel jitter applied to the DDA first-step phase; see Stage 2 comment.
-    const float jitter = ign(dispatchThreadId.xy, frameIndex);
+    // xi0 also serves as the DDA first-step jitter; reusing it avoids an extra
+    // noise evaluation while keeping the per-step-phase and per-direction offsets
+    // correlated (which is harmless: TAA decorrelates them across frames).
+    const float jitter = xi0;
 
     // -----------------------------------------------------------------------
     // Screen-space DDA setup (McGuire & Mara 2014 style).
