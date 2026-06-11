@@ -577,8 +577,6 @@ namespace demo
 
 			utils::Buffer vertexBuffer;
 			utils::Buffer pointsBuffer;
-			// TODO(Phase4): sink to VulkanDevice -- blocked on VulkanSwapchain::init void* coupling (L1030)
-			DEMO_RHI_VK(CommandPool) transientCmdPool{};
 			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
 			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
 			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).
@@ -888,7 +886,6 @@ namespace demo
 			uint32_t maxTextures{10000};
 		};
 
-		void createTransientCommandPool();
 		void createFrameSubmission(uint32_t numFrames);
 		void rebuildSwapchainDependentResources(std::optional<rhi::Extent2D> requestedViewportSize = std::nullopt);
 		bool prepareFrameResources();

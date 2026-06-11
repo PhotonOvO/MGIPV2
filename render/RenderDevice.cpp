@@ -998,12 +998,11 @@ namespace demo
 		m_swapchainDependent.swapchainImageFormat = toPortableTextureFormat(
 			selectSwapchainImageFormat(nativePhysicalDevice, nativeSurface));
 
-		createTransientCommandPool();
-
+		auto& vkDevForSwapchain = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device);
 		auto nativeSwapchain = std::make_unique<rhi::vulkan::VulkanSwapchain>();
 		nativeSwapchain->init(static_cast<void*>(nativePhysicalDevice), static_cast<void*>(nativeDevice),
 		                      static_cast<void*>(nativeGraphicsQueue), static_cast<void*>(nativeSurface),
-		                      static_cast<void*>(m_device.transientCmdPool), m_swapchainDependent.vSync);
+		                      static_cast<void*>(vkDevForSwapchain.transientCmdPool()), m_swapchainDependent.vSync);
 		m_swapchainDependent.swapchain = std::move(nativeSwapchain);
 		m_swapchainDependent.swapchain->rebuild();
 		const rhi::Extent2D swapchainExtent = m_swapchainDependent.swapchain->getExtent();
@@ -1036,11 +1035,8 @@ namespace demo
 				m_device.sceneLinearSamplerHandle)));
 		DBG_VK_NAME(linearSampler);
 
+		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
 		{
-			VkCommandBuffer cmd = utils::beginSingleTimeCommands(nativeDevice, m_device.transientCmdPool);
-			rhi::vulkan::VulkanCommandBuffer rhiCmd;
-			rhiCmd.setTarget(cmd, &m_device.resourceTable);
-
 			const VkFormat depthFormat = utils::findDepthFormat(nativePhysicalDevice);
 			SceneResources::CreateInfo sceneResourcesInit{
 				.size = m_swapchainDependent.windowSize,
@@ -1107,16 +1103,13 @@ namespace demo
 				.debugName = "CSM_CascadeArrayView",
 			});
 
-			utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
-		}
+		});
 
 		createGraphicsArgumentTables();
 		prebuildRequiredPipelineVariants();
 
+		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
 		{
-			VkCommandBuffer cmd = utils::beginSingleTimeCommands(nativeDevice, m_device.transientCmdPool);
-			rhi::vulkan::VulkanCommandBuffer rhiCmd;
-			rhiCmd.setTarget(cmd, &m_device.resourceTable);
 			m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, *m_device.device,
 			                                                  m_device.rhiStagingBuffers, rhiCmd,
 			                                                  std::as_bytes(std::span{s_vertices}),
@@ -1197,8 +1190,7 @@ namespace demo
 				},
 			});
 
-			utils::endSingleTimeCommands(cmd, nativeDevice, m_device.transientCmdPool, nativeGraphicsQueue);
-		}
+		});
 		freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
 
 		updateGraphicsArgumentTables();
@@ -1239,11 +1231,6 @@ namespace demo
 		destroyPassGpuProfileResources();
 		m_lightResources.deinit();
 		destroyIBLResources();
-		if (m_device.transientCmdPool != VK_NULL_HANDLE)
-		{
-			vkDestroyCommandPool(device, m_device.transientCmdPool, nullptr);
-			m_device.transientCmdPool = VK_NULL_HANDLE;
-		}
 		destroyPipelines();
 		// Destroy any owned texture views still registered (adopted/external ones are left to
 		// their owners). Route through destroyTextureView so each view is both freed and removed
@@ -1902,20 +1889,6 @@ namespace demo
 			.after = rhi::ResourceState::Present,
 		};
 		cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
-	}
-
-	void RenderDevice::createTransientCommandPool()
-	{
-		const rhi::QueueInfo graphicsQueueInfo = m_device.device->getGraphicsQueue();
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		const VkCommandPoolCreateInfo commandPoolCreateInfo{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-			.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-			.queueFamilyIndex = graphicsQueueInfo.familyIndex,
-		};
-		VK_CHECK(vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &m_device.transientCmdPool));
-		DBG_VK_NAME(m_device.transientCmdPool);
-		// NOTE: uploadCmdPool has been sunk into VulkanDevice::init (UPL-02).
 	}
 
 	void RenderDevice::createFrameSubmission(uint32_t numFrames)
@@ -3461,13 +3434,10 @@ namespace demo
 			m_perFrame.frameContext->waitForFrame(i);
 		}
 
-		const VkDevice device = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).device();
-		const VkQueue graphicsQueue = fromNativeHandle<VkQueue>(m_device.device->getGraphicsQueue().backendHandle);
-		VkCommandBuffer cmd = utils::beginSingleTimeCommands(device, m_device.transientCmdPool);
-		rhi::vulkan::VulkanCommandBuffer rhiCmd;
-		rhiCmd.setTarget(cmd, &m_device.resourceTable);
-		m_swapchainDependent.sceneResources.update(rhiCmd, m_swapchainDependent.viewportSize);
-		utils::endSingleTimeCommands(cmd, device, m_device.transientCmdPool, graphicsQueue);
+		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
+		{
+			m_swapchainDependent.sceneResources.update(rhiCmd, m_swapchainDependent.viewportSize);
+		});
 
 		for (uint32_t frameIndex = 0; frameIndex < m_perFrame.frameUserData.size(); ++frameIndex)
 		{
