@@ -39,6 +39,10 @@ endif()
 
 option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 include(FetchContent)
 
 set(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
