@@ -482,7 +482,12 @@ float3 computeClusterHeatmap(float2 uv, float viewDepth, float3 baseColor)
     return lerp(baseColor * 0.25, heat, 0.75);
 }
 
-vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao)
+// evaluateEnvironmentIBL now accepts an SSR sample (float4: rgb=radiance, a=confidence).
+// Where confidence > 0, the SSR radiance replaces the prefiltered IBL specular radiance
+// while keeping the same BRDF weight -- preventing the double-count that occurred when SSR
+// was added on top of the full IBL specular term.  Confidence == 0 falls back to IBL
+// seamlessly, providing automatic hole-filling with energy-conserving blending.
+vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao, float4 ssr)
 {
     const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
     if(!useIBL)
@@ -507,7 +512,10 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
         const vec3 prefiltered = max(iblPrefilteredMap.SampleLevel(R, roughness * maxMip).rgb, 0.0);
         const vec2 envBRDF = iblBrdfLut.Sample(float2(NdotV, roughness)).rg;
         diffuse = kD * irradiance * baseColor / PI;
-        specular = prefiltered * (F0 * envBRDF.x + envBRDF.y);
+        // Blend SSR radiance into the specular term at the same BRDF weight, replacing the
+        // prefiltered env sample where SSR confidence is high.
+        const vec3 ssrRadiance = lerp(prefiltered, ssr.rgb, saturate(ssr.a));
+        specular = ssrRadiance * (F0 * envBRDF.x + envBRDF.y);
     }
     else
 #endif
@@ -516,7 +524,9 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
         const vec3 irradiance = sampleEquirectEnvironment(N, maxMip);
         const vec3 prefiltered = sampleEquirectEnvironment(R, roughness * maxMip);
         diffuse = kD * irradiance * baseColor / PI;
-        specular = prefiltered * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
+        // Same SSR blend for the equirect path.
+        const vec3 ssrRadiance = lerp(prefiltered, ssr.rgb, saturate(ssr.a));
+        specular = ssrRadiance * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
     }
 
     const uint debugMode = uint(lighting.light.iblDebugInfo.x);
@@ -526,6 +536,7 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
     }
     if(debugMode == 2u)
     {
+        // Debug mode 2 visualises specular, which now includes the SSR blend result.
         return specular * intensity;
     }
     if(debugMode == 3u)
@@ -540,17 +551,20 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
     return (diffuse * ao + specular) * intensity;
 }
 
-vec3 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
+// Returns float4(ssrColor * F * fade, confidence).  confidence == 0 when SSR is disabled
+// or no hit was found, allowing evaluateEnvironmentIBL to fall back cleanly to pure IBL.
+float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness)
 {
     if(lighting.light.phase7Info.y <= 0.5 || roughness > 0.72)
     {
-        return vec3(0.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
-    const vec4 ssr = inTexture[kSSRTextureIndex].SampleLevel(uv, 0.0);
+    const vec4 ssrSample = inTexture[kSSRTextureIndex].SampleLevel(uv, 0.0);
     const vec3 F0 = lerp(vec3(0.04, 0.04, 0.04), baseColor, metallic);
     const vec3 F = Fresnel_Schlick_Roughness(max(dot(N, V), 0.001), F0, roughness);
     const float roughnessFade = saturate(1.0 - roughness / 0.72);
-    return ssr.rgb * F * saturate(ssr.a) * roughnessFade;
+    const float confidence = saturate(ssrSample.a) * roughnessFade;
+    return float4(ssrSample.rgb * F, confidence);
 }
 
 vec3 toneMapACES(vec3 color)
@@ -620,12 +634,14 @@ float4 fragmentMain(VSOutput input) : SV_Target
         return float4(computeClusterHeatmap(input.uv, viewDepth, baseColor), 1.0);
     }
 
-    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao);
+    // Evaluate SSR first so its confidence can drive IBL specular blending, avoiding the
+    // double-count that results from adding SSR on top of full IBL specular.
+    float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
+    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
-    vec3 color = ambient + directional + pointLights + ssr + emissiveSample.rgb;
+    vec3 color = ambient + directional + pointLights + emissiveSample.rgb;
     return float4(toneMapACES(color), 1.0);
 }
 
@@ -660,12 +676,13 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     }
     float viewDepth = computeViewDepth(worldPos);
 
-    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao);
+    // Evaluate SSR first so its confidence can drive IBL specular blending.
+    float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
+    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
-    return float4(max(ambient + directional + pointLights + ssr + emissiveSample.rgb, 0.0), 1.0);
+    return float4(max(ambient + directional + pointLights + emissiveSample.rgb, 0.0), 1.0);
 }
 
 [shader("fragment")]
