@@ -575,8 +575,8 @@ namespace demo
 			rhi::SamplerHandle sceneLinearSamplerHandle{};
 			rhi::SamplerHandle gbufferLinearSamplerHandle{};
 
-			utils::Buffer vertexBuffer;
-			utils::Buffer pointsBuffer;
+			rhi::BufferHandle vertexBuffer;
+			rhi::BufferHandle pointsBuffer;
 			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
 			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
 			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).

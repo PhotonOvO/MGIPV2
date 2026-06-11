@@ -788,46 +788,32 @@ namespace demo
 		destroyBuffer(allocator, nativeBuffer);
 	}
 
-	static utils::Buffer createBufferAndUploadData(const VkDevice device,
-	                                               const VmaAllocator allocator,
-	                                               rhi::Device& rhiDevice,
-	                                               std::vector<rhi::BufferHandle>& stagingBuffers,
-	                                               rhi::CommandBuffer& cmd,
-	                                               std::span<const std::byte> data,
-	                                               const VkBufferUsageFlags2KHR usage,
-	                                               const upload::StaticBufferUploadPolicy& uploadPolicy)
+	static rhi::BufferHandle createBufferAndUploadData(rhi::Device& rhiDevice,
+	                                                   std::vector<rhi::BufferHandle>& stagingBuffers,
+	                                                   rhi::CommandBuffer& cmd,
+	                                                   std::span<const std::byte> data,
+	                                                   const char* debugName)
 	{
-		(void)uploadPolicy;
-		(void)device;
-		utils::Buffer nativeBuffer{};
-		const VkBufferCreateInfo bufferInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<uint64_t>(data.size_bytes()),
-			.usage = static_cast<VkBufferUsageFlags>(static_cast<VkBufferUsageFlags2KHR>(usage) |
-				VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR),
-		};
-		const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-		VK_CHECK(
-			vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &nativeBuffer.buffer, &nativeBuffer.allocation, nullptr
-			));
-
-		const rhi::BufferHandle bufferHandle = rhiDevice.registerExternalBuffer(
-			reinterpret_cast<uintptr_t>(nativeBuffer.buffer));
-
+		const rhi::BufferHandle buffer = rhiDevice.createBuffer(rhi::BufferDesc{
+			.size        = static_cast<uint64_t>(data.size_bytes()),
+			.usage       = rhi::BufferUsageFlags::storage
+			             | rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.allowGpuAddress = false,
+			.debugName   = debugName,
+		});
 		BatchUploadContext upload;
 		upload.init(rhiDevice, static_cast<uint64_t>(data.size_bytes()));
 		const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(data.size_bytes()), 16);
 		std::memcpy(slice.cpuPtr, data.data(), data.size_bytes());
-		upload.recordBufferUpload(slice, bufferHandle, 0, static_cast<uint64_t>(data.size_bytes()));
+		upload.recordBufferUpload(slice, buffer, 0, static_cast<uint64_t>(data.size_bytes()));
 		upload.executeUploads(cmd);
-		rhiDevice.destroyBuffer(bufferHandle);
-
-		rhi::BufferHandle stagingBuffer = upload.releaseStagingBuffer();
-		if (!stagingBuffer.isNull())
+		rhi::BufferHandle staging = upload.releaseStagingBuffer();
+		if (!staging.isNull())
 		{
-			stagingBuffers.push_back(stagingBuffer);
+			stagingBuffers.push_back(staging);
 		}
-		return nativeBuffer;
+		return buffer;
 	}
 
 	static void freeRhiStagingBuffers(rhi::Device* device, std::vector<rhi::BufferHandle>& stagingBuffers)
@@ -1110,20 +1096,15 @@ namespace demo
 
 		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
 		{
-			m_device.vertexBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, *m_device.device,
+			m_device.vertexBuffer = createBufferAndUploadData(*m_device.device,
 			                                                  m_device.rhiStagingBuffers, rhiCmd,
 			                                                  std::as_bytes(std::span{s_vertices}),
-			                                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-			                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-			                                                  m_device.staticBufferUploadPolicy);
-			DBG_VK_NAME(m_device.vertexBuffer.buffer);
+			                                                  "vertexBuffer");
 
-			m_device.pointsBuffer = createBufferAndUploadData(nativeDevice, m_device.allocator, *m_device.device,
+			m_device.pointsBuffer = createBufferAndUploadData(*m_device.device,
 			                                                  m_device.rhiStagingBuffers, rhiCmd,
 			                                                  std::as_bytes(std::span{s_points}),
-			                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-			                                                  m_device.staticBufferUploadPolicy);
-			DBG_VK_NAME(m_device.pointsBuffer.buffer);
+			                                                  "pointsBuffer");
 
 			const std::vector<std::string> searchPaths = {".", "resources", "../resources", "../../resources"};
 			std::string filename = utils::findFile("image1.jpg", searchPaths);
@@ -1279,8 +1260,10 @@ namespace demo
 			m_perFrame.frameContext.reset();
 		}
 
-		destroyBuffer(m_device.allocator, m_device.vertexBuffer);
-		destroyBuffer(m_device.allocator, m_device.pointsBuffer);
+		if (!m_device.vertexBuffer.isNull())
+			m_device.device->destroyBuffer(m_device.vertexBuffer);
+		if (!m_device.pointsBuffer.isNull())
+			m_device.device->destroyBuffer(m_device.pointsBuffer);
 		std::vector<TextureHandle> texturesToDestroy;
 		m_materials.texturePool.forEachActive(
 			[&](TextureHandle handle, const MaterialResources::TextureRecord&)
@@ -3451,7 +3434,7 @@ namespace demo
 		// Called once after swapchain/resources rebuild
 		passExecutor.bindBuffer({
 			.handle = kPassVertexBufferHandle,
-			.backendBufferToken = reinterpret_cast<uint64_t>(m_device.vertexBuffer.buffer),
+			.backendBufferToken = m_device.resourceTable.resolveBuffer(m_device.vertexBuffer),
 		});
 		passExecutor.bindTexture({
 			.handle = kPassGBuffer0Handle,
