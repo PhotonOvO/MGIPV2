@@ -178,29 +178,32 @@ namespace demo
 	void IBLResources::generateIBLMaps(rhi::CommandBuffer& rhiCmd, const CreateInfo& createInfo)
 	{
 #ifdef USE_SLANG
+		rhi::ComputeEncoder* encoder = rhiCmd.beginComputePass();
+		if (encoder == nullptr)
+		{
+			return;
+		}
 		const auto dispatchGeneration = [&](rhi::PipelineHandle pipeline,
 		                                    rhi::ArgumentTableHandle table,
 		                                    const GeneratePushConstants& constants,
 		                                    uint32_t groupCountX,
 		                                    uint32_t groupCountY,
-		                                    uint32_t groupCountZ) -> bool
+		                                    uint32_t groupCountZ,
+											const char* eventName = nullptr
+			) -> bool
 		{
 			if (pipeline.isNull() || table.isNull())
 			{
 				return false;
 			}
-			rhi::ComputeEncoder* encoder = rhiCmd.beginComputePass();
-			if (encoder == nullptr)
-			{
-				return false;
-			}
+			rhiCmd.beginEvent(eventName);
 			encoder->setPipeline(pipeline);
 			encoder->setArgumentTable(0, table);
 			encoder->setRootConstants(0, &constants, sizeof(constants));
 			encoder->dispatch(rhi::DispatchDesc{
 				.groupCountX = groupCountX, .groupCountY = groupCountY, .groupCountZ = groupCountZ
 			});
-			rhiCmd.endEncoding();
+			rhiCmd.endEvent();
 			return true;
 		};
 		const auto createGenerationTable = [&](rhi::ArgumentLayoutHandle layout,
@@ -260,8 +263,9 @@ namespace demo
 		                        push,
 		                        (createInfo.dfgLUTSize + 7u) / 8u,
 		                        (createInfo.dfgLUTSize + 7u) / 8u,
-		                        1u))
+		                        1u,"DFG LUT Pass"))
 		{
+			rhiCmd.endEncoding();
 			return;
 		}
 
@@ -305,13 +309,11 @@ namespace demo
 			                        push,
 			                        (push.width + 7u) / 8u,
 			                        (push.height + 7u) / 8u,
-			                        6u))
+			                        6u, "IBL Irradiance Pass"))
 			{
+				rhiCmd.endEncoding();
 				return;
 			}
-
-			imageBarrier(rhiCmd, m_irradianceMap, colorRange(1, 6), rhi::ResourceState::General,
-			             rhi::ResourceState::General);
 
 			for (uint32_t mip = 0; mip <= m_maxMipLevel; ++mip)
 			{
@@ -357,13 +359,15 @@ namespace demo
 				                        push,
 				                        (mipSize + 7u) / 8u,
 				                        (mipSize + 7u) / 8u,
-				                        6u))
+				                        6u, "IBL Diffuse Pass"))
 				{
+					rhiCmd.endEncoding();
 					return;
 				}
 			}
 			m_splitSumReady = true;
 		}
+		rhiCmd.endEncoding();
 #else
 		(void)createInfo;
 #endif
