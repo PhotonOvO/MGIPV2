@@ -42,26 +42,78 @@ float3 reconstructWorldPosition(float2 uv, float depth)
     return worldPos.xyz / max(worldPos.w, 1.0e-5);
 }
 
-bool projectWorldPosition(float3 worldPos, out float2 uv, out float depth)
-{
-    float4 clipPos = mul(camera.viewProjection, float4(worldPos, 1.0));
-    if(clipPos.w <= 1.0e-5)
-    {
-        uv = float2(0.0);
-        depth = 0.0;
-        return false;
-    }
-
-    float3 ndc = clipPos.xyz / clipPos.w;
-    uv = ndc.xy * 0.5 + 0.5;
-    depth = ndc.z;
-    return uv.x > 0.0 && uv.y > 0.0 && uv.x < 1.0 && uv.y < 1.0 && depth > 0.0 && depth < 1.0;
-}
-
 float edgeFade(float2 uv)
 {
     float2 edgeDistance = min(uv, 1.0 - uv);
     return saturate(min(edgeDistance.x, edgeDistance.y) * 12.0);
+}
+
+// Extract the near-plane distance from the projection matrix at runtime.
+// The engine uses a reversed-Z finite perspective (glm::perspective with near/far
+// swapped); for that convention, in GLM column-major terms:
+//   projection[2][2] = a,  projection[3][2] = b
+// In Slang/HLSL row-major, GLM [col][row] maps to [row][col], so:
+//   a = camera.projection[2][2],  b = camera.projection[2][3]
+// The reversed-Z near-plane formula (same as clipspace::extractPerspectiveNearPlane):
+//   near = b / (a + 1)
+float extractNear()
+{
+    const float a = camera.projection[2][2];
+    const float b = camera.projection[2][3];
+    const float denom = a + 1.0;
+    return abs(denom) > 1.0e-5 ? abs(b / denom) : 0.1;
+}
+
+// Convert a reversed-Z NDC depth to positive view-space distance.
+// Reversed-Z convention: depth == 1.0 at the near plane, depth -> 0 at infinity.
+// Formula: linearZ = near / depth   (matches the matrix derivation above).
+float linearizeDepth(float ndcDepth, float near)
+{
+    return near / max(ndcDepth, 1.0e-7);
+}
+
+// Refine a DDA hit via 6 bisection steps.  prevUv/prevLinearZ are the sample
+// just before the first crossing; hitUv/hitLinearZ are the crossing step itself.
+// Returns the refined UV and an updated linear-Z estimate for the hit.
+float2 refineHit(float2 prevUv, float prevLinearZ,
+                 float2 hitUv, float hitLinearZ,
+                 float2 halfTexelSize, float near)
+{
+    float2 lo = prevUv;
+    float2 hi = hitUv;
+    float loZ = prevLinearZ;
+    float hiZ = hitLinearZ;
+
+    [unroll]
+    for(int i = 0; i < 6; ++i)
+    {
+        float2 mid = (lo + hi) * 0.5;
+        float2 sampleCoordF = mid * (1.0 / halfTexelSize) - 0.5;
+        uint2  sampleCoord  = uint2(clamp(int2(sampleCoordF), int2(0, 0),
+                                          int2(1.0 / halfTexelSize) - int2(1, 1)));
+        float sceneNdc = depthTexture.Load(int3(sampleCoord, 0));
+        float sceneZ   = linearizeDepth(max(sceneNdc, 1.0e-7), near);
+
+        // The midpoint ray depth is interpolated linearly in 1/viewZ space
+        // (screen-space linear interpolation is linear in 1/w).
+        float invLoZ = 1.0 / max(loZ, 1.0e-7);
+        float invHiZ = 1.0 / max(hiZ, 1.0e-7);
+        float invMidZ = (invLoZ + invHiZ) * 0.5;
+        float midZ = 1.0 / max(invMidZ, 1.0e-7);
+
+        if(midZ > sceneZ)
+        {
+            // Ray is behind the surface at mid -> crossing is in the [lo, mid] half.
+            hi = mid;
+            hiZ = midZ;
+        }
+        else
+        {
+            lo = mid;
+            loZ = midZ;
+        }
+    }
+    return (lo + hi) * 0.5;
 }
 
 [shader("compute")]
@@ -74,6 +126,9 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    // SSR runs at half resolution.  Map the half-res thread to the corresponding
+    // full-res texel (centre of the 2x2 block, offset by (1,1) to avoid the
+    // exact top-left corner which can land on tile boundaries).
     const uint2 inputSize = max(outputSize * 2u, uint2(1u, 1u));
     const uint2 fullCoord = min(dispatchThreadId.xy * 2u + uint2(1u, 1u), inputSize - uint2(1u, 1u));
     const float2 uv = (float2(fullCoord) + 0.5) / float2(inputSize);
@@ -105,45 +160,125 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const uint maxSteps = max(uint(ssrPush.params0.z), 1u);
-    const float thickness = max(ssrPush.params0.w, 0.0001);
-    const float minStep = max(ssrPush.params1.x, 0.01);
-    const float maxDistance = max(ssrPush.params1.y, minStep);
+    // thickness is in metres; passed directly from the C++ push constant.
+    // RenderTypes.h ssrThickness default changed to 0.3 m (see that file).
+    const float thickness = max(ssrPush.params0.w, 0.001);
+    const float maxDistance = max(ssrPush.params1.y, 0.01);
     const float confidenceScale = ssrPush.params1.z;
     const uint frameIndex = uint(ssrPush.params1.w);
     const float roughnessFade = saturate(1.0 - roughness / 0.72);
     const float materialFade = saturate(0.35 + metallic * 0.65);
 
-    // Jitter the ray march start phase to break up banding; TAA accumulates the result
-    // over multiple frames, recovering fine detail from the stochastic offset.
+    // Per-pixel jitter applied to the DDA first-step phase; see Stage 2 comment.
     const float jitter = ign(dispatchThreadId.xy, frameIndex);
 
-    float3 hitColor = float3(0.0);
-    float confidence = 0.0;
+    // -----------------------------------------------------------------------
+    // Screen-space DDA setup (McGuire & Mara 2014 style).
+    // Project the ray end-point (worldPos + rayDir * maxDistance) into clip space.
+    // -----------------------------------------------------------------------
+    const float near = extractNear();
+    const float startLinearZ = linearizeDepth(depth, near);
+
+    // End point: clamp to a reasonable depth so the projection does not diverge.
+    float3 endWorld = worldPos + rayDir * maxDistance;
+    float4 endClip = mul(camera.viewProjection, float4(endWorld, 1.0));
+    float2 endUv;
+    float  endRayDepth;
+    if(endClip.w <= 1.0e-5)
+    {
+        ssrRaw[dispatchThreadId.xy] = float4(0.0);
+        return;
+    }
+    float3 endNdc = endClip.xyz / endClip.w;
+    endUv = endNdc.xy * 0.5 + 0.5;
+    endRayDepth = endNdc.z;
+
+    // Clamp end UV so the DDA does not exit the screen immediately.
+    endUv = clamp(endUv, float2(0.001), float2(0.999));
+    // endLinearZ from the projected depth of the end point.
+    const float endLinearZ = endRayDepth > 1.0e-5 ? linearizeDepth(endRayDepth, near) : maxDistance;
+
+    // Convert start/end to half-resolution texel coordinates.
+    const float2 halfTexelSize = float2(1.0) / float2(outputSize);
+    const float2 startTexel = uv / halfTexelSize;          // half-res texel space
+    const float2 endTexel   = endUv / halfTexelSize;
+
+    // Number of DDA steps is bounded by the pixel-space distance of the segment.
+    const float2 delta = endTexel - startTexel;
+    const float pixelDistance = max(abs(delta.x), abs(delta.y));
+    const uint numSteps = min(maxSteps, uint(ceil(pixelDistance)));
+    if(numSteps == 0u)
+    {
+        ssrRaw[dispatchThreadId.xy] = float4(0.0);
+        return;
+    }
+
+    // 1/viewZ of start and end for perspective-correct depth interpolation along
+    // the screen-space line (see McGuire & Mara: interpolate 1/w linearly).
+    const float invStartZ = 1.0 / max(startLinearZ, 1.0e-7);
+    const float invEndZ   = 1.0 / max(endLinearZ,   1.0e-7);
+
+    float3 hitColor    = float3(0.0);
+    float  confidence  = 0.0;
+    float2 prevUv      = uv;
+    float  prevLinearZ = startLinearZ;
+    bool   hit         = false;
 
     [loop]
-    for(uint stepIndex = 1u; stepIndex <= maxSteps; ++stepIndex)
+    for(uint stepIndex = 1u; stepIndex <= numSteps; ++stepIndex)
     {
-        const float t = (float(stepIndex) - 1.0 + (0.5 + jitter)) / float(maxSteps);
-        const float rayDistance = max(minStep, t * maxDistance);
-        const float3 sampleWorld = worldPos + rayDir * rayDistance;
-        float2 sampleUv;
-        float rayDepth;
-        if(!projectWorldPosition(sampleWorld, sampleUv, rayDepth))
+        // t is the normalised progress along the DDA segment; the jitter shifts
+        // the first step so the sampling phase differs per pixel and per frame.
+        const float t = (float(stepIndex) - 1.0 + (0.5 + jitter)) / float(numSteps);
+
+        // Linear interpolation in UV space (correct for DDA; depth is handled separately).
+        const float2 sampleUv = lerp(uv, endUv, t);
+
+        // Perspective-correct depth interpolation: lerp 1/viewZ, then invert.
+        const float invRayZ    = lerp(invStartZ, invEndZ, t);
+        const float rayLinearZ = 1.0 / max(invRayZ, 1.0e-7);
+
+        // Map sample UV to half-resolution integer coordinate.
+        const float2 sampleCoordF = sampleUv / halfTexelSize - 0.5;
+        const uint2  sampleCoord  = uint2(clamp(int2(sampleCoordF),
+                                                int2(0, 0),
+                                                int2(outputSize) - int2(1, 1)));
+        const float sceneNdc   = depthTexture.Load(int3(sampleCoord * 2u + uint2(1u, 1u), 0));
+        if(sceneNdc <= 0.0001)
         {
+            prevUv      = sampleUv;
+            prevLinearZ = rayLinearZ;
+            continue;  // background pixel, keep marching
+        }
+
+        const float sceneLinearZ = linearizeDepth(sceneNdc, near);
+
+        // Hit test in linear-Z space.
+        // reversed-Z: depth==1 is near, depth->0 is far, so larger NDC depth is closer.
+        // In linear view-space, larger value means farther from camera.
+        // The ray is "behind" the surface when rayLinearZ > sceneLinearZ (ray is farther).
+        // Accept the hit if the penetration depth is within the thickness budget.
+        const float delta = rayLinearZ - sceneLinearZ;
+        if(delta > 0.0 && delta < thickness)
+        {
+            // Binary-search refinement between the previous and current step.
+            const float2 refinedUv = refineHit(prevUv, prevLinearZ,
+                                               sampleUv, rayLinearZ,
+                                               halfTexelSize, near);
+            const float2 refinedCoordF = refinedUv / halfTexelSize - 0.5;
+            const uint2  refinedCoord  = uint2(clamp(int2(refinedCoordF),
+                                                     int2(0, 0),
+                                                     int2(outputSize) - int2(1, 1)));
+            hitColor  = sceneColorHistory.Load(int3(refinedCoord * 2u + uint2(1u, 1u), 0)).rgb;
+            const float progressFade = 1.0 - t;  // confidence diminishes further along the ray
+            confidence = saturate(progressFade * edgeFade(refinedUv)
+                                  * roughnessFade * materialFade * confidenceScale);
+            hit = true;
             break;
         }
 
-        const uint2 sampleCoord = min(uint2(sampleUv * float2(inputSize)), inputSize - uint2(1u, 1u));
-        const float sceneDepth = depthTexture.Load(int3(sampleCoord, 0));
-        // reversed-Z: larger depth = closer. A hit means the ray point fell behind the
-        // surface at this pixel, i.e. the ray is farther than the scene (rayDepth < sceneDepth).
-        const float depthDelta = sceneDepth - rayDepth;
-        if(sceneDepth > 0.0001 && depthDelta > 0.0 && depthDelta < thickness)
-        {
-            hitColor = sceneColorHistory.Load(int3(sampleCoord, 0)).rgb;
-            confidence = saturate((1.0 - t) * edgeFade(sampleUv) * roughnessFade * materialFade * confidenceScale);
-            break;
-        }
+        prevUv      = sampleUv;
+        prevLinearZ = rayLinearZ;
     }
 
     ssrRaw[dispatchThreadId.xy] = float4(hitColor, confidence);

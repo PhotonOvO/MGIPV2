@@ -105,7 +105,7 @@ namespace demo
 		float aoIntensity{1.0f};
 		bool enableSSR{false};
 		int ssrMaxSteps{32};
-		float ssrThickness{0.03f};
+		float ssrThickness{0.3f};  // metres; passed directly to the shader thickness budget
 		bool enableShadowAtlas{false};
 
 		// CSM Shadow cascade debug visualization
