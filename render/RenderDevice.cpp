@@ -1651,7 +1651,7 @@ namespace demo
 			// Wave 8: mirror the per-frame UBO buffers (and the stable transient allocator
 			// buffer) as RHI BufferHandles for ArgumentWrite-based bind-group updates.
 			// Now that the buffer members are rhi::BufferHandle directly, RHI handles are the
-			// same object — assign directly without going through rebindFrameBufferHandle.
+			// same object — assign directly.
 			frameUserData.lightingBufferRHI = frameUserData.lightingBuffer;
 			frameUserData.lightCullingBufferRHI = frameUserData.lightCullingBuffer;
 			frameUserData.gpuCullingUniformBufferRHI = frameUserData.gpuCullingUniformBuffer;

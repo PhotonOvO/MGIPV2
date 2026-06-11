@@ -1,7 +1,6 @@
 #include "SceneResources.h"
 #include "BatchUploadContext.h"
 #include "RHIFormatBridge.h"
-#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,12 +11,7 @@ namespace demo
 {
 	namespace
 	{
-		[[nodiscard]] VkExtent2D toVkExtent(rhi::Extent2D extent)
-		{
-			return {extent.width, extent.height};
-		}
-
-		uint32_t computeMipCount(VkExtent2D extent)
+		uint32_t computeMipCount(rhi::Extent2D extent)
 		{
 			uint32_t mipCount = 1;
 			uint32_t size = std::max(extent.width, extent.height);
@@ -169,17 +163,11 @@ namespace demo
 
 	void SceneResources::create(rhi::CommandBuffer& cmdBuffer)
 	{
-		utils::DebugUtil& dutil = utils::DebugUtil::getInstance();
 		const auto numColor = static_cast<uint32_t>(m_createInfo.color.size());
-		const auto nativeImage = [&](rhi::TextureHandle handle)
-		{
-			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
-			    static_cast<const rhi::vulkan::VulkanDevice&>(*m_rhiDevice));
-			return interop.resolveTexture(handle);
-		};
 
-		// Centralizes RHI view creation + native-handle debug naming. levelCount/baseMip/swizzle
-		// default to the common single-mip color-view case.
+		// Centralizes RHI view creation. Debug naming flows through the desc debugName
+		// (backend names both images and views). levelCount/baseMip/swizzle default to
+		// the common single-mip color-view case.
 		const auto createView = [&](rhi::TextureHandle image, rhi::TextureFormat format, rhi::TextureAspect aspect,
 		                            const std::string& name,
 		                            rhi::ComponentMapping swizzle = {}, uint32_t baseMip = 0,
@@ -193,11 +181,8 @@ namespace demo
 			desc.baseMipLevel = baseMip;
 			desc.levelCount = levelCount;
 			desc.components = swizzle;
-			const rhi::TextureViewHandle handle = m_rhiDevice->createTextureView(desc);
-			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
-			    static_cast<const rhi::vulkan::VulkanDevice&>(*m_rhiDevice));
-			dutil.setObjectName(interop.resolveTextureView(handle), name);
-			return handle;
+			desc.debugName = name.c_str();
+			return m_rhiDevice->createTextureView(desc);
 		};
 		const auto makeTextureDesc = [](rhi::TextureFormat format,
 		                                rhi::Extent2D extent,
@@ -239,7 +224,6 @@ namespace demo
 				                1,
 				                imageName.c_str());
 			m_resources.colorImages[c].image = createImage(imageInfo);
-			dutil.setObjectName(nativeImage(m_resources.colorImages[c].image), imageName);
 
 			m_resources.colorViews[c] = createView(m_resources.colorImages[c].image, m_createInfo.color[c],
 			                                       rhi::TextureAspect::color, "SceneColorView" + std::to_string(c));
@@ -254,7 +238,6 @@ namespace demo
 			m_resources.outputTextureImage.image =
 				createImage(makeTextureDesc(kOutputTextureFormat, m_createInfo.size, colorTargetUsage,
 				                            rhi::SampleCount::count1, 1, "OutputTexture"));
-			dutil.setObjectName(nativeImage(m_resources.outputTextureImage.image), "OutputTexture");
 
 			m_resources.outputTextureView = createView(m_resources.outputTextureImage.image, kOutputTextureFormat,
 			                                           rhi::TextureAspect::color, "OutputTextureView");
@@ -265,7 +248,6 @@ namespace demo
 			m_resources.sceneColorHdrImage.image =
 				createImage(makeTextureDesc(kSceneColorHdrFormat, m_createInfo.size, colorTargetUsage,
 				                            rhi::SampleCount::count1, 1, "GPUDrivenSceneColorHDR"));
-			dutil.setObjectName(nativeImage(m_resources.sceneColorHdrImage.image), "GPUDrivenSceneColorHDR");
 
 			m_resources.sceneColorHdrView = createView(m_resources.sceneColorHdrImage.image, kSceneColorHdrFormat,
 			                                           rhi::TextureAspect::color, "GPUDrivenSceneColorHDRView");
@@ -298,7 +280,6 @@ namespace demo
 			{
 				image.image = createImage(makeTextureDesc(kBloomFormat, extent, colorTargetUsage,
 				                                          rhi::SampleCount::count1, 1, imageName));
-				dutil.setObjectName(nativeImage(image.image), imageName);
 
 				view = createView(image.image, kBloomFormat, rhi::TextureAspect::color, viewName);
 			};
@@ -352,7 +333,6 @@ namespace demo
 			m_resources.velocityImage.image =
 				createImage(makeTextureDesc(kVelocityFormat, m_createInfo.size, colorTargetUsage,
 				                            rhi::SampleCount::count1, 1, "GPUDrivenVelocity"));
-			dutil.setObjectName(nativeImage(m_resources.velocityImage.image), "GPUDrivenVelocity");
 
 			m_resources.velocityView = createView(m_resources.velocityImage.image, kVelocityFormat,
 			                                      rhi::TextureAspect::color, "GPUDrivenVelocityView");
@@ -365,7 +345,6 @@ namespace demo
 				m_resources.sceneColorHistoryImages[historyIndex].image =
 					createImage(makeTextureDesc(kSceneColorHdrFormat, m_createInfo.size, colorTargetUsage,
 					                            rhi::SampleCount::count1, 1, imageName.c_str()));
-				dutil.setObjectName(nativeImage(m_resources.sceneColorHistoryImages[historyIndex].image), imageName);
 
 				m_resources.sceneColorHistoryViews[historyIndex] =
 					createView(m_resources.sceneColorHistoryImages[historyIndex].image, kSceneColorHdrFormat,
@@ -382,7 +361,6 @@ namespace demo
 				                            rhi::SampleCount::count1,
 				                            1,
 				                            "BuiltInColorGradingLUT"));
-			dutil.setObjectName(nativeImage(m_resources.colorGradingLutImage.image), "BuiltInColorGradingLUT");
 
 			m_resources.colorGradingLutView = createView(m_resources.colorGradingLutImage.image, kColorGradingLutFormat,
 			                                             rhi::TextureAspect::color, "BuiltInColorGradingLUTView");
@@ -429,7 +407,6 @@ namespace demo
 				                            rhi::SampleCount::count1,
 				                            1,
 				                            "ShadowMap"));
-			dutil.setObjectName(nativeImage(m_resources.shadowMapImage.image), "ShadowMap");
 
 			m_resources.shadowMapView = createView(m_resources.shadowMapImage.image, m_createInfo.depth,
 			                                       rhi::TextureAspect::depth, "ShadowMapView");
@@ -444,7 +421,6 @@ namespace demo
 				                            m_createInfo.sampleCount,
 				                            1,
 				                            "SceneDepth"));
-			dutil.setObjectName(nativeImage(m_resources.depthImage.image), "SceneDepth");
 
 			m_resources.depthView = createView(m_resources.depthImage.image, m_createInfo.depth,
 			                                   rhi::TextureAspect::depth, "SceneDepthView");
@@ -453,7 +429,7 @@ namespace demo
 				std::max(1u, (m_createInfo.size.width + 1u) / 2u),
 				std::max(1u, (m_createInfo.size.height + 1u) / 2u),
 			};
-			m_resources.depthPyramidMipCount = computeMipCount(toVkExtent(m_resources.depthPyramidExtent));
+			m_resources.depthPyramidMipCount = computeMipCount(m_resources.depthPyramidExtent);
 
 			m_resources.depthPyramidImage.image =
 				createImage(makeTextureDesc(rhi::TextureFormat::r32Sfloat,
@@ -463,7 +439,6 @@ namespace demo
 				                            rhi::SampleCount::count1,
 				                            m_resources.depthPyramidMipCount,
 				                            "DepthPyramid"));
-			dutil.setObjectName(nativeImage(m_resources.depthPyramidImage.image), "DepthPyramid");
 
 			m_resources.depthPyramidMipViews.resize(m_resources.depthPyramidMipCount);
 			for (uint32_t mipLevel = 0; mipLevel < m_resources.depthPyramidMipCount; ++mipLevel)

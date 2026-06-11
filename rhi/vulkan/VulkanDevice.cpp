@@ -1198,6 +1198,10 @@ namespace demo::rhi::vulkan
 		};
 		VkImageView view = VK_NULL_HANDLE;
 		VK_CHECK(vkCreateImageView(m_device, &info, nullptr, &view));
+		if (desc.debugName != nullptr)
+		{
+			utils::DebugUtil::getInstance().setObjectName(view, desc.debugName);
+		}
 		return m_resourceTable->registerTextureView(reinterpret_cast<uint64_t>(view), /*owned=*/true);
 	}
 
