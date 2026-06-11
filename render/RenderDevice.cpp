@@ -109,22 +109,51 @@ namespace demo
 				|| debugOptions.showCullDistance;
 		}
 
-		[[nodiscard]] bool hasStencilComponent(VkFormat format)
+		[[nodiscard]] bool hasStencilComponent(rhi::TextureFormat format)
 		{
 			switch (format)
 			{
-			case VK_FORMAT_D16_UNORM_S8_UINT:
-			case VK_FORMAT_D24_UNORM_S8_UINT:
-			case VK_FORMAT_D32_SFLOAT_S8_UINT:
+			case rhi::TextureFormat::d24UnormS8:
+			case rhi::TextureFormat::d32SfloatS8:
 				return true;
 			default:
 				return false;
 			}
 		}
 
-		[[nodiscard]] rhi::TextureAspect sceneDepthTextureAspect(VkFormat format)
+		[[nodiscard]] rhi::TextureFormat findPortableDepthFormat(rhi::Device& device)
 		{
-			return hasStencilComponent(format) ? rhi::TextureAspect::depthStencil : rhi::TextureAspect::depth;
+			constexpr rhi::FormatFeatureFlag depthFeature = rhi::FormatFeatureFlag::depthStencilAttachment;
+			for (rhi::TextureFormat fmt : {
+					 rhi::TextureFormat::d32Sfloat,
+					 rhi::TextureFormat::d16Unorm,
+					 rhi::TextureFormat::d32SfloatS8,
+					 rhi::TextureFormat::d24UnormS8,
+				 })
+			{
+				if (device.isFormatSupported(fmt, depthFeature))
+					return fmt;
+			}
+			ASSERT(false, "No supported depth format found");
+			return rhi::TextureFormat::d32Sfloat;
+		}
+
+		[[nodiscard]] const char* formatDisplayName(rhi::TextureFormat format)
+		{
+			switch (format)
+			{
+			case rhi::TextureFormat::bgra8Unorm:   return "B8G8R8A8_UNORM";
+			case rhi::TextureFormat::rgba8Unorm:   return "R8G8B8A8_UNORM";
+			case rhi::TextureFormat::rgba16Sfloat: return "R16G16B16A16_SFLOAT";
+			case rhi::TextureFormat::rg16Sfloat:   return "R16G16_SFLOAT";
+			case rhi::TextureFormat::r16Sfloat:    return "R16_SFLOAT";
+			case rhi::TextureFormat::d32Sfloat:    return "D32_SFLOAT";
+			case rhi::TextureFormat::d24UnormS8:   return "D24_UNORM_S8_UINT";
+			case rhi::TextureFormat::d32SfloatS8:  return "D32_SFLOAT_S8_UINT";
+			case rhi::TextureFormat::d16Unorm:     return "D16_UNORM";
+			case rhi::TextureFormat::undefined:    return "Undefined";
+			default:                               return "Other";
+			}
 		}
 
 		[[nodiscard]] uint32_t alignUp(uint32_t value, uint32_t alignment)
@@ -488,31 +517,6 @@ namespace demo
 	                                         uint32_t descriptorCount,
 	                                         rhi::ResourceVisibility visibility);
 
-	static VkFormat selectSwapchainImageFormat(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
-	{
-		const VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo2{
-			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR, .surface = surface
-		};
-
-		uint32_t formatCount = 0;
-		VK_CHECK(vkGetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, &surfaceInfo2, &formatCount, nullptr));
-		ASSERT(formatCount > 0, "RenderDevice::init requires at least one surface format");
-
-		std::vector<VkSurfaceFormat2KHR> formats(formatCount, {.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR});
-		VK_CHECK(vkGetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, &surfaceInfo2, &formatCount, formats.data()));
-
-		for (const VkSurfaceFormat2KHR& format2 : formats)
-		{
-			if (format2.surfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM && format2.surfaceFormat.colorSpace ==
-				VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-			{
-				return format2.surfaceFormat.format;
-			}
-		}
-
-		return formats.front().surfaceFormat.format;
-	}
-
 	template <typename T>
 	static T fromNativeHandle(uint64_t handle)
 	{
@@ -540,34 +544,6 @@ namespace demo
 	[[nodiscard]] VkExtent2D toVkExtent(rhi::Extent2D extent)
 	{
 		return {extent.width, extent.height};
-	}
-
-	[[nodiscard]] VkFormat toVkFormat(rhi::TextureFormat format)
-	{
-		switch (format)
-		{
-		case rhi::TextureFormat::rgba8Unorm:
-			return VK_FORMAT_R8G8B8A8_UNORM;
-		case rhi::TextureFormat::bgra8Unorm:
-			return VK_FORMAT_B8G8R8A8_UNORM;
-		case rhi::TextureFormat::rgba16Sfloat:
-			return VK_FORMAT_R16G16B16A16_SFLOAT;
-		case rhi::TextureFormat::rg16Sfloat:
-			return VK_FORMAT_R16G16_SFLOAT;
-		case rhi::TextureFormat::r32Sfloat:
-			return VK_FORMAT_R32_SFLOAT;
-		case rhi::TextureFormat::d16Unorm:
-			return VK_FORMAT_D16_UNORM;
-		case rhi::TextureFormat::d32Sfloat:
-			return VK_FORMAT_D32_SFLOAT;
-		case rhi::TextureFormat::d24UnormS8:
-			return VK_FORMAT_D24_UNORM_S8_UINT;
-		case rhi::TextureFormat::d32SfloatS8:
-			return VK_FORMAT_D32_SFLOAT_S8_UINT;
-		case rhi::TextureFormat::undefined:
-		default:
-			return VK_FORMAT_UNDEFINED;
-		}
 	}
 
 	[[nodiscard]] uint64_t resolveNativeImage(const rhi::Device& device, rhi::TextureHandle handle)
@@ -916,9 +892,6 @@ namespace demo
 		const VkSurfaceKHR nativeSurface = static_cast<rhi::vulkan::VulkanSurface&>(surface).backendHandle();
 		ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");
 		DBG_VK_NAME(nativeSurface);
-		m_swapchainDependent.swapchainImageFormat = toPortableTextureFormat(
-			selectSwapchainImageFormat(nativePhysicalDevice, nativeSurface));
-
 		auto& vkDevForSwapchain = static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device);
 		auto nativeSwapchain = std::make_unique<rhi::vulkan::VulkanSwapchain>();
 		nativeSwapchain->init(static_cast<void*>(nativePhysicalDevice), static_cast<void*>(nativeDevice),
@@ -926,6 +899,8 @@ namespace demo
 		                      static_cast<void*>(vkDevForSwapchain.transientCmdPool()), m_swapchainDependent.vSync);
 		m_swapchainDependent.swapchain = std::move(nativeSwapchain);
 		m_swapchainDependent.swapchain->rebuild();
+		// WR-08: swapchain format comes from the backend after rebuild (authoritative negotiation result).
+		m_swapchainDependent.swapchainImageFormat = m_swapchainDependent.swapchain->getFormat();
 		const rhi::Extent2D swapchainExtent = m_swapchainDependent.swapchain->getExtent();
 		m_swapchainDependent.windowSize = swapchainExtent;
 
@@ -958,7 +933,7 @@ namespace demo
 
 		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
 		{
-			const VkFormat depthFormat = utils::findDepthFormat(nativePhysicalDevice);
+			const rhi::TextureFormat depthFormat = findPortableDepthFormat(*m_device.device);
 			SceneResources::CreateInfo sceneResourcesInit{
 				.size = m_swapchainDependent.windowSize,
 				.color = {
@@ -966,7 +941,7 @@ namespace demo
 					rhi::TextureFormat::rgba8Unorm, // GBuffer1: oct normal.xy + metallic + AO
 					rhi::TextureFormat::rgba16Sfloat, // GBuffer2: emissive.rgb + material flags
 				},
-				.depth = toPortableTextureFormat(depthFormat),
+				.depth = depthFormat,
 				.linearSampler = m_device.sceneLinearSamplerHandle,
 				// Pass the debug bridge so SceneResources can register textures with ImGui
 				// via the sanctioned DebugInteropBridge (RDEV-05 / D-08 / D-09).
@@ -3321,6 +3296,16 @@ namespace demo
 		if (m_swapchainDependent.swapchain->needsRebuild())
 		{
 			m_swapchainDependent.swapchain->rebuild();
+			// WR-08: update authoritative format after rebuild.
+			m_swapchainDependent.swapchainImageFormat = m_swapchainDependent.swapchain->getFormat();
+			// WR-01: destroy cached view handles before clearing — prevents handle pool leak on resize/rebuild.
+			for (const rhi::TextureViewHandle& handle : m_swapchainViewHandles)
+			{
+				if (!handle.isNull())
+				{
+					m_device.device->destroyTextureView(handle);
+				}
+			}
 			// Swapchain images/views are recreated; cached view handles are now stale (IFACE-03 T-01-02).
 			m_swapchainViewHandles.clear();
 			m_swapchainViewNatives.clear();
