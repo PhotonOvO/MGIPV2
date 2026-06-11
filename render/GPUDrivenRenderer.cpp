@@ -52,9 +52,9 @@ namespace demo
 		constexpr uint32_t kGPUDrivenLightPassBloomUpsampleQuarterIndex = kPackedGBufferTargetCount + 15u;
 		constexpr uint32_t kGPUDrivenLightPassBloomOutputIndex = kPackedGBufferTargetCount + 16u;
 		constexpr uint32_t kGPUDrivenLightPassColorGradingLutIndex = kPackedGBufferTargetCount + 17u;
-		constexpr VkFormat kGPUDrivenAOFormat = VK_FORMAT_R16_SFLOAT;
-		constexpr VkFormat kGPUDrivenSSRFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-		constexpr VkFormat kGPUDrivenShadowAtlasFormat = VK_FORMAT_D32_SFLOAT;
+		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
+		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
+		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
 
 		uint64_t estimateImageBytes(VkExtent2D extent, uint32_t bytesPerPixel)
 		{
@@ -67,23 +67,6 @@ namespace demo
 		}
 
 		constexpr const char* kGPUDrivenDefaultIBLEnvironmentPath = "resources/environment/lilienstein_4k.ktx2";
-
-		uint32_t bytesPerPixelForFormat(VkFormat format)
-		{
-			switch (format)
-			{
-			case VK_FORMAT_B8G8R8A8_UNORM:
-			case VK_FORMAT_R8G8B8A8_UNORM:
-			case VK_FORMAT_R8G8B8A8_SRGB:
-				return 4u;
-			case VK_FORMAT_R16G16_SFLOAT:
-				return 4u;
-			case VK_FORMAT_R16G16B16A16_SFLOAT:
-				return 8u;
-			default:
-				return 0u;
-			}
-		}
 
 		uint32_t bytesPerPixelForFormat(rhi::TextureFormat format)
 		{
@@ -99,12 +82,6 @@ namespace demo
 			default:
 				return 0u;
 			}
-		}
-
-		uint64_t estimateTextureBytes(VkExtent2D extent, VkFormat format)
-		{
-			return static_cast<uint64_t>(extent.width) * static_cast<uint64_t>(extent.height)
-				* static_cast<uint64_t>(bytesPerPixelForFormat(format));
 		}
 
 		uint64_t estimateTextureBytes(rhi::Extent2D extent, rhi::TextureFormat format)
@@ -125,25 +102,6 @@ namespace demo
 			auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
 			    static_cast<const rhi::vulkan::VulkanDevice&>(device));
 			return reinterpret_cast<uintptr_t>(interop.resolveTexture(handle));
-		}
-
-		const char* formatDisplayName(VkFormat format)
-		{
-			switch (format)
-			{
-			case VK_FORMAT_B8G8R8A8_UNORM:
-				return "B8G8R8A8_UNORM";
-			case VK_FORMAT_R8G8B8A8_UNORM:
-				return "R8G8B8A8_UNORM";
-			case VK_FORMAT_R8G8B8A8_SRGB:
-				return "R8G8B8A8_SRGB";
-			case VK_FORMAT_R16G16B16A16_SFLOAT:
-				return "R16G16B16A16_SFLOAT";
-			case VK_FORMAT_UNDEFINED:
-				return "Undefined";
-			default:
-				return "Other";
-			}
 		}
 
 		const char* formatDisplayName(rhi::TextureFormat format)
@@ -426,13 +384,12 @@ namespace demo
 
 		constexpr uint32_t kMaxReasonableGPUDrivenObjectCount = 1u << 20;
 
-		[[nodiscard]] rhi::TextureAspect sceneDepthAspect(VkFormat format)
+		[[nodiscard]] rhi::TextureAspect sceneDepthAspect(rhi::TextureFormat format)
 		{
 			switch (format)
 			{
-			case VK_FORMAT_D16_UNORM_S8_UINT:
-			case VK_FORMAT_D24_UNORM_S8_UINT:
-			case VK_FORMAT_D32_SFLOAT_S8_UINT:
+			case rhi::TextureFormat::d24UnormS8:
+			case rhi::TextureFormat::d32SfloatS8:
 				return rhi::TextureAspect::depthStencil;
 			default:
 				return rhi::TextureAspect::depth;
