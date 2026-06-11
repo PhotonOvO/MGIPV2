@@ -1,7 +1,6 @@
 #include "UploadUtils.h"
 
 #include "../common/Common.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 
 #include <algorithm>
 #include <cstring>
@@ -32,31 +31,6 @@ namespace demo::upload
 			return false;
 		}
 
-		[[nodiscard]] VkDevice toVkDevice(NativeUploadContext context)
-		{
-			return reinterpret_cast<VkDevice>(context.device);
-		}
-
-		[[nodiscard]] VmaAllocator toVmaAllocator(NativeUploadContext context)
-		{
-			return reinterpret_cast<VmaAllocator>(context.allocator);
-		}
-
-		[[nodiscard]] NativeUploadBuffer toNativeUploadBuffer(const utils::Buffer& buffer)
-		{
-			return NativeUploadBuffer{
-				.buffer = reinterpret_cast<uintptr_t>(buffer.buffer),
-				.allocation = reinterpret_cast<uintptr_t>(buffer.allocation),
-			};
-		}
-
-		[[nodiscard]] utils::Buffer toUtilsBuffer(NativeUploadBuffer buffer)
-		{
-			return utils::Buffer{
-				.buffer = reinterpret_cast<VkBuffer>(buffer.buffer),
-				.allocation = reinterpret_cast<VmaAllocation>(buffer.allocation),
-			};
-		}
 	} // namespace
 
 	StaticBufferUploadPolicy buildStaticBufferUploadPolicy(const rhi::MemoryProperties& memoryProperties)
@@ -145,58 +119,5 @@ namespace demo::upload
 		}
 
 		return gpuBuffer;
-	}
-
-	NativeUploadBuffer createUploadStagingBuffer(NativeUploadContext context, std::span<const std::byte> data)
-	{
-		const VmaAllocator allocator = toVmaAllocator(context);
-		utils::Buffer stagingBuffer = toUtilsBuffer(createMappedUploadStagingBuffer(context, data.size_bytes()));
-		VmaAllocationInfo allocationInfo{};
-		vmaGetAllocationInfo(allocator, stagingBuffer.allocation, &allocationInfo);
-		if (!data.empty())
-		{
-			std::memcpy(allocationInfo.pMappedData, data.data(), data.size_bytes());
-		}
-		return toNativeUploadBuffer(stagingBuffer);
-	}
-
-	NativeUploadBuffer createMappedUploadStagingBuffer(NativeUploadContext context, uint64_t size)
-	{
-		const VkDevice device = toVkDevice(context);
-		const VmaAllocator allocator = toVmaAllocator(context);
-		utils::Buffer stagingBuffer{};
-		const VkBufferCreateInfo bufferInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<uint64_t>(size),
-			.usage = VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT_KHR,
-		};
-		const VmaAllocationCreateInfo allocInfo{
-			.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-			.usage = VMA_MEMORY_USAGE_CPU_ONLY,
-		};
-		VmaAllocationInfo allocationInfo{};
-		VK_CHECK(
-			vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &stagingBuffer.buffer, &stagingBuffer.allocation, &
-				allocationInfo));
-		(void)device;
-		(void)allocationInfo;
-		return toNativeUploadBuffer(stagingBuffer);
-	}
-
-	NativeUploadBuffer createStaticBuffer(NativeUploadContext context, uint64_t size, uint64_t usage)
-	{
-		const VkDevice device = toVkDevice(context);
-		const VmaAllocator allocator = toVmaAllocator(context);
-		(void)device;
-		utils::Buffer buffer{};
-		const VkBufferCreateInfo bufferInfo{
-			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = static_cast<uint64_t>(size),
-			.usage = static_cast<VkBufferUsageFlags>(static_cast<VkBufferUsageFlags2KHR>(usage) |
-				VK_BUFFER_USAGE_2_TRANSFER_DST_BIT_KHR),
-		};
-		const VmaAllocationCreateInfo allocInfo{.usage = VMA_MEMORY_USAGE_GPU_ONLY};
-		VK_CHECK(vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr));
-		return toNativeUploadBuffer(buffer);
 	}
 } // namespace demo::upload

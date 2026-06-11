@@ -884,10 +884,7 @@ namespace demo
 		}
 
 
-		m_meshPool.init(reinterpret_cast<uintptr_t>(nativeDevice),
-		                reinterpret_cast<uintptr_t>(m_device.allocator),
-		                m_device.device.get(),
-		                m_device.staticBufferUploadPolicy);
+		m_meshPool.init(m_device.device.get(), m_device.staticBufferUploadPolicy);
 
 		const VkSurfaceKHR nativeSurface = static_cast<rhi::vulkan::VulkanSurface&>(surface).backendHandle();
 		ASSERT(nativeSurface != VK_NULL_HANDLE, "RenderDevice::init requires a valid initialized surface");

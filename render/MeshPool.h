@@ -66,10 +66,9 @@ namespace demo
 	{
 	public:
 		MeshPool() = default;
-		~MeshPool() { assert(m_backendDeviceToken == 0 && "Missing deinit()"); }
+		~MeshPool() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
 
-		void init(uintptr_t backendDeviceToken, uintptr_t backendAllocatorToken, rhi::Device* rhiDevice,
-		          upload::StaticBufferUploadPolicy staticUploadPolicy = {});
+		void init(rhi::Device* rhiDevice, upload::StaticBufferUploadPolicy staticUploadPolicy = {});
 		void deinit();
 
 		MeshHandle uploadMesh(const GltfMeshData& meshData, rhi::CommandBuffer& cmd,
@@ -95,10 +94,10 @@ namespace demo
 
 		[[nodiscard]] const MeshRecord* tryGet(MeshHandle handle) const;
 		void reserve(uint64_t additionalVertexBytes, uint64_t additionalIndexBytes, rhi::CommandBuffer& cmd);
-		// Stable RHI handles for the shared arenas (rebinds across arena realloc via
-		// VulkanResourceTable::updateBuffer). Consumed by RenderEncoder-based passes.
-		[[nodiscard]] rhi::BufferHandle getSharedVertexBufferRHIHandle() const { return m_sharedVertexBufferRHI; }
-		[[nodiscard]] rhi::BufferHandle getSharedIndexBufferRHIHandle() const { return m_sharedIndexBufferRHI; }
+		// Owned RHI handles for the shared arenas; recreated on arena realloc, so
+		// RenderEncoder-based passes must fetch them each frame.
+		[[nodiscard]] rhi::BufferHandle getSharedVertexBufferRHIHandle() const { return m_sharedVertexBuffer.buffer; }
+		[[nodiscard]] rhi::BufferHandle getSharedIndexBufferRHIHandle() const { return m_sharedIndexBuffer.buffer; }
 		[[nodiscard]] size_t getDeferredStagingBufferCount() const;
 		[[nodiscard]] uint64_t getDeferredStagingBufferBytes() const;
 
@@ -115,7 +114,7 @@ namespace demo
 	private:
 		struct SharedBufferArena
 		{
-			upload::NativeUploadBuffer buffer{};
+			rhi::BufferHandle buffer{}; // owned
 			uint64_t capacity{0};
 			uint64_t bytesUsed{0};
 		};
@@ -126,16 +125,11 @@ namespace demo
 		                          rhi::CommandBuffer& cmd);
 		void resetSharedBuffers();
 
-		uintptr_t m_backendDeviceToken = 0;
-		uintptr_t m_backendAllocatorToken = 0;
 		rhi::Device* m_rhiDevice = nullptr;
-		rhi::BufferHandle m_sharedVertexBufferRHI{};
-		rhi::BufferHandle m_sharedIndexBufferRHI{};
 		upload::StaticBufferUploadPolicy m_staticUploadPolicy{};
 		HandlePool<MeshHandle, MeshRecord> m_pool;
 		SharedBufferArena m_sharedVertexBuffer{};
 		SharedBufferArena m_sharedIndexBuffer{};
-		std::vector<upload::NativeUploadBuffer> m_stagingBuffers; // Deferred deletion after GPU sync
-		std::vector<rhi::BufferHandle> m_rhiStagingBuffers;
+		std::vector<rhi::BufferHandle> m_rhiStagingBuffers; // Deferred deletion after GPU sync
 	};
 } // namespace demo
