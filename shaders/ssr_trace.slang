@@ -72,44 +72,46 @@ float linearizeDepth(float ndcDepth, float near)
     return near / max(ndcDepth, 1.0e-7);
 }
 
-// Refine a DDA hit via 6 bisection steps.  prevUv/prevLinearZ are the sample
-// just before the first crossing; hitUv/hitLinearZ are the crossing step itself.
-// Returns the refined UV and an updated linear-Z estimate for the hit.
+// Refine a DDA hit via 6 bisection steps between the last miss (prevUv, prevLinearZ)
+// and the first crossing (hitUv, hitLinearZ).  All UVs are in normalised [0,1] half-res
+// space; the function reads from depthTexture (full-res) by scaling by 2.  The refined
+// UV is returned; the colour sample is taken by the caller at the refined coordinate.
 float2 refineHit(float2 prevUv, float prevLinearZ,
-                 float2 hitUv, float hitLinearZ,
-                 float2 halfTexelSize, float near)
+                 float2 hitUv,  float hitLinearZ,
+                 uint2  outputSize, float near)
 {
     float2 lo = prevUv;
     float2 hi = hitUv;
-    float loZ = prevLinearZ;
-    float hiZ = hitLinearZ;
+    float  loZ = prevLinearZ;
+    float  hiZ = hitLinearZ;
+    const float2 halfTexelSize = float2(1.0) / float2(outputSize);
 
     [unroll]
     for(int i = 0; i < 6; ++i)
     {
         float2 mid = (lo + hi) * 0.5;
-        float2 sampleCoordF = mid * (1.0 / halfTexelSize) - 0.5;
-        uint2  sampleCoord  = uint2(clamp(int2(sampleCoordF), int2(0, 0),
-                                          int2(1.0 / halfTexelSize) - int2(1, 1)));
-        float sceneNdc = depthTexture.Load(int3(sampleCoord, 0));
+
+        // Map normalised half-res UV to half-res integer texel, then to full-res.
+        float2 halfCoordF = mid / halfTexelSize - 0.5;
+        uint2  halfCoord  = uint2(clamp(int2(halfCoordF), int2(0, 0), int2(outputSize) - int2(1, 1)));
+        uint2  fullCoordM = halfCoord * 2u + uint2(1u, 1u);
+        float sceneNdc = depthTexture.Load(int3(fullCoordM, 0));
         float sceneZ   = linearizeDepth(max(sceneNdc, 1.0e-7), near);
 
-        // The midpoint ray depth is interpolated linearly in 1/viewZ space
-        // (screen-space linear interpolation is linear in 1/w).
-        float invLoZ = 1.0 / max(loZ, 1.0e-7);
-        float invHiZ = 1.0 / max(hiZ, 1.0e-7);
-        float invMidZ = (invLoZ + invHiZ) * 0.5;
-        float midZ = 1.0 / max(invMidZ, 1.0e-7);
+        // Midpoint ray depth via 1/viewZ interpolation for perspective correctness.
+        float invLoZ  = 1.0 / max(loZ, 1.0e-7);
+        float invHiZ  = 1.0 / max(hiZ, 1.0e-7);
+        float midZ    = 1.0 / max((invLoZ + invHiZ) * 0.5, 1.0e-7);
 
         if(midZ > sceneZ)
         {
-            // Ray is behind the surface at mid -> crossing is in the [lo, mid] half.
-            hi = mid;
+            // Ray is farther than the scene at mid: the crossing lies in [lo, mid].
+            hi  = mid;
             hiZ = midZ;
         }
         else
         {
-            lo = mid;
+            lo  = mid;
             loZ = midZ;
         }
     }
@@ -261,10 +263,10 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float delta = rayLinearZ - sceneLinearZ;
         if(delta > 0.0 && delta < thickness)
         {
-            // Binary-search refinement between the previous and current step.
+            // Binary-search refinement between the previous step (miss) and this step (hit).
             const float2 refinedUv = refineHit(prevUv, prevLinearZ,
                                                sampleUv, rayLinearZ,
-                                               halfTexelSize, near);
+                                               outputSize, near);
             const float2 refinedCoordF = refinedUv / halfTexelSize - 0.5;
             const uint2  refinedCoord  = uint2(clamp(int2(refinedCoordF),
                                                      int2(0, 0),
