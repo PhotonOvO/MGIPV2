@@ -3265,7 +3265,7 @@ namespace demo
 	void RenderDevice::createLightResources()
 	{
 		const uint32_t frameCount = std::max<uint32_t>(1U, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
-		m_lightResources.init(*m_device.device, reinterpret_cast<uintptr_t>(m_device.allocator),
+		m_lightResources.init(*m_device.device,
 		                      LightResources::CreateInfo{
 			                      .maxPointLights = 256,
 			                      .maxSpotLights = 128,

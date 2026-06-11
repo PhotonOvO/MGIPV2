@@ -18,9 +18,9 @@ namespace demo
 		};
 
 		LightResources() = default;
-		~LightResources() { assert(m_backendDeviceToken == 0 && "Missing deinit()"); }
+		~LightResources() { assert(m_rhiDevice == nullptr && "Missing deinit()"); }
 
-		void init(rhi::Device& device, uintptr_t backendAllocatorToken, const CreateInfo& createInfo);
+		void init(rhi::Device& device, const CreateInfo& createInfo);
 		void deinit();
 
 		void updatePointLights(uint32_t frameIndex, const std::vector<shaderio::LightData>& lights);
@@ -47,8 +47,6 @@ namespace demo
 		};
 
 		rhi::Device* m_rhiDevice{nullptr};
-		uintptr_t m_backendDeviceToken{0};
-		uintptr_t m_backendAllocatorToken{0};
 
 		std::vector<FrameResources> m_frames;
 		uint32_t m_maxPointLights{256};

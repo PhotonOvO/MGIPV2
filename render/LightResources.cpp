@@ -1,5 +1,4 @@
 #include "LightResources.h"
-#include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
 #include <cstring>
@@ -63,14 +62,11 @@ namespace demo
 		}
 	} // namespace
 
-	void LightResources::init(rhi::Device& device, uintptr_t backendAllocatorToken, const CreateInfo& createInfo)
+	void LightResources::init(rhi::Device& device, const CreateInfo& createInfo)
 	{
 		deinit();
 
 		m_rhiDevice = &device;
-		m_backendDeviceToken = reinterpret_cast<uintptr_t>(
-		    static_cast<rhi::vulkan::VulkanDevice&>(device).device());
-		m_backendAllocatorToken = backendAllocatorToken;
 		m_maxPointLights = std::max(1u, createInfo.maxPointLights);
 		m_maxSpotLights = std::max(1u, createInfo.maxSpotLights);
 		m_frames.resize(std::max(1u, createInfo.frameCount));
@@ -110,8 +106,6 @@ namespace demo
 
 		m_frames.clear();
 		m_rhiDevice = nullptr;
-		m_backendDeviceToken = 0;
-		m_backendAllocatorToken = 0;
 		m_maxPointLights = 256;
 		m_maxSpotLights = 128;
 	}
