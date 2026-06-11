@@ -2785,7 +2785,7 @@ namespace demo
 				.entries = aoLayoutEntries.data(), .entryCount = static_cast<uint32_t>(aoLayoutEntries.size())
 			});
 
-		const std::array<ArgumentLayoutEntry, 6> ssrLayoutEntries{
+		const std::array<ArgumentLayoutEntry, 7> ssrLayoutEntries{
 			{
 				{0, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
 				{1, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
@@ -2793,6 +2793,9 @@ namespace demo
 				{3, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, 1},
 				{4, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageTexture, 1},
 				{5, rhi::ShaderStage::compute, rhi::BindlessResourceType::uniformBuffer, 1},
+				// Hi-Z depth pyramid mip array for the experimental Hi-Z SSR march
+				// (ssr_trace.slang kUseHiZMarch); mirrors the GPU-culling pyramid binding.
+				{6, rhi::ShaderStage::compute, rhi::BindlessResourceType::sampledImage, shaderio::LDepthPyramidMaxMips},
 			}
 		};
 		m_ssrLayoutHandle = m_renderer.createArgumentLayout(
@@ -3127,7 +3130,7 @@ namespace demo
 			return rhi::ArgumentTableHandle{};
 		}
 
-		const std::array<rhi::ArgumentWrite, 6> writes{
+		std::array<rhi::ArgumentWrite, 6u + static_cast<size_t>(shaderio::LDepthPyramidMaxMips)> writes{
 			{
 				rhi::ArgumentWrite{.binding = 0, .type = rhi::ArgumentType::sampledTexture, .textureView = historyView},
 				rhi::ArgumentWrite{
@@ -3148,6 +3151,27 @@ namespace demo
 				},
 			}
 		};
+		// Hi-Z pyramid mip array (binding 6) for the experimental Hi-Z SSR march.  The
+		// pyramid image is storage-written by the depth-pyramid pass and stays in GENERAL
+		// layout, so declare readWrite intent exactly like the GPU-culling binding.  When
+		// the pyramid is not (yet) valid, pad every slot with the scene depth view so the
+		// temporary table is still complete -- the shader's Hi-Z path is compile-time
+		// disabled by default and never reads the dummy.
+		const rhi::TextureViewHandle* pyramidMipViews = m_hiZDepthPyramid.getMipViewsData();
+		const uint32_t pyramidMipCount = m_hiZDepthPyramid.getMipCount();
+		const bool pyramidUsable = m_hiZDepthPyramid.isValid() && pyramidMipViews != nullptr && pyramidMipCount > 0;
+		for (uint32_t i = 0; i < static_cast<uint32_t>(shaderio::LDepthPyramidMaxMips); ++i)
+		{
+			writes[6u + i] = rhi::ArgumentWrite{
+				.binding = 6,
+				.arrayElement = i,
+				.type = rhi::ArgumentType::sampledTexture,
+				.textureView = pyramidUsable
+					               ? pyramidMipViews[std::min(i, pyramidMipCount - 1u)]
+					               : sceneView.sceneDepthView,
+				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+			};
+		}
 		return m_renderer.createTemporaryArgumentTable(m_ssrLayoutHandle, writes.data(),
 		                                               static_cast<uint32_t>(writes.size()),
 		                                               ArgumentSlot::shaderSpecific, "gpu-driven-ssr-temp");

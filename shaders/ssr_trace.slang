@@ -1,5 +1,9 @@
 #include "shader_io.h"
 
+// Experimental Hi-Z accelerated march (GPU Pro 5, Uludag).  Compile-time switch:
+// the screen-space DDA below remains the shipping path while this is false.
+STATIC_CONST bool kUseHiZMarch = false;
+
 // Interleaved gradient noise (Jimenez 2014).  Produces a spatially-varying value in [0, 1)
 // that tiles well across 8x8 thread groups and changes each frame via the frame offset.
 float ign(uint2 p, uint frame)
@@ -20,6 +24,11 @@ Texture2D<float4> baseColorRoughnessTexture;
 RWTexture2D<float4> ssrRaw;
 [[vk::binding(5, 0)]]
 ConstantBuffer<CameraUniforms> camera;
+// Hi-Z depth pyramid (max-reduced reversed-Z: each cell stores the *closest*
+// surface of its footprint).  Only read by the kUseHiZMarch path; the engine
+// pads unused descriptor slots, so never index beyond the real mip count.
+[[vk::binding(6, 0)]]
+Texture2D<float> depthPyramidTexture[LDepthPyramidMaxMips];
 
 [[vk::push_constant]]
 ConstantBuffer<GPUDrivenSSRPushConstants> ssrPush;
@@ -139,6 +148,106 @@ float2 refineHit(float2 prevUv, float prevLinearZ,
     return (lo + hi) * 0.5;
 }
 
+// Experimental Hi-Z traversal (GPU Pro 5, Uludag).  Marches a ray expressed in
+// (uv, reversed-Z NDC depth) space -- all three components interpolate linearly
+// along a screen-space line.  Per iteration the ray either skips the whole current
+// pyramid cell (when the in-cell segment stays strictly nearer than the cell's
+// closest surface) and coarsens one mip, or refines one mip; a crossing at mip 0
+// is the hit candidate, validated against the linear-depth thickness budget like
+// the DDA path.  The pyramid's max reduction over reversed-Z depths yields the
+// per-cell *closest* surface, which is exactly the conservative bound this
+// traversal needs to skip empty space safely.
+bool hiZMarch(float3 rayStart, float3 rayDelta, float near, float thickness,
+              out float2 hitUv, out float hitT)
+{
+    hitUv = rayStart.xy;
+    hitT = 0.0;
+
+    uint2 pyramidSize;
+    depthPyramidTexture[0].GetDimensions(pyramidSize.x, pyramidSize.y);
+    if(pyramidSize.x == 0u || pyramidSize.y == 0u)
+    {
+        return false;
+    }
+
+    // Coarsest mip the traversal may climb to.  Kept conservative: descriptor
+    // slots beyond the pyramid's real mip count are padded with the last valid
+    // view, and indexing those with a shifted mipSize would misalign cells.
+    const int kMaxMip = 6;
+    const uint kMaxIterations = 64u;
+
+    int mip = 0;
+    float t = 1.0e-4;  // nudge off the origin cell so the first test is not self-occluded
+
+    [loop]
+    for(uint iter = 0u; iter < kMaxIterations; ++iter)
+    {
+        const float3 p = rayStart + rayDelta * t;
+        if(t > 1.0 || any(p.xy < float2(0.0)) || any(p.xy > float2(1.0)))
+        {
+            return false;
+        }
+
+        const int2 mipSize = max(int2(pyramidSize) >> mip, int2(1, 1));
+        const int2 cell = clamp(int2(p.xy * float2(mipSize)), int2(0, 0), mipSize - int2(1, 1));
+        const float cellClosest = depthPyramidTexture[mip].Load(int3(cell, 0));
+
+        // Parametric distance to the cell exit along the screen-space direction.
+        const float2 cellMin = float2(cell) / float2(mipSize);
+        const float2 cellMax = float2(cell + int2(1, 1)) / float2(mipSize);
+        float2 tEdges = float2(1.0e30, 1.0e30);
+        if(abs(rayDelta.x) > 1.0e-8)
+        {
+            tEdges.x = ((rayDelta.x > 0.0 ? cellMax.x : cellMin.x) - rayStart.x) / rayDelta.x;
+        }
+        if(abs(rayDelta.y) > 1.0e-8)
+        {
+            tEdges.y = ((rayDelta.y > 0.0 ? cellMax.y : cellMin.y) - rayStart.y) / rayDelta.y;
+        }
+        const float tExit = min(min(tEdges.x, tEdges.y) + 1.0e-5, 1.0);
+
+        // Reversed-Z: larger NDC depth is closer.  The segment [t, tExit] cannot hit
+        // anything in this cell while it stays strictly nearer than the closest surface.
+        const float zNow = p.z;
+        const float zExit = rayStart.z + rayDelta.z * tExit;
+        if(min(zNow, zExit) > cellClosest)
+        {
+            t = tExit;
+            mip = min(mip + 1, kMaxMip);
+            continue;
+        }
+
+        if(mip > 0)
+        {
+            mip -= 1;  // potential occluder below: refine without advancing
+            continue;
+        }
+
+        // Mip 0 crossing: locate the parametric crossing of the cell's depth plane.
+        float tCross = t;
+        if(abs(rayDelta.z) > 1.0e-8)
+        {
+            tCross = clamp((cellClosest - rayStart.z) / rayDelta.z, t, tExit);
+        }
+        // Thickness validation in linear view space mirrors the DDA hit test.
+        const float rayNdcZ = rayStart.z + rayDelta.z * tCross;
+        const float rayLinearZ = linearizeDepth(max(rayNdcZ, 1.0e-7), near);
+        const float sceneLinearZ = linearizeDepth(max(cellClosest, 1.0e-7), near);
+        const float depthDelta = rayLinearZ - sceneLinearZ;
+        if(depthDelta > -1.0e-4 && depthDelta < thickness)
+        {
+            hitUv = rayStart.xy + rayDelta.xy * tCross;
+            hitT = tCross;
+            return true;
+        }
+
+        // Crossing too thick (ray passes behind a thin surface): step past this
+        // cell at the fine mip and keep marching.
+        t = tExit;
+    }
+    return false;
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -252,6 +361,31 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     // Convert start/end to half-resolution texel coordinates.
     const float2 halfTexelSize = float2(1.0) / float2(outputSize);
+
+    if(kUseHiZMarch)
+    {
+        // Experimental Hi-Z path: march in (uv, NDC depth) space against the depth
+        // pyramid.  Confidence mirrors the DDA path with progress fade by hit t.
+        float3 hizColor = float3(0.0);
+        float  hizConfidence = 0.0;
+        float2 hizUv;
+        float  hizT;
+        if(hiZMarch(float3(uv, depth),
+                    float3(endUv - uv, endRayDepth - depth),
+                    near, thickness, hizUv, hizT))
+        {
+            const float2 hizCoordF = hizUv / halfTexelSize - 0.5;
+            const uint2  hizCoord  = uint2(clamp(int2(hizCoordF),
+                                                 int2(0, 0),
+                                                 int2(outputSize) - int2(1, 1)));
+            hizColor = sceneColorHistory.Load(int3(hizCoord * 2u + uint2(1u, 1u), 0)).rgb;
+            hizConfidence = saturate((1.0 - hizT) * edgeFade(hizUv)
+                                     * roughnessFade * materialFade * confidenceScale);
+        }
+        ssrRaw[dispatchThreadId.xy] = float4(hizColor, hizConfidence);
+        return;
+    }
+
     const float2 startTexel = uv / halfTexelSize;          // half-res texel space
     const float2 endTexel   = endUv / halfTexelSize;
 
