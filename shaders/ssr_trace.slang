@@ -1,5 +1,13 @@
 #include "shader_io.h"
 
+// Interleaved gradient noise (Jimenez 2014).  Produces a spatially-varying value in [0, 1)
+// that tiles well across 8x8 thread groups and changes each frame via the frame offset.
+float ign(uint2 p, uint frame)
+{
+    p += frame * uint2(47u, 17u);
+    return frac(52.9829189 * frac(0.06711056 * float(p.x) + 0.00583715 * float(p.y)));
+}
+
 [[vk::binding(0, 0)]]
 Texture2D<float4> sceneColorHistory;
 [[vk::binding(1, 0)]]
@@ -101,8 +109,13 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float minStep = max(ssrPush.params1.x, 0.01);
     const float maxDistance = max(ssrPush.params1.y, minStep);
     const float confidenceScale = ssrPush.params1.z;
+    const uint frameIndex = uint(ssrPush.params1.w);
     const float roughnessFade = saturate(1.0 - roughness / 0.72);
     const float materialFade = saturate(0.35 + metallic * 0.65);
+
+    // Jitter the ray march start phase to break up banding; TAA accumulates the result
+    // over multiple frames, recovering fine detail from the stochastic offset.
+    const float jitter = ign(dispatchThreadId.xy, frameIndex);
 
     float3 hitColor = float3(0.0);
     float confidence = 0.0;
@@ -110,7 +123,7 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     [loop]
     for(uint stepIndex = 1u; stepIndex <= maxSteps; ++stepIndex)
     {
-        const float t = float(stepIndex) / float(maxSteps);
+        const float t = (float(stepIndex) - 1.0 + (0.5 + jitter)) / float(maxSteps);
         const float rayDistance = max(minStep, t * maxDistance);
         const float3 sampleWorld = worldPos + rayDir * rayDistance;
         float2 sampleUv;

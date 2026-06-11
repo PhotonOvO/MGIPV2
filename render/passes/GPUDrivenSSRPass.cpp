@@ -67,7 +67,7 @@ namespace demo
 			                     halfExtent.height,
 			                     static_cast<float>(std::max(1, context.params->debugOptions.ssrMaxSteps)),
 			                     context.params->debugOptions.ssrThickness),
-			.params1 = glm::vec4(0.05f, 80.0f, 1.0f, 0.0f),
+			.params1 = glm::vec4(0.05f, 80.0f, 1.0f, static_cast<float>(context.frameIndex % 64u)),
 		};
 
 		rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();

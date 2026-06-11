@@ -119,7 +119,7 @@ struct GPUDrivenAOPushConstants
 struct GPUDrivenSSRPushConstants
 {
   vec4 params0;  // outputWidth, outputHeight, maxSteps, thickness
-  vec4 params1;  // stride, maxDistance, confidenceScale, reserved
+  vec4 params1;  // stride, maxDistance, confidenceScale, frameIndex (float cast of frameIndex % 64)
 };
 
 struct PushConstantCompute
