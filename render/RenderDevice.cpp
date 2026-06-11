@@ -1946,7 +1946,7 @@ namespace demo
 		if (!m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage))
 		{
 			m_device.iblEnvironmentStatus = "Unsupported IBL KTX2 format: " + std::string(
-				string_VkFormat(toNativeFormat(ktxTexture.format)));
+				formatDisplayName(ktxTexture.format));
 			LOGW("%s", m_device.iblEnvironmentStatus.c_str());
 			return;
 		}
@@ -1975,7 +1975,7 @@ namespace demo
 		     ktxTexture.width,
 		     ktxTexture.height,
 		     mipLevels,
-		     string_VkFormat(toNativeFormat(ktxTexture.format)),
+		     formatDisplayName(ktxTexture.format),
 		     static_cast<double>(ktxTexture.data.size()) / (1024.0 * 1024.0));
 	}
 
@@ -5271,7 +5271,7 @@ namespace demo
 					},
 				}
 			};
-			const rhi::TextureFormat outputFormat = toPortableTextureFormat(VK_FORMAT_B8G8R8A8_UNORM);
+			const rhi::TextureFormat outputFormat = rhi::TextureFormat::bgra8Unorm;
 			rhi::GraphicsPipelineDesc debugDesc{
 				.shaderStages = debugStages.data(),
 				.shaderStageCount = static_cast<uint32_t>(debugStages.size()),
@@ -6211,7 +6211,7 @@ namespace demo
 				if (!m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage))
 				{
 					LOGW("Skipping unsupported SceneAsset KTX2 texture format %s for texture %u",
-					     string_VkFormat(toNativeFormat(ktxTexture.format)),
+					     formatDisplayName(ktxTexture.format),
 					     texturePlan.textureIndex);
 					continue;
 				}
@@ -6765,7 +6765,7 @@ namespace demo
 			if (loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
 			{
 				LOGW("Skipping unsupported KTX2 format %s for %s, falling back to source image upload",
-				     string_VkFormat(toNativeFormat(ktxTexture.format)),
+				     formatDisplayName(ktxTexture.format),
 				     ktx2Path.string().c_str());
 			}
 			const GltfImageData* rawImageData = hasSupportedKtx2Sidecar
