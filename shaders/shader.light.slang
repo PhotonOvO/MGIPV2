@@ -1044,17 +1044,20 @@ float taaLanczos(float x, float a)
     return 0.0;
 }
 
-// 精确盒裁剪：把 history 沿 (history→filtered) 线段裁到盒面（Filament taa.mat clipToBox ACCURATE）
-// 相比逐通道 clamp，保持色相方向，边缘处不易产生逐帧跳变
+// 盒裁剪：把 history 向盒中心按比例收缩（Playdead clip_aabb）。
+// 旧实现沿 history→filtered 求线段入盒参数 t = saturate(max3(imin))：
+// 当某色度通道 |filtered-history| 趋零（1/(eps+r) 爆炸，r 为小负数时
+// eps+r 还会翻符号）而 history 该通道又在盒外时 t→1，整条历史被替换为
+// 当前帧值——亮度通道被色度通道劫持拖满，单帧镜面尖峰因此穿透
+// clamp 盒与防火花上限（其基准 clampedHistory 已被污染）。
+// 向盒中心收缩有界且不越过盒面，且各通道按同一比例收缩保持色相方向。
 float3 taaClipToBox(float3 boxMin, float3 boxMax, float3 filtered, float3 history)
 {
     const float eps = 0.0001;
-    float3 r    = filtered - history;
-    float3 ir   = 1.0 / (eps + r);
-    float3 rmax = (boxMax - history) * ir;
-    float3 rmin = (boxMin - history) * ir;
-    float3 imin = min(rmax, rmin);
-    return history + r * saturate(taaMax3(imin));
+    float3 center  = 0.5 * (boxMax + boxMin);
+    float3 extents = 0.5 * (boxMax - boxMin) + eps;
+    float  ma = taaMax3(abs((history - center) / extents));
+    return ma > 1.0 ? center + (history - center) / ma : history;
 }
 
 [shader("fragment")]
