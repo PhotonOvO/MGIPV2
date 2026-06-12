@@ -1036,7 +1036,6 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     }
 
     // --- 1. velocity 重投影（天空像素 velocity=(0,0)，historyUv 自动回退到 input.uv）---
-    float depthSample  = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
     float2 velocity    = inTexture[kVelocityIndex].Sample(input.uv).xy;
     float2 historyUv   = input.uv - velocity;
 
@@ -1094,12 +1093,17 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     float3 tonemappedCurrent = taaTonemapRgb(max(currentColor, 0.0));
     float3 tonemappedHistory = taaTonemapRgb(max(clampedHistory, 0.0));
 
-    // --- 9. Lottes 亮度差平方调制 blendWeight（防闪烁）---
-    // tonemapped 为 RGB 空间，使用 R+2G+B 近似亮度（与 Filament 等效）
+    // --- 9. Lottes 抗闪烁：亮度差平方调制“当前帧”权重（对齐 Filament taa.mat:379-385）---
+    // Filament 中 alpha 是当前帧权重，亮度差越大 alpha 越小 → 越倒向稳定的历史。
+    // 此处 blendWeight 是历史权重，等价变换：historyWeight = 1 - currentWeight * diff²。
+    // tonemapped 为 RGB 空间，使用 R+2G+B 近似亮度（diff 经 max 归一化，常数因子可消）
     float lumaC = tonemappedCurrent.x + tonemappedCurrent.y * 2.0 + tonemappedCurrent.z;
     float lumaH = tonemappedHistory.x + tonemappedHistory.y * 2.0 + tonemappedHistory.z;
     float lumaDiff = 1.0 - abs(lumaC - lumaH) / (0.001 + max(lumaC, lumaH));
-    blendWeight *= lumaDiff * lumaDiff;
+    if(!historyOutOfBounds)
+    {
+        blendWeight = 1.0 - (1.0 - blendWeight) * lumaDiff * lumaDiff;
+    }
 
     // --- 10. 混合 + untonemap ---
     float3 mixed    = lerp(tonemappedCurrent, tonemappedHistory, blendWeight);
