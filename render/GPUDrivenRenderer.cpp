@@ -697,8 +697,12 @@ namespace demo
 			{
 				gpuParams.gltfModel = nullptr;
 			}
-			const uint32_t historyReadIndex = (frameIndex + 1u) & 1u;
-			const uint32_t historyWriteIndex = frameIndex & 1u;
+			// ping-pong 奇偶性必须用单调递增的帧计数：frameIndex 是飞行帧环索引，
+			// 交换链至少 3 张镜像时按 0,1,2 循环，&1 会让每第 3 帧读到 2 帧前的
+			// 旧历史并覆盖最新历史，TAA 累积链周期性断裂（表现为正比于 jitter
+			// 幅度的像素闪烁）。
+			const uint32_t historyReadIndex = static_cast<uint32_t>((m_temporalFrameCounter + 1u) & 1u);
+			const uint32_t historyWriteIndex = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
 			m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
 			m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
 			m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
