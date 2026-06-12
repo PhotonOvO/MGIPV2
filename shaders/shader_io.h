@@ -244,6 +244,28 @@ struct DepthPyramidUniforms
   uint32_t _padding2;
 };
 
+// Global SDF composition (DDGI Wave D1-2)
+STATIC_CONST int LGlobalSDFMaxMeshSDFs = 8;
+STATIC_CONST int LGlobalSDFMipCount = 3;
+
+// Shared root constants for the Global SDF clear/mipmap dispatches.
+struct GlobalSDFDispatchPush
+{
+  vec4 params0;  // x = destination resolution (cubic), y = clear value (clear only), z/w reserved
+};
+
+struct GlobalSDFComposeUniforms
+{
+  vec4 volumeBoundsMin;  // xyz = global volume world-space min, w = voxel size
+  vec4 volumeBoundsMax;  // xyz = global volume world-space max, w = max encode distance
+  uint32_t resolution;   // global volume voxel resolution (cubic)
+  uint32_t numMeshSDFs;  // valid entries in meshBounds arrays (<= LGlobalSDFMaxMeshSDFs)
+  uint32_t _padding0;
+  uint32_t _padding1;
+  vec4 meshBoundsMin[LGlobalSDFMaxMeshSDFs];  // xyz = padded mesh AABB min, w unused
+  vec4 meshBoundsMax[LGlobalSDFMaxMeshSDFs];  // xyz = padded mesh AABB max, w = mesh max encode distance
+};
+
 struct LightCullingUniforms
 {
   vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane

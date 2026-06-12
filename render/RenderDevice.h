@@ -199,6 +199,12 @@ namespace demo
 		}
 
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
+
+		// DDGI (Wave D1-2): master config access for the DDGI / Global SDF passes.
+		// enabled defaults to false so default rendering behavior is unchanged.
+		[[nodiscard]] const DDGIConfig& getDDGIConfig() const { return m_ddgiConfig; }
+		[[nodiscard]] DDGIConfig& getDDGIConfig() { return m_ddgiConfig; }
+
 		CSMShadowResources& getCSMShadowResources() { return m_csmShadowResources; }
 		// Per-cascade depth render-target view as an RHI handle (created via the texture-view
 		// registry in init). Replaces the previous per-layer image-view resources.

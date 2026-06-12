@@ -17,6 +17,7 @@
 #include "passes/GPUDrivenClusteredLightCullingPass.h"
 #include "passes/GPUDrivenAOPass.h"
 #include "passes/GPUDrivenSSRPass.h"
+#include "passes/GlobalSDFPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
 #include "passes/GPUDrivenSkyboxPass.h"
@@ -1014,6 +1015,8 @@ namespace demo
 
 		[[nodiscard]] uint32_t getCurrentFrameIndexHint() const { return m_renderer.getCurrentFrameIndexHint(); }
 		[[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }
+		// DDGI (Wave D1-2): config gate for the DDGI / Global SDF passes.
+		[[nodiscard]] const DDGIConfig& getDDGIConfig() const { return m_renderer.getDDGIConfig(); }
 		// ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
 		[[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
 		{
@@ -1242,6 +1245,9 @@ namespace demo
 		std::unique_ptr<GPUDrivenSkyboxPass> m_skyboxPass;
 		std::unique_ptr<GPUDrivenAOPass> m_aoPass;
 		std::unique_ptr<GPUDrivenSSRPass> m_ssrPass;
+		// DDGI (Wave D1-2): Global SDF clear/compose/mipmap compute pass.
+		// Gated on DDGIConfig::enabled (default false).
+		std::unique_ptr<GlobalSDFPass> m_globalSDFPass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;

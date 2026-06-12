@@ -346,6 +346,7 @@ namespace demo
 		m_skyboxPass = std::make_unique<GPUDrivenSkyboxPass>(this);
 		m_aoPass = std::make_unique<GPUDrivenAOPass>(this);
 		m_ssrPass = std::make_unique<GPUDrivenSSRPass>(this);
+		m_globalSDFPass = std::make_unique<GlobalSDFPass>(this);
 		m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
 		m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
 		m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -365,6 +366,9 @@ namespace demo
 		}
 		m_passExecutor.addPass(*m_lightCullingPass);
 		m_passExecutor.addPass(*m_clusteredLightCullingPass);
+		// DDGI (Wave D1-2): Global SDF rebuild runs early in the frame; all its
+		// resources are pass-private and it no-ops while DDGIConfig::enabled is false.
+		m_passExecutor.addPass(*m_globalSDFPass);
 		m_passExecutor.addPass(*m_csmShadowPass);
 		m_passExecutor.addPass(*m_shadowAtlasPass);
 		m_passExecutor.addPass(*m_gbufferPass);
@@ -391,6 +395,7 @@ namespace demo
 		initTransparentVisibilityPatchResources();
 		initPhase7Resources();
 		bindPhase7PassResources();
+		m_globalSDFPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
 		{
@@ -410,6 +415,10 @@ namespace demo
 		}
 		shutdownTransparentVisibilityPatchResources();
 		shutdownPhase7Resources();
+		if (m_globalSDFPass != nullptr)
+		{
+			m_globalSDFPass->shutdownResources();
+		}
 		m_sortedBootstrapFrames.clear();
 		m_passExecutor.clear();
 		m_imguiPass.reset();
@@ -417,6 +426,7 @@ namespace demo
 		m_taaResolvePass.reset();
 		m_velocityPass.reset();
 		m_forwardPass.reset();
+		m_globalSDFPass.reset();
 		m_ssrPass.reset();
 		m_aoPass.reset();
 		m_skyboxPass.reset();

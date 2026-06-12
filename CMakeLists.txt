@@ -304,6 +304,8 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenClusteredLightCullingPass.cpp
   render/passes/GPUDrivenAOPass.h
   render/passes/GPUDrivenAOPass.cpp
+  render/passes/GlobalSDFPass.h
+  render/passes/GlobalSDFPass.cpp
   render/passes/GPUDrivenSSRPass.h
   render/passes/GPUDrivenSSRPass.cpp
   render/passes/GPUDrivenShadowAtlasPass.h
