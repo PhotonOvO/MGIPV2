@@ -1062,20 +1062,10 @@ namespace demo
 		{
 			m_sceneRegistry.updateTransform(objectIdIt->second, transform, boundsSphere);
 		}
-		if (m_enableExperimentalMeshletPath && !m_meshletCullObjectsCpu.empty())
-		{
-			for (uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
-			{
-				if (packMeshHandleKey(m_meshHandleByDrawIndex[drawIndex]) != packMeshHandleKey(handle)
-					|| drawIndex >= m_meshletDataCpu.size() || drawIndex >= m_meshletCullObjectsCpu.size())
-				{
-					continue;
-				}
-				m_meshletCullObjectsCpu[drawIndex].sphereCenterRadius =
-					transformBoundsSphere(meshRecord->transform, m_meshletDataCpu[drawIndex].boundsSphere);
-				markPersistentDrawDirty(drawIndex);
-			}
-		}
+		// [GPU-CULL-SPHERE] meshlet 模式下包围球变换已移至 GPU shader（shader.gpu_culling.slang
+		// transformMeshletLocalBoundsSphere）。sceneRegistry.updateTransform 已更新
+		// GPUSceneObject.worldMatrixRows，culling shader 会在每帧 dispatch 时实时变换。
+		// m_meshletCullObjectsCpu 的 sphereCenterRadius 保留注册时快照（供调试 overlay 使用）。
 		m_sceneUploadPending = true;
 		if (!m_enableExperimentalMeshletPath)
 		{
