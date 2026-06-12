@@ -65,6 +65,21 @@ void kernelDDGIIrradianceProbeUpdate(uint3 groupId : SV_GroupID,
     const int2 currentCoord =
         int2(groupId.xy) * (kProbeSideLength + 2) + int2(localId.xy) + int2(2, 2);
 
+    // Staggered update (Wave D4-2, option (1)): probes outside this frame's
+    // subset pass-through copy their history texel into the current atlas so
+    // both ping-pong atlases stay complete (the border update still runs for
+    // every probe and reads this freshly copied interior). Skipped on the
+    // first frame (history holds garbage — everything must compute), and
+    // updateStride <= 1 degenerates to a full per-frame update. The branch is
+    // workgroup-uniform (probeIndex depends only on groupId), so returning
+    // before the group barriers below is safe.
+    if (updatePush.firstFrame == 0u && updatePush.updateStride > 1u
+        && (uint(probeIndex) % updatePush.updateStride) != updatePush.updateOffset)
+    {
+        irradianceOutput[uint2(currentCoord)] = irradianceHistory[uint2(currentCoord)];
+        return;
+    }
+
     const float3 texelDirection =
         octDecode(normalizedOctCoord(currentCoord, kProbeSideLength));
 

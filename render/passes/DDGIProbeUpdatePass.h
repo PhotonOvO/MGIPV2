@@ -21,6 +21,15 @@
 // (DDGI hard constraint 4 — never the frames-in-flight ring index), so the
 // update kernels reconstruct the exact directions that were traced.
 //
+// Staggered update (Wave D4-2): each frame only probes with
+// probeIndex % updateStride == updateOffset recompute; the others pass-through
+// copy their history texels inside the update kernels (option (1)), keeping
+// both ping-pong atlases complete. The border dispatches still cover every
+// probe (they read the freshly written/copied interiors). The offset rotates
+// in GPUDrivenRenderer alongside the monotonic temporal frame counter; the
+// ray trace dispatch is intentionally NOT reduced in this first version (the
+// radiance scratch rows stay 1:1 with probe indices).
+//
 // All resources go through rhi:: only — no native graphics types (DDGI hard
 // constraint 1). The whole pass is gated on DDGIConfig::enabled (default
 // false), so default rendering is unchanged.

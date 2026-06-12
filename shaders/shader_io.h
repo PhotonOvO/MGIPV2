@@ -296,7 +296,7 @@ struct DDGIRayTraceUniforms
   uint32_t _ddgiRayPadding0;
 };
 
-// DDGI probe irradiance/depth update (Wave D2-3). 80 bytes: fits the 128B
+// DDGI probe irradiance/depth update (Wave D2-3). 96 bytes: fits the 128B
 // root-constant budget, so this goes through setRootConstants (unlike
 // DDGIRayTraceUniforms). Shared by the irradiance and depth update kernels;
 // the border update kernels take no constants at all.
@@ -312,7 +312,15 @@ struct DDGIProbeUpdatePush
   float ddgiGamma;        // irradiance storage gamma (pow(x, 1/gamma) encode)
   float depthSharpness;   // depth weight exponent pow(dot, sharpness)
   float maxDistance;      // clamp for the stored ray-hit distance (depth only)
+  // Staggered update (Wave D4-2): only probes with
+  // probeIndex % updateStride == updateOffset recompute this frame; the rest
+  // pass-through copy their history texels so both ping-pong atlases stay
+  // complete. updateStride <= 1 degenerates to a full per-frame update.
+  uint32_t updateOffset;
+  uint32_t updateStride;
   uint32_t _ddgiProbeUpdatePadding0;
+  uint32_t _ddgiProbeUpdatePadding1;
+  uint32_t _ddgiProbeUpdatePadding2;
 };
 
 // DDGI probe visualization debug pass (Wave D3-2). Procedural UV-sphere

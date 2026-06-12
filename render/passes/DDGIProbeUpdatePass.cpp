@@ -388,6 +388,13 @@ namespace demo
 		push.ddgiGamma = config.ddgiGamma;
 		push.depthSharpness = config.depthSharpness;
 		push.maxDistance = config.maxDistance;
+		// Staggered update (Wave D4-2): the offset is re-clamped against the
+		// current stride so a runtime stride shrink can never strand it out of
+		// range (which would make every probe pass-through). stride <= 1
+		// degenerates to the full per-frame update.
+		const uint32_t updateStride = std::max(config.updateStride, 1u);
+		push.updateOffset = m_renderer->getDDGIUpdateOffset() % updateStride;
+		push.updateStride = updateStride;
 
 		// One workgroup per probe tile for all four dispatches.
 		const rhi::DispatchDesc probeDispatch{probesPerRow, probeRows, 1u};

@@ -1086,6 +1086,12 @@ namespace demo
 		}
 		m_taaHistoryValid = gpuParams.debugOptions.enablePostProcessing && gpuParams.debugOptions.enableTAA
 			&& !getTAAResolvePipelineHandle().isNull();
+		// DDGI (Wave D4-2): advance the staggered-update subset in lock step
+		// with the temporal counter — same end-of-render() timing, so the CPU
+		// push-constant fill and all pass encoding within a frame observe one
+		// consistent value (mirrors the m_temporalFrameCounter contract).
+		m_ddgiUpdateOffset =
+			(m_ddgiUpdateOffset + 1u) % std::max(getDDGIConfig().updateStride, 1u);
 		++m_temporalFrameCounter;
 	}
 
@@ -1784,6 +1790,7 @@ namespace demo
 		m_previousCameraValid = false;
 		m_taaHistoryValid = false;
 		m_temporalFrameCounter = 0;
+		m_ddgiUpdateOffset = 0;
 	}
 
 	void GPUDrivenRenderer::flushPendingSceneUploads()

@@ -1031,6 +1031,11 @@ namespace demo
 		// temporal ping-pong / parity / random seeding must use this counter, never
 		// the frames-in-flight ring index.
 		[[nodiscard]] uint64_t getTemporalFrameCounter() const { return m_temporalFrameCounter; }
+		// DDGI (Wave D4-2): staggered probe-update subset index for this frame
+		// (probes with index % updateStride == this value recompute; the rest
+		// pass-through copy history). Advanced in lock step with
+		// m_temporalFrameCounter — see the increment at the end of render().
+		[[nodiscard]] uint32_t getDDGIUpdateOffset() const { return m_ddgiUpdateOffset; }
 		// ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
 		[[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
 		{
@@ -1408,5 +1413,10 @@ namespace demo
 		bool m_previousCameraValid{false};
 		bool m_taaHistoryValid{false};
 		uint64_t m_temporalFrameCounter{0};
+		// DDGI (Wave D4-2): staggered-update rotation counter,
+		// (offset + 1) % DDGIConfig::updateStride each frame, incremented
+		// right next to ++m_temporalFrameCounter (monotonic timing — never
+		// derived from the frames-in-flight ring index, constraint 4).
+		uint32_t m_ddgiUpdateOffset{0};
 	};
 } // namespace demo

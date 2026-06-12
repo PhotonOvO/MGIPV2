@@ -705,7 +705,7 @@ ping-pong 规则：偶数帧（temporalFrameCounter & 1 == 0）ray trace 读 irr
 
 #### Wave D4-2：分帧轮转 Probe 更新
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -733,12 +733,19 @@ m_ddgiUpdateOffset 在 RenderDevice 每帧 update 前递增：`m_ddgiUpdateOffse
 
 **验收标准**
 
-- [ ] MSVC 构建通过
-- [ ] RenderDoc 可见每帧 IrradianceProbeUpdate dispatch 的实际写入 probe 数 ≈ totalProbes / updateStride（通过 RenderDoc 写入像素计数或 debug_pixel 验证）
-- [ ] 4 帧后所有 probe 至少更新一次（通过连续 4 帧 RenderDoc 捕获对比所有 probe 颜色变化确认）
-- [ ] `check_rhi_boundary.py` 零新增
+- [x] MSVC 构建通过
+- [ ] RenderDoc 可见每帧 IrradianceProbeUpdate dispatch 的实际写入 probe 数 ≈ totalProbes / updateStride（通过 RenderDoc 写入像素计数或 debug_pixel 验证）—— 用户授权跳过，留待视觉验收
+- [ ] 4 帧后所有 probe 至少更新一次（通过连续 4 帧 RenderDoc 捕获对比所有 probe 颜色变化确认）—— 用户授权跳过，留待视觉验收
+- [x] `check_rhi_boundary.py` 零新增（构建内守卫 PASS 0/0/0）
 
 **提交样例**：`feat(render): DDGI staggered per-frame probe update`
+
+**实施备注（2026-06-13）**：
+- **验收口径（用户授权偏离）**：本 Wave 唯一验收门槛为 MSVC 构建通过（slang 编译失败即构建失败）；RenderDoc 验收项跳过保留未勾，待启用后统一实证。
+- **与 ping-pong 的一致性：采用方案①（直通拷贝）**。D4-1 后 atlas 是双缓冲奇偶翻转，若被跳过的 probe 不写"本帧写 atlas"，其 texel 会是陈旧/未写值。处理：update kernel 的 early-out 改为"非本帧子集 → 从 history atlas 原样复制本 texel 到 current atlas 后 return"（irradiance/depth 两个 kernel 同样处理），保证两张 atlas 每帧都完整；开销远低于完整重算（无 ray gather 循环、无 groupshared 往返）。首帧（firstFrame==1，history 为垃圾值）强制全量计算不做直通拷贝；`updateStride<=1` 时条件恒假，退化为每帧全量（可关闭分帧）。early-out 分支按 workgroup 一致（probeIndex 只依赖 groupId），先于 GroupMemoryBarrierWithGroupSync return 安全。Border update 仍全量跑（读取的是本帧已写/已拷贝的 interior，border 一致性不受影响）。
+- **m_ddgiUpdateOffset 位置（偏离计划，已授权）**：计划草案写在 RenderDevice，实际放 `GPUDrivenRenderer`——DDGI 资源、pass、temporalFrameCounter 都在 GPUDrivenRenderer，更内聚。递增 `(offset+1) % max(updateStride,1)` 紧邻 render() 末尾的 `++m_temporalFrameCounter`，同帧内 CPU 填 push constants 与全部 pass 编码看到同一值；重置点（`m_temporalFrameCounter = 0` 处）同步归零。pass 填充时对 stride 再取模兜底（运行时 stride 缩小不会令 offset 越界导致全员直通）。
+- **trace pass dispatch 不缩减（首版权衡）**：GISDFRays 仍每帧对全部 probe 发射光线，本 Wave 只省 update 端计算不省 trace 端。原因：radianceBuffer 行号与 probe index 1:1 对应，缩减 dispatch 需引入子集→probe 行重映射（shader 与 C++ 两侧同改），风险收益比不利于首版；留待后续按性能数据决定（计划 §5 的回退路径"增大 updateStride"不受影响）。
+- **DDGIProbeUpdatePush 80B→96B**：追加 updateOffset/updateStride 两个 uint32 + 3 个 padding 维持 16B 对齐，仍远低于 128B root-constant 预算，继续走 setRootConstants。
 
 ---
 
