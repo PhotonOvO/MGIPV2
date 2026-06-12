@@ -486,6 +486,20 @@ namespace demo
 				+ (cachedDrawCounts.transparentCount > 0u ? 1u : 0u));
 		m_runtimeStats.batchStats.sortPassCount = 0u;
 		const uint32_t frameIndex = getCurrentFrameIndexHint();
+		// history ping-pong 视图必须在 updateGPUDrivenLights（内部经
+		// updateLightingArgumentTable 写入 historyRead/Write 描述符）之前赋值，
+		// 否则描述符滞后一帧——TAA resolve 会采样本帧正在写入的 render target
+		// （读写同图，未定义行为，表现为噪点状闪烁）。
+		// 奇偶性用单调递增的 m_temporalFrameCounter：frameIndex 是飞行帧环索引，
+		// 交换链 ≥3 镜像时按 0,1,2 循环，&1 会让每第 3 帧读到 2 帧前的旧历史。
+		{
+			const uint32_t historyReadIndex = static_cast<uint32_t>((m_temporalFrameCounter + 1u) & 1u);
+			const uint32_t historyWriteIndex = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
+			m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
+			m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
+			m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
+			m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
+		}
 		if (params.cameraUniforms != nullptr)
 		{
 			getCSMShadowResources().updateCascadeMatrices(*params.cameraUniforms,
@@ -697,16 +711,8 @@ namespace demo
 			{
 				gpuParams.gltfModel = nullptr;
 			}
-			// ping-pong 奇偶性必须用单调递增的帧计数：frameIndex 是飞行帧环索引，
-			// 交换链至少 3 张镜像时按 0,1,2 循环，&1 会让每第 3 帧读到 2 帧前的
-			// 旧历史并覆盖最新历史，TAA 累积链周期性断裂（表现为正比于 jitter
-			// 幅度的像素闪烁）。
-			const uint32_t historyReadIndex = static_cast<uint32_t>((m_temporalFrameCounter + 1u) & 1u);
-			const uint32_t historyWriteIndex = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
-			m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
-			m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
-			m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
-			m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
+			// history ping-pong 视图已在 render() 开头（updateGPUDrivenLights 之前）赋值，
+			// 此处只做 pass 图绑定。
 			updatePhase7Descriptors(frameIndex);
 			m_passExecutor.bindTexture({
 				.handle = kPassVelocityHandle,
