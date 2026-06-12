@@ -17,6 +17,7 @@
 
 #include "shader_io.h"
 #include "sdf_common.slang"
+#include "ddgi_common.slang"
 
 [[vk::binding(0, 0)]]
 RWTexture2D<float4> radianceOutput;
@@ -27,18 +28,10 @@ Sampler3D<float> globalSDFTexture;
 [[vk::binding(2, 0)]]
 ConstantBuffer<DDGIRayTraceUniforms> rayTraceUniforms;
 
+// sphericalFibonacci moved to ddgi_common.slang (Wave D2-3): the probe update
+// kernels reconstruct the exact same per-ray directions from the shared
+// implementation + the same per-frame rotation columns.
 STATIC_CONST float kDDGIRaysPi = 3.14159265359;
-
-// Spherical Fibonacci direction i of n (LuxGI DDGICommon.glsl:42-52).
-float3 sphericalFibonacci(float i, float n)
-{
-    const float phiGolden = sqrt(5.0) * 0.5 + 0.5;
-    const float fraction = (i * (phiGolden - 1.0)) - floor(i * (phiGolden - 1.0));
-    const float phi = 2.0 * kDDGIRaysPi * fraction;
-    const float cosTheta = 1.0 - (2.0 * i + 1.0) * (1.0 / n);
-    const float sinTheta = sqrt(clamp(1.0 - cosTheta * cosTheta, 0.0, 1.0));
-    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
 
 GlobalSDFTraceConfig makeTraceConfig()
 {

@@ -19,6 +19,7 @@
 #include "passes/GPUDrivenAOPass.h"
 #include "passes/GPUDrivenSSRPass.h"
 #include "passes/DDGIRayTracePass.h"
+#include "passes/DDGIProbeUpdatePass.h"
 #include "passes/GlobalSDFPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
@@ -1266,6 +1267,9 @@ namespace demo
 		// DDGI (Wave D2-2): GISDFRays SDF ray trace compute pass. Resources are
 		// only created when DDGIConfig::enabled is true (default false).
 		std::unique_ptr<DDGIRayTracePass> m_ddgiRayTracePass;
+		// DDGI (Wave D2-3): probe irradiance/depth update + border update.
+		// Resources are only created when DDGIConfig::enabled is true.
+		std::unique_ptr<DDGIProbeUpdatePass> m_ddgiProbeUpdatePass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;

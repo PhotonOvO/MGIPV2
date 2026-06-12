@@ -484,7 +484,7 @@ DDGIRayTracePassData 包含：probePositionBufferGpuPtr（GpuPtr）、globalSDFV
 
 #### Wave D2-3：Probe Irradiance/Depth 更新 + Border 更新
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -521,13 +521,25 @@ DDGIProbeUpdatePassData 包含：radianceBufferHandle（TextureHandle）、irrad
 
 **验收标准**
 
-- [ ] MSVC 构建通过
+- [x] MSVC 构建通过（含 compile_slang 构建期 shader 编译）
 - [ ] RenderDoc 帧捕获可见四次 probe update dispatch（IrradianceProbeUpdate、DepthProbeUpdate、IrradianceBorderUpdate、DepthBorderUpdate）
 - [ ] 第 2 帧起 irradianceAtlas 显示 hysteresis 混合后的颜色变化趋势（非突变）
 - [ ] border texel 颜色与相邻 probe 对称（RenderDoc 纹理检视器可验证）
-- [ ] `check_rhi_boundary.py` 零新增
+- [x] `check_rhi_boundary.py` 零新增（构建内守卫 PASS）
 
 **提交样例**：`feat(render): add DDGI probe irradiance/depth update + border passes`
+
+**实施备注**：
+- **验收口径（用户授权偏离）**：本 Wave 唯一验收门槛为 MSVC 构建通过（slang 编译失败即构建失败）；RenderDoc 类验收项跳过保留未勾（enabled 默认 false），待启用后统一实证。
+- **Shader 平铺路径（用户授权偏离）**：CMake 只 glob `shaders/*.slang` 不递归子目录，四个 shader 平铺为 `shaders/ddgi_irradiance_probe_update.slang`、`shaders/ddgi_depth_probe_update.slang`、`shaders/ddgi_irradiance_border_update.slang`、`shaders/ddgi_depth_border_update.slang`（替代计划中的 `shaders/ddgi/` 子目录路径）。
+- **公共模块 ddgi_common.slang（用户授权偏离）**：新增 include-only 模块（CMake EXCLUDE，仿 sdf_common.slang）承载八面体 octEncode/octDecode、normalizedOctCoord、getProbeId、probeAtlasInteriorOrigin（probe 索引↔atlas texel 换算，与 DDGIProbeVolume::atlasExtent 布局契约同步注释）以及 sphericalFibonacci——后者从 ddgi_gi_sdf_rays.slang 原样迁出，rays shader 改为 include，确保 trace 与 update 两侧 ray 方向重建逐位一致。
+- **Ray 方向重建而非存储**：D2-2 radianceBuffer 只存 rgb=radiance/a=hitDistance（未存方向，LuxGI 的 directionDepth 纹理省略）；update kernel 经共享 sphericalFibonacci + 同帧随机旋转列重建方向。旋转矩阵经新增 `DDGIRayTracePass::makeRayRotation(temporalFrameCounter)` 静态方法共享（两个 pass 同帧同种子，严禁飞行帧环索引——约束 4）。
+- **参数走 push constants**：`shaderio::DDGIProbeUpdatePush`（80B < 128B push 预算）经 setRootConstants 传入两个 update pipeline（仿 GlobalSDFDispatchPush），未走 uniform buffer——argument table 全静态、无 per-frame 资源；border pipeline 零常量（dispatch 形状即覆盖全部 probe）。
+- **首帧判断方式**：`firstFrame = (temporalFrameCounter == 0) || 首次记录 dispatch（atlas Undefined→General 惰性转换 latch）`——latch 扩展覆盖运行时中途启用 DDGI 的场景（此时 counter > 0 但 atlas 无有效历史，必须直写跳过 hysteresis）。
+- **读写 atlas 接线现状**：本 Wave 固定"读 history atlas、写 current atlas"（DDGIProbeVolume 双缓冲句柄），swapAtlases 留待 D4-1 启用；启用 ping-pong 时必须重建/重写本 pass 的静态 argument table（头文件已注明）。
+- **Depth ray distance 约定**：D2-2 miss 写 maxTraceDistance（体积对角线，非 LuxGI 的 -1 哨兵），故 depth update 只需 `min(maxDistance, hitDist - 0.01)` 钳制，无 -1 重映射分支。
+- **Barrier 链**：irradiance/depth update 两次 dispatch 相互独立（不同 atlas、只读 radiance）连续编码；之后 compute→compute textureWrites barrier 隔开 border 复制（border 读 interior 写 border ring，dispatch 内无自冒险）；尾部 compute→compute|fragment barrier 供 D3-1 SampleProbe / 调试可视化消费。radiance 写→读由 D2-2 尾部 barrier 覆盖。
+- **接入与门控**：pass 注册于 DDGIRayTracePass 之后、CSM shadow 之前；execute 以 `DDGIConfig::enabled` 门控（默认 false，默认帧零改变）；initResources 仅在 enabled 时调用且校验 config texel 尺寸（8/16）与 shader numthreads 编译期值一致，不符则跳过并告警。
 
 ---
 

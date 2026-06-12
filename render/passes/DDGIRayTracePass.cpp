@@ -61,6 +61,11 @@ namespace demo
 	{
 	}
 
+	glm::mat3 DDGIRayTracePass::makeRayRotation(uint64_t temporalFrameCounter)
+	{
+		return makeRandomRotation(temporalFrameCounter);
+	}
+
 	void DDGIRayTracePass::initResources(rhi::Device& device, uint32_t frameCount)
 	{
 		shutdownResources();
@@ -256,8 +261,9 @@ namespace demo
 		const float maxTraceDistance = glm::length(extent);
 
 		// Constraint 4: seed from the monotonic temporal counter, never the
-		// frames-in-flight ring index (context.frameIndex).
-		const glm::mat3 rotation = makeRandomRotation(m_renderer->getTemporalFrameCounter());
+		// frames-in-flight ring index (context.frameIndex). Shared with the
+		// probe update pass through makeRayRotation (same-frame rotation).
+		const glm::mat3 rotation = makeRayRotation(m_renderer->getTemporalFrameCounter());
 
 		// Sun light from the frame's directional-light settings; defaults match
 		// DirectionalLightSettings if params are unavailable.

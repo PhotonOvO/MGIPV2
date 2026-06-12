@@ -288,6 +288,25 @@ struct DDGIRayTraceUniforms
   uint32_t _ddgiRayPadding1;
 };
 
+// DDGI probe irradiance/depth update (Wave D2-3). 80 bytes: fits the 128B
+// root-constant budget, so this goes through setRootConstants (unlike
+// DDGIRayTraceUniforms). Shared by the irradiance and depth update kernels;
+// the border update kernels take no constants at all.
+struct DDGIProbeUpdatePush
+{
+  vec4 rotationCol0;  // xyz = per-frame ray rotation column 0 — MUST equal the
+  vec4 rotationCol1;  //       same-frame DDGIRayTraceUniforms rotation (ray
+  vec4 rotationCol2;  //       directions are reconstructed, not stored)
+  uint32_t raysPerProbe;
+  uint32_t probesPerRow;  // atlas tiles per row = gridDims.x * gridDims.y
+  uint32_t firstFrame;    // 1 = write results directly (skip history blend)
+  float hysteresis;       // temporal blend: mix(new, history, hysteresis)
+  float ddgiGamma;        // irradiance storage gamma (pow(x, 1/gamma) encode)
+  float depthSharpness;   // depth weight exponent pow(dot, sharpness)
+  float maxDistance;      // clamp for the stored ray-hit distance (depth only)
+  uint32_t _ddgiProbeUpdatePadding0;
+};
+
 struct LightCullingUniforms
 {
   vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane

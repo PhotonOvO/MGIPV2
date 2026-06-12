@@ -39,6 +39,13 @@ namespace demo
 
 		explicit DDGIRayTracePass(GPUDrivenRenderer* renderer);
 
+		// Per-frame uniform random ray rotation seeded by the monotonically
+		// increasing temporal frame counter (DDGI hard constraint 4). Shared
+		// with DDGIProbeUpdatePass (D2-3): the update kernels reconstruct the
+		// traced ray directions, so both passes MUST use the exact same
+		// rotation for a given frame.
+		[[nodiscard]] static glm::mat3 makeRayRotation(uint64_t temporalFrameCounter);
+
 		// Requires GlobalSDFPass::initResources and DDGIProbeVolume::init to
 		// have run; only called when DDGIConfig::enabled is true.
 		void initResources(rhi::Device& device, uint32_t frameCount);

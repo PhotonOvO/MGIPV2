@@ -348,6 +348,7 @@ namespace demo
 		m_ssrPass = std::make_unique<GPUDrivenSSRPass>(this);
 		m_globalSDFPass = std::make_unique<GlobalSDFPass>(this);
 		m_ddgiRayTracePass = std::make_unique<DDGIRayTracePass>(this);
+		m_ddgiProbeUpdatePass = std::make_unique<DDGIProbeUpdatePass>(this);
 		m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
 		m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
 		m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -373,6 +374,10 @@ namespace demo
 		// DDGI (Wave D2-2): probe SDF ray trace consumes the freshly rebuilt
 		// Global SDF (write->read covered by GlobalSDFPass's trailing barrier).
 		m_passExecutor.addPass(*m_ddgiRayTracePass);
+		// DDGI (Wave D2-3): probe irradiance/depth + border updates consume the
+		// radiance scratch (write->read covered by the ray trace pass's
+		// trailing compute barrier).
+		m_passExecutor.addPass(*m_ddgiProbeUpdatePass);
 		m_passExecutor.addPass(*m_csmShadowPass);
 		m_passExecutor.addPass(*m_shadowAtlasPass);
 		m_passExecutor.addPass(*m_gbufferPass);
@@ -416,6 +421,10 @@ namespace demo
 			// DDGI (Wave D2-2): the ray trace pass needs both the probe volume
 			// and the Global SDF volume, so it initializes after them.
 			m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+			// DDGI (Wave D2-3): the probe update pass only needs the probe
+			// volume (atlases + radiance scratch); tables are static, push
+			// constants carry the per-frame values.
+			m_ddgiProbeUpdatePass->initResources(getRHIDevice());
 		}
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
@@ -436,8 +445,12 @@ namespace demo
 		}
 		shutdownTransparentVisibilityPatchResources();
 		shutdownPhase7Resources();
-		// DDGI (Wave D2-2): views over the probe volume / global SDF must go
-		// before their owners are torn down below.
+		// DDGI (Wave D2-2/D2-3): views over the probe volume / global SDF must
+		// go before their owners are torn down below.
+		if (m_ddgiProbeUpdatePass != nullptr)
+		{
+			m_ddgiProbeUpdatePass->shutdownResources();
+		}
 		if (m_ddgiRayTracePass != nullptr)
 		{
 			m_ddgiRayTracePass->shutdownResources();
@@ -455,6 +468,7 @@ namespace demo
 		m_taaResolvePass.reset();
 		m_velocityPass.reset();
 		m_forwardPass.reset();
+		m_ddgiProbeUpdatePass.reset();
 		m_ddgiRayTracePass.reset();
 		m_globalSDFPass.reset();
 		m_ssrPass.reset();
