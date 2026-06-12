@@ -1111,8 +1111,13 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
         [unroll]
         for(int i = 0; i < 9; ++i)
         {
-            const float w = taaLanczos(length(kOffsets[i] + jitterPx), 1.0);
-            acc  += rgbS[i] * w;
+            // Karis 亮度加权（UE4 tonemapped filtering）：核权重除以 (1+luma)，
+            // 单像素 HDR 高光尖峰（specular firefly）在进入 clamp 盒/混合前被压制，
+            // 而面积型高光（多像素一致亮）权重同比缩放、归一化后不受影响。
+            const float3 c = rgbS[i];
+            const float luma = dot(c, float3(0.299, 0.587, 0.114));
+            const float w = taaLanczos(length(kOffsets[i] + jitterPx), 1.0) / (1.0 + luma);
+            acc  += c * w;
             wsum += w;
         }
         filteredRgb = wsum > 1.0e-5 ? max(acc / wsum, 0.0) : currentColor;

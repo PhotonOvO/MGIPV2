@@ -125,6 +125,26 @@ float2 encodeNormalOct(float3 n)
     return n.xy * 0.5 + 0.5;
 }
 
+// Geometric Specular AA（Kaplanyan 2016 / Tokuyoshi-Kaplanyan 2019，
+// 对齐 Filament surface_shading_lit.fs normalFiltering 及其默认参数）。
+// 用世界法线的屏幕空间导数估计像素内法线方差并折算进 perceptual roughness：
+// 法线变化越剧烈高光越宽越淡，抑制法线贴图细节在 TAA jitter 下的
+// 单像素高光闪烁（specular aliasing / firefly）。
+// GBuffer 存的是 perceptual roughness（光照端 NDF_GGX 用 a=r²），
+// 故按 Filament 在 α=r² 域做加法后开两次方根返回 perceptual 域。
+float filterRoughness(float perceptualRoughness, float3 worldNormal)
+{
+    const float kSpecularAAVariance  = 0.15;  // Filament specularAntiAliasingVariance 默认值
+    const float kSpecularAAThreshold = 0.2;   // Filament specularAntiAliasingThreshold 默认值
+    const float3 du = ddx(worldNormal);
+    const float3 dv = ddy(worldNormal);
+    const float variance = kSpecularAAVariance * (dot(du, du) + dot(dv, dv));
+    const float roughness = perceptualRoughness * perceptualRoughness;
+    const float kernelRoughness = min(2.0 * variance, kSpecularAAThreshold);
+    const float squareRoughness = saturate(roughness * roughness + kernelRoughness);
+    return sqrt(sqrt(squareRoughness));
+}
+
 [shader("fragment")]
 void fragmentMain(
     VertexOutput input,
@@ -217,8 +237,8 @@ void fragmentMain(
         emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
     }
 
-    // Pack outputs
-    outGBuffer0 = float4(color.rgb, roughness);
+    // Pack outputs（roughness 经 Geometric Specular AA 调制）
+    outGBuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
     outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
     outGBuffer2 = float4(emissive, 0.0);
 }
@@ -298,7 +318,7 @@ void fragmentMdiMain(
         emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
     }
 
-    outGBuffer0 = float4(color.rgb, roughness);
+    outGBuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
     outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
     outGBuffer2 = float4(emissive, 0.0);
 }

@@ -69,7 +69,7 @@ namespace demo
 		bool enableGPUFrustumCulling{true};
 		bool enableGPUOcclusionCulling{true};
 		bool enableGPUMeshletOcclusionCulling{false};
-		bool enableGPUMeshletConeCulling{true};
+		bool enableGPUMeshletConeCulling{false};
 		bool showCullDistance{false};
 		float cullDistance{25.0f};
 		float pointLightMaxRadius{4.0f};
@@ -90,7 +90,7 @@ namespace demo
 		float taaBlendWeight{0.90f};
 		bool taaFilterInput{true};      // Lanczos 输入滤波（去当前帧亚像素抖动）
 		bool taaVarianceClip{true};     // Salvi 方差盒与 AABB 求交
-		bool taaPreventFlicker{false};  // Lottes 亮度差抗闪烁（Filament 默认关闭）
+		bool taaPreventFlicker{true};   // Lottes 亮度差抗闪烁（高光 firefly 残余闪烁需要，可在 ImGui 关闭对比）
 		bool taaCatmullRom{true};       // Catmull-Rom 5-tap 历史采样
 		float renderScale{1.0f};
 		float exposureTargetLuminance{0.18f};
