@@ -1,6 +1,9 @@
 // LightPass shader: deferred PBR lighting with coarse point-light culling and cascaded shadow maps.
 
 #include "shader_io.h"
+// DDGI SampleProbe (Wave D3-1): include-only module; pulls in ddgi_common.slang,
+// whose signNotZero overloads replace the local copy this file used to define.
+#include "ddgi_sample_probe.slang"
 
 [[vk::binding(0, 0)]]
 Sampler2D inTexture[];
@@ -65,14 +68,14 @@ STATIC_CONST int kBloomUpsampleEighthIndex         = 17;
 STATIC_CONST int kBloomUpsampleQuarterIndex        = 18;
 STATIC_CONST int kBloomOutputIndex                 = 19;
 STATIC_CONST int kColorGradingLutIndex             = 20;
+STATIC_CONST int kDDGIIrradianceAtlasIndex         = 21;
+STATIC_CONST int kDDGIDepthAtlasIndex              = 22;
 STATIC_CONST float PI                   = 3.14159265359;
 STATIC_CONST float TWO_PI               = 6.28318530718;
 STATIC_CONST float kEquirectSpecularFallbackWeight = 1.0;
 
-float2 signNotZero(float2 v)
-{
-    return float2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
-}
+// signNotZero(float2) now comes from ddgi_common.slang (identical semantics);
+// the local definition was removed to avoid an overload redefinition.
 
 float3 decodeNormalOct(float2 encoded)
 {
@@ -486,17 +489,56 @@ float3 computeClusterHeatmap(float2 uv, float viewDepth, float3 baseColor)
     return lerp(baseColor * 0.25, heat, 0.75);
 }
 
+// DDGI (Wave D3-1) runtime gate: both the master enable flag and a non-zero
+// blend weight are required, so the default configuration (enabled=0) keeps
+// the original ambient/IBL math bit-for-bit unchanged.
+bool ddgiSamplingEnabled()
+{
+    return lighting.light.ddgiGridDimsAndEnabled.w > 0.5 && lighting.light.ddgiParams0.x > 0.0;
+}
+
+// Samples the DDGI probe volume for world-space irradiance at the shaded
+// point. Wo follows LuxGI SampleProbe.comp: the surface-to-camera direction.
+vec3 evaluateDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
+{
+    DDGISampleVolume volume;
+    volume.gridOrigin = lighting.light.ddgiOriginAndSpacing.xyz;
+    volume.probeSpacing = lighting.light.ddgiOriginAndSpacing.w;
+    volume.probeCounts = int3(lighting.light.ddgiGridDimsAndEnabled.xyz);
+    volume.normalBias = lighting.light.ddgiParams0.z;
+    volume.ddgiGamma = lighting.light.ddgiParams0.y;
+    volume.irradianceSideLength = int(lighting.light.ddgiParams0.w);
+    volume.irradianceAtlasSize = int2(lighting.light.ddgiParams1.yz);
+    volume.depthSideLength = int(lighting.light.ddgiParams1.x);
+    volume.depthAtlasSize = int2(int(lighting.light.ddgiParams1.w), int(lighting.light.ddgiParams2.x));
+    volume.probePositionAddress = lighting.light.ddgiProbePositionAddress;
+    return sampleDDGIIrradiance(volume, worldPos, N, Wo,
+                                inTexture[kDDGIIrradianceAtlasIndex],
+                                inTexture[kDDGIDepthAtlasIndex]);
+}
+
 // evaluateEnvironmentIBL now accepts an SSR sample (float4: rgb=radiance, a=confidence).
 // Where confidence > 0, the SSR radiance replaces the prefiltered IBL specular radiance
 // while keeping the same BRDF weight -- preventing the double-count that occurred when SSR
 // was added on top of the full IBL specular term.  Confidence == 0 falls back to IBL
 // seamlessly, providing automatic hole-filling with energy-conserving blending.
-vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao, float4 ssr)
+// Wave D3-1: also takes the shaded world position so the indirect diffuse term
+// can blend toward DDGI probe irradiance when the DDGI gate is on.
+vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao, float4 ssr)
 {
     const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
     if(!useIBL)
     {
-        return lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+        const vec3 ambientTerm = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+        if(ddgiSamplingEnabled())
+        {
+            // Energy convention mirrors the fixed-ambient term: irradiance is
+            // turned into outgoing diffuse radiance via albedo / PI, then
+            // attenuated by the same ao factor the ambient term uses.
+            const vec3 ddgiDiffuse = evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI * ao;
+            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
+        }
+        return ambientTerm;
     }
 
     const float intensity = lighting.light.iblParams.y;
@@ -531,6 +573,16 @@ vec3 evaluateEnvironmentIBL(vec3 N, vec3 V, vec3 baseColor, float metallic, floa
         // Same SSR blend for the equirect path.
         const vec3 ssrRadiance = lerp(prefiltered, ssr.rgb, saturate(ssr.a));
         specular = ssrRadiance * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
+    }
+
+    // DDGI indirect diffuse (Wave D3-1): swap the irradiance source at the
+    // exact BRDF weight the IBL diffuse term uses (kD * irradiance * baseColor
+    // / PI), blended by ddgiWeight. The specular term is untouched, and ao /
+    // intensity still apply at the final combine below.
+    if(ddgiSamplingEnabled())
+    {
+        const vec3 ddgiDiffuse = kD * evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI;
+        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
     }
 
     const uint debugMode = uint(lighting.light.iblDebugInfo.x);
@@ -705,7 +757,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
     // Evaluate SSR first so its confidence can drive IBL specular blending, avoiding the
     // double-count that results from adding SSR on top of full IBL specular.
     float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
-    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao, ssr);
+    vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 
@@ -746,7 +798,7 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
 
     // Evaluate SSR first so its confidence can drive IBL specular blending.
     float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
-    vec3 ambient = evaluateEnvironmentIBL(N, V, baseColor, metallic, roughness, ao, ssr);
+    vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
 

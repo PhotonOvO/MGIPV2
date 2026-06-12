@@ -551,7 +551,7 @@ DDGIProbeUpdatePassData 包含：radianceBufferHandle（TextureHandle）、irrad
 
 #### Wave D3-1：SampleProbe 接入 Lighting Pass
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -586,10 +586,17 @@ lighting pass 改动：增加 `if (ddgiEnabled) { irradiance = sampleProbe(...) 
 
 **验收标准**
 
-- [ ] MSVC 构建通过
-- [ ] RenderDoc debug_pixel 采样点 DDGI irradiance 项非零（可见有效间接光贡献）
-- [ ] 关闭 DDGI（ddgiWeight=0）后画面退回 IBL + ambient，与 DDGI 接入前渲染结果一致
-- [ ] `check_rhi_boundary.py` 零新增
+- [x] MSVC 构建通过
+- [ ] RenderDoc debug_pixel 采样点 DDGI irradiance 项非零（可见有效间接光贡献）—— 用户授权跳过，留待视觉验收
+- [ ] 关闭 DDGI（ddgiWeight=0）后画面退回 IBL + ambient，与 DDGI 接入前渲染结果一致 —— 用户授权跳过；运行时门控保证 enabled=false / weight=0 时数值路径与现状逐位一致
+- [x] `check_rhi_boundary.py` 零新增（构建内置 RHI boundary guard 通过）
+
+**实施备注（2026-06-13）**
+
+- **SampleProbe 改为 lighting 内联 include 模块**（用户授权偏离）：LuxGI 的 SampleProbe 是独立 fullscreen compute pass 写间接光纹理；MGIF 简化为 `shaders/ddgi_sample_probe.slang` include-only 函数库（CMake EXCLUDE，同 ddgi_common.slang 模式），由 `shader.light.slang` 直接内联调用 `sampleDDGIIrradiance()`，省去一次全屏 pass 与中间纹理带宽。权重链完整对照 LuxGI DDGICommon.glsl:163-233 翻译（8 邻居三线性 × square((dot+1)*0.5)+0.2 背面 × 切比雪夫三次方 × crush<0.2 三次压缩 × vBias=(N+3·Wo)·normalBias × pow(x,γ/2) 后平方 × 2π/sumWeight）；probe 位置经 probePositionBuffer BDA 读取（与 ray trace pass 同一数据源，数值与 LuxGI 解析式 origin+coord·spacing 等价）。include 链冲突处理：`shader.light.slang` 本地的 `signNotZero(float2)` 与 ddgi_common.slang 的同签名重载冲突，删除本地副本改用 ddgi_common 版本（实现逐位相同）。
+- **绑定降级方案**：lighting 输入 bindless 数组扩到 23 项（+kDDGIIrradianceAtlasIndex=21 / kDDGIDepthAtlasIndex=22）。DDGI 关闭时 atlas 视图为 null → 绑定 gbuffer0 占位视图（沿用 `viewOr` fallback 先例），shader 侧 `ddgiGridDimsAndEnabled.w==0` 门控保证永不实质采样，enabled=false 不崩且渲染逐位不变。DDGI 开启时 atlas 处于 General 布局（probe update 以 storage image 写入且不做布局迁移），故两个 SRV 描述符用 `ArgumentAccessIntent::readWrite` → GENERAL 布局匹配。
+- **能量公式对齐方式**：IBL 路径中 DDGI 替换 diffuse 的 irradiance 源，权重与现有约定一致——`ddgiDiffuse = kD * ddgiIrradiance * baseColor / PI`，再 `diffuse = lerp(diffuse, ddgiDiffuse, ddgiWeight)`，ao 与 IBL intensity 仍在末端统一乘；specular 不动。非 IBL（固定 ambient）路径：`lerp(ambient*baseColor*ao, ddgiIrradiance*baseColor/PI*ao, ddgiWeight)`。
+- **uniform 传参**：`LightParams`（shader_io.h）追加 5 个 vec4 + uint64 BDA + 2 uint padding（总 480 字节，C++/std140 偏移一致，沿用 DDGIRayTraceUniforms 的 BDA-in-cbuffer 先例）；C++ 侧 `updateGPUDrivenLights` 仅在 volume/BDA/视图全就绪时置 enabled=1，否则字段保持零初始化走原路径。
 
 **提交样例**：`feat(render): integrate DDGI SampleProbe into lighting pass, replace fixed ambient`
 

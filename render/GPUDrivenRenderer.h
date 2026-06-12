@@ -1270,6 +1270,12 @@ namespace demo
 		// DDGI (Wave D2-3): probe irradiance/depth update + border update.
 		// Resources are only created when DDGIConfig::enabled is true.
 		std::unique_ptr<DDGIProbeUpdatePass> m_ddgiProbeUpdatePass;
+		// DDGI (Wave D3-1): sampled views over the *current* atlases for the
+		// lighting pass SampleProbe path. Null when DDGI is disabled; the
+		// lighting argument table then falls back to a placeholder view and
+		// the shader gate (ddgiGridDimsAndEnabled.w) keeps the path dormant.
+		rhi::TextureViewHandle m_ddgiIrradianceLightingView{};
+		rhi::TextureViewHandle m_ddgiDepthLightingView{};
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;

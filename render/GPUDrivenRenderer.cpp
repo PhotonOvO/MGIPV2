@@ -33,7 +33,7 @@ namespace demo
 		constexpr float kGPUDrivenHiZNearRejectEpsilon = 1.0e-4f;
 		constexpr float kGPUDrivenHiZLargeObjectFootprintThreshold = 192.0f;
 		constexpr float kGPUDrivenHiZFastCameraFallbackDistance = 8.0f;
-		constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 18u;
+		constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 20u;
 		constexpr uint32_t kGPUDrivenLightPassDepthTextureIndex = kPackedGBufferTargetCount;
 		constexpr uint32_t kGPUDrivenLightPassSceneColorHdrIndex = kPackedGBufferTargetCount + 1u;
 		constexpr uint32_t kGPUDrivenLightPassBloomHalfIndex = kPackedGBufferTargetCount + 2u;
@@ -52,6 +52,10 @@ namespace demo
 		constexpr uint32_t kGPUDrivenLightPassBloomUpsampleQuarterIndex = kPackedGBufferTargetCount + 15u;
 		constexpr uint32_t kGPUDrivenLightPassBloomOutputIndex = kPackedGBufferTargetCount + 16u;
 		constexpr uint32_t kGPUDrivenLightPassColorGradingLutIndex = kPackedGBufferTargetCount + 17u;
+		// DDGI (Wave D3-1): probe atlas SRVs for the lighting SampleProbe path
+		// (shader.light.slang kDDGIIrradianceAtlasIndex / kDDGIDepthAtlasIndex).
+		constexpr uint32_t kGPUDrivenLightPassDDGIIrradianceIndex = kPackedGBufferTargetCount + 18u;
+		constexpr uint32_t kGPUDrivenLightPassDDGIDepthIndex = kPackedGBufferTargetCount + 19u;
 		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
@@ -425,6 +429,32 @@ namespace demo
 			// volume (atlases + radiance scratch); tables are static, push
 			// constants carry the per-frame values.
 			m_ddgiProbeUpdatePass->initResources(getRHIDevice());
+			// DDGI (Wave D3-1): sampled views over the *current* atlases for
+			// the lighting pass (D2-3 writes current, lighting reads current;
+			// the D4-1 ping-pong wave will rebind these per swap).
+			if (m_ddgiProbeVolume.isInitialized())
+			{
+				const auto createLightingAtlasView = [&](rhi::TextureHandle texture,
+				                                         rhi::TextureFormat format,
+				                                         const char* debugName)
+				{
+					rhi::TextureViewCreateDesc viewDesc{};
+					viewDesc.image = texture;
+					viewDesc.format = format;
+					viewDesc.viewType = rhi::ImageViewType::e2D;
+					viewDesc.aspect = rhi::TextureAspect::color;
+					viewDesc.baseMipLevel = 0;
+					viewDesc.levelCount = 1;
+					viewDesc.debugName = debugName;
+					return getRHIDevice().createTextureView(viewDesc);
+				};
+				m_ddgiIrradianceLightingView = createLightingAtlasView(
+					m_ddgiProbeVolume.getIrradianceAtlas(), rhi::TextureFormat::rgba16Sfloat,
+					"ddgi-lighting-irradiance");
+				m_ddgiDepthLightingView = createLightingAtlasView(
+					m_ddgiProbeVolume.getDepthAtlas(), rhi::TextureFormat::rg16Sfloat,
+					"ddgi-lighting-depth");
+			}
 		}
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
@@ -458,6 +488,18 @@ namespace demo
 		if (m_globalSDFPass != nullptr)
 		{
 			m_globalSDFPass->shutdownResources();
+		}
+		// DDGI (Wave D3-1): lighting-pass atlas views must go before the probe
+		// volume tears the underlying textures down.
+		if (!m_ddgiIrradianceLightingView.isNull())
+		{
+			getRHIDevice().destroyTextureView(m_ddgiIrradianceLightingView);
+			m_ddgiIrradianceLightingView = {};
+		}
+		if (!m_ddgiDepthLightingView.isNull())
+		{
+			getRHIDevice().destroyTextureView(m_ddgiDepthLightingView);
+			m_ddgiDepthLightingView = {};
 		}
 		// DDGI (Wave D2-1): no-op when DDGI was never enabled.
 		m_ddgiProbeVolume.deinit();
@@ -3332,6 +3374,38 @@ namespace demo
 			              && !m_ssrDenoisePipelineHandle.isNull() ? 1.0f : 0.0f, // SSR: same guard as AO
 			          0.0f,
 			          0.0f);
+		// DDGI sampling (Wave D3-1): only flag the path on when every GPU-side
+		// dependency exists (volume, position BDA, lighting atlas views). The
+		// zero-initialized fields otherwise keep the shader on the original
+		// ambient/IBL path (ddgiGridDimsAndEnabled.w == 0).
+		{
+			const DDGIConfig& ddgiConfig = getDDGIConfig();
+			const bool ddgiSamplingReady = ddgiConfig.enabled && m_ddgiProbeVolume.isInitialized()
+				&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
+				&& !m_ddgiIrradianceLightingView.isNull() && !m_ddgiDepthLightingView.isNull();
+			if (ddgiSamplingReady)
+			{
+				const DDGIProbeVolumeDesc& volumeDesc = m_ddgiProbeVolume.getDesc();
+				const rhi::Extent2D irradianceExtent = m_ddgiProbeVolume.getIrradianceAtlasExtent();
+				const rhi::Extent2D depthExtent = m_ddgiProbeVolume.getDepthAtlasExtent();
+				lightingUniforms.light.ddgiGridDimsAndEnabled =
+					glm::vec4(glm::vec3(m_ddgiProbeVolume.getGridDims()), 1.0f);
+				lightingUniforms.light.ddgiOriginAndSpacing =
+					glm::vec4(volumeDesc.sceneBoundsMin, volumeDesc.probeSpacing);
+				lightingUniforms.light.ddgiParams0 =
+					glm::vec4(ddgiConfig.ddgiWeight, ddgiConfig.ddgiGamma, ddgiConfig.normalBias,
+					          static_cast<float>(volumeDesc.irradianceTexelSize));
+				lightingUniforms.light.ddgiParams1 =
+					glm::vec4(static_cast<float>(volumeDesc.depthTexelSize),
+					          static_cast<float>(irradianceExtent.width),
+					          static_cast<float>(irradianceExtent.height),
+					          static_cast<float>(depthExtent.width));
+				lightingUniforms.light.ddgiParams2 =
+					glm::vec4(static_cast<float>(depthExtent.height), 0.0f, 0.0f, 0.0f);
+				lightingUniforms.light.ddgiProbePositionAddress =
+					m_ddgiProbeVolume.getProbePositionAddress().value;
+			}
+		}
 
 		const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.viewProjection = camera != nullptr ? camera->viewProjection : glm::mat4(1.0f),
@@ -3424,6 +3498,12 @@ namespace demo
 		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
 		texViews[kGPUDrivenLightPassAOIndex] = viewOr(m_aoDenoisedView, fallbackDepth);
 		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrDenoisedView, fallbackColor);
+		// DDGI (Wave D3-1): atlas SRVs. When DDGI is disabled the views are
+		// null -> bind the gbuffer0 placeholder; the shader-side gate
+		// (ddgiGridDimsAndEnabled.w == 0) guarantees it is never sampled
+		// meaningfully, so disabled rendering stays bit-identical and safe.
+		texViews[kGPUDrivenLightPassDDGIIrradianceIndex] = viewOr(m_ddgiIrradianceLightingView, fallbackColor);
+		texViews[kGPUDrivenLightPassDDGIDepthIndex] = viewOr(m_ddgiDepthLightingView, fallbackColor);
 
 		const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 
@@ -3452,6 +3532,19 @@ namespace demo
 				.binding = shaderio::LBindTextures, .arrayElement = i, .type = rhi::ArgumentType::combinedImageSampler,
 				.textureView = texViews[i], .sampler = m_linearClampSamplerHandle
 			});
+		}
+		// DDGI atlases live in the General resource state (the probe update
+		// pass writes them as storage images and never transitions them), so
+		// their sampled descriptors must use the readWrite intent -> General
+		// layout. Only applies when the real atlas views are bound; the
+		// placeholder fallback keeps the default sampled-read intent.
+		if (!m_ddgiIrradianceLightingView.isNull())
+		{
+			writes[kGPUDrivenLightPassDDGIIrradianceIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
+		}
+		if (!m_ddgiDepthLightingView.isNull())
+		{
+			writes[kGPUDrivenLightPassDDGIDepthIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
 		}
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler,

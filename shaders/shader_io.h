@@ -490,6 +490,20 @@ struct LightParams
   vec4 iblParams;                         // x = enabled, y = intensity, z = max env mip, w = valid env texture
   vec4 iblDebugInfo;                      // x = debug mode, yzw = reserved
   vec4 phase7Info;                        // x = AO enabled, y = SSR enabled, zw = reserved until atlas sampling lands
+
+  // DDGI lighting-pass sampling (Wave D3-1). Runtime gate only: when
+  // ddgiGridDimsAndEnabled.w <= 0.5 (default zero-init) the lighting shader
+  // takes the original ambient/IBL path with numerically identical results.
+  // All-vec4 packing keeps the C++/std140 offsets trivially in sync; the BDA
+  // address sits on a 16-byte boundary (same pattern as DDGIRayTraceUniforms).
+  vec4 ddgiGridDimsAndEnabled;            // xyz = probe grid dims, w = enabled (1/0)
+  vec4 ddgiOriginAndSpacing;              // xyz = probe grid world-space origin, w = probeSpacing
+  vec4 ddgiParams0;                       // x = ddgiWeight, y = ddgiGamma, z = normalBias, w = irradiance texel side
+  vec4 ddgiParams1;                       // x = depth texel side, y = irr atlas width, z = irr atlas height, w = depth atlas width
+  vec4 ddgiParams2;                       // x = depth atlas height, yzw = reserved
+  uint64_t ddgiProbePositionAddress;      // BDA of float4[totalProbes] probe positions (0 when disabled)
+  uint32_t _ddgiLightPadding0;
+  uint32_t _ddgiLightPadding1;
 };
 
 struct LightingUniforms

@@ -197,6 +197,8 @@ list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "shader\\.ibl_common\\.slang$")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "sdf_common\\.slang$")
 # Include-only DDGI octahedral/probe-math module (Wave D2-3), consumed via #include.
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_common\\.slang$")
+# Include-only DDGI SampleProbe module (Wave D3-1), consumed via #include.
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_sample_probe\\.slang$")
 list(FIND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang" DEMO_GPU_LIGHT_SHADER_INDEX)
 if(DEMO_GPU_LIGHT_SHADER_INDEX EQUAL -1)
   list(APPEND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang")
