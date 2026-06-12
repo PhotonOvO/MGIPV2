@@ -307,6 +307,26 @@ struct DDGIProbeUpdatePush
   uint32_t _ddgiProbeUpdatePadding0;
 };
 
+// DDGI probe visualization debug pass (Wave D3-2). Procedural UV-sphere
+// tessellation shared by the C++ draw call (vertexCount = stacks*slices*6)
+// and the shader-side SV_VertexID decoder.
+STATIC_CONST int LDDGIProbeVisStacks = 12;
+STATIC_CONST int LDDGIProbeVisSlices = 24;
+
+// 96 bytes (mat4 64 + uint64 8 + 4x uint32 + 2x float = 96, 16B multiple);
+// C++ natural alignment matches std140 scalar offsets (uint64 at offset 64).
+struct DDGIProbeVisualizationUniforms
+{
+  mat4 viewProjection;            // jittered VP (matches the depth buffer)
+  uint64_t probePositionAddress;  // BDA of float4[totalProbes] world positions
+  uint32_t totalProbes;
+  uint32_t irradianceAtlasWidth;  // full atlas extent in texels
+  uint32_t irradianceAtlasHeight;
+  uint32_t irradianceSideLength;  // irradiance texels per probe (no border)
+  float probeRadius;              // debug sphere world-space radius (0.1)
+  float ddgiGamma;                // decode: pow(x, gamma*0.5) then square
+};
+
 struct LightCullingUniforms
 {
   vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane

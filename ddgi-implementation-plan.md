@@ -604,7 +604,7 @@ lighting pass 改动：增加 `if (ddgiEnabled) { irradiance = sampleProbe(...) 
 
 #### Wave D3-2：Probe 可视化调试 Pass
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -630,11 +630,19 @@ DDGIDebugPassData 包含：probeCount（uint）、probePositionBufferGpuPtr（Gp
 
 **验收标准**
 
-- [ ] MSVC 构建通过
-- [ ] ImGui 开关开启后 RenderDoc 可见 probe 球体 instanced draw call
-- [ ] probe 颜色与场景漫反射方向一致（天空方向 probe 偏蓝，地面方向 probe 偏暖）
-- [ ] ImGui 开关关闭后无额外 draw call
-- [ ] `check_rhi_boundary.py` 零新增
+- [x] MSVC 构建通过
+- [ ] ImGui 开关开启后 RenderDoc 可见 probe 球体 instanced draw call —— 用户授权跳过，留待视觉验收
+- [ ] probe 颜色与场景漫反射方向一致（天空方向 probe 偏蓝，地面方向 probe 偏暖）—— 用户授权跳过，留待视觉验收
+- [ ] ImGui 开关关闭后无额外 draw call —— 用户授权跳过；执行入口 `if (!enabled || !ddgiDebugVisualize) return` 在 beginRenderPass 之前，关闭时逻辑上零 GPU 命令
+- [x] `check_rhi_boundary.py` 零新增（手动复跑 0/0/0 PASS）
+
+**实施备注（2026-06-13）**
+
+- **球体方案：程序化 buffer-less UV 球**（用户授权在两方案中择低风险者）：vertex shader 直接由 SV_VertexID 解码 UV 球三角形（12 stacks × 24 slices × 6 顶点/instance，常量 `LDDGIProbeVisStacks/Slices` 经 shader_io.h 双端共享），不创建任何 sphere vertex/index buffer——比计划草案的 CPU icosphere buffer 上传少一条资源管理路径，且引擎已有同型先例（shader.debug.slang `vertexCullMain` 的 buffer-less 球环绘制）。计划草案中的 `sphereIndexBuffer`/`sphereVertexBuffer` 字段因此不再需要。极点 quad 退化为零面积三角形，无渲染伪影。
+- **Shader 平铺命名**：`shaders/ddgi_probe_visualization.slang`（非计划草案的 `shaders/ddgi/ProbeVisualization.slang`），与现有 ddgi_*.slang 平铺约定一致（CMake glob 不递归子目录）。fragment 按球面法线方向 oct 寻址采样该 probe 的 irradiance（复用 `ddgi_sample_probe.slang` 的 `ddgiTextureCoordFromDirection`，LuxGI ProbeVisualization 做法，取代计划草案"probe 中心 8×8 texel 平均色"），伽马解码 `pow(x, ddgiGamma*0.5)` 后平方。
+- **ImGui 开关接线（已完成）**：沿用 TAA 开关先例的数据流——`DebugPassOptions::ddgiDebugVisualize`（render/RenderTypes.h，默认 false）+ `app/MinimalLatestApp.h` Light Overlays 树内 "DDGI Probe Visualize" checkbox；pass 经 `context.params->debugOptions.ddgiDebugVisualize` 读取。计划草案中的 renderer 成员 `m_ddgiDebugVisualize` 由该结构体字段替代（现成 App→RenderParams→PassContext 管线，无需新增成员与手动同步）。
+- **渲染目标/深度配置**：画到 scene HDR color target（load/store）+ 场景深度 read-only attachment；深度测试开、写关（reversed-Z `greaterOrEqual`，对齐几何 pass 约定；render pass 进入方式对齐 GPUDrivenSkyboxPass）。viewProjection 用抖动后矩阵与深度缓冲匹配（TAA 之后 resolve）。uniform 经 per-frame uniform buffer + BDA probe 位置（96 字节，C++/std140 偏移一致，沿用 DDGIRayTraceUniforms 先例）。atlas SRV 用 `ArgumentAccessIntent::readWrite` → GENERAL 布局匹配（atlas 常驻 General，同 lighting 绑定）；probe update 尾部 compute→fragment barrier（D3-1 既有）覆盖采样 hazard。
+- **帧流程插入点**：skybox/forward 之后、velocity/TAA 之前（场景色全部就绪后、后处理前），双重门控 `DDGIConfig::enabled && ddgiDebugVisualize`（均默认 false），默认渲染输出不变。
 
 **提交样例**：`feat(render): add DDGI probe visualization debug pass`
 

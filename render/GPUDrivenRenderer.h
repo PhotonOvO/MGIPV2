@@ -20,6 +20,7 @@
 #include "passes/GPUDrivenSSRPass.h"
 #include "passes/DDGIRayTracePass.h"
 #include "passes/DDGIProbeUpdatePass.h"
+#include "passes/DDGIDebugPass.h"
 #include "passes/GlobalSDFPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
@@ -1276,6 +1277,10 @@ namespace demo
 		// the shader gate (ddgiGridDimsAndEnabled.w) keeps the path dormant.
 		rhi::TextureViewHandle m_ddgiIrradianceLightingView{};
 		rhi::TextureViewHandle m_ddgiDepthLightingView{};
+		// DDGI (Wave D3-2): probe visualization debug draw. Resources are only
+		// created when DDGIConfig::enabled is true; the draw additionally
+		// requires the ImGui "DDGI Probe Visualize" checkbox (default false).
+		std::unique_ptr<DDGIDebugPass> m_ddgiDebugPass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;

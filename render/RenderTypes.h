@@ -111,6 +111,10 @@ namespace demo
 		int ssrMaxSteps{32};
 		float ssrThickness{0.3f};  // metres; passed directly to the shader thickness budget
 		bool enableShadowAtlas{false};
+		// DDGI (Wave D3-2): probe visualization spheres overlay. Only takes
+		// effect when DDGIConfig::enabled is also true; default rendering is
+		// unchanged.
+		bool ddgiDebugVisualize{false};
 
 		// CSM Shadow cascade debug visualization
 		bool showShadowCascades{true}; // Show cascade frustum splits

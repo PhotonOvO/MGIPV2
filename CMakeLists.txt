@@ -318,6 +318,8 @@ add_library(demo_core STATIC
   render/passes/DDGIRayTracePass.cpp
   render/passes/DDGIProbeUpdatePass.h
   render/passes/DDGIProbeUpdatePass.cpp
+  render/passes/DDGIDebugPass.h
+  render/passes/DDGIDebugPass.cpp
   render/passes/GPUDrivenSSRPass.h
   render/passes/GPUDrivenSSRPass.cpp
   render/passes/GPUDrivenShadowAtlasPass.h

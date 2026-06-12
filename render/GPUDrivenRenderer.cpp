@@ -353,6 +353,7 @@ namespace demo
 		m_globalSDFPass = std::make_unique<GlobalSDFPass>(this);
 		m_ddgiRayTracePass = std::make_unique<DDGIRayTracePass>(this);
 		m_ddgiProbeUpdatePass = std::make_unique<DDGIProbeUpdatePass>(this);
+		m_ddgiDebugPass = std::make_unique<DDGIDebugPass>(this);
 		m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
 		m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
 		m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -390,6 +391,11 @@ namespace demo
 		m_passExecutor.addPass(*m_lightPass);
 		m_passExecutor.addPass(*m_skyboxPass);
 		m_passExecutor.addPass(*m_forwardPass);
+		// DDGI (Wave D3-2): probe visualization overlay draws onto the scene
+		// HDR target after all scene color is in (lighting/sky/forward) and
+		// before post-processing; no-ops unless both DDGIConfig::enabled and
+		// the ImGui visualize toggle are on.
+		m_passExecutor.addPass(*m_ddgiDebugPass);
 		m_passExecutor.addPass(*m_velocityPass);
 		m_passExecutor.addPass(*m_taaResolvePass);
 		m_passExecutor.addPass(*m_bloomPrefilterPass);
@@ -455,6 +461,9 @@ namespace demo
 					m_ddgiProbeVolume.getDepthAtlas(), rhi::TextureFormat::rg16Sfloat,
 					"ddgi-lighting-depth");
 			}
+			// DDGI (Wave D3-2): probe visualization debug draw needs the probe
+			// volume (positions BDA + irradiance atlas), so it initializes last.
+			m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 		}
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
@@ -475,8 +484,12 @@ namespace demo
 		}
 		shutdownTransparentVisibilityPatchResources();
 		shutdownPhase7Resources();
-		// DDGI (Wave D2-2/D2-3): views over the probe volume / global SDF must
-		// go before their owners are torn down below.
+		// DDGI (Wave D2-2/D2-3/D3-2): views over the probe volume / global SDF
+		// must go before their owners are torn down below.
+		if (m_ddgiDebugPass != nullptr)
+		{
+			m_ddgiDebugPass->shutdownResources();
+		}
 		if (m_ddgiProbeUpdatePass != nullptr)
 		{
 			m_ddgiProbeUpdatePass->shutdownResources();
@@ -510,6 +523,7 @@ namespace demo
 		m_taaResolvePass.reset();
 		m_velocityPass.reset();
 		m_forwardPass.reset();
+		m_ddgiDebugPass.reset();
 		m_ddgiProbeUpdatePass.reset();
 		m_ddgiRayTracePass.reset();
 		m_globalSDFPass.reset();

@@ -343,6 +343,7 @@ public:
             ImGui::SliderFloat("SSR Thickness", &m_debugOptions.ssrThickness, 0.005f, 0.12f, "%.3f");
           }
           ImGui::Checkbox("Shadow Atlas", &m_debugOptions.enableShadowAtlas);
+          ImGui::Checkbox("DDGI Probe Visualize", &m_debugOptions.ddgiDebugVisualize);
           ImGui::TreePop();
         }
         if(ImGui::TreeNode("Culling Overlays"))
