@@ -103,7 +103,7 @@ namespace demo
 		bool enableAO{true};
 		float aoRadius{12.0f};
 		float aoIntensity{1.0f};
-		bool enableSSR{false};
+		bool enableSSR{true};
 		int ssrMaxSteps{32};
 		float ssrThickness{0.3f};  // metres; passed directly to the shader thickness budget
 		bool enableShadowAtlas{false};
