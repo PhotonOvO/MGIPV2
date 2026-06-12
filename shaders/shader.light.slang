@@ -1044,20 +1044,17 @@ float taaLanczos(float x, float a)
     return 0.0;
 }
 
-// 盒裁剪：把 history 向盒中心按比例收缩（Playdead clip_aabb）。
-// 旧实现沿 history→filtered 求线段入盒参数 t = saturate(max3(imin))：
-// 当某色度通道 |filtered-history| 趋零（1/(eps+r) 爆炸，r 为小负数时
-// eps+r 还会翻符号）而 history 该通道又在盒外时 t→1，整条历史被替换为
-// 当前帧值——亮度通道被色度通道劫持拖满，单帧镜面尖峰因此穿透
-// clamp 盒与防火花上限（其基准 clampedHistory 已被污染）。
-// 向盒中心收缩有界且不越过盒面，且各通道按同一比例收缩保持色相方向。
+// 盒裁剪：YCoCg 逐通道 clamp（Karis 2014 neighborhood clamp）。
+// 线裁剪（沿 history→filtered）与向心收缩（clip_aabb）都存在同一缺陷：
+// 色度通道出界时收缩参数作用于所有通道，亮度被一并拖向当前帧亮值——
+// 1px 竖线状单帧镜面尖峰所在列的盒中心/盒面是亮的，历史亮度因此被
+// 色度违例劫持抬高，尖峰穿透抑制（实测泄漏 40~60/255）。
+// 逐通道 clamp 让亮度只受亮度盒约束（尖峰列的横向邻居是暗的，
+// crossMin 使 boxMin.Y 保持暗），色度违例只修正色度，代价是强色彩
+// 边缘可能有轻微色相偏移——相对逐帧闪烁可接受。
 float3 taaClipToBox(float3 boxMin, float3 boxMax, float3 filtered, float3 history)
 {
-    const float eps = 0.0001;
-    float3 center  = 0.5 * (boxMax + boxMin);
-    float3 extents = 0.5 * (boxMax - boxMin) + eps;
-    float  ma = taaMax3(abs((history - center) / extents));
-    return ma > 1.0 ? center + (history - center) / ma : history;
+    return clamp(history, boxMin, boxMax);
 }
 
 [shader("fragment")]
@@ -1156,7 +1153,10 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
         }
         float3 mu    = m0 * (1.0 / 5.0);
         float3 sigma = sqrt(max(float3(0, 0, 0), m1 * (1.0 / 5.0) - mu * mu));
-        boxMin = max(boxMin, mu - sigma);
+        // 只用 μ+σ 收紧上界（抗鬼影的关键方向）。μ-σ 抬升下界的前提是邻域
+        // 近高斯分布；1px 竖线状单帧镜面尖峰使十字 5 样本 3/5 为亮（双峰），
+        // μ-σ 高于暗历史，clamp 把历史强行抬亮（实测把 0.07 抬到 0.47），
+        // 尖峰穿透所有抑制。下界仍由几何盒（圆角 3x3 AABB）提供。
         boxMax = min(boxMax, mu + sigma);
     }
 
