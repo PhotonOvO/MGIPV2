@@ -367,6 +367,8 @@ add_library(demo_core STATIC
   loader/GltfLoader.cpp
   loader/Ktx2Loader.h
   loader/Ktx2Loader.cpp
+  loader/SDFLoader.h
+  loader/SDFLoader.cpp
   loader/SceneCacheSerializer.h
   loader/SceneCacheSerializer.cpp
   scene/SceneAsset.h
@@ -541,6 +543,16 @@ add_custom_command(TARGET texture_converter POST_BUILD
           "${NVTT_DLL}"
           "$<TARGET_FILE_DIR:texture_converter>/nvtt30205.dll"
 )
+
+# --- Offline Mesh SDF baker (DDGI Wave D1-1) ---
+# Pure-CPU asset tool: no RHI/Vulkan/NVTT dependency; links glm only.
+# Not a Demo dependency — built separately via the sdf_baker target.
+add_executable(sdf_baker
+  tools/sdf_baker/main.cpp
+  tools/sdf_baker/SDFBaker.cpp
+  tools/sdf_baker/SDFBaker.h
+)
+target_link_libraries(sdf_baker PRIVATE glm)
 
 set(COMPRESS_TEXTURES_SCRIPT_TEMPLATE [=[@echo off
 setlocal
