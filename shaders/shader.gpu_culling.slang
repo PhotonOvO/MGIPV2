@@ -133,6 +133,31 @@ bool isOccluded(float3 center, float radius)
     return nearestDepth + depthEpsilon < hizDepth;
 }
 
+// 将 meshlet 局部包围球变换到世界空间，算法与 CPU 端 transformBoundsSphere 对齐：
+//   worldCenter = M * localCenter（行主序矩阵点乘，w=1 含平移）
+//   maxScale    = max(length(col0), length(col1), length(col2))
+//                 其中列向量从行主序矩阵重建：col_j = float3(rows[*].j)
+//   worldRadius = localRadius * maxScale
+float4 transformMeshletLocalBoundsSphere(uint sceneObjectIndex, float4 localSphere)
+{
+    const float4 row0 = sceneObjects[sceneObjectIndex].worldMatrixRows[0];
+    const float4 row1 = sceneObjects[sceneObjectIndex].worldMatrixRows[1];
+    const float4 row2 = sceneObjects[sceneObjectIndex].worldMatrixRows[2];
+
+    const float4 localPos = float4(localSphere.xyz, 1.0);
+    const float3 worldCenter = float3(dot(row0, localPos),
+                                      dot(row1, localPos),
+                                      dot(row2, localPos));
+
+    // 从行主序矩阵重建列向量（仅取 3x3 线性部分，不含平移列）
+    const float3 col0 = float3(row0.x, row1.x, row2.x);
+    const float3 col1 = float3(row0.y, row1.y, row2.y);
+    const float3 col2 = float3(row0.z, row1.z, row2.z);
+    const float maxScale = max(length(col0), max(length(col1), length(col2)));
+
+    return float4(worldCenter, max(localSphere.w * maxScale, 0.0));
+}
+
 float3 transformMeshletConeAxis(uint objectIndex, float3 localAxis)
 {
     const GPUSceneObject sceneObject = sceneObjects[objectIndex];
@@ -218,8 +243,31 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     command.vertexOffset = objectData.vertexOffset;
     command.firstInstance = objectIndex;
 
-    const float3 center = objectData.sphereCenterRadius.xyz;
-    const float radius = max(objectData.sphereCenterRadius.w, 0.0);
+    float3 center;
+    float radius;
+    if(gpuCullingUniforms.cullingControls.z > 0.5)
+    {
+        // meshlet 模式：用 meshlet 局部包围球 + 世界矩阵实时变换，忽略 objectData 中的预计算世界球
+        const Meshlet meshlet = meshlets[objectIndex];
+        if(meshlet.objectIndex != 0xffffffffu)
+        {
+            const float4 worldSphere = transformMeshletLocalBoundsSphere(meshlet.objectIndex, meshlet.boundsSphere);
+            center = worldSphere.xyz;
+            radius = max(worldSphere.w, 0.0);
+        }
+        else
+        {
+            // objectIndex 无效（哨兵值）：fallback 到预计算世界球
+            center = objectData.sphereCenterRadius.xyz;
+            radius = max(objectData.sphereCenterRadius.w, 0.0);
+        }
+    }
+    else
+    {
+        // object-level 模式：保持原有行为，直接用预计算世界球
+        center = objectData.sphereCenterRadius.xyz;
+        radius = max(objectData.sphereCenterRadius.w, 0.0);
+    }
 
     const bool enableFrustumCulling = (objectData.flags & LGPUCullFlagFrustumCulling) != 0u
                                       && gpuCullingUniforms.cullingControls.x > 0.5;
