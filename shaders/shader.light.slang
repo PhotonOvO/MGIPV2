@@ -370,7 +370,11 @@ vec3 evaluateLocalLight(LightData light, vec3 N, vec3 V, vec3 worldPos, vec3 bas
 
     const vec3 L = toLight / distanceToLight;
     const float invDistanceSq = 1.0 / max(distanceToLight * distanceToLight, 0.01);
-    const float rangeAttenuation = pow(saturate(1.0 - distanceToLight / max(light.range, 0.0001)), 2.0);
+    // 标准 windowed inverse-square 衰减（UE/Frostbite）：window = (1-(d/r)^4)^2。
+    // 旧公式额外乘 range²（range=100 时放大 10000 倍），把掠射面 NdotL 逐帧翻转
+    // 放大成满幅 HDR 闪光（残余高光闪烁根因）；强度应只由 intensity 控制。
+    const float distanceRatio = distanceToLight / max(light.range, 0.0001);
+    const float rangeAttenuation = pow(saturate(1.0 - pow(distanceRatio, 4.0)), 2.0);
     float spotAttenuation = 1.0;
     if(light.lightType == LLightTypeSpot)
     {
@@ -381,7 +385,7 @@ vec3 evaluateLocalLight(LightData light, vec3 N, vec3 V, vec3 worldPos, vec3 bas
         spotAttenuation = smoothstep(outerCos, innerCos, spotCos);
     }
 
-    const vec3 radiance = light.color * light.intensity * invDistanceSq * light.range * light.range * rangeAttenuation * spotAttenuation;
+    const vec3 radiance = light.color * light.intensity * invDistanceSq * rangeAttenuation * spotAttenuation;
     return evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
 }
 
