@@ -988,18 +988,10 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
         return float4(max(currentColor, 0.0), 1.0);
     }
 
-    float depthSample = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
-    float2 historyUv = input.uv;
-    if(depthSample > 0.0001)
-    {
-        float4 currentClip = float4(input.uv * 2.0 - 1.0, depthSample, 1.0);
-        float4 worldPos = mul(camera.inverseViewProjection, currentClip);
-        worldPos.xyz /= max(worldPos.w, 1.0e-5);
-        worldPos.w = 1.0;
-
-        float4 previousClip = mul(camera.prevJitteredViewProjection, worldPos);
-        historyUv = previousClip.xy / max(previousClip.w, 1.0e-5) * 0.5 + 0.5;
-    }
+    float depthSample  = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    // --- velocity 重投影（天空像素 velocity=(0,0)，historyUv 自动回退到 input.uv）---
+    float2 velocity  = inTexture[kVelocityIndex].Sample(input.uv).xy;
+    float2 historyUv = input.uv - velocity;
     float3 historyColor = inTexture[kSceneColorHistoryReadIndex].Sample(historyUv).rgb;
 
     float3 minColor = rgbToYCoCg(currentColor);
