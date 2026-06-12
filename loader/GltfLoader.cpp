@@ -202,6 +202,32 @@ bool hasKtx2Identifier(const unsigned char* bytes, int size)
         && std::memcmp(bytes, kKtx2Identifier.data(), kKtx2Identifier.size()) == 0;
 }
 
+// 自定义 tinygltf 文件读取：png/jpg 引用存在同名 .ktx2 时优先读取 ktx2 字节。
+// 下游 loadImageDataPreservingKtx2 / processImages 均按 KTX2 魔数识别（与 URI 无关），
+// 离线 texture_converter 产出的 BC7+完整 mip 链纹理因此无需改写 glTF 即可生效。
+bool readWholeFilePreferringKtx2(std::vector<unsigned char>* out,
+                                 std::string*                err,
+                                 const std::string&          filepath,
+                                 void*                       userData)
+{
+    const std::filesystem::path path(filepath);
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if(extension == ".png" || extension == ".jpg" || extension == ".jpeg")
+    {
+        std::filesystem::path ktx2Path = path;
+        ktx2Path.replace_extension(".ktx2");
+        std::error_code ec;
+        if(std::filesystem::exists(ktx2Path, ec) && !ec
+           && tinygltf::ReadWholeFile(out, err, ktx2Path.string(), userData))
+        {
+            return true;
+        }
+    }
+    return tinygltf::ReadWholeFile(out, err, filepath, userData);
+}
+
 bool loadImageDataPreservingKtx2(tinygltf::Image* image,
                                  const int        imageIndex,
                                  std::string*     err,
@@ -394,6 +420,16 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     tinygltf::TinyGLTF loader;
     tinygltf::LoadImageDataOption imageLoadOptions;
     loader.SetImageLoader(loadImageDataPreservingKtx2, &imageLoadOptions);
+    // 文件读取层做 png/jpg → .ktx2 同名替换（KTX2 含完整 mip 链，修复无 mip 导致的
+    // 像素频率纹理混叠 + TAA jitter 噪点闪烁）。仅替换图片读取，buffer(.bin) 不受影响。
+    loader.SetFsCallbacks(tinygltf::FsCallbacks{
+        .FileExists = &tinygltf::FileExists,
+        .ExpandFilePath = &tinygltf::ExpandFilePath,
+        .ReadWholeFile = &readWholeFilePreferringKtx2,
+        .WriteWholeFile = &tinygltf::WriteWholeFile,
+        .GetFileSizeInBytes = &tinygltf::GetFileSizeInBytes,
+        .user_data = nullptr,
+    });
     std::string err;
     std::string warn;
 
