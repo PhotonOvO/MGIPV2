@@ -151,6 +151,18 @@ namespace demo
 	inline constexpr TextureHandle kPassBloomUpsampleQuarterHandle{0xF115u, 1u};
 	inline constexpr TextureHandle kPassBloomOutputHandle{0xF116u, 1u};
 	inline constexpr TextureHandle kPassSwapchainHandle{0xF201u, 1u};
+	// DDGI milestone (Wave D0-1): pass handle registrations for the DDGI and
+	// Global SDF passes. 0xF4xx block is reserved for DDGI resources
+	// (0xF3xx is taken by kTransientAllocatorBufferHandle in TransientAllocator.h).
+	inline constexpr TextureHandle kPassDDGIRayTraceHandle{0xF401u, 1u};
+	inline constexpr TextureHandle kPassDDGIProbeUpdateHandle{0xF402u, 1u};
+	inline constexpr TextureHandle kPassDDGIBorderUpdateHandle{0xF403u, 1u};
+	inline constexpr TextureHandle kPassDDGISampleProbeHandle{0xF404u, 1u};
+	inline constexpr TextureHandle kPassDDGIEndFrameHandle{0xF405u, 1u};
+	inline constexpr TextureHandle kPassDDGIDebugVisualizeHandle{0xF406u, 1u};
+	inline constexpr TextureHandle kPassGlobalSDFComposeHandle{0xF407u, 1u};
+	inline constexpr TextureHandle kPassGlobalSDFClearHandle{0xF408u, 1u};
+	inline constexpr TextureHandle kPassGlobalSDFMipmapHandle{0xF409u, 1u};
 
 	class PassNode
 	{

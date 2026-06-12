@@ -226,7 +226,7 @@ DDGI 里程碑启动的前提是 RHI 纯净化 Phase 3/4 全部完成，`check_r
 
 #### Wave D0-1：DDGI 配置骨架与 Pass Handle 注册
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -252,12 +252,14 @@ Pass Handle 常量（追加到 render/Pass.h）：DDGIRayTrace、DDGIProbeUpdate
 
 **验收标准**
 
-- [ ] MSVC vcvars64 构建通过，无 C2 错误
+- [x] MSVC vcvars64 构建通过，无 C2 错误
 - [ ] `check_rhi_boundary.py` 运行后三类 signal 均为 0，无新增
-- [ ] DDGIConfig 可在 `RenderDevice` 中声明成员变量而不报编译错误
-- [ ] 新增 PassHandle 常量与已有常量无命名冲突
+- [x] DDGIConfig 可在 `RenderDevice` 中声明成员变量而不报编译错误
+- [x] 新增 PassHandle 常量与已有常量无命名冲突（DDGI 段取 0xF401–0xF409，避开 TransientAllocator 已占用的 0xF301）
 
 **提交样例**：`feat(ddgi): add DDGIConfig + Pass handle constants`
+
+**实施备注**：DDGIConfig 增加 enabled 字段（默认 false，行为不变门控）；用户豁免前置里程碑检查。
 
 ---
 

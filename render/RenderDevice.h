@@ -16,6 +16,7 @@
 #include "../scene/SceneUploadPlan.h"
 #include "SceneResources.h"
 #include "CSMShadowResources.h"
+#include "DDGIConfig.h"
 #include "TransientAllocator.h"
 #include "UploadUtils.h"
 #include "RenderTypes.h"
@@ -739,6 +740,10 @@ namespace demo
 		PipelineHandle m_forwardMDIPipeline{}; // Forward MDI pass for transparent
 		PipelineHandle m_debugPipeline{}; // Debug line overlay pass
 		PipelineHandle m_gpuCullingDebugPipeline{}; // Current-frame GPU culling visualization
+
+		// DDGI (Wave D0-1): config skeleton; enabled=false keeps default rendering unchanged
+		// until later waves wire the DDGI passes in.
+		DDGIConfig m_ddgiConfig{};
 
 		// GBuffer uniform buffer bind groups (per-frame)
 
