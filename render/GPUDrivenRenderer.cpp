@@ -347,6 +347,7 @@ namespace demo
 		m_aoPass = std::make_unique<GPUDrivenAOPass>(this);
 		m_ssrPass = std::make_unique<GPUDrivenSSRPass>(this);
 		m_globalSDFPass = std::make_unique<GlobalSDFPass>(this);
+		m_ddgiRayTracePass = std::make_unique<DDGIRayTracePass>(this);
 		m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
 		m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
 		m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -369,6 +370,9 @@ namespace demo
 		// DDGI (Wave D1-2): Global SDF rebuild runs early in the frame; all its
 		// resources are pass-private and it no-ops while DDGIConfig::enabled is false.
 		m_passExecutor.addPass(*m_globalSDFPass);
+		// DDGI (Wave D2-2): probe SDF ray trace consumes the freshly rebuilt
+		// Global SDF (write->read covered by GlobalSDFPass's trailing barrier).
+		m_passExecutor.addPass(*m_ddgiRayTracePass);
 		m_passExecutor.addPass(*m_csmShadowPass);
 		m_passExecutor.addPass(*m_shadowAtlasPass);
 		m_passExecutor.addPass(*m_gbufferPass);
@@ -409,6 +413,9 @@ namespace demo
 			// Publish the resolved adaptive grid dims back into the config so
 			// later waves (ray trace / probe update / sampling) see one truth.
 			m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
+			// DDGI (Wave D2-2): the ray trace pass needs both the probe volume
+			// and the Global SDF volume, so it initializes after them.
+			m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 		}
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
@@ -429,6 +436,12 @@ namespace demo
 		}
 		shutdownTransparentVisibilityPatchResources();
 		shutdownPhase7Resources();
+		// DDGI (Wave D2-2): views over the probe volume / global SDF must go
+		// before their owners are torn down below.
+		if (m_ddgiRayTracePass != nullptr)
+		{
+			m_ddgiRayTracePass->shutdownResources();
+		}
 		if (m_globalSDFPass != nullptr)
 		{
 			m_globalSDFPass->shutdownResources();
@@ -442,6 +455,7 @@ namespace demo
 		m_taaResolvePass.reset();
 		m_velocityPass.reset();
 		m_forwardPass.reset();
+		m_ddgiRayTracePass.reset();
 		m_globalSDFPass.reset();
 		m_ssrPass.reset();
 		m_aoPass.reset();

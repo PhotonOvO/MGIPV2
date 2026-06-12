@@ -18,6 +18,7 @@
 #include "passes/GPUDrivenClusteredLightCullingPass.h"
 #include "passes/GPUDrivenAOPass.h"
 #include "passes/GPUDrivenSSRPass.h"
+#include "passes/DDGIRayTracePass.h"
 #include "passes/GlobalSDFPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
@@ -1022,6 +1023,12 @@ namespace demo
 		// allocated when DDGIConfig::enabled is true (default false).
 		[[nodiscard]] const DDGIProbeVolume& getDDGIProbeVolume() const { return m_ddgiProbeVolume; }
 		[[nodiscard]] DDGIProbeVolume& getDDGIProbeVolume() { return m_ddgiProbeVolume; }
+		// DDGI (Wave D2-2): Global SDF volume access for the SDF ray trace pass.
+		[[nodiscard]] const GlobalSDFPass* getGlobalSDFPass() const { return m_globalSDFPass.get(); }
+		// Monotonically increasing temporal frame counter. DDGI hard constraint 4:
+		// temporal ping-pong / parity / random seeding must use this counter, never
+		// the frames-in-flight ring index.
+		[[nodiscard]] uint64_t getTemporalFrameCounter() const { return m_temporalFrameCounter; }
 		// ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
 		[[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
 		{
@@ -1256,6 +1263,9 @@ namespace demo
 		// DDGI (Wave D2-1): probe grid GPU resources (atlases + position buffer).
 		// init is gated on DDGIConfig::enabled, so the default frame allocates nothing.
 		DDGIProbeVolume m_ddgiProbeVolume;
+		// DDGI (Wave D2-2): GISDFRays SDF ray trace compute pass. Resources are
+		// only created when DDGIConfig::enabled is true (default false).
+		std::unique_ptr<DDGIRayTracePass> m_ddgiRayTracePass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;

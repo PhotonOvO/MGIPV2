@@ -193,6 +193,8 @@ file(GLOB SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/*.slang")
 file(GLOB SHADER_GLSL_FILES  "${CMAKE_CURRENT_LIST_DIR}/shaders/*.glsl")
 file(GLOB SHADER_H_FILES     "${CMAKE_CURRENT_LIST_DIR}/shaders/*.h")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "shader\\.ibl_common\\.slang$")
+# Include-only sphere-march module (DDGI Wave D2-2), consumed via #include.
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "sdf_common\\.slang$")
 list(FIND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang" DEMO_GPU_LIGHT_SHADER_INDEX)
 if(DEMO_GPU_LIGHT_SHADER_INDEX EQUAL -1)
   list(APPEND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang")
@@ -308,6 +310,8 @@ add_library(demo_core STATIC
   render/passes/GPUDrivenAOPass.cpp
   render/passes/GlobalSDFPass.h
   render/passes/GlobalSDFPass.cpp
+  render/passes/DDGIRayTracePass.h
+  render/passes/DDGIRayTracePass.cpp
   render/passes/GPUDrivenSSRPass.h
   render/passes/GPUDrivenSSRPass.cpp
   render/passes/GPUDrivenShadowAtlasPass.h

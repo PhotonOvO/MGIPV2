@@ -266,6 +266,28 @@ struct GlobalSDFComposeUniforms
   vec4 meshBoundsMax[LGlobalSDFMaxMeshSDFs];  // xyz = padded mesh AABB max, w = mesh max encode distance
 };
 
+// DDGI SDF ray trace (Wave D2-2). Per-frame uniform buffer instead of root
+// constants: rotation matrix + volume params + lighting exceed the 128B push
+// budget (same fallback as GlobalSDFComposeUniforms).
+struct DDGIRayTraceUniforms
+{
+  vec4 rotationCol0;    // xyz = per-frame random rotation matrix column 0
+  vec4 rotationCol1;    // xyz = column 1
+  vec4 rotationCol2;    // xyz = column 2
+  vec4 volumeBoundsMin; // xyz = global SDF world-space min, w = voxel size
+  vec4 volumeBoundsMax; // xyz = global SDF world-space max, w = max encode distance
+  vec4 sunDirection;    // xyz = light travel direction (light -> scene), w = max trace distance
+  vec4 sunColor;        // xyz = sun radiance, w = sphere-march step scale
+  vec4 skyColorAlbedo;  // xyz = constant miss/sky radiance, w = constant hit albedo
+  uint64_t probePositionAddress;  // BDA of float4[totalProbes] probe world positions
+  uint32_t raysPerProbe;
+  uint32_t totalProbes;
+  uint32_t maxSteps;    // sphere-march step budget (64-128)
+  uint32_t resolution;  // global SDF voxel resolution (cubic, mip 0)
+  uint32_t _ddgiRayPadding0;
+  uint32_t _ddgiRayPadding1;
+};
+
 struct LightCullingUniforms
 {
   vec4 screenSizeAndClipPlanes;  // xy = screen size, z = near plane, w = far plane
