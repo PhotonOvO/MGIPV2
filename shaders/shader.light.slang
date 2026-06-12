@@ -1169,6 +1169,23 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
                                  || historyUv.x > 1.0 || historyUv.y > 1.0;
     float blendWeight = historyOutOfBounds ? 0.0 : saturate(postProcess.params5.z);
 
+    // --- 7.5 历史引导防火花：限制当前帧相对历史的单帧亮度增长率 ---
+    // 亚像素细几何（布幔轮廓）随 jitter 相位翻转产生 1px 竖线状单帧镜面尖峰
+    //（200~500× 背景亮度），该列 3x3 邻域自身含亮样本，clamp 盒无法拦截。
+    // 以裁剪后历史亮度为基准设上限：尖峰被压制；真实变亮区域按每帧 ~4 倍
+    // 几何收敛（全黑→满幅约 4 帧），静态场景下无副作用。
+    if(!historyOutOfBounds)
+    {
+        const float kFireflyRatio  = 4.0;
+        const float kFireflyOffset = 0.05;
+        const float lumaFiltered = luminance(filteredRgb);
+        const float lumaCap = luminance(clampedHistory) * kFireflyRatio + kFireflyOffset;
+        if(lumaFiltered > lumaCap)
+        {
+            filteredRgb *= lumaCap / max(lumaFiltered, 1.0e-5);
+        }
+    }
+
     // --- 8. tonemap 包夹混合（当前帧用滤波后的值）---
     // clampedHistory 已经历 tonemapped 域裁剪后 taaUntonemapRgb 回线性，此处再次 tonemap 进入混合域——与 Filament 路径一致
     float3 tonemappedCurrent = taaTonemapRgb(max(filteredRgb, 0.0));
