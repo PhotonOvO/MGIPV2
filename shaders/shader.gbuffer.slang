@@ -134,8 +134,8 @@ float2 encodeNormalOct(float3 n)
 // 故按 Filament 在 α=r² 域做加法后开两次方根返回 perceptual 域。
 float filterRoughness(float perceptualRoughness, float3 worldNormal)
 {
-    const float kSpecularAAVariance  = 0.15;  // Filament specularAntiAliasingVariance 默认值
-    const float kSpecularAAThreshold = 0.2;   // Filament specularAntiAliasingThreshold 默认值
+    const float kSpecularAAVariance  = 0.25;  // 上调：jitter 欠采样法线变化幅度更大，需更强折算
+    const float kSpecularAAThreshold = 0.4;   // 上调：允许更大的 kernelRoughness 上限以覆盖 13° 摆动
     const float3 du = ddx(worldNormal);
     const float3 dv = ddy(worldNormal);
     const float variance = kSpecularAAVariance * (dot(du, du) + dot(dv, dv));

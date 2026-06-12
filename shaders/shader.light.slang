@@ -1128,11 +1128,12 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     }
 
     // --- 5. YCoCg 空间 clamp 盒：圆角 3x3 AABB（必开）∩ Salvi 方差盒（可关）---
+    // 在 tonemapped 域构建 clamp 盒，单帧高光尖峰被压制后不再拉高上界
     float3 s[9];
     [unroll]
     for(int i = 0; i < 9; ++i)
     {
-        s[i] = rgbToYCoCg(rgbS[i]);
+        s[i] = rgbToYCoCg(taaTonemapRgb(max(rgbS[i], 0.0)));
     }
     float3 crossMin = min(s[4], min(min(s[1], s[3]), min(s[5], s[7])));
     float3 crossMax = max(s[4], max(max(s[1], s[3]), max(s[5], s[7])));
@@ -1157,9 +1158,11 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     }
 
     // --- 6. 精确盒裁剪（沿 history→filtered 方向，替代逐通道 clamp）---
-    float3 filteredYCoCg  = rgbToYCoCg(filteredRgb);
-    float3 historyYCoCg   = taaClipToBox(boxMin, boxMax, filteredYCoCg, rgbToYCoCg(historyRgb));
-    float3 clampedHistory = yCoCgToRgb(historyYCoCg);
+    // clamp 盒已在 tonemapped 域，filteredRgb 与 historyRgb 同样先 tonemap 再进入 taaClipToBox
+    float3 tonemappedFilteredYCoCg = rgbToYCoCg(taaTonemapRgb(max(filteredRgb, 0.0)));
+    float3 clippedHistoryYCoCg     = taaClipToBox(boxMin, boxMax, tonemappedFilteredYCoCg,
+                                                  rgbToYCoCg(taaTonemapRgb(max(historyRgb, 0.0))));
+    float3 clampedHistory          = taaUntonemapRgb(yCoCgToRgb(clippedHistoryYCoCg));
 
     // --- 7. 越界置零 ---
     const bool historyOutOfBounds = historyUv.x < 0.0 || historyUv.y < 0.0
@@ -1167,6 +1170,7 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     float blendWeight = historyOutOfBounds ? 0.0 : saturate(postProcess.params5.z);
 
     // --- 8. tonemap 包夹混合（当前帧用滤波后的值）---
+    // clampedHistory 已经历 tonemapped 域裁剪后 taaUntonemapRgb 回线性，此处再次 tonemap 进入混合域——与 Filament 路径一致
     float3 tonemappedCurrent = taaTonemapRgb(max(filteredRgb, 0.0));
     float3 tonemappedHistory = taaTonemapRgb(max(clampedHistory, 0.0));
 
