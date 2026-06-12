@@ -979,43 +979,131 @@ float3 yCoCgToRgb(float3 c)
     return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
+// 辅助：float3 三分量最大值
+float taaMax3(float3 v) { return max(v.x, max(v.y, v.z)); }
+
+// Filament tonemap：c/(1+max3(c))，压制 HDR 高光
+float3 taaTonemapRgb(float3 c) { return c / (1.0 + taaMax3(c)); }
+
+// Filament untonemap：逆变换，epsilon 防除零（epsilon = 1/65504）
+float3 taaUntonemapRgb(float3 c)
+{
+    const float eps = 1.0 / 65504.0;
+    return c / max(eps, 1.0 - taaMax3(c));
+}
+
+// Catmull-Rom 5-tap 历史采样（去掉 4 个角采样），移植自 Filament taa.mat:197-259
+// texSize = 1.0 / texelSize（即像素分辨率），texelSize = params1.zw
+float3 sampleCatmullRom5Tap(int texIdx, float2 uv, float2 texSize)
+{
+    float2 samplePos = uv * texSize;
+    float2 texPos1   = floor(samplePos - 0.5) + 0.5;
+    float2 f         = samplePos - texPos1;
+    float2 f2        = f * f;
+    float2 f3        = f2 * f;
+    float2 w0  = f2 - 0.5 * (f3 + f);
+    float2 w1  = 1.5 * f3 - 2.5 * f2 + 1.0;
+    float2 w3  = 0.5 * (f3 - f2);
+    float2 w2  = 1.0 - w0 - w1 - w3;
+    float2 w12 = w1 + w2;
+    float2 invTex   = 1.0 / texSize;
+    float2 texPos0  = (texPos1 - 1.0) * invTex;
+    float2 texPos3  = (texPos1 + 2.0) * invTex;
+    float2 texPos12 = (texPos1 + w2 / w12) * invTex;
+    float k0 = w12.x * w0.y;
+    float k1 = w0.x  * w12.y;
+    float k2 = w12.x * w12.y;
+    float k3 = w3.x  * w12.y;
+    float k4 = w12.x * w3.y;
+    float3 s0 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos0.y),  0).rgb;
+    float3 s1 = inTexture[texIdx].SampleLevel(float2(texPos0.x,  texPos12.y), 0).rgb;
+    float3 s2 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos12.y), 0).rgb;
+    float3 s3 = inTexture[texIdx].SampleLevel(float2(texPos3.x,  texPos12.y), 0).rgb;
+    float3 s4 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos3.y),  0).rgb;
+    float3 result = k0*s0 + k1*s1 + k2*s2 + k3*s3 + k4*s4;
+    float kSum = k0 + k1 + k2 + k3 + k4;
+    return max(float3(0), result / kSum);
+}
+
 [shader("fragment")]
 float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
 {
     float3 currentColor = inTexture[kSceneColorHdrIndex].Sample(input.uv).rgb;
+    // TAA 关闭早退（行为不变）
     if(postProcess.params5.x <= 0.5 || postProcess.params5.y <= 0.5)
     {
         return float4(max(currentColor, 0.0), 1.0);
     }
 
+    // --- 1. velocity 重投影（天空像素 velocity=(0,0)，historyUv 自动回退到 input.uv）---
     float depthSample  = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
-    // --- velocity 重投影（天空像素 velocity=(0,0)，historyUv 自动回退到 input.uv）---
-    float2 velocity  = inTexture[kVelocityIndex].Sample(input.uv).xy;
-    float2 historyUv = input.uv - velocity;
-    float3 historyColor = inTexture[kSceneColorHistoryReadIndex].Sample(historyUv).rgb;
+    float2 velocity    = inTexture[kVelocityIndex].Sample(input.uv).xy;
+    float2 historyUv   = input.uv - velocity;
 
-    float3 minColor = rgbToYCoCg(currentColor);
-    float3 maxColor = minColor;
+    // --- 2. Catmull-Rom 5-tap 历史采样 ---
+    float2 texSize = 1.0 / postProcess.params1.zw;  // params1.zw = texelSize → 1/texelSize = 像素分辨率
+    float3 historyRgb = sampleCatmullRom5Tap(kSceneColorHistoryReadIndex, historyUv, texSize);
+
+    // --- 3. 3x3 邻域采样（YCoCg 空间）---
     const float2 texel = postProcess.params1.zw;
-    float2 offsets[4] = {
-        float2(texel.x, 0.0),
-        float2(-texel.x, 0.0),
-        float2(0.0, texel.y),
-        float2(0.0, -texel.y)
-    };
-    [unroll]
-    for(int i = 0; i < 4; ++i)
-    {
-        float3 sampleColor = rgbToYCoCg(inTexture[kSceneColorHdrIndex].Sample(input.uv + offsets[i]).rgb);
-        minColor = min(minColor, sampleColor);
-        maxColor = max(maxColor, sampleColor);
-    }
+    float3 s[9];
+    // 顺序：[-1,-1][0,-1][1,-1][-1,0][0,0][1,0][-1,1][0,1][1,1]
+    s[0] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x, -texel.y), 0).rgb);
+    s[1] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( 0.0,     -texel.y), 0).rgb);
+    s[2] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x, -texel.y), 0).rgb);
+    s[3] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x,  0.0    ), 0).rgb);
+    s[4] = rgbToYCoCg(currentColor);
+    s[5] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x,  0.0    ), 0).rgb);
+    s[6] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x,  texel.y), 0).rgb);
+    s[7] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( 0.0,      texel.y), 0).rgb);
+    s[8] = rgbToYCoCg(inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x,  texel.y), 0).rgb);
 
-    float3 historyYCoCg = clamp(rgbToYCoCg(historyColor), minColor, maxColor);
+    // --- 4. 圆角 AABB（十字盒与全 9 样本盒平均，源自 Filament taa.mat:341-349）---
+    float3 crossMin = min(s[4], min(min(s[1], s[3]), min(s[5], s[7])));
+    float3 crossMax = max(s[4], max(max(s[1], s[3]), max(s[5], s[7])));
+    float3 box9Min  = min(crossMin, min(min(s[0], s[2]), min(s[6], s[8])));
+    float3 box9Max  = max(crossMax, max(max(s[0], s[2]), max(s[6], s[8])));
+    float3 boxMin   = (crossMin + box9Min) * 0.5;
+    float3 boxMax   = (crossMax + box9Max) * 0.5;
+
+    // --- 5. Salvi 方差盒（中心 + 上下左右 5 样本，gamma=1.0）---
+    float3 m0 = s[4];
+    float3 m1 = m0 * m0;
+    [unroll]
+    for(int i = 1; i < 9; i += 2)  // s[1],s[3],s[5],s[7] — 4 样本，合计 5 个
+    {
+        m0 += s[i];
+        m1 += s[i] * s[i];
+    }
+    float3 mu    = m0 * (1.0 / 5.0);
+    float3 sigma = sqrt(max(float3(0, 0, 0), m1 * (1.0 / 5.0) - mu * mu));
+    // 与 AABB 盒求交
+    boxMin = max(boxMin, mu - sigma);
+    boxMax = min(boxMax, mu + sigma);
+
+    // --- 6. clamp 历史（CLAMP 而非精确 clip）---
+    float3 historyYCoCg   = clamp(rgbToYCoCg(historyRgb), boxMin, boxMax);
     float3 clampedHistory = yCoCgToRgb(historyYCoCg);
-    const bool historyOutOfBounds =
-        historyUv.x < 0.0 || historyUv.y < 0.0 || historyUv.x > 1.0 || historyUv.y > 1.0;
+
+    // --- 7. 越界置零 ---
+    const bool historyOutOfBounds = historyUv.x < 0.0 || historyUv.y < 0.0
+                                 || historyUv.x > 1.0 || historyUv.y > 1.0;
     float blendWeight = historyOutOfBounds ? 0.0 : saturate(postProcess.params5.z);
-    float3 resolved = lerp(currentColor, clampedHistory, blendWeight);
+
+    // --- 8. tonemap 包夹混合 ---
+    float3 tonemappedCurrent = taaTonemapRgb(max(currentColor, 0.0));
+    float3 tonemappedHistory = taaTonemapRgb(max(clampedHistory, 0.0));
+
+    // --- 9. Lottes 亮度差平方调制 blendWeight（防闪烁）---
+    // tonemapped 为 RGB 空间，使用 R+2G+B 近似亮度（与 Filament 等效）
+    float lumaC = tonemappedCurrent.x + tonemappedCurrent.y * 2.0 + tonemappedCurrent.z;
+    float lumaH = tonemappedHistory.x + tonemappedHistory.y * 2.0 + tonemappedHistory.z;
+    float lumaDiff = 1.0 - abs(lumaC - lumaH) / (0.001 + max(lumaC, lumaH));
+    blendWeight *= lumaDiff * lumaDiff;
+
+    // --- 10. 混合 + untonemap ---
+    float3 mixed    = lerp(tonemappedCurrent, tonemappedHistory, blendWeight);
+    float3 resolved = taaUntonemapRgb(mixed);
+
     return float4(max(resolved, 0.0), 1.0);
 }
