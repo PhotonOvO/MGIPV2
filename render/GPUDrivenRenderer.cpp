@@ -396,6 +396,20 @@ namespace demo
 		initPhase7Resources();
 		bindPhase7PassResources();
 		m_globalSDFPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		// DDGI (Wave D2-1): probe volume GPU resources are only allocated when
+		// the master gate is on (default false), so default memory/behavior is
+		// unchanged. World bounds mirror the GlobalSDFPass default until a
+		// later wave wires scene-driven bounds in.
+		if (getDDGIConfig().enabled)
+		{
+			m_ddgiProbeVolume.init(getRHIDevice(),
+			                       DDGIProbeVolume::makeDesc(getDDGIConfig(),
+			                                                 glm::vec3(-GlobalSDFPass::kDefaultHalfExtent),
+			                                                 glm::vec3(GlobalSDFPass::kDefaultHalfExtent)));
+			// Publish the resolved adaptive grid dims back into the config so
+			// later waves (ray trace / probe update / sampling) see one truth.
+			m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
+		}
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
 		{
@@ -419,6 +433,8 @@ namespace demo
 		{
 			m_globalSDFPass->shutdownResources();
 		}
+		// DDGI (Wave D2-1): no-op when DDGI was never enabled.
+		m_ddgiProbeVolume.deinit();
 		m_sortedBootstrapFrames.clear();
 		m_passExecutor.clear();
 		m_imguiPass.reset();

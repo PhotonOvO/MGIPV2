@@ -278,6 +278,8 @@ add_library(demo_core STATIC
   render/GPUDrivenLightResources.cpp
   render/GPUSceneRegistry.h
   render/GPUSceneRegistry.cpp
+  render/DDGIProbeVolume.h
+  render/DDGIProbeVolume.cpp
   render/HiZDepthPyramid.h
   render/HiZDepthPyramid.cpp
   render/GPUBatchBuilder.h

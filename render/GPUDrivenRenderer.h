@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DDGIProbeVolume.h"
 #include "GPUSceneRegistry.h"
 #include "GPUDrivenLightResources.h"
 #include "GPUMeshletBuffer.h"
@@ -1017,6 +1018,10 @@ namespace demo
 		[[nodiscard]] rhi::Device& getRHIDevice() const { return m_renderer.getRHIDevice(); }
 		// DDGI (Wave D1-2): config gate for the DDGI / Global SDF passes.
 		[[nodiscard]] const DDGIConfig& getDDGIConfig() const { return m_renderer.getDDGIConfig(); }
+		// DDGI (Wave D2-1): probe atlas / position-buffer resources. Only
+		// allocated when DDGIConfig::enabled is true (default false).
+		[[nodiscard]] const DDGIProbeVolume& getDDGIProbeVolume() const { return m_ddgiProbeVolume; }
+		[[nodiscard]] DDGIProbeVolume& getDDGIProbeVolume() { return m_ddgiProbeVolume; }
 		// ArgumentTable wrapping the per-frame lighting-scene descriptor set (set LSetScene).
 		[[nodiscard]] rhi::ArgumentTableHandle getLightingSceneArgumentTable(uint32_t frameIndex) const
 		{
@@ -1248,6 +1253,9 @@ namespace demo
 		// DDGI (Wave D1-2): Global SDF clear/compose/mipmap compute pass.
 		// Gated on DDGIConfig::enabled (default false).
 		std::unique_ptr<GlobalSDFPass> m_globalSDFPass;
+		// DDGI (Wave D2-1): probe grid GPU resources (atlases + position buffer).
+		// init is gated on DDGIConfig::enabled, so the default frame allocates nothing.
+		DDGIProbeVolume m_ddgiProbeVolume;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;
