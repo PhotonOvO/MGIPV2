@@ -378,6 +378,10 @@ public:
           {
             ImGui::SliderFloat("Jitter Scale", &m_debugOptions.taaJitterScale, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("Blend Weight", &m_debugOptions.taaBlendWeight, 0.0f, 0.98f, "%.2f");
+            ImGui::Checkbox("Filter Input (Lanczos)", &m_debugOptions.taaFilterInput);
+            ImGui::Checkbox("Variance Clip Box", &m_debugOptions.taaVarianceClip);
+            ImGui::Checkbox("Prevent Flicker (Lottes)", &m_debugOptions.taaPreventFlicker);
+            ImGui::Checkbox("Catmull-Rom History", &m_debugOptions.taaCatmullRom);
           }
           ImGui::SliderFloat("Render Scale", &m_debugOptions.renderScale, 0.5f, 1.0f, "%.2f");
           const char* upscaleModes[] = {"Off", "TAA", "Spatial"};

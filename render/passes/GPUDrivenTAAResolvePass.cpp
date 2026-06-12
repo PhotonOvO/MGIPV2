@@ -91,9 +91,16 @@ namespace demo
 				                     1.0f / static_cast<float>(std::max(1u, extent.height)),
 				                     1.0f / static_cast<float>(std::max(1u, extent.width)),
 				                     1.0f / static_cast<float>(std::max(1u, extent.height))),
-				.params2 = glm::vec4(0.0f),
+				// params2.xy = 当前帧 jitter（像素单位），filterInput 的 Lanczos 核中心
+				.params2 = glm::vec4(m_renderer->getCurrentTAAJitterUv().x * static_cast<float>(extent.width),
+				                     m_renderer->getCurrentTAAJitterUv().y * static_cast<float>(extent.height),
+				                     0.0f, 0.0f),
 				.params3 = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f),
-				.params4 = glm::vec4(0.0f),
+				// params4 = TAA 特性开关：filterInput / varianceBox / lottes / catmullRom
+				.params4 = glm::vec4(context.params->debugOptions.taaFilterInput ? 1.0f : 0.0f,
+				                     context.params->debugOptions.taaVarianceClip ? 1.0f : 0.0f,
+				                     context.params->debugOptions.taaPreventFlicker ? 1.0f : 0.0f,
+				                     context.params->debugOptions.taaCatmullRom ? 1.0f : 0.0f),
 				.params5 = glm::vec4(1.0f,
 				                     m_renderer->isTAAHistoryValid() ? 1.0f : 0.0f,
 				                     std::clamp(context.params->debugOptions.taaBlendWeight, 0.0f, 0.98f),
