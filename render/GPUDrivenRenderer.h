@@ -1271,12 +1271,18 @@ namespace demo
 		// DDGI (Wave D2-3): probe irradiance/depth update + border update.
 		// Resources are only created when DDGIConfig::enabled is true.
 		std::unique_ptr<DDGIProbeUpdatePass> m_ddgiProbeUpdatePass;
-		// DDGI (Wave D3-1): sampled views over the *current* atlases for the
-		// lighting pass SampleProbe path. Null when DDGI is disabled; the
-		// lighting argument table then falls back to a placeholder view and
-		// the shader gate (ddgiGridDimsAndEnabled.w) keeps the path dormant.
-		rhi::TextureViewHandle m_ddgiIrradianceLightingView{};
-		rhi::TextureViewHandle m_ddgiDepthLightingView{};
+		// DDGI (Wave D3-1/D4-1): sampled views over BOTH atlas sets for the
+		// lighting pass SampleProbe path. Index = frame parity
+		// (temporalFrameCounter & 1, monotonic counter — constraint 4), view =
+		// that parity's WRITE atlas (the one the probe update produced this
+		// frame; DDGIProbeVolume contract). updateLightingArgumentTable picks
+		// the parity view every frame BEFORE any pass encodes (TAA lesson:
+		// descriptors must point at the right view up front, c04c878). Null
+		// when DDGI is disabled; the lighting argument table then falls back
+		// to a placeholder view and the shader gate (ddgiGridDimsAndEnabled.w)
+		// keeps the path dormant.
+		std::array<rhi::TextureViewHandle, 2> m_ddgiIrradianceLightingViews{};
+		std::array<rhi::TextureViewHandle, 2> m_ddgiDepthLightingViews{};
 		// DDGI (Wave D3-2): probe visualization debug draw. Resources are only
 		// created when DDGIConfig::enabled is true; the draw additionally
 		// requires the ImGui "DDGI Probe Visualize" checkbox (default false).

@@ -11,8 +11,11 @@
 //   3/4. Irradiance/Depth BorderUpdate — octahedral wrap copy of interior
 //      edge texels into each tile's 1px border ring.
 //
-// Wiring this wave: reads the HISTORY atlases, writes the CURRENT atlases
-// (DDGIProbeVolume double buffer); the end-of-frame swap is enabled in D4-1.
+// Ping-pong wiring (Wave D4-1, implementation approach (2): fixed handles +
+// parity selection): two static argument-table sets are prebuilt at init —
+// parity 0 reads atlas set B / writes set A, parity 1 the reverse (cf. the
+// DDGIProbeVolume parity contract) — and execute selects one with
+// temporalFrameCounter & 1. No handle swap, no per-frame descriptor rewrite.
 // The per-frame ray rotation is recomputed via
 // DDGIRayTracePass::makeRayRotation from the monotonic temporal frame counter
 // (DDGI hard constraint 4 — never the frames-in-flight ring index), so the
@@ -26,6 +29,8 @@
 #include "../../rhi/RHIDevice.h"
 
 #include <glm/glm.hpp>
+
+#include <array>
 
 namespace demo
 {
@@ -56,13 +61,13 @@ namespace demo
 		GPUDrivenRenderer* m_renderer{nullptr};
 		rhi::Device* m_device{nullptr};
 
-		// Views owned by this pass over DDGIProbeVolume textures. NOTE: bound
-		// statically to the D2-1 current/history handles — when D4-1 enables
-		// swapAtlases, the tables must be rebuilt (or rebound per parity).
-		rhi::TextureViewHandle m_irradianceCurrentView{};
-		rhi::TextureViewHandle m_irradianceHistoryView{};
-		rhi::TextureViewHandle m_depthCurrentView{};
-		rhi::TextureViewHandle m_depthHistoryView{};
+		// Views owned by this pass over DDGIProbeVolume textures. D4-1: one
+		// storage view per physical atlas (set A = the *Atlas handles, set B =
+		// the *AtlasHistory handles); the parity tables below combine them.
+		rhi::TextureViewHandle m_irradianceViewA{};
+		rhi::TextureViewHandle m_irradianceViewB{};
+		rhi::TextureViewHandle m_depthViewA{};
+		rhi::TextureViewHandle m_depthViewB{};
 		rhi::TextureViewHandle m_radianceView{};
 
 		// Shared by both update pipelines: 0 = out atlas, 1 = history atlas,
@@ -76,11 +81,14 @@ namespace demo
 		rhi::PipelineHandle m_irradianceBorderPipeline{};
 		rhi::PipelineHandle m_depthBorderPipeline{};
 
-		// Static tables: views never change after init (see note above).
-		rhi::ArgumentTableHandle m_irradianceUpdateTable{};
-		rhi::ArgumentTableHandle m_depthUpdateTable{};
-		rhi::ArgumentTableHandle m_irradianceBorderTable{};
-		rhi::ArgumentTableHandle m_depthBorderTable{};
+		// Static prebuilt table pairs indexed by the frame parity
+		// (temporalFrameCounter & 1, monotonic counter — constraint 4):
+		// parity 0 writes set A / reads set B, parity 1 the reverse. The
+		// border tables target the parity's WRITE atlas.
+		std::array<rhi::ArgumentTableHandle, 2> m_irradianceUpdateTables{};
+		std::array<rhi::ArgumentTableHandle, 2> m_depthUpdateTables{};
+		std::array<rhi::ArgumentTableHandle, 2> m_irradianceBorderTables{};
+		std::array<rhi::ArgumentTableHandle, 2> m_depthBorderTables{};
 
 		// Lazily transitions the four atlas textures Undefined -> General on
 		// the first recorded execute; doubling as the "atlases hold no valid

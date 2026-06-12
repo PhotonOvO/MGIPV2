@@ -18,6 +18,7 @@
 #include "shader_io.h"
 #include "sdf_common.slang"
 #include "ddgi_common.slang"
+#include "ddgi_sample_probe.slang"
 
 [[vk::binding(0, 0)]]
 RWTexture2D<float4> radianceOutput;
@@ -27,6 +28,14 @@ Sampler3D<float> globalSDFTexture;
 
 [[vk::binding(2, 0)]]
 ConstantBuffer<DDGIRayTraceUniforms> rayTraceUniforms;
+
+// Infinite bounce (Wave D4-1): LAST frame's probe atlases (the C++ side binds
+// the parity-selected read pair; cf. DDGIProbeVolume::getIrradianceAtlasRead).
+[[vk::binding(3, 0)]]
+Sampler2D historyIrradianceAtlas;
+
+[[vk::binding(4, 0)]]
+Sampler2D historyDepthAtlas;
 
 // sphericalFibonacci moved to ddgi_common.slang (Wave D2-3): the probe update
 // kernels reconstruct the exact same per-ray directions from the shared
@@ -114,6 +123,38 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
             const float albedo = rayTraceUniforms.skyColorAlbedo.w;
             radiance =
                 (albedo / kDDGIRaysPi) * rayTraceUniforms.sunColor.xyz * nDotL * sunVisibility;
+
+            // Infinite bounce (Wave D4-1): add the indirect term by sampling
+            // LAST frame's probe atlases at the hit point — LuxGI
+            // GIRays/Lighting.glsl indirectLighting: diffuseColor *
+            // sampleIrradiance(P, N, Wo) with Wo = -rayDirection.
+            if (rayTraceUniforms.firstFrame == 0u)
+            {
+                DDGISampleVolume volume;
+                volume.gridOrigin = rayTraceUniforms.ddgiGridOriginAndSpacing.xyz;
+                volume.probeSpacing = rayTraceUniforms.ddgiGridOriginAndSpacing.w;
+                volume.probeCounts = int3(rayTraceUniforms.ddgiGridDims.xyz);
+                volume.normalBias = rayTraceUniforms.ddgiSampleParams0.x;
+                volume.ddgiGamma = rayTraceUniforms.ddgiSampleParams0.y;
+                volume.irradianceSideLength = int(rayTraceUniforms.ddgiSampleParams0.z);
+                volume.irradianceAtlasSize = int2(rayTraceUniforms.ddgiSampleParams1.xy);
+                volume.depthSideLength = int(rayTraceUniforms.ddgiSampleParams0.w);
+                volume.depthAtlasSize = int2(rayTraceUniforms.ddgiSampleParams1.zw);
+                volume.probePositionAddress = rayTraceUniforms.probePositionAddress;
+                const float3 indirectIrradiance = sampleDDGIIrradiance(
+                    volume, hitPosition, hitNormal, -rayDirection,
+                    historyIrradianceAtlas, historyDepthAtlas);
+                radiance += (albedo / kDDGIRaysPi) * indirectIrradiance;
+            }
+            else
+            {
+                // First frame (no valid history): constant-sky indirect
+                // fallback (user-sanctioned deviation; the plan's IBL fallback
+                // is deferred with the D2-2 IBL miss wiring). A uniform sky of
+                // radiance L gives hemisphere irradiance E = pi * L, so the
+                // diffuse bounce term (albedo / pi) * E reduces to albedo * L.
+                radiance += albedo * rayTraceUniforms.skyColorAlbedo.xyz;
+            }
             hitDistance = hit.hitTime;
         }
     }

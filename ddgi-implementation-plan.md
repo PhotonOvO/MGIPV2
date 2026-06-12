@@ -656,7 +656,7 @@ DDGIDebugPassData 包含：probeCount（uint）、probePositionBufferGpuPtr（Gp
 
 #### Wave D4-1：无限反弹（History Atlas Ping-Pong）
 
-**状态**：[ ] 未开始
+**状态**：[x] 完成（2026-06-13）
 
 **目标**
 
@@ -684,12 +684,22 @@ ping-pong 规则：偶数帧（temporalFrameCounter & 1 == 0）ray trace 读 irr
 
 **验收标准**
 
-- [ ] MSVC 构建通过
-- [ ] 静止场景 RenderDoc 连续两帧对比，irradianceAtlas 颜色值单调趋近收敛（不同帧间有可见但递减的差异）
-- [ ] 首帧（temporalFrameCounter == 0）无空白/黑色 probe（IBL fallback 工作）
-- [ ] `check_rhi_boundary.py` 零新增
+- [x] MSVC 构建通过
+- [ ] 静止场景 RenderDoc 连续两帧对比，irradianceAtlas 颜色值单调趋近收敛（不同帧间有可见但递减的差异）—— 用户授权跳过，留待视觉验收
+- [ ] 首帧（temporalFrameCounter == 0）无空白/黑色 probe（IBL fallback 工作）—— 用户授权跳过；首帧 fallback 改为常量天空色（见实施备注）
+- [x] `check_rhi_boundary.py` 零新增（构建内守卫 PASS）
 
 **提交样例**：`feat(render): DDGI infinite bounce via history atlas ping-pong`
+
+**实施备注（2026-06-13）**：
+- **验收口径（用户授权偏离）**：本 Wave 唯一验收门槛为 MSVC 构建通过（slang 编译失败即构建失败）；RenderDoc/收敛类验收项跳过保留未勾，待启用后统一实证。
+- **Ping-pong 实现方式：方式②（固定句柄 + 奇偶预建双套 ArgumentTable），非计划草案的 swapAtlases 句柄交换（方式①）**。理由：句柄交换会使所有建立在旧句柄上的视图/描述符失效，迫使每帧重建或重写描述符——这正是 TAA 修复（c04c878）根因的同类问题（描述符写入时机与 ping-pong 视图赋值顺序错位 → 描述符滞后一帧）。方式②下全部视图与 table 在 init 一次性预建为两套（parity 0：写 A 组 `m_irradianceAtlas/m_depthAtlas`、读 B 组 `*History`；parity 1 反之），execute 按 `temporalFrameCounter & 1` 选用，零每帧描述符改写。`DDGIProbeVolume::swapAtlases()` 因此删除，改为 `getIrradianceAtlasWrite/Read(frameParity)`、`getDepthAtlasWrite/Read(frameParity)` 奇偶访问器（parity 契约集中在 DDGIProbeVolume 头文件注释）。**奇偶一律取自单调递增 `m_temporalFrameCounter`，严禁飞行帧环索引（约束 4）**。
+- **各 pass 双套 table 布点**：DDGIRayTracePass tables 扩为 `frameCount × 2`（index = frameIndex×2+parity，同帧两套共享该帧 uniform buffer，仅 history atlas 视图对不同）；DDGIProbeUpdatePass 四类 table 各 ×2（irradiance/depth update：out=本 parity 写组、history=读组；border：本 parity 写组）；DDGIDebugPass tables 同样 `frameCount × 2`。
+- **读取侧描述符更新时机**：lighting 路径的 atlas SRV 本就由 `updateLightingArgumentTable(frameIndex)` 每帧重写（per-frame-in-flight table），本 Wave 改为持有两组视图 `m_ddgiIrradianceLightingViews[2]/m_ddgiDepthLightingViews[2]` 并按奇偶选"本帧 update 写完的那张"（write atlas）。该函数经 `updateGPUDrivenLights` 在 `render()` 第 622 行调用，早于第 850 行 `submitPassGraph`（命令编码），且 `++m_temporalFrameCounter` 在 `render()` 末尾——同帧内 CPU 侧描述符写入与全部 pass 编码看到同一 counter 值，奇偶一致，无描述符滞后（对齐 TAA 修复后的先例：历史视图赋值先于 updateGPUDrivenLights）。
+- **GISDFRays 间接项**：shader 新增 binding 3/4（history irradiance/depth atlas，combinedImageSampler，readWrite intent → General 布局，同 lighting 绑定先例）；命中点着色追加 `radiance += (albedo/π) × sampleDDGIIrradiance(hitPos, hitNormal, Wo=-rayDirection, …)`——复用 D3-1 的 `ddgi_sample_probe.slang` 完整权重链，对照 LuxGI GIRays/Lighting.glsl:79-84 `indirectLighting`（diffuseColor × sampleIrradiance，Wo = -射线方向）。采样体积参数（grid origin/dims、normalBias、ddgiGamma、texel 边长、atlas 尺寸）经 `DDGIRayTraceUniforms` 新增 4 个 vec4 传入（沿用 LightParams ddgi* 打包先例）。
+- **首帧 fallback（用户授权偏离）**：计划草案的 IBL fallback 改为 D2-2 的常量天空色——IBL cubemap 接线进 GISDFRays 复杂度高，与 D2-2 miss IBL 接线一并后置。首帧判断 `firstFrame = (temporalFrameCounter == 0) || 布局 latch 未记录`（uniform 传入，覆盖运行时中途启用），shader 侧跳过 probe 采样改加 `albedo × skyColor`（均匀天空辐射 L 的半球辐照度 E = πL，漫反射项 (albedo/π)·E 化简为 albedo·L）。
+- **Atlas 首帧布局迁移前移**：四张 atlas 的 Undefined→General 惰性迁移从 DDGIProbeUpdatePass 前移至 DDGIRayTracePass（DDGI 链中最先录制，history 采样描述符要求 General 布局先于首个 dispatch）；update pass 保留自身 latch barrier 作幂等兜底（oldLayout=Undefined 恒合法，仅丢弃首写前的垃圾内容），覆盖 trace pass 被跳过的角落场景。
+- **跨帧 hazard**：上帧 update 写 atlas → 本帧 trace 读，由 update pass 既有尾部 compute→compute|fragment barrier 覆盖（同队列提交序）；无新增 barrier。
 
 ---
 

@@ -279,13 +279,21 @@ struct DDGIRayTraceUniforms
   vec4 sunDirection;    // xyz = light travel direction (light -> scene), w = max trace distance
   vec4 sunColor;        // xyz = sun radiance, w = sphere-march step scale
   vec4 skyColorAlbedo;  // xyz = constant miss/sky radiance, w = constant hit albedo
+  // DDGI infinite bounce (Wave D4-1): SampleProbe volume constants so the hit
+  // shading can sample LAST frame's probe atlases (read by parity, see
+  // DDGIProbeVolume). Mirrors the LightParams ddgi* packing (Wave D3-1).
+  vec4 ddgiGridOriginAndSpacing;  // xyz = probe grid world-space origin, w = probeSpacing
+  vec4 ddgiGridDims;              // xyz = probe grid dims, w unused
+  vec4 ddgiSampleParams0;         // x = normalBias, y = ddgiGamma, z = irradiance texel side, w = depth texel side
+  vec4 ddgiSampleParams1;         // x = irr atlas width, y = irr atlas height, z = depth atlas width, w = depth atlas height
   uint64_t probePositionAddress;  // BDA of float4[totalProbes] probe world positions
   uint32_t raysPerProbe;
   uint32_t totalProbes;
   uint32_t maxSteps;    // sphere-march step budget (64-128)
   uint32_t resolution;  // global SDF voxel resolution (cubic, mip 0)
+  uint32_t firstFrame;  // 1 = history atlases hold no valid data: skip probe
+                        //     sampling, use the constant-sky indirect fallback
   uint32_t _ddgiRayPadding0;
-  uint32_t _ddgiRayPadding1;
 };
 
 // DDGI probe irradiance/depth update (Wave D2-3). 80 bytes: fits the 128B

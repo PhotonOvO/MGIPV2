@@ -62,10 +62,36 @@ namespace demo
 		// Safe to call when never initialized (no-op).
 		void deinit();
 
-		// Ping-pong: swaps current <-> history atlas handles (irradiance and
-		// depth). Used by the D4-1 infinite-bounce wave; provided here so the
-		// resource ownership stays in one place.
-		void swapAtlases();
+		// Ping-pong (Wave D4-1, implementation approach (2): fixed handles +
+		// parity selection). The atlas handles never swap; instead every DDGI
+		// pass prebuilds two argument-table sets and selects one with the frame
+		// parity derived from the MONOTONIC temporal frame counter
+		// (temporalFrameCounter & 1 — never the frames-in-flight ring index,
+		// DDGI hard constraint 4). This replaces the previously stubbed
+		// swapAtlases(): swapping handles would invalidate every view/table
+		// built over them and reintroduce the descriptor-lag class of bugs the
+		// TAA fix (c04c878) addressed.
+		//
+		// Convention: parity 0 writes the A set (m_irradianceAtlas/m_depthAtlas)
+		// and reads the B set (the *History members); parity 1 is the reverse.
+		// "Write" is the atlas the probe update produces this frame (and the
+		// lighting/debug passes consume this frame); "Read" is last frame's.
+		[[nodiscard]] rhi::TextureHandle getIrradianceAtlasWrite(uint32_t frameParity) const
+		{
+			return (frameParity & 1u) == 0u ? m_irradianceAtlas : m_irradianceAtlasHistory;
+		}
+		[[nodiscard]] rhi::TextureHandle getIrradianceAtlasRead(uint32_t frameParity) const
+		{
+			return (frameParity & 1u) == 0u ? m_irradianceAtlasHistory : m_irradianceAtlas;
+		}
+		[[nodiscard]] rhi::TextureHandle getDepthAtlasWrite(uint32_t frameParity) const
+		{
+			return (frameParity & 1u) == 0u ? m_depthAtlas : m_depthAtlasHistory;
+		}
+		[[nodiscard]] rhi::TextureHandle getDepthAtlasRead(uint32_t frameParity) const
+		{
+			return (frameParity & 1u) == 0u ? m_depthAtlasHistory : m_depthAtlas;
+		}
 
 		[[nodiscard]] bool isInitialized() const { return m_device != nullptr; }
 		[[nodiscard]] const DDGIProbeVolumeDesc& getDesc() const { return m_desc; }

@@ -39,18 +39,21 @@ namespace demo
 		m_device = &device;
 		m_frameCount = std::max(frameCount, 1u);
 
-		// Sampled view over the *current* irradiance atlas (D2-3 writes
-		// current; same source the lighting SampleProbe path reads).
+		// Sampled views over BOTH irradiance atlases (D4-1 ping-pong): index =
+		// frame parity, view = that parity's WRITE atlas — the one the probe
+		// update produced this frame (same selection as the lighting path).
+		for (uint32_t parity = 0; parity < 2u; ++parity)
 		{
 			rhi::TextureViewCreateDesc viewDesc{};
-			viewDesc.image = probeVolume.getIrradianceAtlas();
+			viewDesc.image = probeVolume.getIrradianceAtlasWrite(parity);
 			viewDesc.format = rhi::TextureFormat::rgba16Sfloat;
 			viewDesc.viewType = rhi::ImageViewType::e2D;
 			viewDesc.aspect = rhi::TextureAspect::color;
 			viewDesc.baseMipLevel = 0;
 			viewDesc.levelCount = 1;
-			viewDesc.debugName = "ddgi-debug-irradiance-view";
-			m_irradianceView = device.createTextureView(viewDesc);
+			viewDesc.debugName = parity == 0u ? "ddgi-debug-irradiance-view-p0"
+			                                  : "ddgi-debug-irradiance-view-p1";
+			m_irradianceViews[parity] = device.createTextureView(viewDesc);
 		}
 
 		m_sampler = device.createSampler(rhi::SamplerDesc{
@@ -81,7 +84,9 @@ namespace demo
 			.debugName = "ddgi-debug",
 		});
 
-		m_tables.resize(m_frameCount);
+		// Two prebuilt tables per frame in flight (index = frameIndex * 2 +
+		// parity): static descriptors, parity selected at execute time.
+		m_tables.resize(m_frameCount * 2u);
 		m_uniformBuffers.resize(m_frameCount);
 		for (uint32_t i = 0; i < m_frameCount; ++i)
 		{
@@ -92,27 +97,31 @@ namespace demo
 				.debugName = "ddgi-debug-uniforms",
 			});
 
-			m_tables[i] = device.createArgumentTable(m_layout);
-			const std::array<rhi::ArgumentWrite, 2> writes{
-				{
-					// The atlas stays in the General layout (the probe update
-					// pass writes it as a storage image and never transitions
-					// it), so the sampled descriptor uses the readWrite intent
-					// -> General layout, same as the lighting-pass binding.
-					rhi::ArgumentWrite{
-						.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
-						.textureView = m_irradianceView,
-						.sampler = m_sampler,
-						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
-					},
-					rhi::ArgumentWrite{
-						.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
-						.buffer = m_uniformBuffers[i],
-						.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
-					},
-				}
-			};
-			device.updateArgumentTable(m_tables[i], static_cast<uint32_t>(writes.size()), writes.data());
+			for (uint32_t parity = 0; parity < 2u; ++parity)
+			{
+				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
+				table = device.createArgumentTable(m_layout);
+				const std::array<rhi::ArgumentWrite, 2> writes{
+					{
+						// The atlas stays in the General layout (the probe update
+						// pass writes it as a storage image and never transitions
+						// it), so the sampled descriptor uses the readWrite intent
+						// -> General layout, same as the lighting-pass binding.
+						rhi::ArgumentWrite{
+							.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
+							.textureView = m_irradianceViews[parity],
+							.sampler = m_sampler,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+						rhi::ArgumentWrite{
+							.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
+							.buffer = m_uniformBuffers[i],
+							.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
+						},
+					}
+				};
+				device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
+			}
 		}
 
 #ifdef USE_SLANG
@@ -203,8 +212,11 @@ namespace demo
 
 		if (!m_sampler.isNull()) m_device->destroySampler(m_sampler);
 		m_sampler = {};
-		if (!m_irradianceView.isNull()) m_device->destroyTextureView(m_irradianceView);
-		m_irradianceView = {};
+		for (rhi::TextureViewHandle& view : m_irradianceViews)
+		{
+			if (!view.isNull()) m_device->destroyTextureView(view);
+			view = {};
+		}
 
 		m_frameCount = 0;
 		m_device = nullptr;
@@ -264,15 +276,22 @@ namespace demo
 			return;
 		}
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
-		if (m_device == nullptr || m_pipeline.isNull() || m_irradianceView.isNull()
+		if (m_device == nullptr || m_pipeline.isNull()
+			|| m_irradianceViews[0].isNull() || m_irradianceViews[1].isNull()
 			|| !probeVolume.isInitialized() || probeVolume.getTotalProbes() == 0u
 			|| !probeVolume.getProbePositionAddress().isValid()
 			|| context.params->cameraUniforms == nullptr)
 		{
 			return;
 		}
+		// Ping-pong parity from the MONOTONIC temporal counter (constraint 4)
+		// — selects the atlas the probe update wrote THIS frame, matching the
+		// lighting-pass read side.
+		const uint32_t parity =
+			static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
 		const uint32_t frameIndex = context.frameIndex;
-		if (frameIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
+		const uint32_t tableIndex = frameIndex * 2u + parity;
+		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
 		{
 			return;
 		}
@@ -316,7 +335,7 @@ namespace demo
 		enc->setScissor(rhi::Rect2D{{0, 0}, targets.extent});
 
 		enc->setPipeline(m_pipeline);
-		enc->setArgumentTable(rhi::ShaderStage::allGraphics, 0, m_tables[frameIndex]);
+		enc->setArgumentTable(rhi::ShaderStage::allGraphics, 0, m_tables[tableIndex]);
 
 		// Procedural UV sphere: stacks * slices * 6 vertices per instance,
 		// one instance per probe (instance id == probe index in the shader).

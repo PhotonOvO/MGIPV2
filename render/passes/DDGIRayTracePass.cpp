@@ -126,7 +126,43 @@ namespace demo
 			.debugName = "ddgi-raytrace-sdf-sampler",
 		});
 
-		const std::array<rhi::ArgumentBinding, 3> bindings{
+		// D4-1: sampled views over both probe atlas sets so the hit shading
+		// can read LAST frame's atlases. Index = frame parity whose READ pair
+		// the view belongs to (DDGIProbeVolume::get*AtlasRead convention).
+		const auto createAtlasReadView = [&](rhi::TextureHandle texture, rhi::TextureFormat format,
+		                                     const char* debugName)
+		{
+			rhi::TextureViewCreateDesc viewDesc{};
+			viewDesc.image = texture;
+			viewDesc.format = format;
+			viewDesc.viewType = rhi::ImageViewType::e2D;
+			viewDesc.aspect = rhi::TextureAspect::color;
+			viewDesc.baseMipLevel = 0;
+			viewDesc.levelCount = 1;
+			viewDesc.debugName = debugName;
+			return device.createTextureView(viewDesc);
+		};
+		for (uint32_t parity = 0; parity < 2u; ++parity)
+		{
+			m_historyIrradianceViews[parity] = createAtlasReadView(
+				probeVolume.getIrradianceAtlasRead(parity), rhi::TextureFormat::rgba16Sfloat,
+				parity == 0u ? "ddgi-raytrace-history-irradiance-p0" : "ddgi-raytrace-history-irradiance-p1");
+			m_historyDepthViews[parity] = createAtlasReadView(
+				probeVolume.getDepthAtlasRead(parity), rhi::TextureFormat::rg16Sfloat,
+				parity == 0u ? "ddgi-raytrace-history-depth-p0" : "ddgi-raytrace-history-depth-p1");
+		}
+
+		m_atlasSampler = device.createSampler(rhi::SamplerDesc{
+			.magFilter = rhi::Filter::linear,
+			.minFilter = rhi::Filter::linear,
+			.mipmapMode = rhi::MipmapMode::nearest,
+			.addressModeU = rhi::AddressMode::clampToEdge,
+			.addressModeV = rhi::AddressMode::clampToEdge,
+			.addressModeW = rhi::AddressMode::clampToEdge,
+			.debugName = "ddgi-raytrace-atlas-sampler",
+		});
+
+		const std::array<rhi::ArgumentBinding, 5> bindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -140,6 +176,14 @@ namespace demo
 					.binding = 2, .type = rhi::ArgumentType::uniformBuffer,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
+				rhi::ArgumentBinding{
+					.binding = 3, .type = rhi::ArgumentType::combinedImageSampler,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
 			}
 		};
 		m_layout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
@@ -148,7 +192,11 @@ namespace demo
 			.debugName = "ddgi-raytrace",
 		});
 
-		m_tables.resize(m_frameCount);
+		// Two prebuilt tables per frame in flight (index = frameIndex * 2 +
+		// parity): static descriptors, no per-frame rewrites — the parity
+		// selection happens at execute time (implementation approach (2),
+		// avoiding the descriptor-lag class of ping-pong bugs).
+		m_tables.resize(m_frameCount * 2u);
 		m_uniformBuffers.resize(m_frameCount);
 		for (uint32_t i = 0; i < m_frameCount; ++i)
 		{
@@ -159,31 +207,52 @@ namespace demo
 				.debugName = "ddgi-raytrace-uniforms",
 			});
 
-			m_tables[i] = device.createArgumentTable(m_layout);
-			const std::array<rhi::ArgumentWrite, 3> writes{
-				{
-					rhi::ArgumentWrite{
-						.binding = 0, .type = rhi::ArgumentType::storageTexture,
-						.textureView = m_radianceView,
-						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
-					},
-					// The SDF volume stays in General layout (written through
-					// storage bindings by GlobalSDFPass); readWrite intent keeps
-					// the descriptor layout in sync (same as the compose pass).
-					rhi::ArgumentWrite{
-						.binding = 1, .type = rhi::ArgumentType::combinedImageSampler,
-						.textureView = m_globalSDFView,
-						.sampler = m_globalSDFSampler,
-						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
-					},
-					rhi::ArgumentWrite{
-						.binding = 2, .type = rhi::ArgumentType::uniformBuffer,
-						.buffer = m_uniformBuffers[i],
-						.size = sizeof(shaderio::DDGIRayTraceUniforms),
-					},
-				}
-			};
-			device.updateArgumentTable(m_tables[i], static_cast<uint32_t>(writes.size()), writes.data());
+			for (uint32_t parity = 0; parity < 2u; ++parity)
+			{
+				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
+				table = device.createArgumentTable(m_layout);
+				const std::array<rhi::ArgumentWrite, 5> writes{
+					{
+						rhi::ArgumentWrite{
+							.binding = 0, .type = rhi::ArgumentType::storageTexture,
+							.textureView = m_radianceView,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+						// The SDF volume stays in General layout (written through
+						// storage bindings by GlobalSDFPass); readWrite intent keeps
+						// the descriptor layout in sync (same as the compose pass).
+						rhi::ArgumentWrite{
+							.binding = 1, .type = rhi::ArgumentType::combinedImageSampler,
+							.textureView = m_globalSDFView,
+							.sampler = m_globalSDFSampler,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+						rhi::ArgumentWrite{
+							.binding = 2, .type = rhi::ArgumentType::uniformBuffer,
+							.buffer = m_uniformBuffers[i],
+							.size = sizeof(shaderio::DDGIRayTraceUniforms),
+						},
+						// D4-1: last frame's atlases. They live in the General
+						// layout (the probe update pass writes them as storage
+						// images and never transitions them), so the sampled
+						// descriptors use the readWrite intent -> General, same
+						// as the lighting-pass atlas bindings.
+						rhi::ArgumentWrite{
+							.binding = 3, .type = rhi::ArgumentType::combinedImageSampler,
+							.textureView = m_historyIrradianceViews[parity],
+							.sampler = m_atlasSampler,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+						rhi::ArgumentWrite{
+							.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
+							.textureView = m_historyDepthViews[parity],
+							.sampler = m_atlasSampler,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+					}
+				};
+				device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
+			}
 		}
 
 #ifdef USE_SLANG
@@ -230,6 +299,18 @@ namespace demo
 		if (!m_layout.isNull()) m_device->destroyArgumentLayout(m_layout);
 		m_layout = {};
 
+		if (!m_atlasSampler.isNull()) m_device->destroySampler(m_atlasSampler);
+		m_atlasSampler = {};
+		for (rhi::TextureViewHandle& view : m_historyIrradianceViews)
+		{
+			if (!view.isNull()) m_device->destroyTextureView(view);
+			view = {};
+		}
+		for (rhi::TextureViewHandle& view : m_historyDepthViews)
+		{
+			if (!view.isNull()) m_device->destroyTextureView(view);
+			view = {};
+		}
 		if (!m_globalSDFSampler.isNull()) m_device->destroySampler(m_globalSDFSampler);
 		m_globalSDFSampler = {};
 		if (!m_globalSDFView.isNull()) m_device->destroyTextureView(m_globalSDFView);
@@ -287,11 +368,36 @@ namespace demo
 		uniforms.sunDirection = glm::vec4(sunDirection, maxTraceDistance);
 		uniforms.sunColor = glm::vec4(sunColor, kDefaultStepScale);
 		uniforms.skyColorAlbedo = glm::vec4(kSkyColorR, kSkyColorG, kSkyColorB, kDefaultAlbedo);
+		// D4-1 infinite bounce: SampleProbe volume constants (same packing
+		// convention as the LightParams ddgi* fields in updateGPUDrivenLights).
+		{
+			const DDGIConfig& config = m_renderer->getDDGIConfig();
+			const DDGIProbeVolumeDesc& volumeDesc = probeVolume.getDesc();
+			const rhi::Extent2D irradianceExtent = probeVolume.getIrradianceAtlasExtent();
+			const rhi::Extent2D depthExtent = probeVolume.getDepthAtlasExtent();
+			uniforms.ddgiGridOriginAndSpacing =
+				glm::vec4(volumeDesc.sceneBoundsMin, volumeDesc.probeSpacing);
+			uniforms.ddgiGridDims = glm::vec4(glm::vec3(probeVolume.getGridDims()), 0.0f);
+			uniforms.ddgiSampleParams0 =
+				glm::vec4(config.normalBias, config.ddgiGamma,
+				          static_cast<float>(volumeDesc.irradianceTexelSize),
+				          static_cast<float>(volumeDesc.depthTexelSize));
+			uniforms.ddgiSampleParams1 =
+				glm::vec4(static_cast<float>(irradianceExtent.width),
+				          static_cast<float>(irradianceExtent.height),
+				          static_cast<float>(depthExtent.width),
+				          static_cast<float>(depthExtent.height));
+		}
 		uniforms.probePositionAddress = probeVolume.getProbePositionAddress().value;
 		uniforms.raysPerProbe = std::max(probeVolume.getDesc().raysPerProbe, 1u);
 		uniforms.totalProbes = probeVolume.getTotalProbes();
 		uniforms.maxSteps = kDefaultMaxSteps;
 		uniforms.resolution = volume.resolution;
+		// First-frame detection mirrors DDGIProbeUpdatePass: counter == 0 OR
+		// the lazy layout latch not yet recorded (covers runtime enabling).
+		// NEVER derived from the frames-in-flight ring index (constraint 4).
+		uniforms.firstFrame =
+			(!m_radianceLayoutInitialized || m_renderer->getTemporalFrameCounter() == 0u) ? 1u : 0u;
 
 		// cpuToGpu memory is host-coherent on desktop; no explicit flush needed
 		// (same contract as GlobalSDFPass's uniform upload).
@@ -324,8 +430,14 @@ namespace demo
 			}
 			return;
 		}
+		// Ping-pong parity from the MONOTONIC temporal frame counter (DDGI hard
+		// constraint 4 — context.frameIndex is the frames-in-flight ring index
+		// and cycles 0,1,2 on triple-buffered swapchains, breaking & 1).
+		const uint32_t parity =
+			static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
 		const uint32_t frameIndex = context.frameIndex;
-		if (frameIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
+		const uint32_t tableIndex = frameIndex * 2u + parity;
+		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
 		{
 			return;
 		}
@@ -337,16 +449,35 @@ namespace demo
 
 		if (!m_radianceLayoutInitialized)
 		{
-			const rhi::TextureBarrier initBarrier{
-				.texture = probeVolume.getRadianceBuffer(),
-				.before = rhi::ResourceState::Undefined,
-				.after = rhi::ResourceState::General,
-				.range = {
-					.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = 1,
-					.baseArrayLayer = 0, .layerCount = 1
-				},
+			// This pass records first in the DDGI chain, so it owns the lazy
+			// Undefined -> General transition for the radiance scratch AND all
+			// four probe atlases: the history sample descriptors (binding 3/4)
+			// require the General layout before the very first dispatch. The
+			// probe update pass keeps its own (idempotent, oldLayout=Undefined)
+			// latch for the corner case where this pass is skipped.
+			const auto makeInitBarrier = [](rhi::TextureHandle texture)
+			{
+				return rhi::TextureBarrier{
+					.texture = texture,
+					.before = rhi::ResourceState::Undefined,
+					.after = rhi::ResourceState::General,
+					.range = {
+						.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = 1,
+						.baseArrayLayer = 0, .layerCount = 1
+					},
+				};
 			};
-			cmd.resourceBarrier(&initBarrier, 1, nullptr, 0);
+			const std::array<rhi::TextureBarrier, 5> initBarriers{
+				{
+					makeInitBarrier(probeVolume.getRadianceBuffer()),
+					makeInitBarrier(probeVolume.getIrradianceAtlas()),
+					makeInitBarrier(probeVolume.getIrradianceAtlasHistory()),
+					makeInitBarrier(probeVolume.getDepthAtlas()),
+					makeInitBarrier(probeVolume.getDepthAtlasHistory()),
+				}
+			};
+			cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()),
+			                    nullptr, 0);
 			m_radianceLayoutInitialized = true;
 		}
 
@@ -359,7 +490,7 @@ namespace demo
 		cmd.beginEvent("GISDFRays");
 		rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 		encoder->setPipeline(m_pipeline);
-		encoder->setArgumentTable(0, m_tables[frameIndex]);
+		encoder->setArgumentTable(0, m_tables[tableIndex]);
 		encoder->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		cmd.endEncoding();
 		cmd.endEvent();

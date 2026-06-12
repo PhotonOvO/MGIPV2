@@ -17,6 +17,7 @@
 #include "../Pass.h"
 #include "../../rhi/RHIDevice.h"
 
+#include <array>
 #include <vector>
 
 namespace demo
@@ -47,15 +48,18 @@ namespace demo
 		rhi::Device* m_device{nullptr};
 		uint32_t m_frameCount{0};
 
-		// Sampled view over the probe volume's *current* irradiance atlas
-		// (owned by DDGIProbeVolume; the view is owned here).
-		rhi::TextureViewHandle m_irradianceView{};
+		// Sampled views over BOTH irradiance atlases (D4-1 ping-pong, approach
+		// (2)): index = frame parity, view = that parity's WRITE atlas (the
+		// one the probe update produced this frame; DDGIProbeVolume contract).
+		std::array<rhi::TextureViewHandle, 2> m_irradianceViews{};
 		rhi::SamplerHandle m_sampler{};
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};
-		// One table + uniform buffer per frame in flight (same pattern as
-		// DDGIRayTracePass): views are static, uniform contents change per frame.
+		// Two tables per frame in flight (index = frameIndex * 2 + parity,
+		// parity = temporalFrameCounter & 1 — monotonic counter, constraint
+		// 4): views are static, uniform contents change per frame. Both
+		// parity tables of a frame share that frame's uniform buffer.
 		std::vector<rhi::ArgumentTableHandle> m_tables;
 		std::vector<rhi::BufferHandle> m_uniformBuffers;
 	};

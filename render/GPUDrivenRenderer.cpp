@@ -435,9 +435,10 @@ namespace demo
 			// volume (atlases + radiance scratch); tables are static, push
 			// constants carry the per-frame values.
 			m_ddgiProbeUpdatePass->initResources(getRHIDevice());
-			// DDGI (Wave D3-1): sampled views over the *current* atlases for
-			// the lighting pass (D2-3 writes current, lighting reads current;
-			// the D4-1 ping-pong wave will rebind these per swap).
+			// DDGI (Wave D3-1/D4-1): sampled views over BOTH atlas sets for
+			// the lighting pass; updateLightingArgumentTable selects the frame
+			// parity's WRITE atlas (the one the probe update produced this
+			// frame) every frame before any pass encodes.
 			if (m_ddgiProbeVolume.isInitialized())
 			{
 				const auto createLightingAtlasView = [&](rhi::TextureHandle texture,
@@ -454,12 +455,17 @@ namespace demo
 					viewDesc.debugName = debugName;
 					return getRHIDevice().createTextureView(viewDesc);
 				};
-				m_ddgiIrradianceLightingView = createLightingAtlasView(
-					m_ddgiProbeVolume.getIrradianceAtlas(), rhi::TextureFormat::rgba16Sfloat,
-					"ddgi-lighting-irradiance");
-				m_ddgiDepthLightingView = createLightingAtlasView(
-					m_ddgiProbeVolume.getDepthAtlas(), rhi::TextureFormat::rg16Sfloat,
-					"ddgi-lighting-depth");
+				for (uint32_t parity = 0; parity < 2u; ++parity)
+				{
+					m_ddgiIrradianceLightingViews[parity] = createLightingAtlasView(
+						m_ddgiProbeVolume.getIrradianceAtlasWrite(parity),
+						rhi::TextureFormat::rgba16Sfloat,
+						parity == 0u ? "ddgi-lighting-irradiance-p0" : "ddgi-lighting-irradiance-p1");
+					m_ddgiDepthLightingViews[parity] = createLightingAtlasView(
+						m_ddgiProbeVolume.getDepthAtlasWrite(parity),
+						rhi::TextureFormat::rg16Sfloat,
+						parity == 0u ? "ddgi-lighting-depth-p0" : "ddgi-lighting-depth-p1");
+				}
 			}
 			// DDGI (Wave D3-2): probe visualization debug draw needs the probe
 			// volume (positions BDA + irradiance atlas), so it initializes last.
@@ -502,17 +508,20 @@ namespace demo
 		{
 			m_globalSDFPass->shutdownResources();
 		}
-		// DDGI (Wave D3-1): lighting-pass atlas views must go before the probe
-		// volume tears the underlying textures down.
-		if (!m_ddgiIrradianceLightingView.isNull())
+		// DDGI (Wave D3-1/D4-1): lighting-pass atlas views must go before the
+		// probe volume tears the underlying textures down.
+		for (uint32_t parity = 0; parity < 2u; ++parity)
 		{
-			getRHIDevice().destroyTextureView(m_ddgiIrradianceLightingView);
-			m_ddgiIrradianceLightingView = {};
-		}
-		if (!m_ddgiDepthLightingView.isNull())
-		{
-			getRHIDevice().destroyTextureView(m_ddgiDepthLightingView);
-			m_ddgiDepthLightingView = {};
+			if (!m_ddgiIrradianceLightingViews[parity].isNull())
+			{
+				getRHIDevice().destroyTextureView(m_ddgiIrradianceLightingViews[parity]);
+				m_ddgiIrradianceLightingViews[parity] = {};
+			}
+			if (!m_ddgiDepthLightingViews[parity].isNull())
+			{
+				getRHIDevice().destroyTextureView(m_ddgiDepthLightingViews[parity]);
+				m_ddgiDepthLightingViews[parity] = {};
+			}
 		}
 		// DDGI (Wave D2-1): no-op when DDGI was never enabled.
 		m_ddgiProbeVolume.deinit();
@@ -3396,7 +3405,8 @@ namespace demo
 			const DDGIConfig& ddgiConfig = getDDGIConfig();
 			const bool ddgiSamplingReady = ddgiConfig.enabled && m_ddgiProbeVolume.isInitialized()
 				&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
-				&& !m_ddgiIrradianceLightingView.isNull() && !m_ddgiDepthLightingView.isNull();
+				&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
+				&& !m_ddgiDepthLightingViews[0].isNull() && !m_ddgiDepthLightingViews[1].isNull();
 			if (ddgiSamplingReady)
 			{
 				const DDGIProbeVolumeDesc& volumeDesc = m_ddgiProbeVolume.getDesc();
@@ -3512,12 +3522,21 @@ namespace demo
 		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
 		texViews[kGPUDrivenLightPassAOIndex] = viewOr(m_aoDenoisedView, fallbackDepth);
 		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrDenoisedView, fallbackColor);
-		// DDGI (Wave D3-1): atlas SRVs. When DDGI is disabled the views are
-		// null -> bind the gbuffer0 placeholder; the shader-side gate
-		// (ddgiGridDimsAndEnabled.w == 0) guarantees it is never sampled
-		// meaningfully, so disabled rendering stays bit-identical and safe.
-		texViews[kGPUDrivenLightPassDDGIIrradianceIndex] = viewOr(m_ddgiIrradianceLightingView, fallbackColor);
-		texViews[kGPUDrivenLightPassDDGIDepthIndex] = viewOr(m_ddgiDepthLightingView, fallbackColor);
+		// DDGI (Wave D3-1/D4-1): atlas SRVs, selected by the ping-pong frame
+		// parity so lighting reads the atlas the probe update writes THIS
+		// frame. Parity comes from the MONOTONIC m_temporalFrameCounter
+		// (constraint 4 — never the frames-in-flight ring index), and this
+		// table write happens in updateGPUDrivenLights, i.e. before any pass
+		// of the frame encodes (TAA lesson c04c878: no descriptor lag). When
+		// DDGI is disabled the views are null -> bind the gbuffer0
+		// placeholder; the shader-side gate (ddgiGridDimsAndEnabled.w == 0)
+		// guarantees it is never sampled meaningfully, so disabled rendering
+		// stays bit-identical and safe.
+		const uint32_t ddgiParity = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
+		texViews[kGPUDrivenLightPassDDGIIrradianceIndex] =
+			viewOr(m_ddgiIrradianceLightingViews[ddgiParity], fallbackColor);
+		texViews[kGPUDrivenLightPassDDGIDepthIndex] =
+			viewOr(m_ddgiDepthLightingViews[ddgiParity], fallbackColor);
 
 		const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 
@@ -3552,11 +3571,11 @@ namespace demo
 		// their sampled descriptors must use the readWrite intent -> General
 		// layout. Only applies when the real atlas views are bound; the
 		// placeholder fallback keeps the default sampled-read intent.
-		if (!m_ddgiIrradianceLightingView.isNull())
+		if (!m_ddgiIrradianceLightingViews[ddgiParity].isNull())
 		{
 			writes[kGPUDrivenLightPassDDGIIrradianceIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
 		}
-		if (!m_ddgiDepthLightingView.isNull())
+		if (!m_ddgiDepthLightingViews[ddgiParity].isNull())
 		{
 			writes[kGPUDrivenLightPassDDGIDepthIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
 		}

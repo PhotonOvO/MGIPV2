@@ -65,20 +65,20 @@ namespace demo
 			return device.createTextureView(viewDesc);
 		};
 
-		// D2-3 wiring: read history, write current (the D4-1 wave enables the
-		// end-of-frame swapAtlases ping-pong and rebinds these).
-		m_irradianceCurrentView = createAtlasView(probeVolume.getIrradianceAtlas(),
-		                                          rhi::TextureFormat::rgba16Sfloat,
-		                                          "ddgi-update-irradiance-current");
-		m_irradianceHistoryView = createAtlasView(probeVolume.getIrradianceAtlasHistory(),
-		                                          rhi::TextureFormat::rgba16Sfloat,
-		                                          "ddgi-update-irradiance-history");
-		m_depthCurrentView = createAtlasView(probeVolume.getDepthAtlas(),
-		                                     rhi::TextureFormat::rg16Sfloat,
-		                                     "ddgi-update-depth-current");
-		m_depthHistoryView = createAtlasView(probeVolume.getDepthAtlasHistory(),
-		                                     rhi::TextureFormat::rg16Sfloat,
-		                                     "ddgi-update-depth-history");
+		// D4-1 ping-pong wiring (approach (2)): one view per physical atlas;
+		// the parity table pairs below combine write/read roles per frame.
+		m_irradianceViewA = createAtlasView(probeVolume.getIrradianceAtlas(),
+		                                    rhi::TextureFormat::rgba16Sfloat,
+		                                    "ddgi-update-irradiance-a");
+		m_irradianceViewB = createAtlasView(probeVolume.getIrradianceAtlasHistory(),
+		                                    rhi::TextureFormat::rgba16Sfloat,
+		                                    "ddgi-update-irradiance-b");
+		m_depthViewA = createAtlasView(probeVolume.getDepthAtlas(),
+		                               rhi::TextureFormat::rg16Sfloat,
+		                               "ddgi-update-depth-a");
+		m_depthViewB = createAtlasView(probeVolume.getDepthAtlasHistory(),
+		                               rhi::TextureFormat::rg16Sfloat,
+		                               "ddgi-update-depth-b");
 		m_radianceView = createAtlasView(probeVolume.getRadianceBuffer(),
 		                                 rhi::TextureFormat::rgba16Sfloat,
 		                                 "ddgi-update-radiance");
@@ -147,11 +147,6 @@ namespace demo
 			device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
 		};
 
-		m_irradianceUpdateTable = device.createArgumentTable(m_updateLayout);
-		writeUpdateTable(m_irradianceUpdateTable, m_irradianceCurrentView, m_irradianceHistoryView);
-		m_depthUpdateTable = device.createArgumentTable(m_updateLayout);
-		writeUpdateTable(m_depthUpdateTable, m_depthCurrentView, m_depthHistoryView);
-
 		const auto writeBorderTable = [&](rhi::ArgumentTableHandle table, rhi::TextureViewHandle view)
 		{
 			const rhi::ArgumentWrite write{
@@ -162,10 +157,26 @@ namespace demo
 			device.updateArgumentTable(table, 1, &write);
 		};
 
-		m_irradianceBorderTable = device.createArgumentTable(m_borderLayout);
-		writeBorderTable(m_irradianceBorderTable, m_irradianceCurrentView);
-		m_depthBorderTable = device.createArgumentTable(m_borderLayout);
-		writeBorderTable(m_depthBorderTable, m_depthCurrentView);
+		// Prebuilt parity pairs (DDGIProbeVolume contract): parity 0 writes
+		// set A / reads set B, parity 1 the reverse. Border copy targets the
+		// parity's WRITE atlas (the one updated this frame).
+		for (uint32_t parity = 0; parity < 2u; ++parity)
+		{
+			const rhi::TextureViewHandle irradianceOut = parity == 0u ? m_irradianceViewA : m_irradianceViewB;
+			const rhi::TextureViewHandle irradianceHistory = parity == 0u ? m_irradianceViewB : m_irradianceViewA;
+			const rhi::TextureViewHandle depthOut = parity == 0u ? m_depthViewA : m_depthViewB;
+			const rhi::TextureViewHandle depthHistory = parity == 0u ? m_depthViewB : m_depthViewA;
+
+			m_irradianceUpdateTables[parity] = device.createArgumentTable(m_updateLayout);
+			writeUpdateTable(m_irradianceUpdateTables[parity], irradianceOut, irradianceHistory);
+			m_depthUpdateTables[parity] = device.createArgumentTable(m_updateLayout);
+			writeUpdateTable(m_depthUpdateTables[parity], depthOut, depthHistory);
+
+			m_irradianceBorderTables[parity] = device.createArgumentTable(m_borderLayout);
+			writeBorderTable(m_irradianceBorderTables[parity], irradianceOut);
+			m_depthBorderTables[parity] = device.createArgumentTable(m_borderLayout);
+			writeBorderTable(m_depthBorderTables[parity], depthOut);
+		}
 
 		// --- Pipelines ---
 #ifdef USE_SLANG
@@ -231,14 +242,21 @@ namespace demo
 		m_irradianceBorderPipeline = {};
 		m_depthBorderPipeline = {};
 
-		if (!m_irradianceUpdateTable.isNull()) m_device->destroyArgumentTable(m_irradianceUpdateTable);
-		if (!m_depthUpdateTable.isNull()) m_device->destroyArgumentTable(m_depthUpdateTable);
-		if (!m_irradianceBorderTable.isNull()) m_device->destroyArgumentTable(m_irradianceBorderTable);
-		if (!m_depthBorderTable.isNull()) m_device->destroyArgumentTable(m_depthBorderTable);
-		m_irradianceUpdateTable = {};
-		m_depthUpdateTable = {};
-		m_irradianceBorderTable = {};
-		m_depthBorderTable = {};
+		for (uint32_t parity = 0; parity < 2u; ++parity)
+		{
+			if (!m_irradianceUpdateTables[parity].isNull())
+				m_device->destroyArgumentTable(m_irradianceUpdateTables[parity]);
+			if (!m_depthUpdateTables[parity].isNull())
+				m_device->destroyArgumentTable(m_depthUpdateTables[parity]);
+			if (!m_irradianceBorderTables[parity].isNull())
+				m_device->destroyArgumentTable(m_irradianceBorderTables[parity]);
+			if (!m_depthBorderTables[parity].isNull())
+				m_device->destroyArgumentTable(m_depthBorderTables[parity]);
+			m_irradianceUpdateTables[parity] = {};
+			m_depthUpdateTables[parity] = {};
+			m_irradianceBorderTables[parity] = {};
+			m_depthBorderTables[parity] = {};
+		}
 
 		if (!m_updateLayout.isNull()) m_device->destroyArgumentLayout(m_updateLayout);
 		if (!m_borderLayout.isNull()) m_device->destroyArgumentLayout(m_borderLayout);
@@ -246,15 +264,15 @@ namespace demo
 		m_borderLayout = {};
 
 		if (!m_radianceView.isNull()) m_device->destroyTextureView(m_radianceView);
-		if (!m_depthHistoryView.isNull()) m_device->destroyTextureView(m_depthHistoryView);
-		if (!m_depthCurrentView.isNull()) m_device->destroyTextureView(m_depthCurrentView);
-		if (!m_irradianceHistoryView.isNull()) m_device->destroyTextureView(m_irradianceHistoryView);
-		if (!m_irradianceCurrentView.isNull()) m_device->destroyTextureView(m_irradianceCurrentView);
+		if (!m_depthViewB.isNull()) m_device->destroyTextureView(m_depthViewB);
+		if (!m_depthViewA.isNull()) m_device->destroyTextureView(m_depthViewA);
+		if (!m_irradianceViewB.isNull()) m_device->destroyTextureView(m_irradianceViewB);
+		if (!m_irradianceViewA.isNull()) m_device->destroyTextureView(m_irradianceViewA);
 		m_radianceView = {};
-		m_depthHistoryView = {};
-		m_depthCurrentView = {};
-		m_irradianceHistoryView = {};
-		m_irradianceCurrentView = {};
+		m_depthViewB = {};
+		m_depthViewA = {};
+		m_irradianceViewB = {};
+		m_irradianceViewA = {};
 
 		m_atlasLayoutInitialized = false;
 		m_device = nullptr;
@@ -317,8 +335,18 @@ namespace demo
 		const bool firstFrame =
 			!m_atlasLayoutInitialized || m_renderer->getTemporalFrameCounter() == 0u;
 
+		// D4-1 ping-pong parity from the MONOTONIC temporal counter (constraint
+		// 4 — never context.frameIndex, the frames-in-flight ring index).
+		const uint32_t parity =
+			static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
+
 		if (!m_atlasLayoutInitialized)
 		{
+			// Normally DDGIRayTracePass (recorded earlier in the frame) already
+			// transitioned the atlases for its history sampling; this latch is
+			// the idempotent backup (oldLayout=Undefined is always legal and
+			// only discards garbage before the first write) for the corner
+			// case where the ray trace pass was skipped.
 			const auto makeInitBarrier = [](rhi::TextureHandle texture)
 			{
 				return rhi::TextureBarrier{
@@ -370,7 +398,7 @@ namespace demo
 		{
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_irradianceUpdatePipeline);
-			encoder->setArgumentTable(0, m_irradianceUpdateTable);
+			encoder->setArgumentTable(0, m_irradianceUpdateTables[parity]);
 			encoder->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
@@ -381,7 +409,7 @@ namespace demo
 		{
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_depthUpdatePipeline);
-			encoder->setArgumentTable(0, m_depthUpdateTable);
+			encoder->setArgumentTable(0, m_depthUpdateTables[parity]);
 			encoder->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
@@ -397,7 +425,7 @@ namespace demo
 		{
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_irradianceBorderPipeline);
-			encoder->setArgumentTable(0, m_irradianceBorderTable);
+			encoder->setArgumentTable(0, m_irradianceBorderTables[parity]);
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
 		}
@@ -407,7 +435,7 @@ namespace demo
 		{
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_depthBorderPipeline);
-			encoder->setArgumentTable(0, m_depthBorderTable);
+			encoder->setArgumentTable(0, m_depthBorderTables[parity]);
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
 		}

@@ -144,12 +144,6 @@ namespace demo
 		m_device = nullptr;
 	}
 
-	void DDGIProbeVolume::swapAtlases()
-	{
-		std::swap(m_irradianceAtlas, m_irradianceAtlasHistory);
-		std::swap(m_depthAtlas, m_depthAtlasHistory);
-	}
-
 	void DDGIProbeVolume::uploadProbePositions() const
 	{
 		if (m_device == nullptr || m_probePositionBuffer.isNull() || m_totalProbes == 0u)

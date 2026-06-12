@@ -10,6 +10,13 @@
 // shadow ray + constant albedo; constant sky on miss) and writes
 // radiance + hit distance into the probe volume's radiance scratch texture.
 //
+// Infinite bounce (Wave D4-1): hit shading additionally samples LAST frame's
+// probe atlases (SampleProbe weight chain) for the indirect term. The atlas
+// ping-pong uses fixed handles + parity selection (DDGIProbeVolume contract):
+// two argument tables per frame in flight are prebuilt, and execute selects
+// by temporalFrameCounter & 1 (monotonic counter, DDGI hard constraint 4 —
+// never the frames-in-flight ring index).
+//
 // All resources go through rhi:: only — no native graphics types and no ray
 // tracing extensions (DDGI hard constraints 1/3). The whole pass is gated on
 // DDGIConfig::enabled (default false), so default rendering is unchanged.
@@ -19,6 +26,7 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <vector>
 
 namespace demo
@@ -67,15 +75,27 @@ namespace demo
 		rhi::TextureViewHandle m_radianceView{};
 		rhi::TextureViewHandle m_globalSDFView{};
 		rhi::SamplerHandle m_globalSDFSampler{};
+		// D4-1: sampled views over BOTH probe atlas sets, indexed by the frame
+		// parity whose READ pair they are (cf. DDGIProbeVolume parity contract).
+		std::array<rhi::TextureViewHandle, 2> m_historyIrradianceViews{};
+		std::array<rhi::TextureViewHandle, 2> m_historyDepthViews{};
+		rhi::SamplerHandle m_atlasSampler{};
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};
-		// One table + uniform buffer per frame in flight: the views are static
-		// (written once at init), only the uniform contents change per dispatch.
+		// Two tables per frame in flight (index = frameIndex * 2 + parity):
+		// views are static (written once at init), only the per-frame uniform
+		// buffer contents change. Both parity tables of a frame share that
+		// frame's uniform buffer; they differ only in the history atlas pair.
 		std::vector<rhi::ArgumentTableHandle> m_tables;
 		std::vector<rhi::BufferHandle> m_uniformBuffers;
 
-		// Lazily transitions the radiance texture Undefined -> General.
+		// Lazily transitions the radiance texture AND the four probe atlases
+		// Undefined -> General on the first recorded execute (this pass runs
+		// first in the DDGI chain, so the history sample descriptors need the
+		// General layout before the probe update pass ever records). Doubles
+		// as the "no valid history yet" first-frame latch for the shader-side
+		// constant-sky indirect fallback.
 		mutable bool m_radianceLayoutInitialized{false};
 	};
 } // namespace demo
