@@ -582,6 +582,51 @@ namespace demo
 		}
 	}
 
+	void GPUDrivenRenderer::setEditableDDGIConfig(const DDGIConfig& config)
+	{
+		const bool wasEnabled = m_renderer.getDDGIConfig().enabled;
+		const bool requiresResourceReset =
+			m_renderer.getDDGIConfig().probeSpacing != config.probeSpacing ||
+			m_renderer.getDDGIConfig().irradianceTexelSize != config.irradianceTexelSize ||
+			m_renderer.getDDGIConfig().depthTexelSize != config.depthTexelSize ||
+			m_renderer.getDDGIConfig().raysPerProbe != config.raysPerProbe;
+
+		m_renderer.getDDGIConfig() = config;
+		if (wasEnabled && config.enabled && requiresResourceReset)
+		{
+			resetDDGIHistory();
+		}
+		else if (!wasEnabled && config.enabled)
+		{
+			initDDGIResources();
+		}
+		else if (wasEnabled && !config.enabled)
+		{
+			waitForIdle();
+			shutdownDDGIResources();
+		}
+	}
+
+	void GPUDrivenRenderer::resetDDGIHistory()
+	{
+		if (!getDDGIConfig().enabled)
+		{
+			m_temporalFrameCounter = 0;
+			m_ddgiUpdateOffset = 0;
+			return;
+		}
+
+		waitForIdle();
+		shutdownDDGIResources();
+		m_temporalFrameCounter = 0;
+		m_ddgiUpdateOffset = 0;
+		initDDGIResources();
+		if (m_ddgiMeshSDFLoaded && m_globalSDFPass != nullptr)
+		{
+			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
+		}
+	}
+
 	void GPUDrivenRenderer::clearDDGIMeshSDF()
 	{
 		if (m_globalSDFPass != nullptr)
@@ -638,8 +683,7 @@ namespace demo
 		m_ddgiMeshSDFLoaded = true;
 		m_ddgiMeshSDFPath = path.string();
 		m_renderer.getDDGIConfig().enabled = true;
-		initDDGIResources();
-		m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
+		resetDDGIHistory();
 		LOGI("Loaded DDGI mesh SDF: %s (%ux%ux%u)",
 		     m_ddgiMeshSDFPath.c_str(),
 		     loadResult.asset.resolution.x,

@@ -52,6 +52,9 @@ namespace demo
 		void setDDGIEnabled(bool enabled);
 		[[nodiscard]] bool isDDGIEnabled() const;
 		[[nodiscard]] bool hasDDGIMeshSDF() const;
+		void resetDDGIHistory();
+		[[nodiscard]] DDGIConfig getDDGIConfig() const;
+		void setDDGIConfig(const DDGIConfig& config);
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;

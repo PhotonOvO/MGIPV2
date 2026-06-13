@@ -1833,10 +1833,28 @@ inline void MinimalLatestApp::drawModelLoaderUI()
 
     if(ImGui::CollapsingHeader("DDGI Mesh SDF", ImGuiTreeNodeFlags_DefaultOpen))
     {
-      bool ddgiEnabled = m_renderer.isDDGIEnabled();
+      demo::DDGIConfig ddgiConfig = m_renderer.getDDGIConfig();
+      bool ddgiEnabled = ddgiConfig.enabled;
       if(ImGui::Checkbox("Enable DDGI", &ddgiEnabled))
       {
-        m_renderer.setDDGIEnabled(ddgiEnabled);
+        ddgiConfig.enabled = ddgiEnabled;
+        m_renderer.setDDGIConfig(ddgiConfig);
+      }
+      bool ddgiConfigChanged = false;
+      ddgiConfigChanged |= ImGui::SliderFloat("Hysteresis", &ddgiConfig.hysteresis, 0.0f, 0.995f, "%.3f");
+      ddgiConfigChanged |= ImGui::SliderFloat("DDGI Weight", &ddgiConfig.ddgiWeight, 0.0f, 1.0f, "%.2f");
+      int updateStride = static_cast<int>(ddgiConfig.updateStride);
+      if(ImGui::InputInt("Update Stride", &updateStride))
+      {
+        ddgiConfig.updateStride = static_cast<uint32_t>(std::max(updateStride, 1));
+        ddgiConfigChanged = true;
+      }
+      if(ddgiConfigChanged)
+      {
+        ddgiConfig.hysteresis = glm::clamp(ddgiConfig.hysteresis, 0.0f, 0.995f);
+        ddgiConfig.ddgiWeight = glm::clamp(ddgiConfig.ddgiWeight, 0.0f, 1.0f);
+        ddgiConfig.updateStride = std::max(ddgiConfig.updateStride, 1u);
+        m_renderer.setDDGIConfig(ddgiConfig);
       }
       ImGui::InputText("Mesh SDF Path", m_meshSDFPathBuffer, sizeof(m_meshSDFPathBuffer));
       if(ImGui::Button("From glTF Path"))
@@ -1847,6 +1865,12 @@ inline void MinimalLatestApp::drawModelLoaderUI()
       if(ImGui::Button("Load Mesh SDF"))
       {
         loadMeshSDFForDDGI();
+      }
+      ImGui::SameLine();
+      if(ImGui::Button("Reset History"))
+      {
+        m_renderer.resetDDGIHistory();
+        m_meshSDFStatus = "DDGI history reset.";
       }
       ImGui::Text("DDGI: %s", m_renderer.isDDGIEnabled() ? "enabled" : "disabled");
       ImGui::Text("Mesh SDF: %s", (m_meshSDFLoaded || m_renderer.hasDDGIMeshSDF()) ? "loaded" : "not loaded");

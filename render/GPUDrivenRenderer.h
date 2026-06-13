@@ -334,6 +334,9 @@ namespace demo
 		void setDDGIEnabled(bool enabled);
 		[[nodiscard]] bool isDDGIEnabled() const { return getDDGIConfig().enabled; }
 		[[nodiscard]] bool hasDDGIMeshSDF() const { return m_ddgiMeshSDFLoaded; }
+		void resetDDGIHistory();
+		[[nodiscard]] DDGIConfig getEditableDDGIConfig() const { return getDDGIConfig(); }
+		void setEditableDDGIConfig(const DDGIConfig& config);
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const
 		{

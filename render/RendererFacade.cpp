@@ -154,6 +154,21 @@ namespace demo
 		return gpuDriven().hasDDGIMeshSDF();
 	}
 
+	void RendererFacade::resetDDGIHistory()
+	{
+		gpuDriven().resetDDGIHistory();
+	}
+
+	DDGIConfig RendererFacade::getDDGIConfig() const
+	{
+		return gpuDriven().getEditableDDGIConfig();
+	}
+
+	void RendererFacade::setDDGIConfig(const DDGIConfig& config)
+	{
+		gpuDriven().setEditableDDGIConfig(config);
+	}
+
 	const shaderio::GPUCullStats& RendererFacade::getLastGPUCullingStats() const
 	{
 		return gpuDriven().getLastGPUCullingStats();
