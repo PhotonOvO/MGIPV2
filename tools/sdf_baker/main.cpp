@@ -1,7 +1,7 @@
 // Offline Mesh SDF baker CLI (DDGI Wave D1-1).
 //
 // Usage:
-//   sdf_baker <input.obj> <output.bin> [--texel-per-meter F] [--min-res N]
+//   sdf_baker <input.obj|input.gltf|input.glb> <output.bin> [--texel-per-meter F] [--min-res N]
 //             [--max-res N] [--samples N]
 //
 // Pure-CPU tool: no RHI / Vulkan dependency. See SDFBaker.h for the .bin layout.
@@ -20,6 +20,7 @@ namespace
 	{
 		std::printf(
 			"Usage: sdf_baker <input.obj> <output.bin> [options]\n"
+			"       sdf_baker <input.gltf|input.glb> <output.bin> [options]\n"
 			"Options:\n"
 			"  --texel-per-meter <float>  Voxel density per world meter (default 3.0)\n"
 			"  --min-res <uint>           Minimum per-axis resolution (default 32)\n"
@@ -85,7 +86,7 @@ int main(int argc, char** argv)
 
 	std::string error;
 	sdf_baker::Mesh mesh;
-	if (!sdf_baker::loadObj(config.inputMeshPath, mesh, error))
+	if (!sdf_baker::loadMesh(config.inputMeshPath, mesh, error))
 	{
 		std::fprintf(stderr, "Mesh load failed: %s\n", error.c_str());
 		return EXIT_FAILURE;

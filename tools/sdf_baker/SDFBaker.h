@@ -3,7 +3,7 @@
 // Offline Mesh SDF baker (DDGI Wave D1-1).
 //
 // Pure-CPU tool: no RHI / Vulkan / engine dependency. Loads a triangle mesh
-// (self-contained Wavefront OBJ parser), evaluates a signed distance field on
+// (self-contained Wavefront OBJ parser or glTF/GLB via tinygltf), evaluates a signed distance field on
 // a regular voxel grid (median-split triangle BVH for closest-point queries +
 // pseudo-normal back-face voting for the sign, mirroring LuxGI SDFBaker.cpp),
 // normalizes distances as (d / maxDistance + 1) / 2 and writes an R16F payload
@@ -63,9 +63,17 @@ namespace sdf_baker
 	// Self-contained float -> IEEE 754 binary16 conversion (round to nearest even).
 	[[nodiscard]] uint16_t floatToHalf(float value);
 
+	// Dispatches to the appropriate mesh parser based on file extension.
+	[[nodiscard]] bool loadMesh(const std::string& path, Mesh& outMesh, std::string& outError);
+
 	// Minimal Wavefront OBJ parser: 'v' and 'f' records, fan triangulation,
 	// v / v/vt / v//vn / v/vt/vn index forms, negative (relative) indices.
 	[[nodiscard]] bool loadObj(const std::string& path, Mesh& outMesh, std::string& outError);
+
+	// glTF/GLB parser for triangle mesh geometry. Applies node transforms and
+	// appends all triangle primitives from the default scene, or all root nodes
+	// when the file does not name a default scene.
+	[[nodiscard]] bool loadGltf(const std::string& path, Mesh& outMesh, std::string& outError);
 
 	// Bakes the SDF for the given mesh. Returns false (with outError set) when
 	// the mesh is empty/degenerate.

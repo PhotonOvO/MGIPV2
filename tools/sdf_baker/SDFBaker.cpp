@@ -1,13 +1,24 @@
 #include "SDFBaker.h"
 
+#define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#include <tiny_gltf.h>
+
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -108,7 +119,336 @@ namespace sdf_baker
 			}
 			return false; // OBJ indices are 1-based; 0 is invalid
 		}
+
+		[[nodiscard]] std::string lowercaseExtension(const std::string& path)
+		{
+			const size_t dot = path.find_last_of('.');
+			if (dot == std::string::npos)
+			{
+				return {};
+			}
+			std::string extension = path.substr(dot);
+			std::transform(extension.begin(), extension.end(), extension.begin(),
+			               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return extension;
+		}
+
+		[[nodiscard]] bool appendAccessorVec3Float(const tinygltf::Model& model,
+		                                           const tinygltf::Accessor& accessor,
+		                                           const glm::mat4& transform,
+		                                           std::vector<glm::vec3>& outPositions,
+		                                           std::string& outError)
+		{
+			if (accessor.type != TINYGLTF_TYPE_VEC3 ||
+			    accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
+			{
+				outError = "glTF POSITION accessor must be VEC3 float";
+				return false;
+			}
+			if (accessor.bufferView < 0 || static_cast<size_t>(accessor.bufferView) >= model.bufferViews.size())
+			{
+				outError = "glTF POSITION accessor has no valid buffer view";
+				return false;
+			}
+			if (accessor.sparse.isSparse)
+			{
+				outError = "glTF sparse POSITION accessors are not supported by sdf_baker";
+				return false;
+			}
+
+			const tinygltf::BufferView& view = model.bufferViews[static_cast<size_t>(accessor.bufferView)];
+			if (view.buffer < 0 || static_cast<size_t>(view.buffer) >= model.buffers.size())
+			{
+				outError = "glTF POSITION buffer view references an invalid buffer";
+				return false;
+			}
+
+			const tinygltf::Buffer& buffer = model.buffers[static_cast<size_t>(view.buffer)];
+			const int strideValue = accessor.ByteStride(view);
+			const size_t stride = strideValue > 0 ? static_cast<size_t>(strideValue) : sizeof(float) * 3;
+			const size_t offset = view.byteOffset + accessor.byteOffset;
+			const size_t elementBytes = sizeof(float) * 3;
+			if (accessor.count > 0 &&
+			    (offset > buffer.data.size() ||
+			     elementBytes > buffer.data.size() - offset ||
+			     stride > buffer.data.size() ||
+			     (accessor.count - 1) > (buffer.data.size() - offset - elementBytes) / stride))
+			{
+				outError = "glTF POSITION accessor exceeds source buffer bounds";
+				return false;
+			}
+
+			outPositions.reserve(outPositions.size() + accessor.count);
+			for (size_t i = 0; i < accessor.count; ++i)
+			{
+				const uint8_t* src = buffer.data.data() + offset + i * stride;
+				glm::vec3 position{0.0f};
+				std::memcpy(glm::value_ptr(position), src, sizeof(float) * 3);
+				outPositions.push_back(glm::vec3(transform * glm::vec4(position, 1.0f)));
+			}
+			return true;
+		}
+
+		template <typename IndexT>
+		[[nodiscard]] bool appendTypedIndices(const uint8_t* data,
+		                                      size_t count,
+		                                      size_t stride,
+		                                      uint32_t baseVertex,
+		                                      std::vector<uint32_t>& outIndices)
+		{
+			for (size_t i = 0; i < count; ++i)
+			{
+				IndexT value = 0;
+				std::memcpy(&value, data + i * stride, sizeof(IndexT));
+				outIndices.push_back(baseVertex + static_cast<uint32_t>(value));
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool appendAccessorIndices(const tinygltf::Model& model,
+		                                         const tinygltf::Accessor& accessor,
+		                                         uint32_t baseVertex,
+		                                         std::vector<uint32_t>& outIndices,
+		                                         std::string& outError)
+		{
+			if (accessor.type != TINYGLTF_TYPE_SCALAR)
+			{
+				outError = "glTF index accessor must be SCALAR";
+				return false;
+			}
+			if (accessor.bufferView < 0 || static_cast<size_t>(accessor.bufferView) >= model.bufferViews.size())
+			{
+				outError = "glTF index accessor has no valid buffer view";
+				return false;
+			}
+			if (accessor.sparse.isSparse)
+			{
+				outError = "glTF sparse index accessors are not supported by sdf_baker";
+				return false;
+			}
+
+			const tinygltf::BufferView& view = model.bufferViews[static_cast<size_t>(accessor.bufferView)];
+			if (view.buffer < 0 || static_cast<size_t>(view.buffer) >= model.buffers.size())
+			{
+				outError = "glTF index buffer view references an invalid buffer";
+				return false;
+			}
+
+			const size_t componentSize = tinygltf::GetComponentSizeInBytes(accessor.componentType);
+			if (componentSize == 0)
+			{
+				outError = "glTF index accessor uses an unsupported component type";
+				return false;
+			}
+
+			const tinygltf::Buffer& buffer = model.buffers[static_cast<size_t>(view.buffer)];
+			const int strideValue = accessor.ByteStride(view);
+			const size_t stride = strideValue > 0 ? static_cast<size_t>(strideValue) : componentSize;
+			const size_t offset = view.byteOffset + accessor.byteOffset;
+			if (accessor.count > 0 &&
+			    (offset > buffer.data.size() ||
+			     componentSize > buffer.data.size() - offset ||
+			     stride > buffer.data.size() ||
+			     (accessor.count - 1) > (buffer.data.size() - offset - componentSize) / stride))
+			{
+				outError = "glTF index accessor exceeds source buffer bounds";
+				return false;
+			}
+
+			outIndices.reserve(outIndices.size() + accessor.count);
+			const uint8_t* data = buffer.data.data() + offset;
+			switch (accessor.componentType)
+			{
+			case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+				return appendTypedIndices<uint8_t>(data, accessor.count, stride, baseVertex, outIndices);
+			case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+				return appendTypedIndices<uint16_t>(data, accessor.count, stride, baseVertex, outIndices);
+			case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+				return appendTypedIndices<uint32_t>(data, accessor.count, stride, baseVertex, outIndices);
+			default:
+				outError = "glTF index accessor must use unsigned byte, unsigned short, or unsigned int";
+				return false;
+			}
+		}
+
+		[[nodiscard]] bool appendPrimitiveTriangles(const tinygltf::Model& model,
+		                                           const tinygltf::Primitive& primitive,
+		                                           const glm::mat4& transform,
+		                                           Mesh& outMesh,
+		                                           std::string& outError)
+		{
+			if (primitive.mode != TINYGLTF_MODE_TRIANGLES)
+			{
+				outError = "glTF primitive mode is not TRIANGLES";
+				return false;
+			}
+
+			const auto positionIt = primitive.attributes.find("POSITION");
+			if (positionIt == primitive.attributes.end() ||
+			    positionIt->second < 0 ||
+			    static_cast<size_t>(positionIt->second) >= model.accessors.size())
+			{
+				outError = "glTF primitive missing POSITION attribute";
+				return false;
+			}
+
+			const uint32_t baseVertex = static_cast<uint32_t>(outMesh.positions.size());
+			const tinygltf::Accessor& positionAccessor = model.accessors[static_cast<size_t>(positionIt->second)];
+			if (positionAccessor.count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - baseVertex)
+			{
+				outError = "glTF mesh has too many vertices for sdf_baker";
+				return false;
+			}
+			if (!appendAccessorVec3Float(model, positionAccessor, transform, outMesh.positions, outError))
+			{
+				return false;
+			}
+
+			const size_t firstNewIndex = outMesh.indices.size();
+			if (primitive.indices >= 0)
+			{
+				if (static_cast<size_t>(primitive.indices) >= model.accessors.size())
+				{
+					outError = "glTF primitive references an invalid index accessor";
+					return false;
+				}
+				if (!appendAccessorIndices(model, model.accessors[static_cast<size_t>(primitive.indices)],
+				                           baseVertex, outMesh.indices, outError))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				outMesh.indices.reserve(outMesh.indices.size() + positionAccessor.count);
+				for (uint32_t i = 0; i < static_cast<uint32_t>(positionAccessor.count); ++i)
+				{
+					outMesh.indices.push_back(baseVertex + i);
+				}
+			}
+
+			const size_t addedIndexCount = outMesh.indices.size() - firstNewIndex;
+			if (addedIndexCount < 3 || addedIndexCount % 3 != 0)
+			{
+				outError = "glTF triangle primitive index count is not a non-zero multiple of three";
+				return false;
+			}
+			return true;
+		}
+
+		[[nodiscard]] glm::mat4 nodeLocalTransform(const tinygltf::Node& node)
+		{
+			if (node.matrix.size() == 16)
+			{
+				return glm::make_mat4(node.matrix.data());
+			}
+
+			glm::vec3 translation{0.0f};
+			if (node.translation.size() == 3)
+			{
+				translation = glm::vec3(static_cast<float>(node.translation[0]),
+				                        static_cast<float>(node.translation[1]),
+				                        static_cast<float>(node.translation[2]));
+			}
+
+			glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+			if (node.rotation.size() == 4)
+			{
+				rotation = glm::quat(static_cast<float>(node.rotation[3]),
+				                     static_cast<float>(node.rotation[0]),
+				                     static_cast<float>(node.rotation[1]),
+				                     static_cast<float>(node.rotation[2]));
+			}
+
+			glm::vec3 scale{1.0f};
+			if (node.scale.size() == 3)
+			{
+				scale = glm::vec3(static_cast<float>(node.scale[0]),
+				                  static_cast<float>(node.scale[1]),
+				                  static_cast<float>(node.scale[2]));
+			}
+
+			if (glm::length(rotation) <= 0.0f)
+			{
+				rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+			}
+
+			return glm::translate(glm::mat4(1.0f), translation) *
+			       glm::mat4_cast(glm::normalize(rotation)) *
+			       glm::scale(glm::mat4(1.0f), scale);
+		}
+
+		[[nodiscard]] bool appendNode(const tinygltf::Model& model,
+		                              int nodeIndex,
+		                              const glm::mat4& parentTransform,
+		                              std::vector<uint8_t>& visitState,
+		                              Mesh& outMesh,
+		                              std::string& outError)
+		{
+			if (nodeIndex < 0 || static_cast<size_t>(nodeIndex) >= model.nodes.size())
+			{
+				outError = "glTF scene references an invalid node";
+				return false;
+			}
+
+			uint8_t& state = visitState[static_cast<size_t>(nodeIndex)];
+			if (state == 1u)
+			{
+				outError = "glTF node graph contains a cycle";
+				return false;
+			}
+			if (state == 2u)
+			{
+				return true;
+			}
+			state = 1u;
+
+			const tinygltf::Node& node = model.nodes[static_cast<size_t>(nodeIndex)];
+			const glm::mat4 worldTransform = parentTransform * nodeLocalTransform(node);
+			if (node.mesh >= 0)
+			{
+				if (static_cast<size_t>(node.mesh) >= model.meshes.size())
+				{
+					outError = "glTF node references an invalid mesh";
+					return false;
+				}
+				const tinygltf::Mesh& mesh = model.meshes[static_cast<size_t>(node.mesh)];
+				for (const tinygltf::Primitive& primitive : mesh.primitives)
+				{
+					if (!appendPrimitiveTriangles(model, primitive, worldTransform, outMesh, outError))
+					{
+						return false;
+					}
+				}
+			}
+
+			for (int childIndex : node.children)
+			{
+				if (!appendNode(model, childIndex, worldTransform, visitState, outMesh, outError))
+				{
+					return false;
+				}
+			}
+
+			state = 2u;
+			return true;
+		}
 	} // namespace
+
+	bool loadMesh(const std::string& path, Mesh& outMesh, std::string& outError)
+	{
+		const std::string extension = lowercaseExtension(path);
+		if (extension == ".obj")
+		{
+			return loadObj(path, outMesh, outError);
+		}
+		if (extension == ".gltf" || extension == ".glb")
+		{
+			return loadGltf(path, outMesh, outError);
+		}
+		outError = "Unsupported mesh extension '" + extension + "' (expected .obj, .gltf, or .glb)";
+		return false;
+	}
 
 	bool loadObj(const std::string& path, Mesh& outMesh, std::string& outError)
 	{
@@ -176,6 +516,76 @@ namespace sdf_baker
 		{
 			outError = "OBJ contains no triangles: " + path;
 			return false;
+		}
+		return true;
+	}
+
+	bool loadGltf(const std::string& path, Mesh& outMesh, std::string& outError)
+	{
+		tinygltf::TinyGLTF loader;
+		tinygltf::Model model;
+		std::string warn;
+		std::string error;
+
+		const std::string extension = lowercaseExtension(path);
+		const bool loaded = extension == ".glb"
+			? loader.LoadBinaryFromFile(&model, &error, &warn, path)
+			: loader.LoadASCIIFromFile(&model, &error, &warn, path);
+		if (!loaded)
+		{
+			outError = "Could not load glTF file: " + path;
+			if (!error.empty())
+			{
+				outError += " (" + error + ")";
+			}
+			return false;
+		}
+
+		outMesh.positions.clear();
+		outMesh.indices.clear();
+
+		std::vector<uint8_t> visitState(model.nodes.size(), 0u);
+		std::vector<int> roots;
+		if (model.defaultScene >= 0 && static_cast<size_t>(model.defaultScene) < model.scenes.size())
+		{
+			roots = model.scenes[static_cast<size_t>(model.defaultScene)].nodes;
+		}
+		else if (!model.scenes.empty())
+		{
+			roots = model.scenes.front().nodes;
+		}
+		else
+		{
+			std::set<int> childNodes;
+			for (const tinygltf::Node& node : model.nodes)
+			{
+				childNodes.insert(node.children.begin(), node.children.end());
+			}
+			for (size_t nodeIndex = 0; nodeIndex < model.nodes.size(); ++nodeIndex)
+			{
+				if (childNodes.find(static_cast<int>(nodeIndex)) == childNodes.end())
+				{
+					roots.push_back(static_cast<int>(nodeIndex));
+				}
+			}
+		}
+
+		for (int root : roots)
+		{
+			if (!appendNode(model, root, glm::mat4(1.0f), visitState, outMesh, outError))
+			{
+				return false;
+			}
+		}
+
+		if (outMesh.positions.empty() || outMesh.indices.empty())
+		{
+			outError = "glTF contains no triangle mesh primitives: " + path;
+			return false;
+		}
+		if (!warn.empty())
+		{
+			std::fprintf(stderr, "glTF warning: %s\n", warn.c_str());
 		}
 		return true;
 	}
