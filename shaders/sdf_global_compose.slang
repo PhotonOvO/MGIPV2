@@ -22,6 +22,12 @@ Sampler3D<float> meshSDFTextures[LGlobalSDFMaxMeshSDFs];
 [[vk::binding(2, 0)]]
 ConstantBuffer<GlobalSDFComposeUniforms> composeUniforms;
 
+[[vk::binding(3, 0)]]
+RWTexture3D<float4> dstAlbedo;
+
+[[vk::binding(4, 0)]]
+Sampler3D<float4> meshAlbedoTextures[LGlobalSDFMaxMeshSDFs];
+
 float distanceToAABB(float3 p, float3 boundsMin, float3 boundsMax)
 {
     const float3 d = max(max(boundsMin - p, p - boundsMax), float3(0.0, 0.0, 0.0));
@@ -45,6 +51,7 @@ void kernelGlobalSDFCompose(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 worldPos = volumeMin + (float3(dispatchThreadId) + float3(0.5, 0.5, 0.5)) * voxelSize;
 
     float minDistance = globalMaxDistance;
+    float4 nearestAlbedo = float4(1.0, 1.0, 1.0, 1.0);
     const uint numMeshSDFs = min(composeUniforms.numMeshSDFs, uint(LGlobalSDFMaxMeshSDFs));
     for (uint i = 0u; i < numMeshSDFs; ++i)
     {
@@ -66,10 +73,21 @@ void kernelGlobalSDFCompose(uint3 dispatchThreadId : SV_DispatchThreadID)
             const float3 uvw = (worldPos - boundsMin) / extent;
             const float encoded = meshSDFTextures[i].SampleLevel(uvw, 0.0);
             meshDistance = (encoded * 2.0 - 1.0) * meshMaxDistance;
+            if (meshDistance < minDistance)
+            {
+                nearestAlbedo = meshAlbedoTextures[i].SampleLevel(uvw, 0.0);
+            }
+        }
+        if (aabbDistance > 0.0 && meshDistance < minDistance)
+        {
+            nearestAlbedo = meshAlbedoTextures[i].SampleLevel(
+                clamp((worldPos - boundsMin) / max(boundsMax - boundsMin, float3(1e-4, 1e-4, 1e-4)),
+                      float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)), 0.0);
         }
         minDistance = min(minDistance, meshDistance);
     }
 
     const float normalized = clamp(minDistance / globalMaxDistance, -1.0, 1.0);
     dstVolume[dispatchThreadId] = (normalized + 1.0) * 0.5;
+    dstAlbedo[dispatchThreadId] = nearestAlbedo;
 }

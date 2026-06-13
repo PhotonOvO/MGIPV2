@@ -30,6 +30,7 @@ namespace demo
 		glm::vec3 boundsMin{0.0f};
 		glm::vec3 boundsMax{0.0f};
 		rhi::TextureHandle sdfTexture{};
+		rhi::TextureHandle albedoTexture{};
 	};
 
 	// Single-cascade global SDF volume. The mip chain lives on the same texture
@@ -38,7 +39,9 @@ namespace demo
 	struct GlobalSDFVolume
 	{
 		rhi::TextureHandle sdfTexture{};
+		rhi::TextureHandle albedoTexture{};
 		std::vector<rhi::TextureViewHandle> mipViews;
+		rhi::TextureViewHandle albedoView{};
 		glm::vec3 worldBoundsMin{0.0f};
 		glm::vec3 worldBoundsMax{0.0f};
 		uint32_t resolution{0};
@@ -103,6 +106,7 @@ namespace demo
 		std::vector<GlobalSDFMeshEntry> m_meshEntries;
 		// Views owned by this pass over the entry textures (created on set).
 		std::vector<rhi::TextureViewHandle> m_meshViews;
+		std::vector<rhi::TextureViewHandle> m_meshAlbedoViews;
 
 		// Lazily transitions the volume Undefined -> General on first record.
 		mutable bool m_layoutInitialized{false};

@@ -37,6 +37,9 @@ Sampler2D historyIrradianceAtlas;
 [[vk::binding(4, 0)]]
 Sampler2D historyDepthAtlas;
 
+[[vk::binding(5, 0)]]
+Sampler3D<float4> globalAlbedoTexture;
+
 // sphericalFibonacci moved to ddgi_common.slang (Wave D2-3): the probe update
 // kernels reconstruct the exact same per-ray directions from the shared
 // implementation + the same per-frame rotation columns.
@@ -53,6 +56,14 @@ GlobalSDFTraceConfig makeTraceConfig()
     config.stepScale = rayTraceUniforms.sunColor.w;
     config.maxSteps = rayTraceUniforms.maxSteps;
     return config;
+}
+
+float3 sampleGlobalAlbedo(GlobalSDFTraceConfig config, float3 worldPos)
+{
+    const float3 extent = max(config.boundsMax - config.boundsMin, float3(1e-4, 1e-4, 1e-4));
+    const float3 uvw =
+        clamp((worldPos - config.boundsMin) / extent, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+    return max(globalAlbedoTexture.SampleLevel(uvw, 0.0).rgb, float3(0.0, 0.0, 0.0));
 }
 
 [shader("compute")]
@@ -128,8 +139,10 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
             // fallback energy source, but keeps later frames from converging to
             // a fully black probe field when SDF-only binary sun shadows are
             // too conservative for thin/low-resolution geometry.
-            // Per-object average albedo + surface cache are later milestones.
-            const float albedo = rayTraceUniforms.skyColorAlbedo.w;
+            // First colored-bounce path: sample the global albedo volume
+            // composed alongside the global SDF. Full texture/material hit
+            // shading can replace this coarse nearest-surface color later.
+            const float3 albedo = sampleGlobalAlbedo(config, hitPosition);
             const float skyDiffuseFloor = 0.25;
             radiance =
                 (albedo / kDDGIRaysPi) * rayTraceUniforms.sunColor.xyz * nDotL * sunVisibility;

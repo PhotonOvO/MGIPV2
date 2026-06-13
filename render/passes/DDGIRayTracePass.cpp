@@ -77,7 +77,8 @@ namespace demo
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
 		const GlobalSDFPass* globalSDFPass = m_renderer->getGlobalSDFPass();
 		if (!probeVolume.isInitialized() || globalSDFPass == nullptr
-			|| globalSDFPass->getVolume().sdfTexture.isNull())
+			|| globalSDFPass->getVolume().sdfTexture.isNull()
+			|| globalSDFPass->getVolume().albedoTexture.isNull())
 		{
 			LOGW("DDGIRayTracePass::initResources skipped: probe volume or global SDF not ready");
 			return;
@@ -112,6 +113,17 @@ namespace demo
 			viewDesc.levelCount = GlobalSDFPass::kMipCount;
 			viewDesc.debugName = "ddgi-raytrace-global-sdf-view";
 			m_globalSDFView = device.createTextureView(viewDesc);
+		}
+		{
+			rhi::TextureViewCreateDesc viewDesc{};
+			viewDesc.image = globalSDFPass->getVolume().albedoTexture;
+			viewDesc.format = rhi::TextureFormat::rgba8Unorm;
+			viewDesc.viewType = rhi::ImageViewType::e3D;
+			viewDesc.aspect = rhi::TextureAspect::color;
+			viewDesc.baseMipLevel = 0;
+			viewDesc.levelCount = 1;
+			viewDesc.debugName = "ddgi-raytrace-global-albedo-view";
+			m_globalAlbedoView = device.createTextureView(viewDesc);
 		}
 
 		// Trilinear within a level, nearest between levels: SampleLevel(uvw, 2)
@@ -162,7 +174,7 @@ namespace demo
 			.debugName = "ddgi-raytrace-atlas-sampler",
 		});
 
-		const std::array<rhi::ArgumentBinding, 5> bindings{
+		const std::array<rhi::ArgumentBinding, 6> bindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -182,6 +194,10 @@ namespace demo
 				},
 				rhi::ArgumentBinding{
 					.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 5, .type = rhi::ArgumentType::combinedImageSampler,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
 			}
@@ -211,7 +227,7 @@ namespace demo
 			{
 				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
 				table = device.createArgumentTable(m_layout);
-				const std::array<rhi::ArgumentWrite, 5> writes{
+				const std::array<rhi::ArgumentWrite, 6> writes{
 					{
 						rhi::ArgumentWrite{
 							.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -247,6 +263,12 @@ namespace demo
 							.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
 							.textureView = m_historyDepthViews[parity],
 							.sampler = m_atlasSampler,
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+						},
+						rhi::ArgumentWrite{
+							.binding = 5, .type = rhi::ArgumentType::combinedImageSampler,
+							.textureView = m_globalAlbedoView,
+							.sampler = m_globalSDFSampler,
 							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 						},
 					}
@@ -315,6 +337,8 @@ namespace demo
 		m_globalSDFSampler = {};
 		if (!m_globalSDFView.isNull()) m_device->destroyTextureView(m_globalSDFView);
 		m_globalSDFView = {};
+		if (!m_globalAlbedoView.isNull()) m_device->destroyTextureView(m_globalAlbedoView);
+		m_globalAlbedoView = {};
 		if (!m_radianceView.isNull()) m_device->destroyTextureView(m_radianceView);
 		m_radianceView = {};
 

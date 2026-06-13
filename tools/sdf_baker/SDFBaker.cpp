@@ -302,6 +302,25 @@ namespace sdf_baker
 			}
 		}
 
+		[[nodiscard]] glm::vec4 primitiveBaseColor(const tinygltf::Model& model,
+		                                           const tinygltf::Primitive& primitive)
+		{
+			if (primitive.material < 0 || static_cast<size_t>(primitive.material) >= model.materials.size())
+			{
+				return glm::vec4(1.0f);
+			}
+			const tinygltf::Material& material = model.materials[static_cast<size_t>(primitive.material)];
+			const std::vector<double>& factor = material.pbrMetallicRoughness.baseColorFactor;
+			if (factor.size() != 4)
+			{
+				return glm::vec4(1.0f);
+			}
+			return glm::vec4(static_cast<float>(factor[0]),
+			                 static_cast<float>(factor[1]),
+			                 static_cast<float>(factor[2]),
+			                 static_cast<float>(factor[3]));
+		}
+
 		[[nodiscard]] bool appendPrimitiveTriangles(const tinygltf::Model& model,
 		                                           const tinygltf::Primitive& primitive,
 		                                           const glm::mat4& transform,
@@ -364,6 +383,8 @@ namespace sdf_baker
 				outError = "glTF triangle primitive index count is not a non-zero multiple of three";
 				return false;
 			}
+			const glm::vec4 baseColor = primitiveBaseColor(model, primitive);
+			outMesh.triangleAlbedos.insert(outMesh.triangleAlbedos.end(), addedIndexCount / 3, baseColor);
 			return true;
 		}
 
@@ -538,6 +559,7 @@ namespace sdf_baker
 					outMesh.indices.push_back(corners[0]);
 					outMesh.indices.push_back(corners[i]);
 					outMesh.indices.push_back(corners[i + 1]);
+					outMesh.triangleAlbedos.emplace_back(1.0f);
 				}
 			}
 			// vt / vn / usemtl / o / g / s / mtllib are ignored.
@@ -576,6 +598,7 @@ namespace sdf_baker
 
 		outMesh.positions.clear();
 		outMesh.indices.clear();
+		outMesh.triangleAlbedos.clear();
 
 		std::vector<uint8_t> visitState(model.nodes.size(), 0u);
 		std::vector<int> roots;
@@ -757,10 +780,13 @@ namespace sdf_baker
 			{
 				glm::vec3 v0, v1, v2;
 				glm::vec3 geometricNormal; // unnormalized cross product is fine for sign tests
+				glm::vec4 albedo{1.0f};
 			};
 
-			void build(const std::vector<glm::vec3>& positions, const std::vector<uint32_t>& indices)
+			void build(const Mesh& mesh)
 			{
+				const std::vector<glm::vec3>& positions = mesh.positions;
+				const std::vector<uint32_t>& indices = mesh.indices;
 				const size_t triangleCount = indices.size() / 3;
 				m_triangles.reserve(triangleCount);
 				for (size_t i = 0; i < triangleCount; ++i)
@@ -771,6 +797,10 @@ namespace sdf_baker
 					triangle.v2 = positions[indices[i * 3 + 2]];
 					triangle.geometricNormal = glm::cross(triangle.v1 - triangle.v0,
 					                                      triangle.v2 - triangle.v0);
+					if (i < mesh.triangleAlbedos.size())
+					{
+						triangle.albedo = glm::clamp(mesh.triangleAlbedos[i], glm::vec4(0.0f), glm::vec4(1.0f));
+					}
 					m_triangles.push_back(triangle);
 				}
 				m_order.resize(m_triangles.size());
@@ -782,8 +812,17 @@ namespace sdf_baker
 			[[nodiscard]] float closestDistance(const glm::vec3& point) const
 			{
 				float bestSq = std::numeric_limits<float>::max();
-				closestRecurse(0, point, bestSq);
+				uint32_t bestTriangle = 0;
+				closestRecurse(0, point, bestSq, bestTriangle);
 				return std::sqrt(bestSq);
+			}
+
+			[[nodiscard]] glm::vec4 closestAlbedo(const glm::vec3& point) const
+			{
+				float bestSq = std::numeric_limits<float>::max();
+				uint32_t bestTriangle = 0;
+				closestRecurse(0, point, bestSq, bestTriangle);
+				return bestTriangle < m_triangles.size() ? m_triangles[bestTriangle].albedo : glm::vec4(1.0f);
 			}
 
 			// Nearest hit along [tMin, tMax]; outBackFace = ray hits the triangle
@@ -882,7 +921,8 @@ namespace sdf_baker
 				return nodeIndex;
 			}
 
-			void closestRecurse(uint32_t nodeIndex, const glm::vec3& point, float& bestSq) const
+			void closestRecurse(uint32_t nodeIndex, const glm::vec3& point, float& bestSq,
+			                    uint32_t& bestTriangle) const
 			{
 				const Node& node = m_nodes[nodeIndex];
 				if (distanceSqPointAABB(point, node.bmin, node.bmax) >= bestSq)
@@ -897,7 +937,12 @@ namespace sdf_baker
 						const glm::vec3 closest = closestPointOnTriangle(point, triangle.v0, triangle.v1,
 						                                                 triangle.v2);
 						const glm::vec3 delta = point - closest;
-						bestSq = std::min(bestSq, glm::dot(delta, delta));
+						const float distSq = glm::dot(delta, delta);
+						if (distSq < bestSq)
+						{
+							bestSq = distSq;
+							bestTriangle = m_order[i];
+						}
 					}
 					return;
 				}
@@ -908,13 +953,13 @@ namespace sdf_baker
 				const float distRight = distanceSqPointAABB(point, m_nodes[right].bmin, m_nodes[right].bmax);
 				if (distLeft < distRight)
 				{
-					closestRecurse(left, point, bestSq);
-					closestRecurse(right, point, bestSq);
+					closestRecurse(left, point, bestSq, bestTriangle);
+					closestRecurse(right, point, bestSq, bestTriangle);
 				}
 				else
 				{
-					closestRecurse(right, point, bestSq);
-					closestRecurse(left, point, bestSq);
+					closestRecurse(right, point, bestSq, bestTriangle);
+					closestRecurse(left, point, bestSq, bestTriangle);
 				}
 			}
 
@@ -974,6 +1019,20 @@ namespace sdf_baker
 			}
 			return directions;
 		}
+
+		[[nodiscard]] uint32_t packRGBA8(const glm::vec4& color)
+		{
+			const glm::vec4 clamped = glm::clamp(color, glm::vec4(0.0f), glm::vec4(1.0f));
+			const auto toByte = [](float v)
+			{
+				return static_cast<uint32_t>(std::lround(glm::clamp(v, 0.0f, 1.0f) * 255.0f));
+			};
+			const uint32_t r = toByte(clamped.r);
+			const uint32_t g = toByte(clamped.g);
+			const uint32_t b = toByte(clamped.b);
+			const uint32_t a = toByte(clamped.a);
+			return r | (g << 8u) | (b << 16u) | (a << 24u);
+		}
 	} // namespace
 
 	// ---------------------------------------------------------------------------
@@ -1023,7 +1082,7 @@ namespace sdf_baker
 		const float maxDistance = std::max(extent.x, std::max(extent.y, extent.z));
 
 		TriangleBVH bvh;
-		bvh.build(mesh.positions, mesh.indices);
+		bvh.build(mesh);
 
 		const std::vector<glm::vec3> sampleDirections = buildSampleDirections(config.sampleCount);
 		const size_t voxelCount = static_cast<size_t>(resolution.x) * resolution.y * resolution.z;
@@ -1032,6 +1091,7 @@ namespace sdf_baker
 		outSDF.boundsMin = boundsMin;
 		outSDF.boundsMax = boundsMax;
 		outSDF.halfTexels.assign(voxelCount, 0u);
+		outSDF.albedoTexels.assign(voxelCount, packRGBA8(glm::vec4(1.0f)));
 
 		// Voxel centers span the padded AABB inclusively (LuxGI flattening:
 		// index = x + y*rx + z*rx*ry).
@@ -1047,6 +1107,7 @@ namespace sdf_baker
 						glm::vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)) * cellSize;
 
 					float distance = bvh.closestDistance(voxelPos);
+					const glm::vec4 albedo = bvh.closestAlbedo(voxelPos);
 
 					// Sign by back-face voting (LuxGI SDFBaker.cpp:113-144): cast the
 					// direction set, count nearest hits whose triangle faces away.
@@ -1079,6 +1140,7 @@ namespace sdf_baker
 						static_cast<size_t>(y) * resolution.x +
 						static_cast<size_t>(z) * resolution.x * resolution.y;
 					outSDF.halfTexels[index] = floatToHalf(encoded);
+					outSDF.albedoTexels[index] = packRGBA8(albedo);
 				}
 			}
 		};
@@ -1130,6 +1192,8 @@ namespace sdf_baker
 		file.write(reinterpret_cast<const char*>(&sdf.boundsMax), sizeof(float) * 3);
 		file.write(reinterpret_cast<const char*>(sdf.halfTexels.data()),
 		           static_cast<std::streamsize>(sdf.halfTexels.size() * sizeof(uint16_t)));
+		file.write(reinterpret_cast<const char*>(sdf.albedoTexels.data()),
+		           static_cast<std::streamsize>(sdf.albedoTexels.size() * sizeof(uint32_t)));
 
 		if (!file.good())
 		{

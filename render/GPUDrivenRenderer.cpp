@@ -638,6 +638,11 @@ namespace demo
 			waitForIdle();
 			getRHIDevice().destroyTexture(m_ddgiMeshSDFEntry.sdfTexture);
 		}
+		if (!m_ddgiMeshSDFEntry.albedoTexture.isNull())
+		{
+			waitForIdle();
+			getRHIDevice().destroyTexture(m_ddgiMeshSDFEntry.albedoTexture);
+		}
 		m_ddgiMeshSDFEntry = {};
 		m_ddgiMeshSDFLoaded = false;
 		m_ddgiMeshSDFPath.clear();
@@ -679,6 +684,7 @@ namespace demo
 			.boundsMin = loadResult.asset.worldBoundsMin,
 			.boundsMax = loadResult.asset.worldBoundsMax,
 			.sdfTexture = loadResult.asset.normalizedSDFHandle,
+			.albedoTexture = loadResult.asset.albedoHandle,
 		};
 		m_ddgiMeshSDFLoaded = true;
 		m_ddgiMeshSDFPath = path.string();

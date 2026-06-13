@@ -67,6 +67,17 @@ namespace demo
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.debugName = "global-sdf-volume",
 		});
+		m_volume.albedoTexture = device.createTexture(rhi::TextureDesc{
+			.dimension = rhi::TextureDimension::e3D,
+			.format = rhi::TextureFormat::rgba8Unorm,
+			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::storage,
+			.extent = {kResolution, kResolution, kResolution},
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.sampleCount = rhi::SampleCount::count1,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
+			.debugName = "global-sdf-albedo",
+		});
 
 		m_volume.mipViews.resize(kMipCount);
 		for (uint32_t mip = 0; mip < kMipCount; ++mip)
@@ -81,6 +92,17 @@ namespace demo
 			viewDesc.debugName = "global-sdf-volume-mip";
 			m_volume.mipViews[mip] = device.createTextureView(viewDesc);
 		}
+		{
+			rhi::TextureViewCreateDesc viewDesc{};
+			viewDesc.image = m_volume.albedoTexture;
+			viewDesc.format = rhi::TextureFormat::rgba8Unorm;
+			viewDesc.viewType = rhi::ImageViewType::e3D;
+			viewDesc.aspect = rhi::TextureAspect::color;
+			viewDesc.baseMipLevel = 0;
+			viewDesc.levelCount = 1;
+			viewDesc.debugName = "global-sdf-albedo-view";
+			m_volume.albedoView = device.createTextureView(viewDesc);
+		}
 
 		m_meshSDFSampler = device.createSampler(rhi::SamplerDesc{
 			.magFilter = rhi::Filter::linear,
@@ -93,10 +115,14 @@ namespace demo
 		});
 
 		// --- Argument layouts ---
-		const std::array<rhi::ArgumentBinding, 1> clearBindings{
+		const std::array<rhi::ArgumentBinding, 2> clearBindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 1, .type = rhi::ArgumentType::storageTexture,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
 			}
@@ -107,7 +133,7 @@ namespace demo
 			.debugName = "global-sdf-clear",
 		});
 
-		const std::array<rhi::ArgumentBinding, 3> composeBindings{
+		const std::array<rhi::ArgumentBinding, 5> composeBindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -120,6 +146,14 @@ namespace demo
 				rhi::ArgumentBinding{
 					.binding = 2, .type = rhi::ArgumentType::uniformBuffer,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 3, .type = rhi::ArgumentType::storageTexture,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = kMaxMeshSDFs
 				},
 			}
 		};
@@ -150,12 +184,21 @@ namespace demo
 		// --- Argument tables ---
 		m_clearTable = device.createArgumentTable(m_clearLayout);
 		{
-			const rhi::ArgumentWrite clearWrite{
-				.binding = 0, .type = rhi::ArgumentType::storageTexture,
-				.textureView = m_volume.mipViews[0],
-				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+			const std::array<rhi::ArgumentWrite, 2> clearWrites{
+				{
+					rhi::ArgumentWrite{
+						.binding = 0, .type = rhi::ArgumentType::storageTexture,
+						.textureView = m_volume.mipViews[0],
+						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+					},
+					rhi::ArgumentWrite{
+						.binding = 1, .type = rhi::ArgumentType::storageTexture,
+						.textureView = m_volume.albedoView,
+						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+					},
+				}
 			};
-			device.updateArgumentTable(m_clearTable, 1, &clearWrite);
+			device.updateArgumentTable(m_clearTable, static_cast<uint32_t>(clearWrites.size()), clearWrites.data());
 		}
 
 		m_mipmapTables.resize(kMipCount - 1u);
@@ -290,7 +333,10 @@ namespace demo
 			view = {};
 		}
 		m_volume.mipViews.clear();
+		if (!m_volume.albedoView.isNull()) m_device->destroyTextureView(m_volume.albedoView);
+		m_volume.albedoView = {};
 		if (!m_volume.sdfTexture.isNull()) m_device->destroyTexture(m_volume.sdfTexture);
+		if (!m_volume.albedoTexture.isNull()) m_device->destroyTexture(m_volume.albedoTexture);
 		m_volume = {};
 
 		m_layoutInitialized = false;
@@ -321,9 +367,10 @@ namespace demo
 
 		m_meshEntries.reserve(clamped);
 		m_meshViews.reserve(clamped);
+		m_meshAlbedoViews.reserve(clamped);
 		for (uint32_t i = 0; i < clamped; ++i)
 		{
-			if (entries[i].sdfTexture.isNull())
+			if (entries[i].sdfTexture.isNull() || entries[i].albedoTexture.isNull())
 			{
 				continue;
 			}
@@ -336,6 +383,15 @@ namespace demo
 			viewDesc.levelCount = 1;
 			viewDesc.debugName = "global-sdf-mesh-view";
 			m_meshViews.push_back(m_device->createTextureView(viewDesc));
+			rhi::TextureViewCreateDesc albedoViewDesc{};
+			albedoViewDesc.image = entries[i].albedoTexture;
+			albedoViewDesc.format = rhi::TextureFormat::rgba8Unorm;
+			albedoViewDesc.viewType = rhi::ImageViewType::e3D;
+			albedoViewDesc.aspect = rhi::TextureAspect::color;
+			albedoViewDesc.baseMipLevel = 0;
+			albedoViewDesc.levelCount = 1;
+			albedoViewDesc.debugName = "global-sdf-mesh-albedo-view";
+			m_meshAlbedoViews.push_back(m_device->createTextureView(albedoViewDesc));
 			m_meshEntries.push_back(entries[i]);
 		}
 	}
@@ -348,8 +404,13 @@ namespace demo
 			{
 				if (!view.isNull()) m_device->destroyTextureView(view);
 			}
+			for (rhi::TextureViewHandle view : m_meshAlbedoViews)
+			{
+				if (!view.isNull()) m_device->destroyTextureView(view);
+			}
 		}
 		m_meshViews.clear();
+		m_meshAlbedoViews.clear();
 	}
 
 	PassNode::HandleSlice<PassResourceDependency> GlobalSDFPass::getDependencies() const
@@ -386,7 +447,7 @@ namespace demo
 
 	void GlobalSDFPass::updateComposeArgumentTable(uint32_t frameIndex, uint32_t meshCount) const
 	{
-		std::array<rhi::ArgumentWrite, kMaxMeshSDFs + 2u> writes{};
+		std::array<rhi::ArgumentWrite, kMaxMeshSDFs * 2u + 3u> writes{};
 		uint32_t writeCount = 0;
 		writes[writeCount++] = rhi::ArgumentWrite{
 			.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -413,6 +474,22 @@ namespace demo
 			.buffer = m_composeUniformBuffers[frameIndex],
 			.size = sizeof(shaderio::GlobalSDFComposeUniforms),
 		};
+		writes[writeCount++] = rhi::ArgumentWrite{
+			.binding = 3, .type = rhi::ArgumentType::storageTexture,
+			.textureView = m_volume.albedoView,
+			.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+		};
+		for (uint32_t i = 0; i < kMaxMeshSDFs; ++i)
+		{
+			const uint32_t sourceIndex = std::min(i, meshCount - 1u);
+			writes[writeCount++] = rhi::ArgumentWrite{
+				.binding = 4, .arrayElement = i,
+				.type = rhi::ArgumentType::combinedImageSampler,
+				.textureView = m_meshAlbedoViews[sourceIndex],
+				.sampler = m_meshSDFSampler,
+				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+			};
+		}
 		m_device->updateArgumentTable(m_composeTables[frameIndex], writeCount, writes.data());
 	}
 
@@ -427,7 +504,8 @@ namespace demo
 		{
 			return;
 		}
-		if (m_device == nullptr || m_volume.sdfTexture.isNull() || m_clearTable.isNull()
+		if (m_device == nullptr || m_volume.sdfTexture.isNull() || m_volume.albedoTexture.isNull()
+			|| m_clearTable.isNull()
 			|| m_clearPipeline.isNull() || m_composePipeline.isNull() || m_mipmapPipeline.isNull()
 			|| m_mipmapTables.size() != kMipCount - 1u)
 		{
@@ -447,16 +525,29 @@ namespace demo
 
 		if (!m_layoutInitialized)
 		{
-			const rhi::TextureBarrier initBarrier{
-				.texture = m_volume.sdfTexture,
-				.before = rhi::ResourceState::Undefined,
-				.after = rhi::ResourceState::General,
-				.range = {
-					.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = kMipCount,
-					.baseArrayLayer = 0, .layerCount = 1
+			const std::array<rhi::TextureBarrier, 2> initBarriers{
+				{
+					rhi::TextureBarrier{
+						.texture = m_volume.sdfTexture,
+						.before = rhi::ResourceState::Undefined,
+						.after = rhi::ResourceState::General,
+						.range = {
+							.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = kMipCount,
+							.baseArrayLayer = 0, .layerCount = 1
+						},
+					},
+					rhi::TextureBarrier{
+						.texture = m_volume.albedoTexture,
+						.before = rhi::ResourceState::Undefined,
+						.after = rhi::ResourceState::General,
+						.range = {
+							.aspect = rhi::TextureAspect::color, .baseMipLevel = 0, .levelCount = 1,
+							.baseArrayLayer = 0, .layerCount = 1
+						},
+					},
 				},
 			};
-			cmd.resourceBarrier(&initBarrier, 1, nullptr, 0);
+			cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()), nullptr, 0);
 			m_layoutInitialized = true;
 		}
 
@@ -481,7 +572,9 @@ namespace demo
 
 		// --- Compose: min over the registered mesh SDF list ---
 		// Empty list (this wave): early-out, the volume stays at max distance.
-		const uint32_t meshCount = std::min(static_cast<uint32_t>(m_meshViews.size()), kMaxMeshSDFs);
+		const uint32_t meshCount = std::min({static_cast<uint32_t>(m_meshViews.size()),
+		                                     static_cast<uint32_t>(m_meshAlbedoViews.size()),
+		                                     kMaxMeshSDFs});
 		const uint32_t frameIndex = context.frameIndex;
 		if (meshCount > 0u && frameIndex < m_composeTables.size()
 			&& frameIndex < m_composeUniformBuffers.size())

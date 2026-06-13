@@ -74,6 +74,7 @@ namespace demo
 		// (DDGIProbeVolume radiance texture, GlobalSDFPass volume mip chain).
 		rhi::TextureViewHandle m_radianceView{};
 		rhi::TextureViewHandle m_globalSDFView{};
+		rhi::TextureViewHandle m_globalAlbedoView{};
 		rhi::SamplerHandle m_globalSDFSampler{};
 		// D4-1: sampled views over BOTH probe atlas sets, indexed by the frame
 		// parity whose READ pair they are (cf. DDGIProbeVolume parity contract).

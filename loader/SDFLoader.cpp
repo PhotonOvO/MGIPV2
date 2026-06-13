@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <array>
 #include <fstream>
 #include <span>
 
@@ -12,8 +13,10 @@ namespace demo
 	namespace
 	{
 		constexpr char kSDFMagic[4] = {'M', 'S', 'D', 'F'};
-		constexpr uint32_t kSDFVersion = 1u;
+		constexpr uint32_t kSDFVersionV1 = 1u;
+		constexpr uint32_t kSDFVersionV2 = 2u;
 		constexpr size_t kHeaderSize = 4 + sizeof(uint32_t) + sizeof(uint32_t) * 3 + sizeof(float) * 6;
+		constexpr uint32_t kWhiteRGBA8 = 0xffffffffu;
 	} // namespace
 
 	bool SDFLoader::parseFile(const std::filesystem::path& path, FileData& outData, std::string& outError)
@@ -42,10 +45,11 @@ namespace demo
 			outError = "SDF asset has bad magic: " + path.string();
 			return false;
 		}
-		if (version != kSDFVersion)
+		if (version != kSDFVersionV1 && version != kSDFVersionV2)
 		{
-			outError = "SDF asset version mismatch (" + std::to_string(version) + " != " +
-				std::to_string(kSDFVersion) + "): " + path.string();
+			outError = "SDF asset version mismatch (" + std::to_string(version) + " not in ["
+				+ std::to_string(kSDFVersionV1) + ", " + std::to_string(kSDFVersionV2) + "]): "
+				+ path.string();
 			return false;
 		}
 
@@ -86,6 +90,23 @@ namespace demo
 			outError = "SDF asset payload read failed: " + path.string();
 			return false;
 		}
+		outData.albedoTexels.assign(voxelCount, kWhiteRGBA8);
+		if (version >= kSDFVersionV2)
+		{
+			const size_t albedoPayloadSize = voxelCount * sizeof(uint32_t);
+			if (static_cast<size_t>(fileSize) < kHeaderSize + payloadSize + albedoPayloadSize)
+			{
+				outError = "SDF asset truncated (albedo payload): " + path.string();
+				return false;
+			}
+			file.read(reinterpret_cast<char*>(outData.albedoTexels.data()),
+			          static_cast<std::streamsize>(albedoPayloadSize));
+			if (!file.good())
+			{
+				outError = "SDF asset albedo payload read failed: " + path.string();
+				return false;
+			}
+		}
 		return true;
 	}
 
@@ -116,6 +137,21 @@ namespace demo
 			result.errorMessage = "Failed to create R16F Texture3D for SDF asset: " + path.string();
 			return result;
 		}
+		const rhi::TextureHandle albedoTexture = device.createTexture(rhi::TextureDesc{
+			.dimension = rhi::TextureDimension::e3D,
+			.format = rhi::TextureFormat::rgba8Unorm,
+			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
+			.extent = {resolution.x, resolution.y, resolution.z},
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.debugName = "MeshSDF_Albedo",
+		});
+		if (!albedoTexture.isValid())
+		{
+			device.destroyTexture(sdfTexture);
+			result.errorMessage = "Failed to create RGBA8 Texture3D for SDF albedo asset: " + path.string();
+			return result;
+		}
 
 		const rhi::TextureSubresourceRange volumeRange{
 			.aspect = rhi::TextureAspect::color,
@@ -126,24 +162,50 @@ namespace demo
 		};
 
 		// Undefined -> TransferDst before the staging copy.
-		const rhi::TextureBarrier uploadBeginBarrier{
-			.texture = sdfTexture,
-			.before = rhi::ResourceState::Undefined,
-			.after = rhi::ResourceState::TransferDst,
-			.range = volumeRange,
+		const std::array<rhi::TextureBarrier, 2> uploadBeginBarriers{
+			{
+				rhi::TextureBarrier{
+					.texture = sdfTexture,
+					.before = rhi::ResourceState::Undefined,
+					.after = rhi::ResourceState::TransferDst,
+					.range = volumeRange,
+				},
+				rhi::TextureBarrier{
+					.texture = albedoTexture,
+					.before = rhi::ResourceState::Undefined,
+					.after = rhi::ResourceState::TransferDst,
+					.range = volumeRange,
+				},
+			}
 		};
-		cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+		cmd.resourceBarrier(uploadBeginBarriers.data(), static_cast<uint32_t>(uploadBeginBarriers.size()), nullptr, 0);
 
 		const std::span<const std::byte> payload(
 			reinterpret_cast<const std::byte*>(fileData.halfTexels.data()),
 			fileData.halfTexels.size() * sizeof(uint16_t));
 		const rhi::BufferHandle stagingBuffer = upload::createUploadStagingBuffer(device, payload);
+		const std::span<const std::byte> albedoPayload(
+			reinterpret_cast<const std::byte*>(fileData.albedoTexels.data()),
+			fileData.albedoTexels.size() * sizeof(uint32_t));
+		const rhi::BufferHandle albedoStagingBuffer = upload::createUploadStagingBuffer(device, albedoPayload);
 
 		rhi::ComputeEncoder* copy = cmd.beginComputePass();
 		copy->copyBufferToTexture(rhi::BufferTextureCopyDesc{
 			.buffer = stagingBuffer,
 			.bufferOffset = 0,
 			.texture = sdfTexture,
+			.aspect = rhi::TextureAspect::color,
+			.mipLevel = 0,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+			.width = resolution.x,
+			.height = resolution.y,
+			.depth = resolution.z,
+		});
+		copy->copyBufferToTexture(rhi::BufferTextureCopyDesc{
+			.buffer = albedoStagingBuffer,
+			.bufferOffset = 0,
+			.texture = albedoTexture,
 			.aspect = rhi::TextureAspect::color,
 			.mipLevel = 0,
 			.baseArrayLayer = 0,
@@ -159,21 +221,33 @@ namespace demo
 		cmd.barrier(rhi::StageFlags::transfer, rhi::StageFlags::all, rhi::HazardFlags::textureWrites);
 
 		// TransferDst -> General for sampling by later DDGI passes.
-		const rhi::TextureBarrier uploadEndBarrier{
-			.texture = sdfTexture,
-			.before = rhi::ResourceState::TransferDst,
-			.after = rhi::ResourceState::General,
-			.range = volumeRange,
+		const std::array<rhi::TextureBarrier, 2> uploadEndBarriers{
+			{
+				rhi::TextureBarrier{
+					.texture = sdfTexture,
+					.before = rhi::ResourceState::TransferDst,
+					.after = rhi::ResourceState::General,
+					.range = volumeRange,
+				},
+				rhi::TextureBarrier{
+					.texture = albedoTexture,
+					.before = rhi::ResourceState::TransferDst,
+					.after = rhi::ResourceState::General,
+					.range = volumeRange,
+				},
+			}
 		};
-		cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+		cmd.resourceBarrier(uploadEndBarriers.data(), static_cast<uint32_t>(uploadEndBarriers.size()), nullptr, 0);
 
 		// Caller retires the staging buffer after the command buffer is submitted.
 		outStagingBuffers.push_back(stagingBuffer);
+		outStagingBuffers.push_back(albedoStagingBuffer);
 
 		result.asset.worldBoundsMin = fileData.boundsMin;
 		result.asset.worldBoundsMax = fileData.boundsMax;
 		result.asset.resolution = resolution;
 		result.asset.normalizedSDFHandle = sdfTexture;
+		result.asset.albedoHandle = albedoTexture;
 		result.asset.isValid = true;
 		return result;
 	}

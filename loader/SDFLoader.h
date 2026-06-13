@@ -7,11 +7,12 @@
 //
 // Binary layout (.bin) — MUST stay in sync with tools/sdf_baker/SDFBaker.h:
 //   offset  0: char     magic[4]      = "MSDF"
-//   offset  4: uint32   version       = 1
+//   offset  4: uint32   version       = 1 or 2
 //   offset  8: uint32   resolution[3]   (x, y, z voxel counts)
 //   offset 20: float    boundsMin[3]    (padded world-space AABB)
 //   offset 32: float    boundsMax[3]
 //   offset 44: uint16   payload[x*y*z]  (R16F, normalized (d+1)/2, x-major)
+//   v2 then:  uint8    albedo[x*y*z*4] (RGBA8, nearest triangle material color)
 
 #include "../rhi/RHICommandBuffer.h"
 #include "../rhi/RHIDevice.h"
@@ -34,6 +35,8 @@ namespace demo
 		glm::uvec3 resolution{0u};
 		// R16F Texture3D holding the normalized distance field (d + 1) / 2.
 		rhi::TextureHandle normalizedSDFHandle{};
+		// RGBA8 Texture3D holding nearest-surface albedo. v1 assets upload white.
+		rhi::TextureHandle albedoHandle{};
 		bool isValid{false};
 	};
 
@@ -53,6 +56,7 @@ namespace demo
 			glm::vec3 boundsMin{0.0f};
 			glm::vec3 boundsMax{0.0f};
 			std::vector<uint16_t> halfTexels;
+			std::vector<uint32_t> albedoTexels;
 		};
 
 		// Parses the .bin payload only (no GPU resources created).

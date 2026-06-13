@@ -7,6 +7,9 @@
 [[vk::binding(0, 0)]]
 RWTexture3D<float> dstVolume;
 
+[[vk::binding(1, 0)]]
+RWTexture3D<float4> dstAlbedo;
+
 [[vk::push_constant]]
 ConstantBuffer<GlobalSDFDispatchPush> clearPush;
 
@@ -21,4 +24,5 @@ void kernelGlobalSDFClear(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
     dstVolume[dispatchThreadId] = clearPush.params0.y;
+    dstAlbedo[dispatchThreadId] = float4(1.0, 1.0, 1.0, 1.0);
 }

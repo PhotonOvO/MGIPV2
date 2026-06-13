@@ -12,11 +12,12 @@
 // Binary layout (.bin) — MUST stay in sync with loader/SDFLoader.h
 // (demo::sdf format constants):
 //   offset  0: char     magic[4]      = "MSDF"
-//   offset  4: uint32   version       = 1
+//   offset  4: uint32   version       = 2
 //   offset  8: uint32   resolution[3]   (x, y, z voxel counts)
 //   offset 20: float    boundsMin[3]    (padded world-space AABB)
 //   offset 32: float    boundsMax[3]
 //   offset 44: uint16   payload[x*y*z]  (R16F, normalized (d+1)/2, x-major)
+//   then:      uint8    albedo[x*y*z*4] (RGBA8, nearest triangle material color)
 
 #include <glm/glm.hpp>
 
@@ -27,7 +28,7 @@
 namespace sdf_baker
 {
 	inline constexpr char kSDFMagic[4] = {'M', 'S', 'D', 'F'};
-	inline constexpr uint32_t kSDFVersion = 1u;
+	inline constexpr uint32_t kSDFVersion = 2u;
 
 	struct SDFBakerConfig
 	{
@@ -52,12 +53,14 @@ namespace sdf_baker
 		glm::vec3 boundsMin{0.0f};
 		glm::vec3 boundsMax{0.0f};
 		std::vector<uint16_t> halfTexels; // R16F payload, x-major flattening
+		std::vector<uint32_t> albedoTexels; // RGBA8 payload packed as 0xAABBGGRR, x-major
 	};
 
 	struct Mesh
 	{
 		std::vector<glm::vec3> positions;
 		std::vector<uint32_t> indices; // triangle list
+		std::vector<glm::vec4> triangleAlbedos; // one entry per triangle, linear RGBA
 	};
 
 	// Self-contained float -> IEEE 754 binary16 conversion (round to nearest even).
