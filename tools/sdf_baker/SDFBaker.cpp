@@ -133,6 +133,37 @@ namespace sdf_baker
 			return extension;
 		}
 
+		bool skipImageData(tinygltf::Image* image,
+		                   const int imageIndex,
+		                   std::string* err,
+		                   std::string* warn,
+		                   int reqWidth,
+		                   int reqHeight,
+		                   const unsigned char* bytes,
+		                   int size,
+		                   void* userData)
+		{
+			(void)imageIndex;
+			(void)err;
+			(void)warn;
+			(void)reqWidth;
+			(void)reqHeight;
+			(void)bytes;
+			(void)size;
+			(void)userData;
+
+			if (image != nullptr)
+			{
+				image->image.clear();
+				image->width = 0;
+				image->height = 0;
+				image->component = 0;
+				image->bits = 8;
+				image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+			}
+			return true;
+		}
+
 		[[nodiscard]] bool appendAccessorVec3Float(const tinygltf::Model& model,
 		                                           const tinygltf::Accessor& accessor,
 		                                           const glm::mat4& transform,
@@ -523,6 +554,8 @@ namespace sdf_baker
 	bool loadGltf(const std::string& path, Mesh& outMesh, std::string& outError)
 	{
 		tinygltf::TinyGLTF loader;
+		loader.SetImageLoader(skipImageData, nullptr);
+
 		tinygltf::Model model;
 		std::string warn;
 		std::string error;
