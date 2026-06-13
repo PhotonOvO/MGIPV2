@@ -107,22 +107,33 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
             const float3 toSun = -rayTraceUniforms.sunDirection.xyz;
             const float nDotL = max(dot(hitNormal, toSun), 0.0);
 
-            // Sun shadow ray: march toward the sun from a normal-offset origin;
-            // any hit means occluded (binary visibility).
+            // Sun shadow ray: march toward the sun from a normal-offset origin.
+            // The global SDF is coarse compared with thin scene geometry, so
+            // ignore very near hits; otherwise the first few voxels often
+            // self-shadow the same surface and make the probe field collapse
+            // to black after the first fallback frame.
             float sunVisibility = 0.0;
             if (nDotL > 0.0)
             {
-                const float3 shadowOrigin = hitPosition + hitNormal * (config.voxelSize * 2.0);
+                const float shadowSelfHitDistance = config.voxelSize * 4.0;
+                const float3 shadowOrigin = hitPosition + hitNormal * shadowSelfHitDistance;
                 const GlobalSDFTraceHit shadowHit =
                     traceGlobalSDF(globalSDFTexture, config, shadowOrigin, toSun, maxTraceDistance);
-                sunVisibility = isGlobalSDFHit(shadowHit) ? 0.0 : 1.0;
+                sunVisibility =
+                    (isGlobalSDFHit(shadowHit) && shadowHit.hitTime > shadowSelfHitDistance) ? 0.0 : 1.0;
             }
 
-            // Simplified hit shading: constant-albedo Lambert direct sun term.
+            // Simplified hit shading: constant-albedo Lambert direct sun term
+            // plus a small sky diffuse floor. The floor mirrors the first-frame
+            // fallback energy source, but keeps later frames from converging to
+            // a fully black probe field when SDF-only binary sun shadows are
+            // too conservative for thin/low-resolution geometry.
             // Per-object average albedo + surface cache are later milestones.
             const float albedo = rayTraceUniforms.skyColorAlbedo.w;
+            const float skyDiffuseFloor = 0.25;
             radiance =
                 (albedo / kDDGIRaysPi) * rayTraceUniforms.sunColor.xyz * nDotL * sunVisibility;
+            radiance += albedo * rayTraceUniforms.skyColorAlbedo.xyz * skyDiffuseFloor;
 
             // Infinite bounce (Wave D4-1): add the indirect term by sampling
             // LAST frame's probe atlases at the hit point — LuxGI
