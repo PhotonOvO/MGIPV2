@@ -28,6 +28,8 @@
 #include <atomic>
 #include <array>
 #include <algorithm>
+#include <cstring>
+#include <filesystem>
 
 class MinimalLatestApp
 {
@@ -59,6 +61,9 @@ public:
 
     // Load default scene automatically
     std::string path = "resources/Sponza/Sponza.gltf";
+    std::strncpy(m_modelPathBuffer, path.c_str(), sizeof(m_modelPathBuffer) - 1);
+    m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
+    setMeshSDFPathFromModelPath(path);
     loadModelAsync(path);
   }
 
@@ -948,6 +953,9 @@ private:
 
   // UI state
   char m_modelPathBuffer[512] = "resources/NV_Bistro/bistro_ktx.gltf";
+  char m_meshSDFPathBuffer[512] = "";
+  std::string m_meshSDFStatus;
+  bool m_meshSDFLoaded = false;
 
   // Preset models
   struct PresetModel {
@@ -1006,6 +1014,9 @@ private:
   void loadModelAsync(const std::string& path);
   void unloadModel();
   void drawModelLoaderUI();
+  void setMeshSDFPathFromModelPath(const std::string& gltfPath);
+  std::filesystem::path resolveMeshSDFPathForLoad() const;
+  void loadMeshSDFForDDGI();
   void drawSceneGraphUI();
   void drawSceneNodeTree(int nodeIndex);
   void drawSelectedSceneNodeInspector();
@@ -1711,6 +1722,72 @@ inline void MinimalLatestApp::unloadModel()
   }
 }
 
+inline void MinimalLatestApp::setMeshSDFPathFromModelPath(const std::string& gltfPath)
+{
+  const std::filesystem::path source(gltfPath);
+  std::filesystem::path sdfPath = source;
+  const std::string extension = source.has_extension() ? source.extension().string() : ".bin";
+  sdfPath.replace_filename(source.stem().string() + "_sdf" + extension);
+  std::strncpy(m_meshSDFPathBuffer, sdfPath.string().c_str(), sizeof(m_meshSDFPathBuffer) - 1);
+  m_meshSDFPathBuffer[sizeof(m_meshSDFPathBuffer) - 1] = '\0';
+}
+
+inline std::filesystem::path MinimalLatestApp::resolveMeshSDFPathForLoad() const
+{
+  const std::filesystem::path explicitPath(m_meshSDFPathBuffer);
+  std::error_code ec;
+  if(!explicitPath.empty() && std::filesystem::exists(explicitPath, ec) && !ec)
+  {
+    return explicitPath;
+  }
+
+  const std::filesystem::path source(m_modelPathBuffer);
+  const std::filesystem::path preferred =
+      source.parent_path() / (source.stem().string() + "_sdf" + source.extension().string());
+  if(std::filesystem::exists(preferred, ec) && !ec)
+  {
+    return preferred;
+  }
+
+  const std::filesystem::path upperBin = source.parent_path() / (source.stem().string() + "_SDF.bin");
+  if(std::filesystem::exists(upperBin, ec) && !ec)
+  {
+    return upperBin;
+  }
+
+  const std::filesystem::path lowerBin = source.parent_path() / (source.stem().string() + "_sdf.bin");
+  if(std::filesystem::exists(lowerBin, ec) && !ec)
+  {
+    return lowerBin;
+  }
+
+  return explicitPath.empty() ? preferred : explicitPath;
+}
+
+inline void MinimalLatestApp::loadMeshSDFForDDGI()
+{
+  if(m_isLoading)
+  {
+    m_meshSDFStatus = "Wait for scene loading to finish first.";
+    return;
+  }
+
+  const std::filesystem::path sdfPath = resolveMeshSDFPathForLoad();
+  std::string error;
+  if(m_renderer.loadDDGIMeshSDF(sdfPath, error))
+  {
+    std::strncpy(m_meshSDFPathBuffer, sdfPath.string().c_str(), sizeof(m_meshSDFPathBuffer) - 1);
+    m_meshSDFPathBuffer[sizeof(m_meshSDFPathBuffer) - 1] = '\0';
+    m_meshSDFLoaded = true;
+    m_meshSDFStatus = "Loaded: " + sdfPath.string();
+  }
+  else
+  {
+    m_meshSDFLoaded = false;
+    m_meshSDFStatus = error.empty() ? ("Failed to load: " + sdfPath.string()) : error;
+  }
+}
+
 inline void MinimalLatestApp::drawModelLoaderUI()
 {
   if(ImGui::Begin("Model Loader"))
@@ -1732,6 +1809,7 @@ inline void MinimalLatestApp::drawModelLoaderUI()
           m_selectedPreset = i;
           std::strncpy(m_modelPathBuffer, m_presetModels[i].path, sizeof(m_modelPathBuffer) - 1);
           m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
+          setMeshSDFPathFromModelPath(m_modelPathBuffer);
         }
         if(isSelected)
         {
@@ -1747,6 +1825,35 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     if(ImGui::CollapsingHeader("Custom Path"))
     {
       ImGui::InputText("Path", m_modelPathBuffer, sizeof(m_modelPathBuffer));
+      if(ImGui::Button("Use Path For Mesh SDF"))
+      {
+        setMeshSDFPathFromModelPath(m_modelPathBuffer);
+      }
+    }
+
+    if(ImGui::CollapsingHeader("DDGI Mesh SDF", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+      bool ddgiEnabled = m_renderer.isDDGIEnabled();
+      if(ImGui::Checkbox("Enable DDGI", &ddgiEnabled))
+      {
+        m_renderer.setDDGIEnabled(ddgiEnabled);
+      }
+      ImGui::InputText("Mesh SDF Path", m_meshSDFPathBuffer, sizeof(m_meshSDFPathBuffer));
+      if(ImGui::Button("From glTF Path"))
+      {
+        setMeshSDFPathFromModelPath(m_modelPathBuffer);
+      }
+      ImGui::SameLine();
+      if(ImGui::Button("Load Mesh SDF"))
+      {
+        loadMeshSDFForDDGI();
+      }
+      ImGui::Text("DDGI: %s", m_renderer.isDDGIEnabled() ? "enabled" : "disabled");
+      ImGui::Text("Mesh SDF: %s", (m_meshSDFLoaded || m_renderer.hasDDGIMeshSDF()) ? "loaded" : "not loaded");
+      if(!m_meshSDFStatus.empty())
+      {
+        ImGui::TextWrapped("%s", m_meshSDFStatus.c_str());
+      }
     }
 
     // Load button
@@ -1754,6 +1861,7 @@ inline void MinimalLatestApp::drawModelLoaderUI()
     {
       if(!m_isLoading)
       {
+        setMeshSDFPathFromModelPath(m_modelPathBuffer);
         loadModelAsync(std::string(m_modelPathBuffer));
       }
     }

@@ -2,6 +2,8 @@
 
 #include "GPUDrivenRenderer.h"
 
+#include <filesystem>
+
 namespace demo
 {
 	enum class RendererBackend
@@ -46,6 +48,10 @@ namespace demo
 		void updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
 		void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn);
 		void waitForIdle();
+		[[nodiscard]] bool loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError);
+		void setDDGIEnabled(bool enabled);
+		[[nodiscard]] bool isDDGIEnabled() const;
+		[[nodiscard]] bool hasDDGIMeshSDF() const;
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;

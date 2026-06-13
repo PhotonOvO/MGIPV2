@@ -134,6 +134,26 @@ namespace demo
 		gpuDriven().waitForIdle();
 	}
 
+	bool RendererFacade::loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError)
+	{
+		return gpuDriven().loadDDGIMeshSDF(path, outError);
+	}
+
+	void RendererFacade::setDDGIEnabled(bool enabled)
+	{
+		gpuDriven().setDDGIEnabled(enabled);
+	}
+
+	bool RendererFacade::isDDGIEnabled() const
+	{
+		return gpuDriven().isDDGIEnabled();
+	}
+
+	bool RendererFacade::hasDDGIMeshSDF() const
+	{
+		return gpuDriven().hasDDGIMeshSDF();
+	}
+
 	const shaderio::GPUCullStats& RendererFacade::getLastGPUCullingStats() const
 	{
 		return gpuDriven().getLastGPUCullingStats();

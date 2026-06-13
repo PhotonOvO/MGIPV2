@@ -35,6 +35,7 @@
 #include "RenderDevice.h"
 
 #include <array>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -329,6 +330,10 @@ namespace demo
 		}
 
 		void waitForIdle() { m_renderer.waitForIdle(); }
+		[[nodiscard]] bool loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError);
+		void setDDGIEnabled(bool enabled);
+		[[nodiscard]] bool isDDGIEnabled() const { return getDDGIConfig().enabled; }
+		[[nodiscard]] bool hasDDGIMeshSDF() const { return m_ddgiMeshSDFLoaded; }
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const
 		{
@@ -1224,6 +1229,9 @@ namespace demo
 		void updateLightingArgumentTable(uint32_t frameIndex);
 		void initLightingPipelines();
 		void shutdownLightingPipelines();
+		void initDDGIResources();
+		void shutdownDDGIResources();
+		void clearDDGIMeshSDF();
 		void initPhase7Resources();
 		void shutdownPhase7Resources();
 		void resizePhase7Resources();
@@ -1288,6 +1296,9 @@ namespace demo
 		// keeps the path dormant.
 		std::array<rhi::TextureViewHandle, 2> m_ddgiIrradianceLightingViews{};
 		std::array<rhi::TextureViewHandle, 2> m_ddgiDepthLightingViews{};
+		GlobalSDFMeshEntry m_ddgiMeshSDFEntry{};
+		bool m_ddgiMeshSDFLoaded{false};
+		std::string m_ddgiMeshSDFPath;
 		// DDGI (Wave D3-2): probe visualization debug draw. Resources are only
 		// created when DDGIConfig::enabled is true; the draw additionally
 		// requires the ImGui "DDGI Probe Visualize" checkbox (default false).

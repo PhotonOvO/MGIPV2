@@ -4,6 +4,7 @@
 #include "UploadUtils.h"
 #include "RHIFormatBridge.h"
 #include "../loader/Ktx2Loader.h"
+#include "../loader/SDFLoader.h"
 #include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
@@ -415,62 +416,7 @@ namespace demo
 		initPhase7Resources();
 		bindPhase7PassResources();
 		m_globalSDFPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
-		// DDGI (Wave D2-1): probe volume GPU resources are only allocated when
-		// the master gate is on (default false), so default memory/behavior is
-		// unchanged. World bounds mirror the GlobalSDFPass default until a
-		// later wave wires scene-driven bounds in.
-		if (getDDGIConfig().enabled)
-		{
-			m_ddgiProbeVolume.init(getRHIDevice(),
-			                       DDGIProbeVolume::makeDesc(getDDGIConfig(),
-			                                                 glm::vec3(-GlobalSDFPass::kDefaultHalfExtent),
-			                                                 glm::vec3(GlobalSDFPass::kDefaultHalfExtent)));
-			// Publish the resolved adaptive grid dims back into the config so
-			// later waves (ray trace / probe update / sampling) see one truth.
-			m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
-			// DDGI (Wave D2-2): the ray trace pass needs both the probe volume
-			// and the Global SDF volume, so it initializes after them.
-			m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
-			// DDGI (Wave D2-3): the probe update pass only needs the probe
-			// volume (atlases + radiance scratch); tables are static, push
-			// constants carry the per-frame values.
-			m_ddgiProbeUpdatePass->initResources(getRHIDevice());
-			// DDGI (Wave D3-1/D4-1): sampled views over BOTH atlas sets for
-			// the lighting pass; updateLightingArgumentTable selects the frame
-			// parity's WRITE atlas (the one the probe update produced this
-			// frame) every frame before any pass encodes.
-			if (m_ddgiProbeVolume.isInitialized())
-			{
-				const auto createLightingAtlasView = [&](rhi::TextureHandle texture,
-				                                         rhi::TextureFormat format,
-				                                         const char* debugName)
-				{
-					rhi::TextureViewCreateDesc viewDesc{};
-					viewDesc.image = texture;
-					viewDesc.format = format;
-					viewDesc.viewType = rhi::ImageViewType::e2D;
-					viewDesc.aspect = rhi::TextureAspect::color;
-					viewDesc.baseMipLevel = 0;
-					viewDesc.levelCount = 1;
-					viewDesc.debugName = debugName;
-					return getRHIDevice().createTextureView(viewDesc);
-				};
-				for (uint32_t parity = 0; parity < 2u; ++parity)
-				{
-					m_ddgiIrradianceLightingViews[parity] = createLightingAtlasView(
-						m_ddgiProbeVolume.getIrradianceAtlasWrite(parity),
-						rhi::TextureFormat::rgba16Sfloat,
-						parity == 0u ? "ddgi-lighting-irradiance-p0" : "ddgi-lighting-irradiance-p1");
-					m_ddgiDepthLightingViews[parity] = createLightingAtlasView(
-						m_ddgiProbeVolume.getDepthAtlasWrite(parity),
-						rhi::TextureFormat::rg16Sfloat,
-						parity == 0u ? "ddgi-lighting-depth-p0" : "ddgi-lighting-depth-p1");
-				}
-			}
-			// DDGI (Wave D3-2): probe visualization debug draw needs the probe
-			// volume (positions BDA + irradiance atlas), so it initializes last.
-			m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
-		}
+		initDDGIResources();
 		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
 		{
@@ -490,41 +436,12 @@ namespace demo
 		}
 		shutdownTransparentVisibilityPatchResources();
 		shutdownPhase7Resources();
-		// DDGI (Wave D2-2/D2-3/D3-2): views over the probe volume / global SDF
-		// must go before their owners are torn down below.
-		if (m_ddgiDebugPass != nullptr)
-		{
-			m_ddgiDebugPass->shutdownResources();
-		}
-		if (m_ddgiProbeUpdatePass != nullptr)
-		{
-			m_ddgiProbeUpdatePass->shutdownResources();
-		}
-		if (m_ddgiRayTracePass != nullptr)
-		{
-			m_ddgiRayTracePass->shutdownResources();
-		}
+		clearDDGIMeshSDF();
+		shutdownDDGIResources();
 		if (m_globalSDFPass != nullptr)
 		{
 			m_globalSDFPass->shutdownResources();
 		}
-		// DDGI (Wave D3-1/D4-1): lighting-pass atlas views must go before the
-		// probe volume tears the underlying textures down.
-		for (uint32_t parity = 0; parity < 2u; ++parity)
-		{
-			if (!m_ddgiIrradianceLightingViews[parity].isNull())
-			{
-				getRHIDevice().destroyTextureView(m_ddgiIrradianceLightingViews[parity]);
-				m_ddgiIrradianceLightingViews[parity] = {};
-			}
-			if (!m_ddgiDepthLightingViews[parity].isNull())
-			{
-				getRHIDevice().destroyTextureView(m_ddgiDepthLightingViews[parity]);
-				m_ddgiDepthLightingViews[parity] = {};
-			}
-		}
-		// DDGI (Wave D2-1): no-op when DDGI was never enabled.
-		m_ddgiProbeVolume.deinit();
 		m_sortedBootstrapFrames.clear();
 		m_passExecutor.clear();
 		m_imguiPass.reset();
@@ -561,6 +478,174 @@ namespace demo
 		shutdownLightingResources();
 		m_sceneRegistry.deinit();
 		m_renderer.shutdown(surface);
+	}
+
+	void GPUDrivenRenderer::initDDGIResources()
+	{
+		if (!getDDGIConfig().enabled || m_ddgiProbeVolume.isInitialized() || m_globalSDFPass == nullptr)
+		{
+			return;
+		}
+
+		m_ddgiProbeVolume.init(getRHIDevice(),
+		                       DDGIProbeVolume::makeDesc(getDDGIConfig(),
+		                                                 glm::vec3(-GlobalSDFPass::kDefaultHalfExtent),
+		                                                 glm::vec3(GlobalSDFPass::kDefaultHalfExtent)));
+		m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
+		m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		m_ddgiProbeUpdatePass->initResources(getRHIDevice());
+
+		if (m_ddgiProbeVolume.isInitialized())
+		{
+			const auto createLightingAtlasView = [&](rhi::TextureHandle texture,
+			                                         rhi::TextureFormat format,
+			                                         const char* debugName)
+			{
+				rhi::TextureViewCreateDesc viewDesc{};
+				viewDesc.image = texture;
+				viewDesc.format = format;
+				viewDesc.viewType = rhi::ImageViewType::e2D;
+				viewDesc.aspect = rhi::TextureAspect::color;
+				viewDesc.baseMipLevel = 0;
+				viewDesc.levelCount = 1;
+				viewDesc.debugName = debugName;
+				return getRHIDevice().createTextureView(viewDesc);
+			};
+			for (uint32_t parity = 0; parity < 2u; ++parity)
+			{
+				m_ddgiIrradianceLightingViews[parity] = createLightingAtlasView(
+					m_ddgiProbeVolume.getIrradianceAtlasWrite(parity),
+					rhi::TextureFormat::rgba16Sfloat,
+					parity == 0u ? "ddgi-lighting-irradiance-p0" : "ddgi-lighting-irradiance-p1");
+				m_ddgiDepthLightingViews[parity] = createLightingAtlasView(
+					m_ddgiProbeVolume.getDepthAtlasWrite(parity),
+					rhi::TextureFormat::rg16Sfloat,
+					parity == 0u ? "ddgi-lighting-depth-p0" : "ddgi-lighting-depth-p1");
+			}
+		}
+
+		m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		if (m_ddgiMeshSDFLoaded)
+		{
+			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
+		}
+	}
+
+	void GPUDrivenRenderer::shutdownDDGIResources()
+	{
+		if (m_ddgiDebugPass != nullptr)
+		{
+			m_ddgiDebugPass->shutdownResources();
+		}
+		if (m_ddgiProbeUpdatePass != nullptr)
+		{
+			m_ddgiProbeUpdatePass->shutdownResources();
+		}
+		if (m_ddgiRayTracePass != nullptr)
+		{
+			m_ddgiRayTracePass->shutdownResources();
+		}
+
+		for (uint32_t parity = 0; parity < 2u; ++parity)
+		{
+			if (!m_ddgiIrradianceLightingViews[parity].isNull())
+			{
+				getRHIDevice().destroyTextureView(m_ddgiIrradianceLightingViews[parity]);
+				m_ddgiIrradianceLightingViews[parity] = {};
+			}
+			if (!m_ddgiDepthLightingViews[parity].isNull())
+			{
+				getRHIDevice().destroyTextureView(m_ddgiDepthLightingViews[parity]);
+				m_ddgiDepthLightingViews[parity] = {};
+			}
+		}
+		m_ddgiProbeVolume.deinit();
+		m_renderer.getDDGIConfig().gridDims = glm::uvec3(0u);
+	}
+
+	void GPUDrivenRenderer::setDDGIEnabled(bool enabled)
+	{
+		if (m_renderer.getDDGIConfig().enabled == enabled)
+		{
+			return;
+		}
+
+		m_renderer.getDDGIConfig().enabled = enabled;
+		if (enabled)
+		{
+			initDDGIResources();
+		}
+		else
+		{
+			waitForIdle();
+			shutdownDDGIResources();
+		}
+	}
+
+	void GPUDrivenRenderer::clearDDGIMeshSDF()
+	{
+		if (m_globalSDFPass != nullptr)
+		{
+			m_globalSDFPass->setMeshSDFList(nullptr, 0u);
+		}
+		if (!m_ddgiMeshSDFEntry.sdfTexture.isNull())
+		{
+			waitForIdle();
+			getRHIDevice().destroyTexture(m_ddgiMeshSDFEntry.sdfTexture);
+		}
+		m_ddgiMeshSDFEntry = {};
+		m_ddgiMeshSDFLoaded = false;
+		m_ddgiMeshSDFPath.clear();
+	}
+
+	bool GPUDrivenRenderer::loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError)
+	{
+		outError.clear();
+		if (m_globalSDFPass == nullptr)
+		{
+			outError = "GlobalSDFPass is not initialized";
+			return false;
+		}
+
+		SDFLoadResult loadResult{};
+		std::vector<rhi::BufferHandle> stagingBuffers;
+		executeUploadCommand([&](rhi::CommandBuffer& cmd)
+		{
+			loadResult = SDFLoader::load(path, getRHIDevice(), cmd, stagingBuffers);
+		});
+		waitForIdle();
+		for (rhi::BufferHandle staging : stagingBuffers)
+		{
+			if (!staging.isNull())
+			{
+				getRHIDevice().destroyBuffer(staging);
+			}
+		}
+		if (!loadResult.asset.isValid)
+		{
+			outError = loadResult.errorMessage.empty()
+				           ? ("Failed to load DDGI mesh SDF: " + path.string())
+				           : loadResult.errorMessage;
+			return false;
+		}
+
+		clearDDGIMeshSDF();
+		m_ddgiMeshSDFEntry = GlobalSDFMeshEntry{
+			.boundsMin = loadResult.asset.worldBoundsMin,
+			.boundsMax = loadResult.asset.worldBoundsMax,
+			.sdfTexture = loadResult.asset.normalizedSDFHandle,
+		};
+		m_ddgiMeshSDFLoaded = true;
+		m_ddgiMeshSDFPath = path.string();
+		m_renderer.getDDGIConfig().enabled = true;
+		initDDGIResources();
+		m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
+		LOGI("Loaded DDGI mesh SDF: %s (%ux%ux%u)",
+		     m_ddgiMeshSDFPath.c_str(),
+		     loadResult.asset.resolution.x,
+		     loadResult.asset.resolution.y,
+		     loadResult.asset.resolution.z);
+		return true;
 	}
 
 	void GPUDrivenRenderer::resize(rhi::Extent2D size)
