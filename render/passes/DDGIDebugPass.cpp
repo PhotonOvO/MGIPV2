@@ -177,7 +177,11 @@ namespace demo
 			.specializationVariant = 0x7409u,
 		};
 		desc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
-		desc.rasterState.cullMode = rhi::CullMode::none;
+		// Cull the hidden half of each procedural sphere. With two-sided
+		// drawing and depth writes disabled, back faces can overdraw front faces
+		// because both only test against scene depth, producing stripey probes
+		// that look like they ignore depth.
+		desc.rasterState.cullMode = rhi::CullMode::back;
 		desc.rasterState.frontFace = rhi::FrontFace::counterClockwise;
 		desc.rasterState.sampleCount = rhi::SampleCount::count1;
 		m_pipeline = device.createGraphicsPipeline(desc);

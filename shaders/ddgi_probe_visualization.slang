@@ -30,6 +30,40 @@ struct ProbeVisVertexOutput
     nointerpolation uint probeIndex : TEXCOORD0;
 };
 
+float3 decodeProbeVisIrradiance(float2 uv)
+{
+    float3 irradiance = irradianceAtlas.SampleLevel(uv, 0.0).rgb;
+    // Gamma decode: pow(x, gamma * 0.5) then square (LuxGI DDGICommon.glsl
+    // storage convention, same as the lighting SampleProbe path).
+    const float halfGamma = probeVisUniforms.ddgiGamma * 0.5;
+    irradiance = pow(irradiance, float3(halfGamma, halfGamma, halfGamma));
+    return irradiance * irradiance;
+}
+
+float3 sampleProbeVisDirection(uint probeIndex, float3 dir)
+{
+    const int2 atlasSize = int2(int(probeVisUniforms.irradianceAtlasWidth),
+                                int(probeVisUniforms.irradianceAtlasHeight));
+    const float2 uv = ddgiTextureCoordFromDirection(
+        normalize(dir), int(probeIndex), atlasSize, int(probeVisUniforms.irradianceSideLength));
+    return decodeProbeVisIrradiance(uv);
+}
+
+float3 sampleProbeVisAverage(uint probeIndex)
+{
+    // Debug visualization wants a stable "probe health" color. Averaging a few
+    // principal directions avoids magnifying the 8x8 octahedral texels into
+    // distracting sphere stripes while still reflecting probe irradiance.
+    float3 sum = float3(0.0, 0.0, 0.0);
+    sum += sampleProbeVisDirection(probeIndex, float3(1.0, 0.0, 0.0));
+    sum += sampleProbeVisDirection(probeIndex, float3(-1.0, 0.0, 0.0));
+    sum += sampleProbeVisDirection(probeIndex, float3(0.0, 1.0, 0.0));
+    sum += sampleProbeVisDirection(probeIndex, float3(0.0, -1.0, 0.0));
+    sum += sampleProbeVisDirection(probeIndex, float3(0.0, 0.0, 1.0));
+    sum += sampleProbeVisDirection(probeIndex, float3(0.0, 0.0, -1.0));
+    return sum * (1.0 / 6.0);
+}
+
 // Unit-sphere direction of one UV-sphere triangle-list vertex. Quad corner
 // order (two CCW triangles): (0,0) (1,0) (1,1) / (0,0) (1,1) (0,1) — encoded
 // as bit masks over the 6 in-quad vertex ids. Pole quads degenerate to zero
@@ -79,16 +113,8 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
 float4 fragmentProbeVisMain(ProbeVisVertexOutput input) : SV_Target
 {
     const float3 n = normalize(input.normalWS);
-    const int2 atlasSize = int2(int(probeVisUniforms.irradianceAtlasWidth),
-                                int(probeVisUniforms.irradianceAtlasHeight));
-    const float2 uv = ddgiTextureCoordFromDirection(
-        n, int(input.probeIndex), atlasSize, int(probeVisUniforms.irradianceSideLength));
-
-    float3 irradiance = irradianceAtlas.SampleLevel(uv, 0.0).rgb;
-    // Gamma decode: pow(x, gamma * 0.5) then square (LuxGI DDGICommon.glsl
-    // storage convention, same as the lighting SampleProbe path).
-    const float halfGamma = probeVisUniforms.ddgiGamma * 0.5;
-    irradiance = pow(irradiance, float3(halfGamma, halfGamma, halfGamma));
-    irradiance *= irradiance;
+    const float3 averageIrradiance = sampleProbeVisAverage(input.probeIndex);
+    const float3 directionalIrradiance = sampleProbeVisDirection(input.probeIndex, n);
+    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.2);
     return float4(irradiance, 1.0);
 }
