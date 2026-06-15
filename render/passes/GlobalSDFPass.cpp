@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 
 namespace demo
 {
@@ -351,6 +352,9 @@ namespace demo
 
 		if (entries == nullptr || count == 0u)
 		{
+			m_volume.worldBoundsMin = glm::vec3(-kDefaultHalfExtent);
+			m_volume.worldBoundsMax = glm::vec3(kDefaultHalfExtent);
+			m_volume.voxelSize = (2.0f * kDefaultHalfExtent) / static_cast<float>(kResolution);
 			return;
 		}
 		if (m_device == nullptr)
@@ -368,12 +372,18 @@ namespace demo
 		m_meshEntries.reserve(clamped);
 		m_meshViews.reserve(clamped);
 		m_meshAlbedoViews.reserve(clamped);
+		glm::vec3 boundsMin(std::numeric_limits<float>::max());
+		glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+		bool boundsValid = false;
 		for (uint32_t i = 0; i < clamped; ++i)
 		{
 			if (entries[i].sdfTexture.isNull() || entries[i].albedoTexture.isNull())
 			{
 				continue;
 			}
+			boundsMin = boundsValid ? glm::min(boundsMin, entries[i].boundsMin) : entries[i].boundsMin;
+			boundsMax = boundsValid ? glm::max(boundsMax, entries[i].boundsMax) : entries[i].boundsMax;
+			boundsValid = true;
 			rhi::TextureViewCreateDesc viewDesc{};
 			viewDesc.image = entries[i].sdfTexture;
 			viewDesc.format = rhi::TextureFormat::r16Sfloat;
@@ -393,6 +403,20 @@ namespace demo
 			albedoViewDesc.debugName = "global-sdf-mesh-albedo-view";
 			m_meshAlbedoViews.push_back(m_device->createTextureView(albedoViewDesc));
 			m_meshEntries.push_back(entries[i]);
+		}
+		if (boundsValid)
+		{
+			const glm::vec3 extent = glm::max(boundsMax - boundsMin, glm::vec3(1e-3f));
+			const float maxExtent = std::max(maxComponent(extent), 1e-3f);
+			const float paddedExtent = maxExtent * 1.02f;
+			const glm::vec3 center = (boundsMin + boundsMax) * 0.5f;
+			m_volume.worldBoundsMin = center - glm::vec3(paddedExtent * 0.5f);
+			m_volume.worldBoundsMax = center + glm::vec3(paddedExtent * 0.5f);
+			m_volume.voxelSize = paddedExtent / static_cast<float>(kResolution);
+			LOGI("GlobalSDFPass bounds updated from mesh SDFs: min=(%.3f %.3f %.3f) max=(%.3f %.3f %.3f) voxel=%.3f",
+			     m_volume.worldBoundsMin.x, m_volume.worldBoundsMin.y, m_volume.worldBoundsMin.z,
+			     m_volume.worldBoundsMax.x, m_volume.worldBoundsMax.y, m_volume.worldBoundsMax.z,
+			     m_volume.voxelSize);
 		}
 	}
 

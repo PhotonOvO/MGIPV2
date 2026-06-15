@@ -37,6 +37,8 @@ namespace demo
 		rhi::TextureHandle normalizedSDFHandle{};
 		// RGBA8 Texture3D holding nearest-surface albedo. v1 assets upload white.
 		rhi::TextureHandle albedoHandle{};
+		uint32_t fileVersion{0u};
+		bool hasAlbedoPayload{false};
 		bool isValid{false};
 	};
 
@@ -55,6 +57,8 @@ namespace demo
 			glm::uvec3 resolution{0u};
 			glm::vec3 boundsMin{0.0f};
 			glm::vec3 boundsMax{0.0f};
+			uint32_t version{0u};
+			bool hasAlbedoPayload{false};
 			std::vector<uint16_t> halfTexels;
 			std::vector<uint32_t> albedoTexels;
 		};

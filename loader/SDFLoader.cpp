@@ -82,6 +82,7 @@ namespace demo
 		outData.resolution = {resolution[0], resolution[1], resolution[2]};
 		outData.boundsMin = {boundsMin[0], boundsMin[1], boundsMin[2]};
 		outData.boundsMax = {boundsMax[0], boundsMax[1], boundsMax[2]};
+		outData.version = version;
 		outData.halfTexels.resize(voxelCount);
 		file.read(reinterpret_cast<char*>(outData.halfTexels.data()),
 		          static_cast<std::streamsize>(payloadSize));
@@ -106,6 +107,7 @@ namespace demo
 				outError = "SDF asset albedo payload read failed: " + path.string();
 				return false;
 			}
+			outData.hasAlbedoPayload = true;
 		}
 		return true;
 	}
@@ -248,6 +250,8 @@ namespace demo
 		result.asset.resolution = resolution;
 		result.asset.normalizedSDFHandle = sdfTexture;
 		result.asset.albedoHandle = albedoTexture;
+		result.asset.fileVersion = fileData.version;
+		result.asset.hasAlbedoPayload = fileData.hasAlbedoPayload;
 		result.asset.isValid = true;
 		return result;
 	}

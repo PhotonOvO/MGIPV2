@@ -1,6 +1,7 @@
 #include "DDGIProbeVolume.h"
 
 #include "../common/Common.h"
+#include "../common/logger.h"
 
 #include <algorithm>
 #include <cstring>
@@ -55,15 +56,45 @@ namespace demo
 
 		m_device = &device;
 		m_desc = desc;
+		const glm::vec3 requestedBoundsMin = m_desc.sceneBoundsMin;
+		const glm::vec3 requestedBoundsMax = m_desc.sceneBoundsMax;
+		const glm::vec3 sceneLength = glm::max(requestedBoundsMax - requestedBoundsMin, glm::vec3(0.0f));
+		const glm::vec3 sceneCenter = (requestedBoundsMin + requestedBoundsMax) * 0.5f;
 		if (m_desc.gridDims.x == 0u || m_desc.gridDims.y == 0u || m_desc.gridDims.z == 0u)
 		{
 			m_desc.gridDims = computeGridDims(m_desc.sceneBoundsMin, m_desc.sceneBoundsMax, m_desc.probeSpacing);
 		}
 		m_desc.gridDims = glm::min(m_desc.gridDims, kMaxGridDims);
+		m_desc.gridDims = glm::max(m_desc.gridDims, glm::uvec3(2u));
+		float effectiveSpacing = std::max(m_desc.probeSpacing, 1e-3f);
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			const float axisSpacing = sceneLength[axis] / static_cast<float>(m_desc.gridDims[axis] - 1u);
+			effectiveSpacing = std::max(effectiveSpacing, axisSpacing);
+		}
+		m_desc.probeSpacing = effectiveSpacing;
+		const glm::vec3 gridExtent = glm::vec3(m_desc.gridDims - glm::uvec3(1u)) * m_desc.probeSpacing;
+		m_desc.sceneBoundsMin = sceneCenter - gridExtent * 0.5f;
+		m_desc.sceneBoundsMax = sceneCenter + gridExtent * 0.5f;
 		m_desc.irradianceTexelSize = std::max(m_desc.irradianceTexelSize, 1u);
 		m_desc.depthTexelSize = std::max(m_desc.depthTexelSize, 1u);
 		m_desc.raysPerProbe = std::max(m_desc.raysPerProbe, 1u);
 		m_totalProbes = m_desc.gridDims.x * m_desc.gridDims.y * m_desc.gridDims.z;
+		LOGI("DDGI probe volume: bounds=(%.2f %.2f %.2f)-(%.2f %.2f %.2f), grid origin=(%.2f %.2f %.2f), "
+		     "dims=%ux%ux%u, spacing=%.2f",
+		     requestedBoundsMin.x,
+		     requestedBoundsMin.y,
+		     requestedBoundsMin.z,
+		     requestedBoundsMax.x,
+		     requestedBoundsMax.y,
+		     requestedBoundsMax.z,
+		     m_desc.sceneBoundsMin.x,
+		     m_desc.sceneBoundsMin.y,
+		     m_desc.sceneBoundsMin.z,
+		     m_desc.gridDims.x,
+		     m_desc.gridDims.y,
+		     m_desc.gridDims.z,
+		     m_desc.probeSpacing);
 
 		m_irradianceAtlasExtent = atlasExtent(m_desc.gridDims, m_desc.irradianceTexelSize);
 		m_depthAtlasExtent = atlasExtent(m_desc.gridDims, m_desc.depthTexelSize);

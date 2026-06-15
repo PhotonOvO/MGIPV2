@@ -1726,8 +1726,7 @@ inline void MinimalLatestApp::setMeshSDFPathFromModelPath(const std::string& glt
 {
   const std::filesystem::path source(gltfPath);
   std::filesystem::path sdfPath = source;
-  const std::string extension = source.has_extension() ? source.extension().string() : ".bin";
-  sdfPath.replace_filename(source.stem().string() + "_sdf" + extension);
+  sdfPath.replace_filename(source.stem().string() + "_sdf.bin");
   std::strncpy(m_meshSDFPathBuffer, sdfPath.string().c_str(), sizeof(m_meshSDFPathBuffer) - 1);
   m_meshSDFPathBuffer[sizeof(m_meshSDFPathBuffer) - 1] = '\0';
 }
@@ -1742,13 +1741,6 @@ inline std::filesystem::path MinimalLatestApp::resolveMeshSDFPathForLoad() const
   }
 
   const std::filesystem::path source(m_modelPathBuffer);
-  const std::filesystem::path preferred =
-      source.parent_path() / (source.stem().string() + "_sdf" + source.extension().string());
-  if(std::filesystem::exists(preferred, ec) && !ec)
-  {
-    return preferred;
-  }
-
   const std::filesystem::path upperBin = source.parent_path() / (source.stem().string() + "_SDF.bin");
   if(std::filesystem::exists(upperBin, ec) && !ec)
   {
@@ -1761,6 +1753,14 @@ inline std::filesystem::path MinimalLatestApp::resolveMeshSDFPathForLoad() const
     return lowerBin;
   }
 
+  const std::filesystem::path legacySameExtension =
+      source.parent_path() / (source.stem().string() + "_sdf" + source.extension().string());
+  if(std::filesystem::exists(legacySameExtension, ec) && !ec)
+  {
+    return legacySameExtension;
+  }
+
+  const std::filesystem::path preferred = lowerBin;
   return explicitPath.empty() ? preferred : explicitPath;
 }
 

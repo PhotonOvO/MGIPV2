@@ -52,7 +52,7 @@ namespace demo
 
 	struct DebugPassOptions
 	{
-		bool enabled{true};
+		bool enabled{false};
 		bool showSceneBounds{true};
 		bool showShadowFrustum{true};
 		bool showViewFrustum{false};
@@ -85,7 +85,7 @@ namespace demo
 		int upscalingMode{1}; // 0=Off, 1=TAA, 2=Spatial fallback
 		float postExposure{1.0f};
 		float bloomIntensity{0.35f};
-		float bloomThreshold{0.0f};
+		float bloomThreshold{0.8f};
 		float taaJitterScale{1.0f};
 		float taaBlendWeight{0.90f};
 		bool taaFilterInput{true};      // Lanczos 输入滤波（去当前帧亚像素抖动）

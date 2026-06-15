@@ -1,7 +1,7 @@
 #include "SDFBaker.h"
 
 #define TINYGLTF_IMPLEMENTATION
-#define TINYGLTF_NO_STB_IMAGE
+#define STB_IMAGE_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #include <tiny_gltf.h>
 
@@ -133,35 +133,98 @@ namespace sdf_baker
 			return extension;
 		}
 
-		bool skipImageData(tinygltf::Image* image,
-		                   const int imageIndex,
-		                   std::string* err,
-		                   std::string* warn,
-		                   int reqWidth,
-		                   int reqHeight,
-		                   const unsigned char* bytes,
-		                   int size,
-		                   void* userData)
+		[[nodiscard]] float srgbToLinear(float value)
 		{
-			(void)imageIndex;
-			(void)err;
-			(void)warn;
-			(void)reqWidth;
-			(void)reqHeight;
-			(void)bytes;
-			(void)size;
-			(void)userData;
+			value = glm::clamp(value, 0.0f, 1.0f);
+			return value <= 0.04045f ? value * (1.0f / 12.92f)
+			                         : std::pow((value + 0.055f) * (1.0f / 1.055f), 2.4f);
+		}
 
-			if (image != nullptr)
+		[[nodiscard]] float wrapTextureCoord(float value, int wrapMode)
+		{
+			switch (wrapMode)
 			{
-				image->image.clear();
-				image->width = 0;
-				image->height = 0;
-				image->component = 0;
-				image->bits = 8;
-				image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+			case TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE:
+				return glm::clamp(value, 0.0f, 1.0f);
+			case TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT:
+			{
+				float mirrored = std::fmod(value, 2.0f);
+				if (mirrored < 0.0f)
+				{
+					mirrored += 2.0f;
+				}
+				return mirrored <= 1.0f ? mirrored : 2.0f - mirrored;
 			}
-			return true;
+			case TINYGLTF_TEXTURE_WRAP_REPEAT:
+			default:
+				return value - std::floor(value);
+			}
+		}
+
+		[[nodiscard]] glm::vec4 sampleBaseColorTexture(const TextureImage& texture, glm::vec2 uv)
+		{
+			if (texture.width == 0u || texture.height == 0u || texture.componentCount == 0u || texture.pixels.empty())
+			{
+				return glm::vec4(1.0f);
+			}
+
+			const float u = wrapTextureCoord(uv.x, texture.wrapS);
+			const float v = wrapTextureCoord(uv.y, texture.wrapT);
+			const float x = u * static_cast<float>(texture.width - 1u);
+			const float y = v * static_cast<float>(texture.height - 1u);
+			const uint32_t x0 = static_cast<uint32_t>(glm::clamp(std::floor(x), 0.0f, static_cast<float>(texture.width - 1u)));
+			const uint32_t y0 = static_cast<uint32_t>(glm::clamp(std::floor(y), 0.0f, static_cast<float>(texture.height - 1u)));
+			const uint32_t x1 = std::min(x0 + 1u, texture.width - 1u);
+			const uint32_t y1 = std::min(y0 + 1u, texture.height - 1u);
+			const float tx = x - std::floor(x);
+			const float ty = y - std::floor(y);
+
+			const auto texel = [&](uint32_t px, uint32_t py)
+			{
+				const size_t base = (static_cast<size_t>(py) * texture.width + px) * texture.componentCount;
+				const auto channel = [&](uint32_t index, uint8_t fallback)
+				{
+					return index < texture.componentCount ? texture.pixels[base + index] : fallback;
+				};
+				const glm::vec4 srgb(
+					static_cast<float>(channel(0u, 255u)) * (1.0f / 255.0f),
+					static_cast<float>(channel(1u, channel(0u, 255u))) * (1.0f / 255.0f),
+					static_cast<float>(channel(2u, channel(0u, 255u))) * (1.0f / 255.0f),
+					static_cast<float>(channel(3u, 255u)) * (1.0f / 255.0f));
+				return glm::vec4(srgbToLinear(srgb.r), srgbToLinear(srgb.g), srgbToLinear(srgb.b), srgb.a);
+			};
+
+			const glm::vec4 c00 = texel(x0, y0);
+			const glm::vec4 c10 = texel(x1, y0);
+			const glm::vec4 c01 = texel(x0, y1);
+			const glm::vec4 c11 = texel(x1, y1);
+			return glm::mix(glm::mix(c00, c10, tx), glm::mix(c01, c11, tx), ty);
+		}
+
+		[[nodiscard]] glm::vec3 barycentricCoordinates(const glm::vec3& p,
+		                                               const glm::vec3& a,
+		                                               const glm::vec3& b,
+		                                               const glm::vec3& c)
+		{
+			const glm::vec3 v0 = b - a;
+			const glm::vec3 v1 = c - a;
+			const glm::vec3 v2 = p - a;
+			const float d00 = glm::dot(v0, v0);
+			const float d01 = glm::dot(v0, v1);
+			const float d11 = glm::dot(v1, v1);
+			const float d20 = glm::dot(v2, v0);
+			const float d21 = glm::dot(v2, v1);
+			const float denom = d00 * d11 - d01 * d01;
+			if (std::fabs(denom) < 1e-12f)
+			{
+				return glm::vec3(1.0f / 3.0f);
+			}
+			const float v = (d11 * d20 - d01 * d21) / denom;
+			const float w = (d00 * d21 - d01 * d20) / denom;
+			const float u = 1.0f - v - w;
+			const glm::vec3 clamped = glm::max(glm::vec3(u, v, w), glm::vec3(0.0f));
+			const float sum = clamped.x + clamped.y + clamped.z;
+			return sum > 1e-6f ? clamped / sum : glm::vec3(1.0f / 3.0f);
 		}
 
 		[[nodiscard]] bool appendAccessorVec3Float(const tinygltf::Model& model,
@@ -216,6 +279,92 @@ namespace sdf_baker
 				glm::vec3 position{0.0f};
 				std::memcpy(glm::value_ptr(position), src, sizeof(float) * 3);
 				outPositions.push_back(glm::vec3(transform * glm::vec4(position, 1.0f)));
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool appendAccessorTexCoords(const tinygltf::Model& model,
+		                                           const tinygltf::Accessor& accessor,
+		                                           std::vector<glm::vec2>& outTexCoords,
+		                                           std::string& outError)
+		{
+			if (accessor.type != TINYGLTF_TYPE_VEC2)
+			{
+				outError = "glTF TEXCOORD_0 accessor must be VEC2";
+				return false;
+			}
+			if (accessor.bufferView < 0 || static_cast<size_t>(accessor.bufferView) >= model.bufferViews.size())
+			{
+				outError = "glTF TEXCOORD_0 accessor has no valid buffer view";
+				return false;
+			}
+			if (accessor.sparse.isSparse)
+			{
+				outError = "glTF sparse TEXCOORD_0 accessors are not supported by sdf_baker";
+				return false;
+			}
+
+			const tinygltf::BufferView& view = model.bufferViews[static_cast<size_t>(accessor.bufferView)];
+			if (view.buffer < 0 || static_cast<size_t>(view.buffer) >= model.buffers.size())
+			{
+				outError = "glTF TEXCOORD_0 buffer view references an invalid buffer";
+				return false;
+			}
+
+			const size_t componentSize = tinygltf::GetComponentSizeInBytes(accessor.componentType);
+			if (componentSize == 0)
+			{
+				outError = "glTF TEXCOORD_0 accessor uses an unsupported component type";
+				return false;
+			}
+			const tinygltf::Buffer& buffer = model.buffers[static_cast<size_t>(view.buffer)];
+			const int strideValue = accessor.ByteStride(view);
+			const size_t elementBytes = componentSize * 2u;
+			const size_t stride = strideValue > 0 ? static_cast<size_t>(strideValue) : elementBytes;
+			const size_t offset = view.byteOffset + accessor.byteOffset;
+			if (accessor.count > 0 &&
+			    (offset > buffer.data.size() ||
+			     elementBytes > buffer.data.size() - offset ||
+			     stride > buffer.data.size() ||
+			     (accessor.count - 1) > (buffer.data.size() - offset - elementBytes) / stride))
+			{
+				outError = "glTF TEXCOORD_0 accessor exceeds source buffer bounds";
+				return false;
+			}
+
+			const auto readComponent = [&](const uint8_t* src, uint32_t component) -> float
+			{
+				switch (accessor.componentType)
+				{
+				case TINYGLTF_COMPONENT_TYPE_FLOAT:
+				{
+					float value = 0.0f;
+					std::memcpy(&value, src + component * sizeof(float), sizeof(float));
+					return value;
+				}
+				case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+				{
+					const uint8_t value = src[component];
+					return accessor.normalized ? static_cast<float>(value) * (1.0f / 255.0f)
+					                           : static_cast<float>(value);
+				}
+				case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+				{
+					uint16_t value = 0;
+					std::memcpy(&value, src + component * sizeof(uint16_t), sizeof(uint16_t));
+					return accessor.normalized ? static_cast<float>(value) * (1.0f / 65535.0f)
+					                           : static_cast<float>(value);
+				}
+				default:
+					return 0.0f;
+				}
+			};
+
+			outTexCoords.reserve(outTexCoords.size() + accessor.count);
+			for (size_t i = 0; i < accessor.count; ++i)
+			{
+				const uint8_t* src = buffer.data.data() + offset + i * stride;
+				outTexCoords.emplace_back(readComponent(src, 0u), readComponent(src, 1u));
 			}
 			return true;
 		}
@@ -321,9 +470,66 @@ namespace sdf_baker
 			                 static_cast<float>(factor[3]));
 		}
 
+		[[nodiscard]] int32_t resolveBaseColorTexture(const tinygltf::Model& model,
+		                                              const tinygltf::Primitive& primitive,
+		                                              std::vector<int32_t>& textureMap,
+		                                              Mesh& outMesh)
+		{
+			if (primitive.material < 0 || static_cast<size_t>(primitive.material) >= model.materials.size())
+			{
+				return -1;
+			}
+			const tinygltf::Material& material = model.materials[static_cast<size_t>(primitive.material)];
+			const tinygltf::TextureInfo& textureInfo = material.pbrMetallicRoughness.baseColorTexture;
+			if (textureInfo.index < 0 || textureInfo.texCoord != 0 ||
+			    static_cast<size_t>(textureInfo.index) >= model.textures.size() ||
+			    static_cast<size_t>(textureInfo.index) >= textureMap.size())
+			{
+				return -1;
+			}
+			int32_t& mapped = textureMap[static_cast<size_t>(textureInfo.index)];
+			if (mapped != -2)
+			{
+				return mapped;
+			}
+
+			const tinygltf::Texture& texture = model.textures[static_cast<size_t>(textureInfo.index)];
+			if (texture.source < 0 || static_cast<size_t>(texture.source) >= model.images.size())
+			{
+				mapped = -1;
+				return -1;
+			}
+			const tinygltf::Image& image = model.images[static_cast<size_t>(texture.source)];
+			if (image.width <= 0 || image.height <= 0 || image.component <= 0 || image.bits != 8 ||
+			    image.pixel_type != TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE || image.image.empty())
+			{
+				mapped = -1;
+				return -1;
+			}
+
+			TextureImage bakedTexture{};
+			bakedTexture.width = static_cast<uint32_t>(image.width);
+			bakedTexture.height = static_cast<uint32_t>(image.height);
+			bakedTexture.componentCount = static_cast<uint32_t>(image.component);
+			bakedTexture.wrapS = TINYGLTF_TEXTURE_WRAP_REPEAT;
+			bakedTexture.wrapT = TINYGLTF_TEXTURE_WRAP_REPEAT;
+			if (texture.sampler >= 0 && static_cast<size_t>(texture.sampler) < model.samplers.size())
+			{
+				const tinygltf::Sampler& sampler = model.samplers[static_cast<size_t>(texture.sampler)];
+				bakedTexture.wrapS = sampler.wrapS;
+				bakedTexture.wrapT = sampler.wrapT;
+			}
+			bakedTexture.pixels = image.image;
+
+			mapped = static_cast<int32_t>(outMesh.baseColorTextures.size());
+			outMesh.baseColorTextures.push_back(std::move(bakedTexture));
+			return mapped;
+		}
+
 		[[nodiscard]] bool appendPrimitiveTriangles(const tinygltf::Model& model,
 		                                           const tinygltf::Primitive& primitive,
 		                                           const glm::mat4& transform,
+		                                           std::vector<int32_t>& textureMap,
 		                                           Mesh& outMesh,
 		                                           std::string& outError)
 		{
@@ -352,6 +558,28 @@ namespace sdf_baker
 			if (!appendAccessorVec3Float(model, positionAccessor, transform, outMesh.positions, outError))
 			{
 				return false;
+			}
+			const size_t addedVertexCount = positionAccessor.count;
+			const auto texCoordIt = primitive.attributes.find("TEXCOORD_0");
+			const bool hasTexCoord0 = texCoordIt != primitive.attributes.end() &&
+				texCoordIt->second >= 0 &&
+				static_cast<size_t>(texCoordIt->second) < model.accessors.size();
+			if (hasTexCoord0)
+			{
+				const tinygltf::Accessor& texCoordAccessor = model.accessors[static_cast<size_t>(texCoordIt->second)];
+				if (texCoordAccessor.count != addedVertexCount)
+				{
+					outError = "glTF TEXCOORD_0 count does not match POSITION count";
+					return false;
+				}
+				if (!appendAccessorTexCoords(model, texCoordAccessor, outMesh.texCoords, outError))
+				{
+					return false;
+				}
+			}
+			else
+			{
+				outMesh.texCoords.insert(outMesh.texCoords.end(), addedVertexCount, glm::vec2(0.0f));
 			}
 
 			const size_t firstNewIndex = outMesh.indices.size();
@@ -384,7 +612,11 @@ namespace sdf_baker
 				return false;
 			}
 			const glm::vec4 baseColor = primitiveBaseColor(model, primitive);
+			const int32_t baseColorTexture =
+				hasTexCoord0 ? resolveBaseColorTexture(model, primitive, textureMap, outMesh) : -1;
 			outMesh.triangleAlbedos.insert(outMesh.triangleAlbedos.end(), addedIndexCount / 3, baseColor);
+			outMesh.triangleBaseColorTextures.insert(outMesh.triangleBaseColorTextures.end(),
+			                                         addedIndexCount / 3, baseColorTexture);
 			return true;
 		}
 
@@ -434,6 +666,7 @@ namespace sdf_baker
 		                              int nodeIndex,
 		                              const glm::mat4& parentTransform,
 		                              std::vector<uint8_t>& visitState,
+		                              std::vector<int32_t>& textureMap,
 		                              Mesh& outMesh,
 		                              std::string& outError)
 		{
@@ -467,7 +700,7 @@ namespace sdf_baker
 				const tinygltf::Mesh& mesh = model.meshes[static_cast<size_t>(node.mesh)];
 				for (const tinygltf::Primitive& primitive : mesh.primitives)
 				{
-					if (!appendPrimitiveTriangles(model, primitive, worldTransform, outMesh, outError))
+					if (!appendPrimitiveTriangles(model, primitive, worldTransform, textureMap, outMesh, outError))
 					{
 						return false;
 					}
@@ -476,7 +709,7 @@ namespace sdf_baker
 
 			for (int childIndex : node.children)
 			{
-				if (!appendNode(model, childIndex, worldTransform, visitState, outMesh, outError))
+				if (!appendNode(model, childIndex, worldTransform, visitState, textureMap, outMesh, outError))
 				{
 					return false;
 				}
@@ -512,7 +745,11 @@ namespace sdf_baker
 		}
 
 		outMesh.positions.clear();
+		outMesh.texCoords.clear();
 		outMesh.indices.clear();
+		outMesh.triangleAlbedos.clear();
+		outMesh.triangleBaseColorTextures.clear();
+		outMesh.baseColorTextures.clear();
 
 		std::string line;
 		size_t lineNumber = 0;
@@ -534,6 +771,7 @@ namespace sdf_baker
 					return false;
 				}
 				outMesh.positions.push_back(position);
+				outMesh.texCoords.emplace_back(0.0f);
 			}
 			else if (keyword == "f")
 			{
@@ -560,6 +798,7 @@ namespace sdf_baker
 					outMesh.indices.push_back(corners[i]);
 					outMesh.indices.push_back(corners[i + 1]);
 					outMesh.triangleAlbedos.emplace_back(1.0f);
+					outMesh.triangleBaseColorTextures.push_back(-1);
 				}
 			}
 			// vt / vn / usemtl / o / g / s / mtllib are ignored.
@@ -576,7 +815,7 @@ namespace sdf_baker
 	bool loadGltf(const std::string& path, Mesh& outMesh, std::string& outError)
 	{
 		tinygltf::TinyGLTF loader;
-		loader.SetImageLoader(skipImageData, nullptr);
+		loader.SetPreserveImageChannels(true);
 
 		tinygltf::Model model;
 		std::string warn;
@@ -597,10 +836,14 @@ namespace sdf_baker
 		}
 
 		outMesh.positions.clear();
+		outMesh.texCoords.clear();
 		outMesh.indices.clear();
 		outMesh.triangleAlbedos.clear();
+		outMesh.triangleBaseColorTextures.clear();
+		outMesh.baseColorTextures.clear();
 
 		std::vector<uint8_t> visitState(model.nodes.size(), 0u);
+		std::vector<int32_t> textureMap(model.textures.size(), -2);
 		std::vector<int> roots;
 		if (model.defaultScene >= 0 && static_cast<size_t>(model.defaultScene) < model.scenes.size())
 		{
@@ -628,7 +871,7 @@ namespace sdf_baker
 
 		for (int root : roots)
 		{
-			if (!appendNode(model, root, glm::mat4(1.0f), visitState, outMesh, outError))
+			if (!appendNode(model, root, glm::mat4(1.0f), visitState, textureMap, outMesh, outError))
 			{
 				return false;
 			}
@@ -779,8 +1022,10 @@ namespace sdf_baker
 			struct Triangle
 			{
 				glm::vec3 v0, v1, v2;
+				glm::vec2 uv0{0.0f}, uv1{0.0f}, uv2{0.0f};
 				glm::vec3 geometricNormal; // unnormalized cross product is fine for sign tests
 				glm::vec4 albedo{1.0f};
+				int32_t baseColorTexture{-1};
 			};
 
 			void build(const Mesh& mesh)
@@ -795,14 +1040,25 @@ namespace sdf_baker
 					triangle.v0 = positions[indices[i * 3 + 0]];
 					triangle.v1 = positions[indices[i * 3 + 1]];
 					triangle.v2 = positions[indices[i * 3 + 2]];
+					if (mesh.texCoords.size() == mesh.positions.size())
+					{
+						triangle.uv0 = mesh.texCoords[indices[i * 3 + 0]];
+						triangle.uv1 = mesh.texCoords[indices[i * 3 + 1]];
+						triangle.uv2 = mesh.texCoords[indices[i * 3 + 2]];
+					}
 					triangle.geometricNormal = glm::cross(triangle.v1 - triangle.v0,
 					                                      triangle.v2 - triangle.v0);
 					if (i < mesh.triangleAlbedos.size())
 					{
 						triangle.albedo = glm::clamp(mesh.triangleAlbedos[i], glm::vec4(0.0f), glm::vec4(1.0f));
 					}
+					if (i < mesh.triangleBaseColorTextures.size())
+					{
+						triangle.baseColorTexture = mesh.triangleBaseColorTextures[i];
+					}
 					m_triangles.push_back(triangle);
 				}
+				m_baseColorTextures = &mesh.baseColorTextures;
 				m_order.resize(m_triangles.size());
 				std::iota(m_order.begin(), m_order.end(), 0u);
 				m_nodes.reserve(m_triangles.size() * 2);
@@ -822,7 +1078,23 @@ namespace sdf_baker
 				float bestSq = std::numeric_limits<float>::max();
 				uint32_t bestTriangle = 0;
 				closestRecurse(0, point, bestSq, bestTriangle);
-				return bestTriangle < m_triangles.size() ? m_triangles[bestTriangle].albedo : glm::vec4(1.0f);
+				if (bestTriangle >= m_triangles.size())
+				{
+					return glm::vec4(1.0f);
+				}
+				const Triangle& triangle = m_triangles[bestTriangle];
+				glm::vec4 albedo = triangle.albedo;
+				if (m_baseColorTextures != nullptr && triangle.baseColorTexture >= 0 &&
+				    static_cast<size_t>(triangle.baseColorTexture) < m_baseColorTextures->size())
+				{
+					const glm::vec3 closest = closestPointOnTriangle(point, triangle.v0, triangle.v1, triangle.v2);
+					const glm::vec3 barycentric =
+						barycentricCoordinates(closest, triangle.v0, triangle.v1, triangle.v2);
+					const glm::vec2 uv =
+						triangle.uv0 * barycentric.x + triangle.uv1 * barycentric.y + triangle.uv2 * barycentric.z;
+					albedo *= sampleBaseColorTexture((*m_baseColorTextures)[static_cast<size_t>(triangle.baseColorTexture)], uv);
+				}
+				return glm::clamp(albedo, glm::vec4(0.0f), glm::vec4(1.0f));
 			}
 
 			// Nearest hit along [tMin, tMax]; outBackFace = ray hits the triangle
@@ -991,6 +1263,7 @@ namespace sdf_baker
 			}
 
 			std::vector<Triangle> m_triangles;
+			const std::vector<TextureImage>* m_baseColorTextures{nullptr};
 			std::vector<uint32_t> m_order;
 			std::vector<Node> m_nodes;
 		};

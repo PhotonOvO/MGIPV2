@@ -46,7 +46,9 @@ namespace demo
 		static constexpr uint32_t kAtlasEdgeTexels = 2u;
 
 		// Adaptive grid sizing: ivec3(sceneLength / probeSpacing) + 2, clamped
-		// per axis to kMaxGridDims (each axis is at least 2 probes).
+		// per axis to kMaxGridDims (each axis is at least 2 probes). When the
+		// clamp would under-cover the bounds, init() raises the effective
+		// spacing and recenters the grid around the requested AABB.
 		[[nodiscard]] static glm::uvec3 computeGridDims(const glm::vec3& boundsMin,
 		                                                const glm::vec3& boundsMax,
 		                                                float probeSpacing);
@@ -115,7 +117,7 @@ namespace demo
 		// a 2-texel outer edge.
 		[[nodiscard]] static rhi::Extent2D atlasExtent(const glm::uvec3& gridDims, uint32_t texelSize);
 
-		// CPU-side probe placement: sceneBoundsMin + ivec3(x,y,z) * probeSpacing
+		// CPU-side probe placement: gridOrigin + ivec3(x,y,z) * probeSpacing
 		// stored as float4 (w = 1), written through the mapped storage buffer.
 		void uploadProbePositions() const;
 

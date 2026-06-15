@@ -26,7 +26,8 @@ namespace demo
 	{
 		static const std::array<PassResourceDependency, 2> dependencies = {
 			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::readWrite,
-			                                rhi::ShaderStage::fragment),
+			                                rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ColorAttachment),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::DepthStencilReadOnly),
 		};

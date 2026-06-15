@@ -3,11 +3,12 @@
 // Offline Mesh SDF baker (DDGI Wave D1-1).
 //
 // Pure-CPU tool: no RHI / Vulkan / engine dependency. Loads a triangle mesh
-// (self-contained Wavefront OBJ parser or glTF/GLB via tinygltf), evaluates a signed distance field on
-// a regular voxel grid (median-split triangle BVH for closest-point queries +
-// pseudo-normal back-face voting for the sign, mirroring LuxGI SDFBaker.cpp),
-// normalizes distances as (d / maxDistance + 1) / 2 and writes an R16F payload
-// to a .bin asset consumed by loader/SDFLoader.
+// (self-contained Wavefront OBJ parser or glTF/GLB via tinygltf), evaluates a
+// signed distance field on a regular voxel grid (median-split triangle BVH for
+// closest-point queries + pseudo-normal back-face voting for the sign,
+// mirroring LuxGI SDFBaker.cpp), normalizes distances as
+// (d / maxDistance + 1) / 2 and writes an R16F payload to a .bin asset consumed
+// by loader/SDFLoader.
 //
 // Binary layout (.bin) — MUST stay in sync with loader/SDFLoader.h
 // (demo::sdf format constants):
@@ -56,11 +57,27 @@ namespace sdf_baker
 		std::vector<uint32_t> albedoTexels; // RGBA8 payload packed as 0xAABBGGRR, x-major
 	};
 
+	struct TextureImage
+	{
+		uint32_t width{0u};
+		uint32_t height{0u};
+		uint32_t componentCount{0u};
+		int32_t wrapS{0};
+		int32_t wrapT{0};
+		std::vector<uint8_t> pixels;
+	};
+
 	struct Mesh
 	{
 		std::vector<glm::vec3> positions;
+		std::vector<glm::vec2> texCoords; // parallel to positions; zero when unavailable
 		std::vector<uint32_t> indices; // triangle list
-		std::vector<glm::vec4> triangleAlbedos; // one entry per triangle, linear RGBA
+		// One entry per triangle. `triangleAlbedos` is the linear baseColorFactor.
+		// `triangleBaseColorTextures` indexes `baseColorTextures`, or -1 when
+		// this triangle has no usable base-color texture sample.
+		std::vector<glm::vec4> triangleAlbedos;
+		std::vector<int32_t> triangleBaseColorTextures;
+		std::vector<TextureImage> baseColorTextures;
 	};
 
 	// Self-contained float -> IEEE 754 binary16 conversion (round to nearest even).

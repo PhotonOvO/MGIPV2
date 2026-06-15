@@ -183,6 +183,12 @@ namespace demo
 
 				const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
 				const rhi::BufferHandle indexBufferRHI = m_renderer->getShadowPackedIndexBufferRHIHandle();
+				if (!vertexBufferRHI.isValid() || !indexBufferRHI.isValid())
+				{
+					context.commandBuffer->endEncoding();
+					context.commandBuffer->endEvent();
+					return;
+				}
 				constexpr uint64_t vertexOffset = 0;
 				enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
 				enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);

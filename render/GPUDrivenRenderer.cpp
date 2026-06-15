@@ -487,10 +487,23 @@ namespace demo
 			return;
 		}
 
+		glm::vec3 probeBoundsMin(-GlobalSDFPass::kDefaultHalfExtent);
+		glm::vec3 probeBoundsMax(GlobalSDFPass::kDefaultHalfExtent);
+		if (m_ddgiMeshSDFLoaded)
+		{
+			probeBoundsMin = m_ddgiMeshSDFEntry.boundsMin;
+			probeBoundsMax = m_ddgiMeshSDFEntry.boundsMax;
+		}
+		else if (m_sceneView.sceneBoundsValid)
+		{
+			probeBoundsMin = m_sceneView.sceneBoundsMin;
+			probeBoundsMax = m_sceneView.sceneBoundsMax;
+		}
+
 		m_ddgiProbeVolume.init(getRHIDevice(),
 		                       DDGIProbeVolume::makeDesc(getDDGIConfig(),
-		                                                 glm::vec3(-GlobalSDFPass::kDefaultHalfExtent),
-		                                                 glm::vec3(GlobalSDFPass::kDefaultHalfExtent)));
+		                                                 probeBoundsMin,
+		                                                 probeBoundsMax));
 		m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
 		m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 		m_ddgiProbeUpdatePass->initResources(getRHIDevice());
@@ -690,11 +703,18 @@ namespace demo
 		m_ddgiMeshSDFPath = path.string();
 		m_renderer.getDDGIConfig().enabled = true;
 		resetDDGIHistory();
-		LOGI("Loaded DDGI mesh SDF: %s (%ux%ux%u)",
+		LOGI("Loaded DDGI mesh SDF: %s (%ux%ux%u, v%u, albedo=%s)",
 		     m_ddgiMeshSDFPath.c_str(),
 		     loadResult.asset.resolution.x,
 		     loadResult.asset.resolution.y,
-		     loadResult.asset.resolution.z);
+		     loadResult.asset.resolution.z,
+		     loadResult.asset.fileVersion,
+		     loadResult.asset.hasAlbedoPayload ? "yes" : "white fallback");
+		if (!loadResult.asset.hasAlbedoPayload)
+		{
+			LOGW("DDGI mesh SDF has no albedo payload; probe bounce color will use white fallback. "
+			     "Rebake the asset with the current sdf_baker to get material-colored indirect probes.");
+		}
 		return true;
 	}
 
@@ -1296,6 +1316,24 @@ namespace demo
 		m_renderer.destroyGltfResources(result);
 	}
 
+	void GPUDrivenRenderer::clearShadowPackedBufferMirrors()
+	{
+		rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+		if (resourceTable != nullptr)
+		{
+			if (!m_shadowPackedVertexBufferRHI.isNull())
+			{
+				resourceTable->removeBuffer(m_shadowPackedVertexBufferRHI);
+			}
+			if (!m_shadowPackedIndexBufferRHI.isNull())
+			{
+				resourceTable->removeBuffer(m_shadowPackedIndexBufferRHI);
+			}
+		}
+		m_shadowPackedVertexBufferRHI = {};
+		m_shadowPackedIndexBufferRHI = {};
+	}
+
 	void GPUDrivenRenderer::updateMeshTransform(MeshHandle handle, const glm::mat4& transform)
 	{
 		const uint64_t meshKey = packMeshHandleKey(handle);
@@ -1884,6 +1922,7 @@ namespace demo
 	{
 		++m_sceneTopologyVersion;
 		invalidateSortedBootstrapStates();
+		clearShadowPackedBufferMirrors();
 		m_sceneRegistry.clear();
 		if (m_enableExperimentalMeshletPath)
 		{

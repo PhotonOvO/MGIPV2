@@ -51,9 +51,9 @@ float3 sampleProbeVisDirection(uint probeIndex, float3 dir)
 
 float3 sampleProbeVisAverage(uint probeIndex)
 {
-    // Debug visualization wants a stable "probe health" color. Averaging a few
-    // principal directions avoids magnifying the 8x8 octahedral texels into
-    // distracting sphere stripes while still reflecting probe irradiance.
+    // Coarse low-frequency baseline for exposure stability. The final debug
+    // color still favors the sphere-normal sample so nearby colored surfaces
+    // remain visible in the probe field.
     float3 sum = float3(0.0, 0.0, 0.0);
     sum += sampleProbeVisDirection(probeIndex, float3(1.0, 0.0, 0.0));
     sum += sampleProbeVisDirection(probeIndex, float3(-1.0, 0.0, 0.0));
@@ -115,6 +115,6 @@ float4 fragmentProbeVisMain(ProbeVisVertexOutput input) : SV_Target
     const float3 n = normalize(input.normalWS);
     const float3 averageIrradiance = sampleProbeVisAverage(input.probeIndex);
     const float3 directionalIrradiance = sampleProbeVisDirection(input.probeIndex, n);
-    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.2);
+    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.75);
     return float4(irradiance, 1.0);
 }

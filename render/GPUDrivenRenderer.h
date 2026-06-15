@@ -1242,6 +1242,7 @@ namespace demo
 		void initPhase7Pipelines();
 		void shutdownPhase7Pipelines();
 		void updatePhase7Descriptors(uint32_t frameIndex);
+		void clearShadowPackedBufferMirrors();
 
 		RenderDevice m_renderer;
 		PassExecutor m_passExecutor;
