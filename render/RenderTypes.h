@@ -115,6 +115,12 @@ namespace demo
 		// effect when DDGIConfig::enabled is also true; default rendering is
 		// unchanged.
 		bool ddgiDebugVisualize{false};
+		// Reserved Flax GI debug toggles. They do not allocate or dispatch
+		// resources until the matching Surface Atlas / cascaded DDGI stages land.
+		bool ddgiDebugSurfaceAtlasCoverage{false};
+		int ddgiDebugCascadeIndex{-1}; // -1 = all cascades, 0-3 = specific cascade
+		bool ddgiDebugActiveProbes{false};
+		bool ddgiDebugProbeState{false};
 
 		// CSM Shadow cascade debug visualization
 		bool showShadowCascades{true}; // Show cascade frustum splits

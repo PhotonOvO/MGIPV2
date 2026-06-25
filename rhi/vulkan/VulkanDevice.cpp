@@ -1169,6 +1169,10 @@ namespace demo::rhi::vulkan
 				return VK_FORMAT_BC7_UNORM_BLOCK;
 			case TextureFormat::bc7SrgbBlock:
 				return VK_FORMAT_BC7_SRGB_BLOCK;
+			case TextureFormat::rgba8Snorm:
+				return VK_FORMAT_R8G8B8A8_SNORM;
+			case TextureFormat::r11g11b10Ufloat:
+				return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 			default:
 				return VK_FORMAT_UNDEFINED;
 			}

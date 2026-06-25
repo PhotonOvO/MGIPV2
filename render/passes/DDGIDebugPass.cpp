@@ -273,9 +273,9 @@ namespace demo
 		{
 			return;
 		}
-		// Double gate: DDGI master toggle AND the ImGui visualize checkbox
+		// Double gate: current DDGI path AND the ImGui visualize checkbox
 		// (both default false) — the default frame stays untouched.
-		if (!m_renderer->getDDGIConfig().enabled || !context.params->debugOptions.ddgiDebugVisualize)
+		if (!m_renderer->isDDGIProbeDataPathEnabled() || !context.params->debugOptions.ddgiDebugVisualize)
 		{
 			return;
 		}

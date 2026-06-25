@@ -199,6 +199,10 @@ list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "sdf_common\\.slang$")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_common\\.slang$")
 # Include-only DDGI SampleProbe module (Wave D3-1), consumed via #include.
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_sample_probe\\.slang$")
+# Flax GI: include-only Surface Atlas sampling helpers (FGI-012).
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "surface_atlas_common\\.slang$")
+# Flax GI: include-only Flax-style DDGI sampling/state helpers (FGI-012).
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "flax_ddgi_common\\.slang$")
 list(FIND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang" DEMO_GPU_LIGHT_SHADER_INDEX)
 if(DEMO_GPU_LIGHT_SHADER_INDEX EQUAL -1)
   list(APPEND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang")
@@ -320,6 +324,15 @@ add_library(demo_core STATIC
   render/passes/DDGIProbeUpdatePass.cpp
   render/passes/DDGIDebugPass.h
   render/passes/DDGIDebugPass.cpp
+  render/passes/GlobalSurfaceAtlasPass.h
+  render/passes/GlobalSurfaceAtlasPass.cpp
+  render/passes/SurfaceAtlasRasterPass.h
+  render/passes/SurfaceAtlasRasterPass.cpp
+  render/FlaxDDGIResources.h
+  render/FlaxDDGIResources.cpp
+  render/GlobalSurfaceAtlasObject.h
+  render/GlobalSurfaceAtlasTilePacker.h
+  render/GlobalSurfaceAtlasData.h
   render/passes/GPUDrivenSSRPass.h
   render/passes/GPUDrivenSSRPass.cpp
   render/passes/GPUDrivenShadowAtlasPass.h

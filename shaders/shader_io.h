@@ -5,6 +5,9 @@
 typealias vec2 = float2;
 typealias vec3 = float3;
 typealias vec4 = float4;
+typealias ivec4 = int4;
+typealias uvec3 = uint3;
+typealias uvec4 = uint4;
 typealias mat4 = float4x4;
 #define STATIC_CONST static const
 #else
@@ -15,6 +18,9 @@ typealias mat4 = float4x4;
 using vec2 = glm::vec2;
 using vec3 = glm::vec3;
 using vec4 = glm::vec4;
+using ivec4 = glm::ivec4;
+using uvec3 = glm::uvec3;
+using uvec4 = glm::uvec4;
 using mat4 = glm::mat4;
 #define STATIC_CONST static const
 #endif
@@ -514,6 +520,65 @@ struct GPUCullingUniforms
   vec4 cameraPositionAndMeshletInfo;  // xyz = camera position, w = reserved
 };
 
+// ---------------------------------------------------------------------------
+// Flax-style DDGI data (FGI-013). Cascade count capped at 4; layout mirrors
+// Flax DDGIData with vec4-friendly alignment. Sampled by Flax-style DDGI
+// compute passes and the cascaded probe sampling helper.
+// CPU mirror: render/DDGIConfig.h or future FlaxDDGIData struct.
+// ---------------------------------------------------------------------------
+STATIC_CONST int LFlaxDDGIMaxCascades = 4;
+
+struct FlaxDDGIData
+{
+  vec4 probesOriginAndSpacing[LFlaxDDGIMaxCascades];  // xyz = cascade origin, w = probe spacing
+  vec4 blendOrigin[LFlaxDDGIMaxCascades];             // xyz = blend origin, w unused
+  ivec4 probesScrollOffsets[LFlaxDDGIMaxCascades];     // xyz = scroll offset, w unused
+  uvec3 probesCounts;                                   // grid resolution per cascade
+  uint32_t cascadesCount;                               // active cascade count (1-4)
+  float irradianceGamma;
+  float probeHistoryWeight;
+  float rayMaxDistance;
+  float indirectLightingIntensity;
+  vec3 viewPos;
+  uint32_t raysCount;
+  vec4 fallbackIrradiance;                              // rgb = fallback color, a unused
+};
+
+// ---------------------------------------------------------------------------
+// Flax-style Global Surface Atlas data (FGI-013).
+// CPU mirror: future GlobalSurfaceAtlas pass or config struct.
+// ---------------------------------------------------------------------------
+STATIC_CONST int LGlobalSurfaceAtlasChunksResolution = 40;
+STATIC_CONST int LGlobalSurfaceAtlasChunksGroupSize = 4;
+STATIC_CONST int LGlobalSurfaceAtlasTileDataStride = 5;
+
+struct GlobalSurfaceAtlasData
+{
+  vec3 viewPos;
+  float padding0;
+  float resolution;     // atlas texture resolution (square)
+  float chunkSize;      // world-space chunk size for culling
+  uint32_t objectsCount;
+  uint32_t padding1;
+  uint32_t padding2;
+  uint32_t padding3;
+};
+
+struct SurfaceAtlasCullPush
+{
+  uint32_t objectCount;
+  uint32_t chunkCount;
+  float chunkSize;
+  float atlasCoverageDistance;
+  vec3 viewPos;
+  uint32_t _padding;
+};
+
+struct SurfaceAtlasLightingPush
+{
+  vec4 atlasResolutionAndPadding; // xy = resolution, z = enabled, w unused
+};
+
 // Light parameters for PBR lighting pass (scene-level UBO)
 struct LightParams
 {
@@ -536,10 +601,22 @@ struct LightParams
   vec4 ddgiOriginAndSpacing;              // xyz = probe grid world-space origin, w = probeSpacing
   vec4 ddgiParams0;                       // x = ddgiWeight, y = ddgiGamma, z = normalBias, w = irradiance texel side
   vec4 ddgiParams1;                       // x = depth texel side, y = irr atlas width, z = irr atlas height, w = depth atlas width
-  vec4 ddgiParams2;                       // x = depth atlas height, yzw = reserved
-  uint64_t ddgiProbePositionAddress;      // BDA of float4[totalProbes] probe positions (0 when disabled)
-  uint32_t _ddgiLightPadding0;
-  uint32_t _ddgiLightPadding1;
+	vec4 ddgiParams2;                       // x = depth atlas height, yzw = reserved
+	uint64_t ddgiProbePositionAddress;      // BDA of float4[totalProbes] probe positions (0 when disabled)
+	uint32_t _ddgiLightPadding0;
+	uint32_t _ddgiLightPadding1;
+
+	// Flax-style DDGI sampling (FGI-061): packed into LightParams for the
+	// lighting pass. Gated by ddgiFlaxEnabledAndCascades.x > 0.5.
+	// z = 1 when Flax textures (data/distance/irradiance) are bound in
+	// the bindless texture array; 0 = safe fallback to ambient/IBL.
+	vec4 ddgiFlaxEnabledAndCascades;        // x = enabled, y = cascade count, z = textures bound, w unused
+	vec4 ddgiFlaxOriginAndSpacing[4];       // xyz = cascade origin, w = spacing
+	vec4 ddgiFlaxBlendOrigin[4];            // xyz = blend origin, w unused
+	ivec4 ddgiFlaxScrollOffsets[4];
+	uvec4 ddgiFlaxCountsAndRays;            // xyz = probesCounts, w = raysCount
+	vec4 ddgiFlaxGammaWeightMaxDist;        // x = gamma, y = historyWeight, z = maxDist, w = intensity
+	vec4 ddgiFlaxFallbackIrradiance;        // rgb = fallback, w unused
 };
 
 struct LightingUniforms

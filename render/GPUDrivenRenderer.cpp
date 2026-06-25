@@ -480,9 +480,53 @@ namespace demo
 		m_renderer.shutdown(surface);
 	}
 
-	void GPUDrivenRenderer::initDDGIResources()
+	void GPUDrivenRenderer::initFlaxDDGIResources()
 	{
-		if (!getDDGIConfig().enabled || m_ddgiProbeVolume.isInitialized() || m_globalSDFPass == nullptr)
+		if (!isFlaxStyleDDGIRequested()) return;
+
+		waitForIdle();
+
+		// Bridge path: the lighting shader currently samples the existing DDGI
+		// probe atlases for FlaxGI, so make sure that shared probe chain exists.
+		initDDGIProbeResources();
+		if (!m_ddgiProbeVolume.isInitialized())
+		{
+			LOGW("Flax DDGI initialization skipped: shared probe resources are not ready");
+			return;
+		}
+
+		const DDGIConfig& config = getDDGIConfig();
+		const uint32_t cascadeCount = std::min(config.maxCascades, 4u);
+		const glm::uvec3 probesPerCascade = FlaxDDGIResources::computeProbesPerCascade(config, 0, cascadeCount);
+
+		m_flaxDDGIResources.init(getRHIDevice(), config, cascadeCount, probesPerCascade);
+
+		if (config.enableGlobalSurfaceAtlas)
+		{
+			m_surfaceAtlasPass.init(getRHIDevice(), config);
+			m_surfaceAtlasRasterPass.init(getRHIDevice(), m_surfaceAtlasPass,
+			                              &m_renderer.getMeshPool(),
+			                              &m_renderer.getSceneResources());
+		}
+
+		m_flaxDDGICascades.clear();
+		LOGI("Flax DDGI initialized: %u cascades, %ux%ux%u probes, atlas=%s",
+		     cascadeCount, probesPerCascade.x, probesPerCascade.y, probesPerCascade.z,
+		     config.enableGlobalSurfaceAtlas ? "yes" : "no");
+	}
+
+	void GPUDrivenRenderer::shutdownFlaxDDGIResources()
+	{
+		waitForIdle();
+		m_flaxDDGIResources.deinit();
+		m_surfaceAtlasPass.deinit();
+		m_surfaceAtlasRasterPass.deinit();
+		m_flaxDDGICascades.clear();
+	}
+
+	void GPUDrivenRenderer::initDDGIProbeResources()
+	{
+		if (m_ddgiProbeVolume.isInitialized() || m_globalSDFPass == nullptr)
 		{
 			return;
 		}
@@ -544,8 +588,19 @@ namespace demo
 		}
 	}
 
+	void GPUDrivenRenderer::initDDGIResources()
+	{
+		if (!isCurrentDDGIPathEnabled())
+		{
+			return;
+		}
+		initDDGIProbeResources();
+	}
+
 	void GPUDrivenRenderer::shutdownDDGIResources()
 	{
+		shutdownFlaxDDGIResources();
+
 		if (m_ddgiDebugPass != nullptr)
 		{
 			m_ddgiDebugPass->shutdownResources();
@@ -587,6 +642,7 @@ namespace demo
 		if (enabled)
 		{
 			initDDGIResources();
+			initFlaxDDGIResources();
 		}
 		else
 		{
@@ -597,32 +653,72 @@ namespace demo
 
 	void GPUDrivenRenderer::setEditableDDGIConfig(const DDGIConfig& config)
 	{
-		const bool wasEnabled = m_renderer.getDDGIConfig().enabled;
+		const DDGIConfig previousConfig = m_renderer.getDDGIConfig();
+		const bool wasCurrentPathEnabled =
+			previousConfig.enabled && previousConfig.runtimeMode == DDGIRuntimeMode::current;
+		const bool willCurrentPathBeEnabled =
+			config.enabled && config.runtimeMode == DDGIRuntimeMode::current;
+		const bool wasFlaxPathEnabled =
+			previousConfig.enabled && previousConfig.runtimeMode == DDGIRuntimeMode::flaxStyle;
+		const bool willFlaxPathBeEnabled =
+			config.enabled && config.runtimeMode == DDGIRuntimeMode::flaxStyle;
 		const bool requiresResourceReset =
-			m_renderer.getDDGIConfig().probeSpacing != config.probeSpacing ||
-			m_renderer.getDDGIConfig().irradianceTexelSize != config.irradianceTexelSize ||
-			m_renderer.getDDGIConfig().depthTexelSize != config.depthTexelSize ||
-			m_renderer.getDDGIConfig().raysPerProbe != config.raysPerProbe;
+			previousConfig.probeSpacing != config.probeSpacing ||
+			previousConfig.irradianceTexelSize != config.irradianceTexelSize ||
+			previousConfig.depthTexelSize != config.depthTexelSize ||
+			previousConfig.raysPerProbe != config.raysPerProbe ||
+			previousConfig.maxCascades != config.maxCascades ||
+			previousConfig.giDistance != config.giDistance ||
+			previousConfig.enableGlobalSurfaceAtlas != config.enableGlobalSurfaceAtlas ||
+			previousConfig.surfaceAtlasResolution != config.surfaceAtlasResolution ||
+			previousConfig.surfaceAtlasTileResolution != config.surfaceAtlasTileResolution ||
+			previousConfig.surfaceAtlasCoverageDistance != config.surfaceAtlasCoverageDistance;
 
 		m_renderer.getDDGIConfig() = config;
-		if (wasEnabled && config.enabled && requiresResourceReset)
-		{
-			resetDDGIHistory();
-		}
-		else if (!wasEnabled && config.enabled)
-		{
-			initDDGIResources();
-		}
-		else if (wasEnabled && !config.enabled)
+
+		if (previousConfig.enabled && !config.enabled)
 		{
 			waitForIdle();
 			shutdownDDGIResources();
+			return;
+		}
+
+		// Current simple DDGI transitions
+		if (wasCurrentPathEnabled && willCurrentPathBeEnabled && requiresResourceReset)
+		{
+			resetDDGIHistory();
+		}
+		else if (!wasCurrentPathEnabled && willCurrentPathBeEnabled)
+		{
+			initDDGIResources();
+		}
+		else if (wasCurrentPathEnabled && !willCurrentPathBeEnabled)
+		{
+			waitForIdle();
+			shutdownDDGIResources();
+		}
+
+		// Flax DDGI transitions
+		if (wasFlaxPathEnabled && !willFlaxPathBeEnabled)
+		{
+			waitForIdle();
+			shutdownFlaxDDGIResources();
+		}
+		else if (!wasFlaxPathEnabled && willFlaxPathBeEnabled)
+		{
+			initFlaxDDGIResources();
+		}
+		else if (wasFlaxPathEnabled && willFlaxPathBeEnabled && requiresResourceReset)
+		{
+			waitForIdle();
+			shutdownDDGIResources();
+			initFlaxDDGIResources();
 		}
 	}
 
 	void GPUDrivenRenderer::resetDDGIHistory()
 	{
-		if (!getDDGIConfig().enabled)
+		if (!isDDGIProbeDataPathEnabled())
 		{
 			m_temporalFrameCounter = 0;
 			m_ddgiUpdateOffset = 0;
@@ -633,7 +729,14 @@ namespace demo
 		shutdownDDGIResources();
 		m_temporalFrameCounter = 0;
 		m_ddgiUpdateOffset = 0;
-		initDDGIResources();
+		if (isFlaxStyleDDGIRequested())
+		{
+			initFlaxDDGIResources();
+		}
+		else
+		{
+			initDDGIResources();
+		}
 		if (m_ddgiMeshSDFLoaded && m_globalSDFPass != nullptr)
 		{
 			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
@@ -3584,7 +3687,7 @@ namespace demo
 		// ambient/IBL path (ddgiGridDimsAndEnabled.w == 0).
 		{
 			const DDGIConfig& ddgiConfig = getDDGIConfig();
-			const bool ddgiSamplingReady = ddgiConfig.enabled && m_ddgiProbeVolume.isInitialized()
+			const bool ddgiSamplingReady = isCurrentDDGIPathEnabled() && m_ddgiProbeVolume.isInitialized()
 				&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
 				&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
 				&& !m_ddgiDepthLightingViews[0].isNull() && !m_ddgiDepthLightingViews[1].isNull();
@@ -3607,12 +3710,39 @@ namespace demo
 					          static_cast<float>(depthExtent.width));
 				lightingUniforms.light.ddgiParams2 =
 					glm::vec4(static_cast<float>(depthExtent.height), 0.0f, 0.0f, 0.0f);
-				lightingUniforms.light.ddgiProbePositionAddress =
-					m_ddgiProbeVolume.getProbePositionAddress().value;
-			}
-		}
+		lightingUniforms.light.ddgiProbePositionAddress =
+			m_ddgiProbeVolume.getProbePositionAddress().value;
+	}
 
-		const shaderio::LightCoarseCullingUniforms coarseUniforms{
+	// Flax DDGI (FGI-061): populate Flax-style sampling parameters.
+	// When Flax DDGI is requested, reuse the simple DDGI probe volume data
+	// with Flax config parameters (gamma, intensity, history weight, etc.).
+	{
+		const DDGIConfig& ddgiConfig = getDDGIConfig();
+		const bool flaxRequested = isFlaxStyleDDGIRequested();
+		if (flaxRequested && m_ddgiProbeVolume.isInitialized())
+		{
+			const DDGIProbeVolumeDesc& volumeDesc = m_ddgiProbeVolume.getDesc();
+			lightingUniforms.light.ddgiFlaxEnabledAndCascades =
+				glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+			lightingUniforms.light.ddgiFlaxOriginAndSpacing[0] =
+				glm::vec4(volumeDesc.sceneBoundsMin, volumeDesc.probeSpacing);
+			lightingUniforms.light.ddgiFlaxCountsAndRays =
+				glm::uvec4(m_ddgiProbeVolume.getGridDims(), ddgiConfig.raysPerProbe);
+			lightingUniforms.light.ddgiFlaxGammaWeightMaxDist =
+				glm::vec4(ddgiConfig.ddgiGamma,
+				          ddgiConfig.probeHistoryWeight,
+				          ddgiConfig.maxDistance,
+				          ddgiConfig.indirectLightingIntensity);
+			lightingUniforms.light.ddgiFlaxFallbackIrradiance =
+				ddgiConfig.fallbackIrradiance;
+			lightingUniforms.light.ddgiProbePositionAddress =
+				m_ddgiProbeVolume.getProbePositionAddress().value;
+		}
+	}
+}  // closes DDGI scope
+
+const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.viewProjection = camera != nullptr ? camera->viewProjection : glm::mat4(1.0f),
 			.cameraRight = glm::vec4(glm::normalize(glm::vec3(inverseView[0])), 0.0f),
 			.cameraUp = glm::vec4(glm::normalize(glm::vec3(inverseView[1])), 0.0f),

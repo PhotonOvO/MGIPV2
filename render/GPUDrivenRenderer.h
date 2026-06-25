@@ -20,8 +20,12 @@
 #include "passes/GPUDrivenSSRPass.h"
 #include "passes/DDGIRayTracePass.h"
 #include "passes/DDGIProbeUpdatePass.h"
-#include "passes/DDGIDebugPass.h"
+#include "DDGIProbeVolume.h"
+#include "FlaxDDGIResources.h"
 #include "passes/GlobalSDFPass.h"
+#include "passes/DDGIDebugPass.h"
+#include "passes/GlobalSurfaceAtlasPass.h"
+#include "passes/SurfaceAtlasRasterPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
 #include "passes/GPUDrivenLightPass.h"
 #include "passes/GPUDrivenSkyboxPass.h"
@@ -333,6 +337,28 @@ namespace demo
 		[[nodiscard]] bool loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError);
 		void setDDGIEnabled(bool enabled);
 		[[nodiscard]] bool isDDGIEnabled() const { return getDDGIConfig().enabled; }
+		[[nodiscard]] bool isCurrentDDGIPathEnabled() const
+		{
+			const DDGIConfig& config = getDDGIConfig();
+			return config.enabled && config.runtimeMode == DDGIRuntimeMode::current;
+		}
+		[[nodiscard]] bool isFlaxStyleDDGIRequested() const
+		{
+			const DDGIConfig& config = getDDGIConfig();
+			return config.enabled && config.runtimeMode == DDGIRuntimeMode::flaxStyle;
+		}
+		[[nodiscard]] bool isDDGIProbeDataPathEnabled() const
+		{
+			const DDGIConfig& config = getDDGIConfig();
+			return config.enabled
+				&& (config.runtimeMode == DDGIRuntimeMode::current
+					|| config.runtimeMode == DDGIRuntimeMode::flaxStyle);
+		}
+		[[nodiscard]] bool isGlobalSurfaceAtlasRequested() const
+		{
+			const DDGIConfig& config = getDDGIConfig();
+			return config.enabled && config.enableGlobalSurfaceAtlas;
+		}
 		[[nodiscard]] bool hasDDGIMeshSDF() const { return m_ddgiMeshSDFLoaded; }
 		void resetDDGIHistory();
 		[[nodiscard]] DDGIConfig getEditableDDGIConfig() const { return getDDGIConfig(); }
@@ -1232,8 +1258,11 @@ namespace demo
 		void updateLightingArgumentTable(uint32_t frameIndex);
 		void initLightingPipelines();
 		void shutdownLightingPipelines();
+		void initDDGIProbeResources();
 		void initDDGIResources();
 		void shutdownDDGIResources();
+		void initFlaxDDGIResources();
+		void shutdownFlaxDDGIResources();
 		void clearDDGIMeshSDF();
 		void initPhase7Resources();
 		void shutdownPhase7Resources();
@@ -1277,16 +1306,27 @@ namespace demo
 		std::unique_ptr<GPUDrivenAOPass> m_aoPass;
 		std::unique_ptr<GPUDrivenSSRPass> m_ssrPass;
 		// DDGI (Wave D1-2): Global SDF clear/compose/mipmap compute pass.
-		// Gated on DDGIConfig::enabled (default false).
+		// Gated on the current DDGI path (default false).
 		std::unique_ptr<GlobalSDFPass> m_globalSDFPass;
 		// DDGI (Wave D2-1): probe grid GPU resources (atlases + position buffer).
-		// init is gated on DDGIConfig::enabled, so the default frame allocates nothing.
+		// Current DDGI owns this directly; FlaxGI temporarily bridges through it
+		// until the full Flax classify/trace/update resource chain is connected.
 		DDGIProbeVolume m_ddgiProbeVolume;
+
+		// Flax DDGI (FGI-042): cascaded probe resources + state encoding.
+		// init is gated on Flax-style DDGI path.
+		FlaxDDGIResources m_flaxDDGIResources;
+		// Flax GI (FGI-030): Global Surface Atlas textures and buffers.
+		GlobalSurfaceAtlasPass m_surfaceAtlasPass;
+		// Flax GI (FGI-031/032): tile rasterization and clear pass.
+		SurfaceAtlasRasterPass m_surfaceAtlasRasterPass;
+		// Flax DDGI cascade descriptors (CPU-computed each frame).
+		std::vector<DDGICascadeDesc> m_flaxDDGICascades;
 		// DDGI (Wave D2-2): GISDFRays SDF ray trace compute pass. Resources are
-		// only created when DDGIConfig::enabled is true (default false).
+		// only created for the current DDGI path (default false).
 		std::unique_ptr<DDGIRayTracePass> m_ddgiRayTracePass;
 		// DDGI (Wave D2-3): probe irradiance/depth update + border update.
-		// Resources are only created when DDGIConfig::enabled is true.
+		// Resources are only created for the current DDGI path.
 		std::unique_ptr<DDGIProbeUpdatePass> m_ddgiProbeUpdatePass;
 		// DDGI (Wave D3-1/D4-1): sampled views over BOTH atlas sets for the
 		// lighting pass SampleProbe path. Index = frame parity
@@ -1304,7 +1344,7 @@ namespace demo
 		bool m_ddgiMeshSDFLoaded{false};
 		std::string m_ddgiMeshSDFPath;
 		// DDGI (Wave D3-2): probe visualization debug draw. Resources are only
-		// created when DDGIConfig::enabled is true; the draw additionally
+		// created for the current DDGI path; the draw additionally
 		// requires the ImGui "DDGI Probe Visualize" checkbox (default false).
 		std::unique_ptr<DDGIDebugPass> m_ddgiDebugPass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;

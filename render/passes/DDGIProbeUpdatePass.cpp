@@ -292,8 +292,8 @@ namespace demo
 		{
 			return;
 		}
-		// DDGI master gate (defaults to false): the default frame is untouched.
-		if (!m_renderer->getDDGIConfig().enabled)
+		// Current DDGI and FlaxGI bridge both need the shared probe atlas data.
+		if (!m_renderer->isDDGIProbeDataPathEnabled())
 		{
 			return;
 		}

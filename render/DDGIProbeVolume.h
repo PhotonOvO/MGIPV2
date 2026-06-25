@@ -40,6 +40,8 @@ namespace demo
 	public:
 		// Per-axis probe-count ceiling (memory guard; plan section 3.1 "上限钳制防爆显存").
 		static constexpr glm::uvec3 kMaxGridDims{24u, 16u, 24u};
+		// Max cascades for Flax-style DDGI (FGI-041).
+		static constexpr uint32_t kMaxCascades = 4u;
 		// Octahedral border texels around each probe tile (1px on each side).
 		static constexpr uint32_t kProbeBorderTexels = 2u;
 		// Outer guard band around the whole atlas (LuxGI layout).

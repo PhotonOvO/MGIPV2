@@ -18,7 +18,7 @@ SamplerCube iblPrefilteredMap;
 [[vk::binding(LBindIBLBrdfLut, LSetTextures)]]
 Sampler2D iblBrdfLut;
 #endif
-
+// Cube maps for split-sum IBL
 [[vk::binding(2, 0)]]
 StructuredBuffer<LightData> pointLightBuffer;
 [[vk::binding(8, 0)]]
@@ -70,6 +70,10 @@ STATIC_CONST int kBloomOutputIndex                 = 19;
 STATIC_CONST int kColorGradingLutIndex             = 20;
 STATIC_CONST int kDDGIIrradianceAtlasIndex         = 21;
 STATIC_CONST int kDDGIDepthAtlasIndex              = 22;
+// Flax DDGI (FGI-061): additional textures for cascaded probe sampling
+STATIC_CONST int kFlaxDDGIProbesDataIndex          = 23;
+STATIC_CONST int kFlaxDDGIProbesDistanceIndex      = 24;
+STATIC_CONST int kFlaxDDGIProbesIrradianceIndex    = 25;
 STATIC_CONST float PI                   = 3.14159265359;
 STATIC_CONST float TWO_PI               = 6.28318530718;
 STATIC_CONST float kEquirectSpecularFallbackWeight = 1.0;
@@ -489,6 +493,71 @@ float3 computeClusterHeatmap(float2 uv, float viewDepth, float3 baseColor)
     return lerp(baseColor * 0.25, heat, 0.75);
 }
 
+// ---- Flax DDGI sampling (FGI-061) ----
+// Gated by ddgiFlaxEnabledAndCascades.x > 0.5.
+
+// Reconstruct FlaxDDGIData from LightParams packed fields for the sampling helper.
+FlaxDDGIData buildFlaxDDGIData(LightingUniforms lighting)
+{
+    FlaxDDGIData ddgi;
+    ddgi.probesOriginAndSpacing = lighting.light.ddgiFlaxOriginAndSpacing;
+    ddgi.blendOrigin = lighting.light.ddgiFlaxBlendOrigin;
+    ddgi.probesScrollOffsets = lighting.light.ddgiFlaxScrollOffsets;
+    ddgi.probesCounts = lighting.light.ddgiFlaxCountsAndRays.xyz;
+    ddgi.cascadesCount = uint(lighting.light.ddgiFlaxEnabledAndCascades.y);
+    ddgi.irradianceGamma = lighting.light.ddgiFlaxGammaWeightMaxDist.x;
+    ddgi.probeHistoryWeight = lighting.light.ddgiFlaxGammaWeightMaxDist.y;
+    ddgi.rayMaxDistance = lighting.light.ddgiFlaxGammaWeightMaxDist.z;
+    ddgi.indirectLightingIntensity = lighting.light.ddgiFlaxGammaWeightMaxDist.w;
+    ddgi.viewPos = float3(0,0,0); // filled by CPU per-frame
+    ddgi.raysCount = uint(lighting.light.ddgiFlaxCountsAndRays.w);
+    ddgi.fallbackIrradiance = lighting.light.ddgiFlaxFallbackIrradiance;
+    return ddgi;
+}
+
+bool flaxDDGIEnabled()
+{
+    return lighting.light.ddgiFlaxEnabledAndCascades.x > 0.5
+        && lighting.light.ddgiFlaxEnabledAndCascades.y > 0.0
+        && lighting.light.ddgiFlaxEnabledAndCascades.z > 0.5; // textures bound
+}
+
+// Flax-style DDGI irradiance evaluation (FGI-061).
+// Uses the simple DDGI probe textures (already bound at indices 21/22) with
+// Flax config parameters applied (gamma, intensity, history weight, fallback).
+vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
+{
+    DDGISampleVolume volume;
+    volume.gridOrigin = lighting.light.ddgiFlaxOriginAndSpacing[0].xyz;
+    volume.probeSpacing = lighting.light.ddgiFlaxOriginAndSpacing[0].w;
+    volume.probeCounts = int3(lighting.light.ddgiFlaxCountsAndRays.xyz);
+    volume.normalBias = 0.3f;
+    volume.ddgiGamma = lighting.light.ddgiFlaxGammaWeightMaxDist.x;
+
+    // Derive atlas sizes from the actual bound textures
+    uint irrW, irrH, depthW, depthH;
+    inTexture[kDDGIIrradianceAtlasIndex].GetDimensions(irrW, irrH);
+    inTexture[kDDGIDepthAtlasIndex].GetDimensions(depthW, depthH);
+    volume.irradianceAtlasSize = int2(irrW, irrH);
+    volume.depthAtlasSize = int2(depthW, depthH);
+
+    // Compute side length from atlas dimensions and probe grid
+    uint probesPerRow = volume.probeCounts.x * volume.probeCounts.y;
+    // irradiance: tile = (atlasWidth - 2) / probesPerRow, sideLength = tile - 2
+    volume.irradianceSideLength = int((irrW - 2) / max(probesPerRow, 1)) - 2;
+    volume.depthSideLength = int((depthW - 2) / max(probesPerRow, 1)) - 2;
+
+    volume.probePositionAddress = lighting.light.ddgiProbePositionAddress;
+
+    float3 rawIrradiance = sampleDDGIIrradiance(volume, worldPos, N, Wo,
+                                                 inTexture[kDDGIIrradianceAtlasIndex],
+                                                 inTexture[kDDGIDepthAtlasIndex]);
+
+    float intensity = lighting.light.ddgiFlaxGammaWeightMaxDist.w;
+    float3 fallback = lighting.light.ddgiFlaxFallbackIrradiance.rgb;
+    return lerp(fallback, rawIrradiance * intensity, 0.9f);
+}
+
 // DDGI (Wave D3-1) runtime gate: both the master enable flag and a non-zero
 // blend weight are required, so the default configuration (enabled=0) keeps
 // the original ambient/IBL math bit-for-bit unchanged.
@@ -527,19 +596,24 @@ vec3 evaluateDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao, float4 ssr)
 {
     const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
-    if(!useIBL)
-    {
-        const vec3 ambientTerm = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
-        if(ddgiSamplingEnabled())
-        {
-            // Energy convention mirrors the fixed-ambient term: irradiance is
-            // turned into outgoing diffuse radiance via albedo / PI, then
-            // attenuated by the same ao factor the ambient term uses.
-            const vec3 ddgiDiffuse = evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI * ao;
-            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
-        }
-        return ambientTerm;
-    }
+	    if(!useIBL)
+	    {
+	        const vec3 ambientTerm = lighting.light.ambientColorAndTexelSize.rgb * baseColor * ao;
+
+	        // Flax DDGI takes priority when textures are bound (z > 0.5).
+	        // Falls back to simple DDGI when Flax textures aren't available.
+	        if(flaxDDGIEnabled())
+	        {
+	            const vec3 ddgiDiffuse = evaluateFlaxDDGIIrradiance(worldPos, N, V) * baseColor / PI * ao;
+	            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiFlaxGammaWeightMaxDist.w));
+	        }
+	        if(ddgiSamplingEnabled())
+	        {
+	            const vec3 ddgiDiffuse = evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI * ao;
+	            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
+	        }
+	        return ambientTerm;
+	    }
 
     const float intensity = lighting.light.iblParams.y;
     const float maxMip = max(lighting.light.iblParams.z, 0.0);
@@ -575,15 +649,18 @@ vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float
         specular = ssrRadiance * (F * envBRDF.x + envBRDF.y) * kEquirectSpecularFallbackWeight;
     }
 
-    // DDGI indirect diffuse (Wave D3-1): swap the irradiance source at the
-    // exact BRDF weight the IBL diffuse term uses (kD * irradiance * baseColor
-    // / PI), blended by ddgiWeight. The specular term is untouched, and ao /
-    // intensity still apply at the final combine below.
-    if(ddgiSamplingEnabled())
-    {
-        const vec3 ddgiDiffuse = kD * evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI;
-        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
-    }
+	    // DDGI indirect diffuse: Flax-style takes priority when textures are bound,
+	    // falling back to simple DDGI when available.
+	    if(flaxDDGIEnabled())
+	    {
+	        const vec3 ddgiDiffuse = kD * evaluateFlaxDDGIIrradiance(worldPos, N, V) * baseColor / PI;
+	        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiFlaxGammaWeightMaxDist.w));
+	    }
+	    else if(ddgiSamplingEnabled())
+	    {
+	        const vec3 ddgiDiffuse = kD * evaluateDDGIIrradiance(worldPos, N, V) * baseColor / PI;
+	        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
+	    }
 
     const uint debugMode = uint(lighting.light.iblDebugInfo.x);
     if(debugMode == 1u)

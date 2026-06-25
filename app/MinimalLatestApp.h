@@ -349,6 +349,10 @@ public:
           }
           ImGui::Checkbox("Shadow Atlas", &m_debugOptions.enableShadowAtlas);
           ImGui::Checkbox("DDGI Probe Visualize", &m_debugOptions.ddgiDebugVisualize);
+          ImGui::Checkbox("Surface Atlas Coverage", &m_debugOptions.ddgiDebugSurfaceAtlasCoverage);
+          ImGui::SliderInt("DDGI Cascade", &m_debugOptions.ddgiDebugCascadeIndex, -1, 3);
+          ImGui::Checkbox("DDGI Active Probes", &m_debugOptions.ddgiDebugActiveProbes);
+          ImGui::Checkbox("DDGI Probe State", &m_debugOptions.ddgiDebugProbeState);
           ImGui::TreePop();
         }
         if(ImGui::TreeNode("Culling Overlays"))
@@ -967,6 +971,7 @@ private:
     {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
     {"NVBistro", "resources/NV_Bistro/bistro_ktx.gltf"},
     {"SponzaNew", "resources/Sponza/sponza.gltf"},
+    {"CornellBox", "resources/CornellBox/CornellBox.gltf"},
     {"test", "resources/test/test.gltf"}
   };
   int m_selectedPreset = 0;
@@ -1841,13 +1846,71 @@ inline void MinimalLatestApp::drawModelLoaderUI()
         m_renderer.setDDGIConfig(ddgiConfig);
       }
       bool ddgiConfigChanged = false;
-      ddgiConfigChanged |= ImGui::SliderFloat("Hysteresis", &ddgiConfig.hysteresis, 0.0f, 0.995f, "%.3f");
-      ddgiConfigChanged |= ImGui::SliderFloat("DDGI Weight", &ddgiConfig.ddgiWeight, 0.0f, 1.0f, "%.2f");
-      int updateStride = static_cast<int>(ddgiConfig.updateStride);
-      if(ImGui::InputInt("Update Stride", &updateStride))
+      int ddgiMode = ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle ? 1 : 0;
+      const char* ddgiModes[] = {"Current DDGI", "FlaxGI"};
+      if(ImGui::Combo("GI Mode", &ddgiMode, ddgiModes, IM_ARRAYSIZE(ddgiModes)))
       {
-        ddgiConfig.updateStride = static_cast<uint32_t>(std::max(updateStride, 1));
+        ddgiConfig.runtimeMode = ddgiMode == 1 ? demo::DDGIRuntimeMode::flaxStyle : demo::DDGIRuntimeMode::current;
         ddgiConfigChanged = true;
+      }
+
+      if(ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::current)
+      {
+        ImGui::SeparatorText("Current DDGI Parameters");
+        ddgiConfigChanged |= ImGui::SliderFloat("Hysteresis", &ddgiConfig.hysteresis, 0.0f, 0.995f, "%.3f");
+        ddgiConfigChanged |= ImGui::SliderFloat("DDGI Weight", &ddgiConfig.ddgiWeight, 0.0f, 1.0f, "%.2f");
+        int updateStride = static_cast<int>(ddgiConfig.updateStride);
+        if(ImGui::InputInt("Update Stride", &updateStride))
+        {
+          ddgiConfig.updateStride = static_cast<uint32_t>(std::max(updateStride, 1));
+          ddgiConfigChanged = true;
+        }
+      }
+      else
+      {
+        ImGui::SeparatorText("FlaxGI Parameters");
+        ddgiConfigChanged |= ImGui::SliderFloat("GI Distance", &ddgiConfig.giDistance, 5.0f, 200.0f, "%.0f");
+        int maxCascades = static_cast<int>(ddgiConfig.maxCascades);
+        if(ImGui::SliderInt("Max Cascades", &maxCascades, 1, 4))
+        {
+          ddgiConfig.maxCascades = static_cast<uint32_t>(maxCascades);
+          ddgiConfigChanged = true;
+        }
+        ddgiConfigChanged |= ImGui::SliderFloat("Probe History Weight", &ddgiConfig.probeHistoryWeight, 0.5f, 0.999f, "%.3f");
+        ddgiConfigChanged |= ImGui::SliderFloat("Indirect Intensity", &ddgiConfig.indirectLightingIntensity, 0.0f, 5.0f, "%.2f");
+        ddgiConfigChanged |= ImGui::ColorEdit3("Fallback Irradiance", &ddgiConfig.fallbackIrradiance.x);
+        int maxProbesPerFrame = static_cast<int>(ddgiConfig.maxUpdatedProbesPerFrame);
+        if(ImGui::InputInt("Max Probes/Frame", &maxProbesPerFrame, 64, 256))
+        {
+          ddgiConfig.maxUpdatedProbesPerFrame = static_cast<uint32_t>(std::max(maxProbesPerFrame, 0));
+          ddgiConfigChanged = true;
+        }
+        int cascadeFreq = static_cast<int>(ddgiConfig.cascadeUpdateFrequency);
+        if(ImGui::SliderInt("Cascade Update Freq", &cascadeFreq, 1, 8))
+        {
+          ddgiConfig.cascadeUpdateFrequency = static_cast<uint32_t>(std::max(cascadeFreq, 1));
+          ddgiConfigChanged = true;
+        }
+        ddgiConfigChanged |= ImGui::SliderInt("Debug Cascade", &ddgiConfig.debugCascadeOverride, -1, 3);
+
+        ImGui::SeparatorText("Surface Atlas");
+        ddgiConfigChanged |= ImGui::Checkbox("Global Surface Atlas", &ddgiConfig.enableGlobalSurfaceAtlas);
+        if(ddgiConfig.enableGlobalSurfaceAtlas)
+        {
+          int atlasRes = static_cast<int>(ddgiConfig.surfaceAtlasResolution);
+          if(ImGui::SliderInt("Atlas Resolution", &atlasRes, 512, 4096))
+          {
+            ddgiConfig.surfaceAtlasResolution = static_cast<uint32_t>(atlasRes);
+            ddgiConfigChanged = true;
+          }
+          int tileRes = static_cast<int>(ddgiConfig.surfaceAtlasTileResolution);
+          if(ImGui::SliderInt("Tile Resolution", &tileRes, 32, 512))
+          {
+            ddgiConfig.surfaceAtlasTileResolution = static_cast<uint32_t>(tileRes);
+            ddgiConfigChanged = true;
+          }
+          ddgiConfigChanged |= ImGui::SliderFloat("Coverage Distance", &ddgiConfig.surfaceAtlasCoverageDistance, 10.0f, 200.0f, "%.0f");
+        }
       }
       if(ddgiConfigChanged)
       {
@@ -1873,6 +1936,14 @@ inline void MinimalLatestApp::drawModelLoaderUI()
         m_meshSDFStatus = "DDGI history reset.";
       }
       ImGui::Text("DDGI: %s", m_renderer.isDDGIEnabled() ? "enabled" : "disabled");
+      ImGui::Text("DDGI Mode: %s", ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle ? "Flax-style" : "Current");
+      if(ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle)
+      {
+        const bool flaxRequested = ddgiConfig.enabled && ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle;
+        const bool atlasRequested = flaxRequested && ddgiConfig.enableGlobalSurfaceAtlas;
+        ImGui::Text("Flax Resources: %s", flaxRequested ? "requested" : "idle");
+        ImGui::Text("Surface Atlas: %s", atlasRequested ? "requested" : "idle");
+      }
       ImGui::Text("Mesh SDF: %s", (m_meshSDFLoaded || m_renderer.hasDDGIMeshSDF()) ? "loaded" : "not loaded");
       if(!m_meshSDFStatus.empty())
       {
