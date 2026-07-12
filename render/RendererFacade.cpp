@@ -169,6 +169,11 @@ namespace demo
 		gpuDriven().setEditableDDGIConfig(config);
 	}
 
+	FlaxGIDebugStatus RendererFacade::getFlaxGIDebugStatus() const
+	{
+		return gpuDriven().getFlaxGIDebugStatus();
+	}
+
 	const shaderio::GPUCullStats& RendererFacade::getLastGPUCullingStats() const
 	{
 		return gpuDriven().getLastGPUCullingStats();

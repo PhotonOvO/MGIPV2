@@ -322,6 +322,8 @@ add_library(demo_core STATIC
   render/passes/DDGIRayTracePass.cpp
   render/passes/DDGIProbeUpdatePass.h
   render/passes/DDGIProbeUpdatePass.cpp
+  render/passes/FlaxDDGIPass.h
+  render/passes/FlaxDDGIPass.cpp
   render/passes/DDGIDebugPass.h
   render/passes/DDGIDebugPass.cpp
   render/passes/GlobalSurfaceAtlasPass.h

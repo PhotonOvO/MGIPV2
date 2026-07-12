@@ -121,6 +121,15 @@ namespace demo
 		int ddgiDebugCascadeIndex{-1}; // -1 = all cascades, 0-3 = specific cascade
 		bool ddgiDebugActiveProbes{false};
 		bool ddgiDebugProbeState{false};
+		int flaxGIDebugMode{0}; // 0=Off, 1=Irradiance, 2=No visibility, 3=Diffuse, 4=Gate, 5=Direct atlas
+		float flaxGIDebugScale{1.0f};
+		int flaxGIRayDebugMode{0}; // 0=Normal, 1=Hit albedo, 2=Branch colors
+		// Flax GI runtime controls (R10: freeze/reset/single-step)
+		bool flaxGIFreeze{false};
+		bool flaxGIReset{false};
+		bool flaxGISingleStep{false};
+		bool flaxGIDisableIBL{false};  // Disable IBL to isolate Flax GI contribution
+		bool flaxGIBootstrapShading{false}; // Use simple direct-light-only shading in trace
 
 		// CSM Shadow cascade debug visualization
 		bool showShadowCascades{true}; // Show cascade frustum splits

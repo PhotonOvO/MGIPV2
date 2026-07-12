@@ -4,6 +4,7 @@
 #include "../common/logger.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -18,10 +19,11 @@ namespace demo
 		glm::uvec3 dims{};
 		for (int axis = 0; axis < 3; ++axis)
 		{
-			// ivec3(sceneLength / probeSpacing) + 2 boundary probes, then a hard
-			// per-axis ceiling so a huge scene AABB cannot blow up GPU memory.
-			const uint32_t interior = static_cast<uint32_t>(sceneLength[axis] / spacing);
-			dims[axis] = std::clamp(interior + 2u, 2u, kMaxGridDims[axis]);
+			// Probe centers stay inside the scene AABB. Adding two boundary probes
+			// placed the outer layer beyond closed rooms such as CornellBox, where
+			// outward-facing probe directions could only miss the GlobalSDF.
+			const uint32_t interior = static_cast<uint32_t>(std::ceil(sceneLength[axis] / spacing));
+			dims[axis] = std::clamp(interior, 2u, kMaxGridDims[axis]);
 		}
 		return dims;
 	}
@@ -69,7 +71,9 @@ namespace demo
 		float effectiveSpacing = std::max(m_desc.probeSpacing, 1e-3f);
 		for (int axis = 0; axis < 3; ++axis)
 		{
-			const float axisSpacing = sceneLength[axis] / static_cast<float>(m_desc.gridDims[axis] - 1u);
+			// Divide by the probe count rather than count - 1 so the first and
+			// last probes retain a half-cell margin inside the requested bounds.
+			const float axisSpacing = sceneLength[axis] / static_cast<float>(m_desc.gridDims[axis]);
 			effectiveSpacing = std::max(effectiveSpacing, axisSpacing);
 		}
 		m_desc.probeSpacing = effectiveSpacing;

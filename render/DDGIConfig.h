@@ -21,8 +21,8 @@ namespace demo
 	struct DDGIConfig
 	{
 		// --- Current-simple settings (preserved) ---
-		// Probe grid dimensions. Computed at runtime from the scene AABB
-		// (probeCounts = sceneLength / probeSpacing + 2, clamped per axis).
+		// Probe grid dimensions. Computed at runtime from the scene AABB with
+		// probe centers kept inside the bounds (ceil(length / spacing)).
 		glm::uvec3 gridDims{0u, 0u, 0u};
 		// World-space distance between neighboring probes.
 		float probeSpacing{1.5f};
@@ -40,9 +40,9 @@ namespace demo
 		float depthSharpness{50.0f};
 		// Surface offset along normal when sampling probes (leak reduction).
 		float normalBias{0.3f};
-		// Max ray-hit distance stored in the depth atlas. Computed at runtime as
-		// probeSpacing * 1.5; default mirrors that for the default spacing.
-		float maxDistance{2.25f};
+		// Max ray-hit distance. Must cover full cascade extent so empty-area probes
+		// can trace into the SDF. 96 = 1.5 * 32 * 2 (probeSpacing * probesPerAxis * 2).
+		float maxDistance{96.0f};
 		// Staggered update stride: each frame updates 1/updateStride of the probes.
 		uint32_t updateStride{4u};
 		// Blend weight between IBL and DDGI irradiance in the lighting pass.
@@ -62,7 +62,7 @@ namespace demo
 		// Fallback irradiance color when no valid probe data is available.
 		glm::vec4 fallbackIrradiance{0.02f, 0.02f, 0.02f, 1.0f};
 		// Maximum probes updated per frame (budget cap). 0 = unlimited.
-		uint32_t maxUpdatedProbesPerFrame{0u};
+		uint32_t maxUpdatedProbesPerFrame{64u};
 		// Inner cascade update frequency (1 = every frame, 2 = every other, etc.).
 		uint32_t cascadeUpdateFrequency{1u};
 		// Debug override: force a specific cascade for visualization (-1 = off).
@@ -74,13 +74,50 @@ namespace demo
 		float surfaceAtlasCoverageDistance{50.0f};
 
 		// --- Feature gates ---
-		// Runtime implementation selector. The Flax-style path is reserved until
-		// the cascaded DDGI and Global Surface Atlas resources land.
-		DDGIRuntimeMode runtimeMode{DDGIRuntimeMode::current};
-		// Separate allocation gate for the future Global Surface Atlas path.
-		bool enableGlobalSurfaceAtlas{false};
-		// Master toggle. Defaults to off so default rendering behavior is
-		// unchanged until later waves wire the DDGI passes in.
-		bool enabled{false};
+		// Default FlaxGI enabled for GPU smoke testing.
+		DDGIRuntimeMode runtimeMode{DDGIRuntimeMode::flaxStyle};
+		bool enableGlobalSurfaceAtlas{true};
+		bool enabled{true};
+
+		// --- Flax GI runtime controls (R10: freeze/reset/single-step) ---
+		bool flaxGIFreeze{false};
+		bool flaxGISingleStep{false};
+		bool flaxGIDisableIBL{false};
+	};
+
+	struct FlaxGIDebugStatus
+	{
+		bool ddgiEnabled{false};
+		bool flaxRequested{false};
+		bool meshSDFLoaded{false};
+		bool globalSDFPassReady{false};
+		bool globalSDFVolumeReady{false};
+		uint32_t globalSDFMeshCount{0};
+
+		bool sharedProbeVolumeReady{false};
+		bool probePositionReady{false};
+		bool rayTracePassReady{false};
+		bool probeUpdatePassReady{false};
+		bool lightingAtlasViewsReady{false};
+		glm::uvec3 probeGridDims{0u, 0u, 0u};
+		uint32_t totalProbes{0};
+		uint32_t raysPerProbe{0};
+
+		bool flaxResourcesReady{false};
+		uint32_t flaxCascadeCount{0};
+		glm::uvec3 flaxProbesPerCascade{0u, 0u, 0u};
+
+		bool surfaceAtlasRequested{false};
+		bool surfaceAtlasReady{false};
+		bool surfaceAtlasRasterReady{false};
+		uint32_t surfaceAtlasObjects{0};
+		uint32_t surfaceAtlasDirtyObjects{0};
+		uint32_t surfaceAtlasTiles{0};
+
+		uint64_t temporalFrameCounter{0};
+		uint32_t updateOffset{0};
+		glm::vec3 globalSDFBoundsMin{0.0f};
+		glm::vec3 globalSDFBoundsMax{0.0f};
+		uint32_t globalSDFResolution{0};
 	};
 } // namespace demo

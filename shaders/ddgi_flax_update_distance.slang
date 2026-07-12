@@ -1,71 +1,80 @@
-// ddgi_flax_update_distance.slang — Flax-style probe distance/moment update (FGI-054)
-// Filters traced hit distances into probe distance texture with temporal history.
-// Handles scroll invalidation and border updates.
+// ddgi_flax_update_distance.slang - Flax-style probe distance/moment update.
+// Dispatches only active probe tiles and uses the active-list slot directly as
+// the trace row, avoiding a full-atlas dispatch and per-texel linear search.
 
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"
 #include "ddgi_common.slang"
 
-[[vk::binding(0, 0)]] Texture2D<float4> probesTrace       : register(t0); // input radiance+distance
-[[vk::binding(1, 0)]] Texture2D<float4> probesData         : register(t1);
-[[vk::binding(2, 0)]] RWTexture2D<float4> probesDistance    : register(u0); // output moments
-
-[[vk::push_constant]] ConstantBuffer<FlaxDDGIData> ddgi;
+[[vk::binding(0, 0)]] Texture2D<float4> probesTrace         : register(t0);
+[[vk::binding(1, 0)]] Texture2D<float4> probesData          : register(t1);
+[[vk::binding(2, 0)]] RWTexture2D<float2> probesDistance    : register(u0);
+[[vk::binding(3, 0)]] RWStructuredBuffer<uint> activeProbes : register(u1); // counter + indices
+[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t2);
+[[vk::binding(5, 0)]] Texture2D<float2> probesDistanceHist : register(t3);
+static FlaxDDGIData ddgi = ddgiData[0];
 
 [numthreads(8, 8, 1)]
-void CS_UpdateDistance(uint3 dispatchThreadId : SV_DispatchThreadID)
+void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-    uint2 texel = dispatchThreadId.xy;
-    uint cascadeIndex = texel.y / ddgi.probesCounts.z;
-    if (cascadeIndex >= ddgi.cascadesCount) return;
+    static const uint kCascadeIndex = 0;
+    static const uint kTileSize = 16;
+    static const uint kGroupsPerTileAxis = 2;
+    static const uint kGroupsPerProbe = kGroupsPerTileAxis * kGroupsPerTileAxis;
 
-    // Determine which probe this texel belongs to
-    uint probeRes = 14; // DDGI_PROBE_RESOLUTION_DISTANCE
-    uint tileSize = probeRes + 2;
-    uint probesPerRow = ddgi.probesCounts.x * ddgi.probesCounts.y;
+    uint activeSlot = groupId.x / kGroupsPerProbe;
+    uint activeCount = activeProbes[0];
+    if (activeSlot >= activeCount) return;
 
-    uint probeX = texel.x / tileSize;
-    uint probeY = texel.y % ddgi.probesCounts.z;
-    if (probeX >= probesPerRow || probeY >= ddgi.probesCounts.z) return;
+    uint tileGroup = groupId.x % kGroupsPerProbe;
+    uint2 tileBlock = uint2(tileGroup % kGroupsPerTileAxis, tileGroup / kGroupsPerTileAxis);
+    uint2 localTexel = tileBlock * 8 + groupThreadId.xy;
 
-    uint probeIndex = probeX + probeY * probesPerRow;
+    uint probeIndex = activeProbes[1 + activeSlot];
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
+    uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
+    uint2 probeTile = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
+    uint2 texel = probeTile * kTileSize + localTexel;
 
-    // Load probe data
-    uint2 dataCoord = getProbeTexelCoords(ddgi, cascadeIndex,
-        getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords));
-    float4 pd = probesData.Load(int3(dataCoord, 0));
-    uint state = decodeProbeState(pd);
-    float attention = decodeProbeAttention(pd);
+    float4 probeData = probesData.Load(int3(probeTile, 0));
+    uint state = decodeProbeState(probeData);
+    if (state == kDDGIProbeStateInactive)
+    {
+        float2 historyData = probesDistanceHist.Load(int3(texel, 0));
+        probesDistance[texel] = historyData;
+        return;
+    }
 
-    // Accumulate ray hit distances for this probe
-    float3 worldPos = getProbeWorldPosition(ddgi, cascadeIndex, probeCoords);
     float sumDist = 0.0f;
     float sumDist2 = 0.0f;
-    float validRays = 0.0f;
+    float accumulatedWeight = 0.0f;
+    float2 octahedralCoord = ((float2(localTexel) + 0.5f) / float(kTileSize)) * 2.0f - 1.0f;
+    float3 texelDirection = flaxOctahedralDecode(octahedralCoord);
 
     for (uint r = 0; r < ddgi.raysCount; r++)
     {
-        // Find this probe's batch slot (simplified: assume sequential batch layout)
-        // In production, active probe list maps probes to batch slots
-        float4 traceData = probesTrace.Load(int3(uint2(r, probeIndex % 256), 0));
+        float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
         float hitDist = traceData.w;
         if (hitDist > 0.0f)
         {
-            sumDist += hitDist;
-            sumDist2 += hitDist * hitDist;
-            validRays += 1.0f;
+            float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
+            float rayWeight = saturate(dot(texelDirection, rayDirection));
+            sumDist += hitDist * rayWeight;
+            sumDist2 += hitDist * hitDist * rayWeight;
+            accumulatedWeight += rayWeight;
         }
     }
 
-    float meanDist = validRays > 0.0f ? sumDist / validRays : ddgi.rayMaxDistance;
-    float varDist = validRays > 1.0f ? max(sumDist2 / validRays - meanDist * meanDist, 0.0f) : 0.0f;
+    float meanDist = accumulatedWeight > 0.0f
+        ? sumDist / accumulatedWeight : ddgi.rayMaxDistance;
+    float varDist = accumulatedWeight > 0.0f
+        ? max(sumDist2 / accumulatedWeight - meanDist * meanDist, 0.0f) : 0.0f;
 
-    // Temporal blend with history
-    float4 historyData = probesDistance.Load(int2(texel));
+    float2 historyData = probesDistanceHist.Load(int3(texel, 0));
     float historyWeight = state == kDDGIProbeStateActivated ? 0.0f : ddgi.probeHistoryWeight;
-    meanDist = lerp(meanDist, historyData.x, historyWeight);
-    varDist  = lerp(varDist,  historyData.y, historyWeight);
+    float historyMeanDistance = historyData.x * ddgi.rayMaxDistance;
+    meanDist = lerp(meanDist, historyMeanDistance, historyWeight);
+    varDist = lerp(varDist, historyData.y, historyWeight);
 
-    probesDistance[texel] = float4(meanDist / ddgi.rayMaxDistance, varDist, 0, attention);
+    probesDistance[texel] = float2(meanDist / ddgi.rayMaxDistance, varDist);
 }

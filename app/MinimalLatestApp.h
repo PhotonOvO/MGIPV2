@@ -59,11 +59,12 @@ public:
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 
-    // Load default scene automatically
-    std::string path = "resources/Sponza/Sponza.gltf";
+    // Load CornellBox by default for FlaxGI smoke testing
+    std::string path = "resources/CornellBox/CornellBox.gltf";
     std::strncpy(m_modelPathBuffer, path.c_str(), sizeof(m_modelPathBuffer) - 1);
     m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
     setMeshSDFPathFromModelPath(path);
+    m_autoLoadSDFOnSceneReady = true;
     loadModelAsync(path);
   }
 
@@ -97,6 +98,13 @@ public:
       {
         demo::profiling::ScopedCpuRange asyncLoadingRange("AppPreRecord.UpdateAsyncLoading");
         updateAsyncLoading();
+      }
+
+      // Auto-load SDF after scene is fully uploaded (smoke test convenience)
+      if (m_autoLoadSDFOnSceneReady && !m_isLoading && !m_renderer.isSceneRenderingSuspended() && !m_meshSDFLoaded)
+      {
+        loadMeshSDFForDDGI();
+        m_autoLoadSDFOnSceneReady = false;
       }
 
       // Camera input handling
@@ -353,6 +361,27 @@ public:
           ImGui::SliderInt("DDGI Cascade", &m_debugOptions.ddgiDebugCascadeIndex, -1, 3);
           ImGui::Checkbox("DDGI Active Probes", &m_debugOptions.ddgiDebugActiveProbes);
           ImGui::Checkbox("DDGI Probe State", &m_debugOptions.ddgiDebugProbeState);
+          const char* flaxDebugModes[] = {
+            "Off",
+            "Irradiance",
+            "Irradiance No Visibility",
+            "Diffuse Term",
+            "Gate State",
+            "Probe Atlas Direct"
+          };
+          ImGui::Combo("FlaxGI Lighting Debug", &m_debugOptions.flaxGIDebugMode,
+                       flaxDebugModes, IM_ARRAYSIZE(flaxDebugModes));
+          if(m_debugOptions.flaxGIDebugMode > 0)
+          {
+            ImGui::SliderFloat("FlaxGI Debug Scale", &m_debugOptions.flaxGIDebugScale, 0.01f, 10.0f, "%.2f");
+          }
+          const char* flaxRayDebugModes[] = {
+            "Normal",
+            "Hit Albedo",
+            "Branch Colors"
+          };
+          ImGui::Combo("FlaxGI Ray Debug", &m_debugOptions.flaxGIRayDebugMode,
+                       flaxRayDebugModes, IM_ARRAYSIZE(flaxRayDebugModes));
           ImGui::TreePop();
         }
         if(ImGui::TreeNode("Culling Overlays"))
@@ -852,10 +881,15 @@ public:
       {
         demo::profiling::ScopedCpuRange rendererFacadeRange("App.RendererFacadeRender");
         m_renderer.render(frameParams);
+        ++m_gpuSmokeFrameCount;
         if(!m_loggedFirstFrame)
         {
           LOGI("GPU smoke: first frame rendered");
           m_loggedFirstFrame = true;
+        }
+        if(m_gpuSmokeFrameCount == 10u)
+        {
+          LOGI("GPU smoke: 10 frames rendered");
         }
       }
 
@@ -919,6 +953,7 @@ private:
   demo::RendererFacade                              m_renderer;
   bool                       m_vSync{false};
   bool                       m_loggedFirstFrame{false};
+  uint32_t                   m_gpuSmokeFrameCount{0};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
 
@@ -957,9 +992,10 @@ private:
 
   // UI state
   char m_modelPathBuffer[512] = "resources/NV_Bistro/bistro_ktx.gltf";
-  char m_meshSDFPathBuffer[512] = "";
-  std::string m_meshSDFStatus;
-  bool m_meshSDFLoaded = false;
+	char m_meshSDFPathBuffer[512] = "";
+	std::string m_meshSDFStatus;
+	bool m_meshSDFLoaded = false;
+	bool m_autoLoadSDFOnSceneReady = false;
 
   // Preset models
   struct PresetModel {
@@ -1869,7 +1905,8 @@ inline void MinimalLatestApp::drawModelLoaderUI()
       else
       {
         ImGui::SeparatorText("FlaxGI Parameters");
-        ddgiConfigChanged |= ImGui::SliderFloat("GI Distance", &ddgiConfig.giDistance, 5.0f, 200.0f, "%.0f");
+        ddgiConfigChanged |= ImGui::SliderFloat("GI Coverage Radius", &ddgiConfig.giDistance, 5.0f, 200.0f, "%.0f");
+        ddgiConfigChanged |= ImGui::SliderFloat("Ray Max Distance", &ddgiConfig.maxDistance, 5.0f, 200.0f, "%.0f");
         int maxCascades = static_cast<int>(ddgiConfig.maxCascades);
         if(ImGui::SliderInt("Max Cascades", &maxCascades, 1, 4))
         {
@@ -1911,6 +1948,41 @@ inline void MinimalLatestApp::drawModelLoaderUI()
           }
           ddgiConfigChanged |= ImGui::SliderFloat("Coverage Distance", &ddgiConfig.surfaceAtlasCoverageDistance, 10.0f, 200.0f, "%.0f");
         }
+
+        ImGui::SeparatorText("FlaxGI Runtime");
+        {
+          bool freeze = ddgiConfig.flaxGIFreeze;
+          if(ImGui::Checkbox("Freeze", &freeze))
+          {
+            ddgiConfig.flaxGIFreeze = freeze;
+            m_debugOptions.flaxGIFreeze = freeze;
+            ddgiConfigChanged = true;
+          }
+          ImGui::SameLine();
+          bool singleStep = ddgiConfig.flaxGISingleStep;
+          if(ImGui::Button(singleStep ? "Single Step (armed)" : "Single Step"))
+          {
+            ddgiConfig.flaxGISingleStep = true;
+            ddgiConfig.flaxGIFreeze = false; // unfreeze for one frame
+            m_debugOptions.flaxGISingleStep = true;
+            m_debugOptions.flaxGIFreeze = false;
+            ddgiConfigChanged = true;
+          }
+          bool resetProbes = m_debugOptions.flaxGIReset;
+          if(ImGui::Button("Reset Probes"))
+          {
+            m_debugOptions.flaxGIReset = true;
+            ddgiConfigChanged = true;
+          }
+          ImGui::SameLine();
+          bool disableIBL = ddgiConfig.flaxGIDisableIBL;
+          if(ImGui::Checkbox("Disable IBL", &disableIBL))
+          {
+            ddgiConfig.flaxGIDisableIBL = disableIBL;
+            m_debugOptions.flaxGIDisableIBL = disableIBL;
+            ddgiConfigChanged = true;
+          }
+        }
       }
       if(ddgiConfigChanged)
       {
@@ -1939,10 +2011,64 @@ inline void MinimalLatestApp::drawModelLoaderUI()
       ImGui::Text("DDGI Mode: %s", ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle ? "Flax-style" : "Current");
       if(ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle)
       {
-        const bool flaxRequested = ddgiConfig.enabled && ddgiConfig.runtimeMode == demo::DDGIRuntimeMode::flaxStyle;
-        const bool atlasRequested = flaxRequested && ddgiConfig.enableGlobalSurfaceAtlas;
-        ImGui::Text("Flax Resources: %s", flaxRequested ? "requested" : "idle");
-        ImGui::Text("Surface Atlas: %s", atlasRequested ? "requested" : "idle");
+        const demo::FlaxGIDebugStatus flaxStatus = m_renderer.getFlaxGIDebugStatus();
+        const auto readyText = [](bool ready) { return ready ? "Ready" : "Blocked"; };
+        const auto statusLine = [&](const char* label, bool ready)
+        {
+          ImGui::Text("%s: %s", label, readyText(ready));
+        };
+        const auto firstBlocked = [&]() -> const char*
+        {
+          if(!flaxStatus.ddgiEnabled) return "Enable DDGI";
+          if(!flaxStatus.flaxRequested) return "Switch GI Mode to FlaxGI";
+          if(!flaxStatus.meshSDFLoaded) return "Load Mesh SDF";
+          if(!flaxStatus.globalSDFPassReady) return "GlobalSDF pass missing";
+          if(!flaxStatus.globalSDFVolumeReady) return "GlobalSDF volume missing";
+          if(flaxStatus.globalSDFMeshCount == 0) return "GlobalSDF has no mesh SDF entries";
+          if(!flaxStatus.sharedProbeVolumeReady) return "Shared probe volume missing";
+          if(!flaxStatus.probePositionReady) return "Probe position buffer missing";
+          if(!flaxStatus.rayTracePassReady) return "GISDF ray trace pass not ready";
+          if(!flaxStatus.probeUpdatePassReady) return "Probe update pass not ready";
+          if(!flaxStatus.lightingAtlasViewsReady) return "Lighting atlas views missing";
+          if(!flaxStatus.flaxResourcesReady) return "Flax resource set missing";
+          if(flaxStatus.surfaceAtlasRequested && !flaxStatus.surfaceAtlasReady) return "Surface Atlas resources missing";
+          if(flaxStatus.surfaceAtlasRequested && !flaxStatus.surfaceAtlasRasterReady) return "Surface Atlas raster pass missing";
+          if(flaxStatus.surfaceAtlasRequested && flaxStatus.surfaceAtlasObjects == 0) return "Surface Atlas has no registered objects";
+          return "None";
+        };
+
+        ImGui::SeparatorText("FlaxGI Debug Status");
+        ImGui::Text("First Blocked Step: %s", firstBlocked());
+        statusLine("01 Request", flaxStatus.flaxRequested);
+        statusLine("02 Mesh SDF", flaxStatus.meshSDFLoaded);
+        statusLine("03 GlobalSDF Pass", flaxStatus.globalSDFPassReady);
+        statusLine("04 GlobalSDF Volume", flaxStatus.globalSDFVolumeReady);
+        ImGui::Text("   GlobalSDF Meshes: %u, Resolution: %u",
+                    flaxStatus.globalSDFMeshCount, flaxStatus.globalSDFResolution);
+        statusLine("05 Shared Probe Volume", flaxStatus.sharedProbeVolumeReady);
+        statusLine("06 Probe Positions", flaxStatus.probePositionReady);
+        statusLine("07 GISDF Ray Trace", flaxStatus.rayTracePassReady);
+        statusLine("08 Probe Update", flaxStatus.probeUpdatePassReady);
+        statusLine("09 Lighting Atlas Views", flaxStatus.lightingAtlasViewsReady);
+        statusLine("10 Flax Resources", flaxStatus.flaxResourcesReady);
+        ImGui::Text("   Probes: %ux%ux%u (%u), Rays: %u",
+                    flaxStatus.probeGridDims.x, flaxStatus.probeGridDims.y, flaxStatus.probeGridDims.z,
+                    flaxStatus.totalProbes, flaxStatus.raysPerProbe);
+        ImGui::Text("   Flax Cascades: %u, Probes/Cascade: %ux%ux%u",
+                    flaxStatus.flaxCascadeCount,
+                    flaxStatus.flaxProbesPerCascade.x,
+                    flaxStatus.flaxProbesPerCascade.y,
+                    flaxStatus.flaxProbesPerCascade.z);
+        statusLine("11 Surface Atlas Requested", flaxStatus.surfaceAtlasRequested);
+        statusLine("12 Surface Atlas Resources", flaxStatus.surfaceAtlasReady);
+        statusLine("13 Surface Atlas Raster", flaxStatus.surfaceAtlasRasterReady);
+        ImGui::Text("   Surface Atlas Objects: %u, Dirty: %u, Tiles: %u",
+                    flaxStatus.surfaceAtlasObjects,
+                    flaxStatus.surfaceAtlasDirtyObjects,
+                    flaxStatus.surfaceAtlasTiles);
+        ImGui::Text("   Frame: %llu, Update Offset: %u",
+                    static_cast<unsigned long long>(flaxStatus.temporalFrameCounter),
+                    flaxStatus.updateOffset);
       }
       ImGui::Text("Mesh SDF: %s", (m_meshSDFLoaded || m_renderer.hasDDGIMeshSDF()) ? "loaded" : "not loaded");
       if(!m_meshSDFStatus.empty())

@@ -179,6 +179,12 @@ float4 sampleGlobalSurfaceAtlas(
 {
     float4 result = float4(0,0,0,0);
 
+    // The current atlas raster path is not yet scheduled by the pass graph.
+    // Avoid touching uninitialized chunk/object storage until it publishes
+    // an actual object count.
+    if (data.objectsCount == 0)
+        return result;
+
     // Find chunk
     int3 chunkCoord = int3(clamp(
         floor((worldPosition - data.viewPos) / data.chunkSize + float3(20.0f, 20.0f, 30.0f)),

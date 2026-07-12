@@ -61,6 +61,12 @@ namespace demo
 		// constants carry the per-frame values), so no frame-count plumbing.
 		void initResources(rhi::Device& device);
 		void shutdownResources();
+		[[nodiscard]] bool isReady() const
+		{
+			return m_device != nullptr && !m_radianceView.isNull()
+				&& !m_irradianceUpdatePipeline.isNull() && !m_depthUpdatePipeline.isNull()
+				&& !m_irradianceBorderPipeline.isNull() && !m_depthBorderPipeline.isNull();
+		}
 
 		[[nodiscard]] const char* getName() const override { return "DDGIProbeUpdatePass"; }
 		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;

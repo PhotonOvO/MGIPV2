@@ -9,6 +9,7 @@
 // shaders/ because the CMake glob does not recurse into subdirectories).
 #ifdef USE_SLANG
 #include "_autogen/ddgi_gi_sdf_rays.slang.h"
+#include "_autogen/ddgi_probe_relocate.slang.h"
 #endif
 
 #include <glm/gtc/quaternion.hpp>
@@ -207,12 +208,30 @@ namespace demo
 			.bindingCount = static_cast<uint32_t>(bindings.size()),
 			.debugName = "ddgi-raytrace",
 		});
+		const std::array<rhi::ArgumentBinding, 2> relocationBindings{
+			{
+				rhi::ArgumentBinding{
+					.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
+					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+				},
+			}
+		};
+		m_relocationLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
+			.bindings = relocationBindings.data(),
+			.bindingCount = static_cast<uint32_t>(relocationBindings.size()),
+			.debugName = "ddgi-probe-relocation",
+		});
 
 		// Two prebuilt tables per frame in flight (index = frameIndex * 2 +
 		// parity): static descriptors, no per-frame rewrites — the parity
 		// selection happens at execute time (implementation approach (2),
 		// avoiding the descriptor-lag class of ping-pong bugs).
 		m_tables.resize(m_frameCount * 2u);
+		m_relocationTables.resize(m_frameCount);
 		m_uniformBuffers.resize(m_frameCount);
 		for (uint32_t i = 0; i < m_frameCount; ++i)
 		{
@@ -222,6 +241,25 @@ namespace demo
 				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
 				.debugName = "ddgi-raytrace-uniforms",
 			});
+			m_relocationTables[i] = device.createArgumentTable(m_relocationLayout);
+			const std::array<rhi::ArgumentWrite, 2> relocationWrites{
+				{
+					rhi::ArgumentWrite{
+						.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
+						.textureView = m_globalSDFView,
+						.sampler = m_globalSDFSampler,
+						.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+					},
+					rhi::ArgumentWrite{
+						.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
+						.buffer = m_uniformBuffers[i],
+						.size = sizeof(shaderio::DDGIRayTraceUniforms),
+					},
+				}
+			};
+			device.updateArgumentTable(m_relocationTables[i],
+			                           static_cast<uint32_t>(relocationWrites.size()),
+			                           relocationWrites.data());
 
 			for (uint32_t parity = 0; parity < 2u; ++parity)
 			{
@@ -292,6 +330,21 @@ namespace demo
 			.specializationVariant = 0x7404u,
 		};
 		m_pipeline = device.createComputePipeline(desc);
+
+		const std::array<rhi::ArgumentLayoutHandle, 1> relocationLayouts{{m_relocationLayout}};
+		const rhi::ComputePipelineDesc relocationDesc{
+			.shaderStage =
+			rhi::PipelineShaderStageDesc{
+				.stage = rhi::ShaderStage::compute,
+				.spirvCode = ddgi_probe_relocate_slang,
+				.spirvSize = std::size(ddgi_probe_relocate_slang) * sizeof(uint32_t),
+				.entryPoint = "kernelDDGIProbeRelocate",
+			},
+			.argumentLayouts = relocationLayouts.data(),
+			.argumentLayoutCount = static_cast<uint32_t>(relocationLayouts.size()),
+			.specializationVariant = 0x7409u,
+		};
+		m_relocationPipeline = device.createComputePipeline(relocationDesc);
 #endif
 	}
 
@@ -303,7 +356,9 @@ namespace demo
 		}
 
 		if (!m_pipeline.isNull()) m_device->destroyPipeline(m_pipeline);
+		if (!m_relocationPipeline.isNull()) m_device->destroyPipeline(m_relocationPipeline);
 		m_pipeline = {};
+		m_relocationPipeline = {};
 
 		for (rhi::ArgumentTableHandle& table : m_tables)
 		{
@@ -311,6 +366,12 @@ namespace demo
 			table = {};
 		}
 		m_tables.clear();
+		for (rhi::ArgumentTableHandle& table : m_relocationTables)
+		{
+			if (!table.isNull()) m_device->destroyArgumentTable(table);
+			table = {};
+		}
+		m_relocationTables.clear();
 		for (rhi::BufferHandle& buffer : m_uniformBuffers)
 		{
 			if (!buffer.isNull()) m_device->destroyBuffer(buffer);
@@ -319,7 +380,9 @@ namespace demo
 		m_uniformBuffers.clear();
 
 		if (!m_layout.isNull()) m_device->destroyArgumentLayout(m_layout);
+		if (!m_relocationLayout.isNull()) m_device->destroyArgumentLayout(m_relocationLayout);
 		m_layout = {};
+		m_relocationLayout = {};
 
 		if (!m_atlasSampler.isNull()) m_device->destroySampler(m_atlasSampler);
 		m_atlasSampler = {};
@@ -343,6 +406,7 @@ namespace demo
 		m_radianceView = {};
 
 		m_radianceLayoutInitialized = false;
+		m_probeRelocationInitialized = false;
 		m_frameCount = 0;
 		m_device = nullptr;
 	}
@@ -421,7 +485,11 @@ namespace demo
 		// the lazy layout latch not yet recorded (covers runtime enabling).
 		// NEVER derived from the frames-in-flight ring index (constraint 4).
 		uniforms.firstFrame =
-			(!m_radianceLayoutInitialized || m_renderer->getTemporalFrameCounter() == 0u) ? 1u : 0u;
+			(!m_radianceLayoutInitialized || !m_probeRelocationInitialized
+			 || m_renderer->getTemporalFrameCounter() == 0u) ? 1u : 0u;
+		uniforms.debugMode = context.params != nullptr
+			                     ? static_cast<uint32_t>(std::max(context.params->debugOptions.flaxGIRayDebugMode, 0))
+			                     : 0u;
 
 		// cpuToGpu memory is host-coherent on desktop; no explicit flush needed
 		// (same contract as GlobalSDFPass's uniform upload).
@@ -435,13 +503,14 @@ namespace demo
 		{
 			return;
 		}
-		// Current DDGI and FlaxGI bridge both need the shared probe atlas data.
-		if (!m_renderer->isDDGIProbeDataPathEnabled())
-		{
-			return;
-		}
+// Current DDGI only; Flax mode uses FlaxDDGIPass.
+			if (!m_renderer->isDDGIProbeDataPathEnabled() || m_renderer->isFlaxStyleDDGIRequested())
+			{
+				return;
+			}
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
-		if (m_device == nullptr || m_pipeline.isNull() || m_radianceView.isNull()
+		if (m_device == nullptr || m_pipeline.isNull() || m_relocationPipeline.isNull()
+			|| m_radianceView.isNull()
 			|| !probeVolume.isInitialized() || probeVolume.getTotalProbes() == 0u
 			|| !probeVolume.getProbePositionAddress().isValid())
 		{
@@ -461,7 +530,8 @@ namespace demo
 			static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
 		const uint32_t frameIndex = context.frameIndex;
 		const uint32_t tableIndex = frameIndex * 2u + parity;
-		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
+		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size()
+			|| frameIndex >= m_relocationTables.size())
 		{
 			return;
 		}
@@ -510,6 +580,23 @@ namespace demo
 		const uint32_t raysPerProbe = std::max(probeVolume.getDesc().raysPerProbe, 1u);
 		const uint32_t groupsX = (raysPerProbe + kGroupSizeX - 1u) / kGroupSizeX;
 		const uint32_t groupsY = probeVolume.getTotalProbes();
+		if (!m_probeRelocationInitialized)
+		{
+			const uint32_t relocationGroups =
+				(probeVolume.getTotalProbes() + kRelocationGroupSizeX - 1u) / kRelocationGroupSizeX;
+			cmd.beginEvent("DDGIProbeRelocation");
+			rhi::ComputeEncoder* relocationEncoder = cmd.beginComputePass();
+			relocationEncoder->setPipeline(m_relocationPipeline);
+			relocationEncoder->setArgumentTable(0, m_relocationTables[frameIndex]);
+			relocationEncoder->dispatch(rhi::DispatchDesc{relocationGroups, 1u, 1u});
+			cmd.endEncoding();
+			cmd.endEvent();
+
+			// Relocated position-buffer writes must be visible to GISDFRays.
+			cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+			            rhi::HazardFlags::bufferWrites);
+			m_probeRelocationInitialized = true;
+		}
 
 		cmd.beginEvent("GISDFRays");
 		rhi::ComputeEncoder* encoder = cmd.beginComputePass();
@@ -519,10 +606,12 @@ namespace demo
 		cmd.endEncoding();
 		cmd.endEvent();
 
-		// Radiance storage writes -> probe update reads (D2-3) and any later
-		// compute consumers of the scratch texture.
-		cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-		            rhi::HazardFlags::textureWrites);
+		// Publish radiance writes to probe update and relocated probe positions
+		// to later compute, visualization vertex, and lighting fragment reads.
+		cmd.barrier(rhi::StageFlags::compute,
+		            rhi::StageFlags::compute | rhi::StageFlags::vertexShader
+		                | rhi::StageFlags::fragmentShader,
+		            rhi::HazardFlags::textureWrites | rhi::HazardFlags::bufferWrites);
 
 		cmd.endEvent(); // DDGIRayTracePass
 	}

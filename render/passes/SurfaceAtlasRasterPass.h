@@ -30,6 +30,7 @@ public:
   void init(rhi::Device& device, GlobalSurfaceAtlasPass& atlasPass,
             MeshPool* meshPool, SceneResources* sceneResources);
   void deinit();
+  [[nodiscard]] bool isInitialized() const { return m_device != nullptr; }
 
   // --- FGI-032: Clear paths ---
   // Full atlas clear (depth = 1.0, color = black, lighting = black)

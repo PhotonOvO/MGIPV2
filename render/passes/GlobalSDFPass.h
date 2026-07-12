@@ -72,6 +72,7 @@ namespace demo
 
 		[[nodiscard]] const GlobalSDFVolume& getVolume() const { return m_volume; }
 		[[nodiscard]] uint32_t getMeshSDFCount() const { return static_cast<uint32_t>(m_meshEntries.size()); }
+		[[nodiscard]] rhi::SamplerHandle getMeshSDFSampler() const { return m_meshSDFSampler; }
 
 		[[nodiscard]] const char* getName() const override { return "GlobalSDFPass"; }
 		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;

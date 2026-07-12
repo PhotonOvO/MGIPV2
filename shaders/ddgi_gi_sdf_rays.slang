@@ -45,6 +45,11 @@ Sampler3D<float4> globalAlbedoTexture;
 // implementation + the same per-frame rotation columns.
 STATIC_CONST float kDDGIRaysPi = 3.14159265359;
 
+// Minimal SDF-hit lighting bridge: until Surface Atlas / scene-light hit shading
+// is wired, valid SDF hits contribute bounded albedo radiance so strongly colored
+// walls can enter the probe irradiance instead of depending only on directional sun.
+STATIC_CONST float kSDFHitAlbedoRadianceFloor = 0.75;
+
 GlobalSDFTraceConfig makeTraceConfig()
 {
     GlobalSDFTraceConfig config;
@@ -80,7 +85,18 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Probe origin through the buffer device address of the position buffer
     // (same BDA pattern as shader.rast.slang sceneInfo.dataBufferAddress).
     float4* probePositions = (float4*)rayTraceUniforms.probePositionAddress;
-    const float3 rayOrigin = probePositions[probeId].xyz;
+    const float4 probeData = probePositions[probeId];
+    const float3 rayOrigin = probeData.xyz;
+
+    if (probeData.w < 0.5)
+    {
+        const float maxTraceDistance = rayTraceUniforms.sunDirection.w;
+        const float3 radiance = rayTraceUniforms.debugMode == 2u
+            ? float3(0.0, 0.0, 1.0)
+            : float3(0.0, 0.0, 0.0);
+        radianceOutput[uint2(rayId, probeId)] = float4(radiance, maxTraceDistance);
+        return;
+    }
 
     // Per-frame random rotation applied to the Fibonacci basis direction.
     // Columns are combined explicitly so no matrix-layout convention applies.
@@ -105,18 +121,28 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             // Probe sits inside / flush with geometry: no reliable shading
             // (LuxGI GISDFRays.comp:93-96 backface guard).
-            radiance = float3(0.0, 0.0, 0.0);
-            hitDistance = maxTraceDistance;
+            radiance = rayTraceUniforms.debugMode == 2u ? float3(0.0, 0.0, 1.0) : float3(0.0, 0.0, 0.0);
+            hitDistance = rayTraceUniforms.debugMode == 2u ? hit.hitTime : maxTraceDistance;
         }
         else
         {
             const float3 hitPosition = rayOrigin + rayDirection * hit.hitTime;
-            const float3 hitNormal =
-                computeGlobalSDFGradientNormal(globalSDFTexture, config, hitPosition);
-            // sunDirection.xyz travels light -> scene, so the shading direction
-            // toward the sun is its negation.
-            const float3 toSun = -rayTraceUniforms.sunDirection.xyz;
-            const float nDotL = max(dot(hitNormal, toSun), 0.0);
+            // First colored-bounce path: sample the global albedo volume
+            // composed alongside the global SDF. Full texture/material hit
+            // shading can replace this coarse nearest-surface color later.
+            const float3 albedo = sampleGlobalAlbedo(config, hitPosition);
+            if (rayTraceUniforms.debugMode == 1u || rayTraceUniforms.debugMode == 2u)
+            {
+                radiance = albedo;
+            }
+            else
+            {
+                const float3 hitNormal =
+                    computeGlobalSDFGradientNormal(globalSDFTexture, config, hitPosition);
+                // sunDirection.xyz travels light -> scene, so the shading direction
+                // toward the sun is its negation.
+                const float3 toSun = -rayTraceUniforms.sunDirection.xyz;
+                const float nDotL = max(dot(hitNormal, toSun), 0.0);
 
             // Sun shadow ray: march toward the sun from a normal-offset origin.
             // The global SDF is coarse compared with thin scene geometry, so
@@ -139,13 +165,10 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
             // fallback energy source, but keeps later frames from converging to
             // a fully black probe field when SDF-only binary sun shadows are
             // too conservative for thin/low-resolution geometry.
-            // First colored-bounce path: sample the global albedo volume
-            // composed alongside the global SDF. Full texture/material hit
-            // shading can replace this coarse nearest-surface color later.
-            const float3 albedo = sampleGlobalAlbedo(config, hitPosition);
             const float skyDiffuseFloor = 0.25;
             radiance =
                 (albedo / kDDGIRaysPi) * rayTraceUniforms.sunColor.xyz * nDotL * sunVisibility;
+            radiance += albedo * kSDFHitAlbedoRadianceFloor;
             radiance += albedo * rayTraceUniforms.skyColorAlbedo.xyz * skyDiffuseFloor;
 
             // Infinite bounce (Wave D4-1): add the indirect term by sampling
@@ -179,13 +202,16 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
                 // diffuse bounce term (albedo / pi) * E reduces to albedo * L.
                 radiance += albedo * rayTraceUniforms.skyColorAlbedo.xyz;
             }
+            }
             hitDistance = hit.hitTime;
         }
     }
     else
     {
         // Miss: constant sky radiance (IBL cubemap wiring deferred, see plan note).
-        radiance = rayTraceUniforms.skyColorAlbedo.xyz;
+        radiance = rayTraceUniforms.debugMode == 2u
+            ? float3(1.0, 0.0, 1.0)
+            : rayTraceUniforms.skyColorAlbedo.xyz;
         hitDistance = maxTraceDistance;
     }
 

@@ -4,6 +4,7 @@
 // DDGI SampleProbe (Wave D3-1): include-only module; pulls in ddgi_common.slang,
 // whose signNotZero overloads replace the local copy this file used to define.
 #include "ddgi_sample_probe.slang"
+#include "flax_ddgi_common.slang"
 
 [[vk::binding(0, 0)]]
 Sampler2D inTexture[];
@@ -519,43 +520,111 @@ bool flaxDDGIEnabled()
 {
     return lighting.light.ddgiFlaxEnabledAndCascades.x > 0.5
         && lighting.light.ddgiFlaxEnabledAndCascades.y > 0.0
-        && lighting.light.ddgiFlaxEnabledAndCascades.z > 0.5; // textures bound
+        && lighting.light.ddgiFlaxEnabledAndCascades.z > 0.5 // shared probe textures bound
+        && lighting.light.ddgiGridDimsAndEnabled.w > 0.5;
+}
+
+uint flaxGIDebugMode()
+{
+    return uint(max(lighting.light.ddgiParams2.y, 0.0) + 0.5);
+}
+
+float flaxGIDebugScale()
+{
+    return max(lighting.light.ddgiParams2.z, 0.0);
+}
+
+DDGISampleVolume buildSharedDDGISampleVolume()
+{
+    DDGISampleVolume volume;
+    volume.gridOrigin = lighting.light.ddgiOriginAndSpacing.xyz;
+    volume.probeSpacing = lighting.light.ddgiOriginAndSpacing.w;
+    volume.probeCounts = int3(lighting.light.ddgiGridDimsAndEnabled.xyz);
+    volume.normalBias = lighting.light.ddgiParams0.z;
+    volume.ddgiGamma = lighting.light.ddgiParams0.y;
+    volume.irradianceSideLength = int(lighting.light.ddgiParams0.w);
+    volume.irradianceAtlasSize = int2(lighting.light.ddgiParams1.yz);
+    volume.depthSideLength = int(lighting.light.ddgiParams1.x);
+    volume.depthAtlasSize = int2(int(lighting.light.ddgiParams1.w), int(lighting.light.ddgiParams2.x));
+    volume.probePositionAddress = lighting.light.ddgiProbePositionAddress;
+    return volume;
+}
+
+vec3 sampleSharedDDGIProbeIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
+{
+    DDGISampleVolume volume = buildSharedDDGISampleVolume();
+    return sampleDDGIIrradiance(volume, worldPos, N, Wo,
+                                inTexture[kDDGIIrradianceAtlasIndex],
+                                inTexture[kDDGIDepthAtlasIndex]);
+}
+
+vec3 sampleSharedDDGIProbeIrradianceNoVisibility(vec3 worldPos, vec3 N, vec3 Wo)
+{
+    DDGISampleVolume volume = buildSharedDDGISampleVolume();
+    return sampleDDGIIrradianceNoVisibility(volume, worldPos, N, Wo,
+                                            inTexture[kDDGIIrradianceAtlasIndex]);
+}
+
+vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
+{
+    DDGISampleVolume volume = buildSharedDDGISampleVolume();
+    const int3 maxGridCoord = volume.probeCounts - int3(1, 1, 1);
+    const int3 probeCoord = clamp(
+        int3((worldPos - volume.gridOrigin) / volume.probeSpacing + float3(0.5, 0.5, 0.5)),
+        int3(0, 0, 0), maxGridCoord);
+    float4* probePositions = (float4*)volume.probePositionAddress;
+    int probeIdx = -1;
+    float bestDistanceSquared = 3.402823466e+38;
+    for (int z = -1; z <= 1; ++z)
+    {
+        for (int y = -1; y <= 1; ++y)
+        {
+            for (int x = -1; x <= 1; ++x)
+            {
+                const int3 candidateCoord = clamp(
+                    probeCoord + int3(x, y, z), int3(0, 0, 0), maxGridCoord);
+                const int candidateIndex = ddgiGridCoordToProbeIndex(volume, candidateCoord);
+                const float4 candidateData = probePositions[candidateIndex];
+                const float3 candidateDelta = candidateData.xyz - worldPos;
+                const float candidateDistanceSquared = dot(candidateDelta, candidateDelta);
+                if (candidateData.w >= 0.5 && candidateDistanceSquared < bestDistanceSquared)
+                {
+                    bestDistanceSquared = candidateDistanceSquared;
+                    probeIdx = candidateIndex;
+                }
+            }
+        }
+    }
+    if (probeIdx < 0)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const float3 dir = length(N) > 0.0001 ? normalize(N) : float3(0.0, 1.0, 0.0);
+    const float2 texCoord = ddgiTextureCoordFromDirection(
+        dir, probeIdx, volume.irradianceAtlasSize, volume.irradianceSideLength);
+    float3 probeIrradiance = inTexture[kDDGIIrradianceAtlasIndex].SampleLevel(texCoord, 0.0).rgb;
+    probeIrradiance = pow(probeIrradiance,
+                          float3(volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5));
+    probeIrradiance *= probeIrradiance;
+    return 2.0 * kDDGICommonPi * probeIrradiance;
 }
 
 // Flax-style DDGI irradiance evaluation (FGI-061).
-// Uses the simple DDGI probe textures (already bound at indices 21/22) with
-// Flax config parameters applied (gamma, intensity, history weight, fallback).
+// Uses the Flax-specific ProbesData, ProbesDistance, and ProbesIrradiance
+// textures bound at bindless indices 23-25. These are populated by the
+// FlaxDDGIPass classify/trace/update pipeline.
 vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 {
-    DDGISampleVolume volume;
-    volume.gridOrigin = lighting.light.ddgiFlaxOriginAndSpacing[0].xyz;
-    volume.probeSpacing = lighting.light.ddgiFlaxOriginAndSpacing[0].w;
-    volume.probeCounts = int3(lighting.light.ddgiFlaxCountsAndRays.xyz);
-    volume.normalBias = 0.3f;
-    volume.ddgiGamma = lighting.light.ddgiFlaxGammaWeightMaxDist.x;
+    FlaxDDGIData ddgi = buildFlaxDDGIData(lighting);
+    float normalBias = lighting.light.lightColorAndNormalBias.w;
+    float cascadeBlendDist = kDDGICascadeBlendSize;
 
-    // Derive atlas sizes from the actual bound textures
-    uint irrW, irrH, depthW, depthH;
-    inTexture[kDDGIIrradianceAtlasIndex].GetDimensions(irrW, irrH);
-    inTexture[kDDGIDepthAtlasIndex].GetDimensions(depthW, depthH);
-    volume.irradianceAtlasSize = int2(irrW, irrH);
-    volume.depthAtlasSize = int2(depthW, depthH);
-
-    // Compute side length from atlas dimensions and probe grid
-    uint probesPerRow = volume.probeCounts.x * volume.probeCounts.y;
-    // irradiance: tile = (atlasWidth - 2) / probesPerRow, sideLength = tile - 2
-    volume.irradianceSideLength = int((irrW - 2) / max(probesPerRow, 1)) - 2;
-    volume.depthSideLength = int((depthW - 2) / max(probesPerRow, 1)) - 2;
-
-    volume.probePositionAddress = lighting.light.ddgiProbePositionAddress;
-
-    float3 rawIrradiance = sampleDDGIIrradiance(volume, worldPos, N, Wo,
-                                                 inTexture[kDDGIIrradianceAtlasIndex],
-                                                 inTexture[kDDGIDepthAtlasIndex]);
-
-    float intensity = lighting.light.ddgiFlaxGammaWeightMaxDist.w;
-    float3 fallback = lighting.light.ddgiFlaxFallbackIrradiance.rgb;
-    return lerp(fallback, rawIrradiance * intensity, 0.9f);
+    return sampleFlaxDDGIIrradiance(
+        ddgi,
+        inTexture[kFlaxDDGIProbesDataIndex],
+        inTexture[kFlaxDDGIProbesDistanceIndex],
+        inTexture[kFlaxDDGIProbesIrradianceIndex],
+        worldPos, N, normalBias, cascadeBlendDist);
 }
 
 // DDGI (Wave D3-1) runtime gate: both the master enable flag and a non-zero
@@ -570,20 +639,7 @@ bool ddgiSamplingEnabled()
 // point. Wo follows LuxGI SampleProbe.comp: the surface-to-camera direction.
 vec3 evaluateDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 {
-    DDGISampleVolume volume;
-    volume.gridOrigin = lighting.light.ddgiOriginAndSpacing.xyz;
-    volume.probeSpacing = lighting.light.ddgiOriginAndSpacing.w;
-    volume.probeCounts = int3(lighting.light.ddgiGridDimsAndEnabled.xyz);
-    volume.normalBias = lighting.light.ddgiParams0.z;
-    volume.ddgiGamma = lighting.light.ddgiParams0.y;
-    volume.irradianceSideLength = int(lighting.light.ddgiParams0.w);
-    volume.irradianceAtlasSize = int2(lighting.light.ddgiParams1.yz);
-    volume.depthSideLength = int(lighting.light.ddgiParams1.x);
-    volume.depthAtlasSize = int2(int(lighting.light.ddgiParams1.w), int(lighting.light.ddgiParams2.x));
-    volume.probePositionAddress = lighting.light.ddgiProbePositionAddress;
-    return sampleDDGIIrradiance(volume, worldPos, N, Wo,
-                                inTexture[kDDGIIrradianceAtlasIndex],
-                                inTexture[kDDGIDepthAtlasIndex]);
+    return sampleSharedDDGIProbeIrradiance(worldPos, N, Wo);
 }
 
 // evaluateEnvironmentIBL now accepts an SSR sample (float4: rgb=radiance, a=confidence).
@@ -595,6 +651,49 @@ vec3 evaluateDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 // can blend toward DDGI probe irradiance when the DDGI gate is on.
 vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float metallic, float roughness, float ao, float4 ssr)
 {
+    const uint ddgiDebugMode = flaxGIDebugMode();
+    if(ddgiDebugMode != 0u)
+    {
+        const float debugScale = max(flaxGIDebugScale(), 0.001);
+        if(ddgiDebugMode == 4u)
+        {
+            if(flaxDDGIEnabled())
+            {
+                return float3(0.0, 1.0, 0.0);
+            }
+            if(ddgiSamplingEnabled())
+            {
+                return float3(1.0, 0.8, 0.0);
+            }
+            return float3(1.0, 0.0, 0.0);
+        }
+
+        if(!flaxDDGIEnabled() && !ddgiSamplingEnabled())
+        {
+            return float3(1.0, 0.0, 1.0);
+        }
+
+        vec3 ddgiIrradiance;
+        if(flaxDDGIEnabled())
+        {
+            // Flax debug modes must observe Flax-owned atlases.
+            ddgiIrradiance = evaluateFlaxDDGIIrradiance(worldPos, N, V);
+        }
+        else
+        {
+            ddgiIrradiance = ddgiDebugMode == 5u
+                ? sampleSharedDDGIProbeIrradianceDirect(worldPos, N)
+                : (ddgiDebugMode == 2u
+                    ? sampleSharedDDGIProbeIrradianceNoVisibility(worldPos, N, V)
+                    : sampleSharedDDGIProbeIrradiance(worldPos, N, V));
+        }
+        if(ddgiDebugMode == 3u)
+        {
+            return ddgiIrradiance * baseColor / PI * debugScale;
+        }
+        return ddgiIrradiance * debugScale;
+    }
+
     const bool useIBL = lighting.light.iblParams.x > 0.5 && lighting.light.iblParams.w > 0.5;
 	    if(!useIBL)
 	    {

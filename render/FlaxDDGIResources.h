@@ -1,14 +1,14 @@
 #pragma once
 
-// Flax-style DDGI probe resources (FGI-042) and probe state encoding (FGI-043).
+// Flax-style DDGI probe resources (FGI-042 R1) and probe state encoding (FGI-043).
 //
-// Owns the multi-cascade DDGI GPU resources matching the Flax DDGI data model:
-//   - ProbesTrace: 2D staging texture (rays x active-probe-batch), HDR radiance
-//   - ProbesData: 2D texture with per-probe offset + state + attention (SNORM or float)
-//   - ProbesIrradiance: 2D octahedral irradiance atlas (HDR), all cascades
-//   - ProbesDistance: 2D octahedral distance/moment atlas, all cascades
-//   - ActiveProbes: storage buffer with counter at element 0
-//   - UpdateProbesInitArgs: indirect dispatch argument buffer
+// R1 contract fix — per-cascade resource model:
+//   - Probe counts per cascade (not shared)
+//   - ActiveProbes partitioned by cascade (separate buffer + counter per cascade)
+//   - Indirect Args as [cascade][batch][pass] (3D flat array)
+//   - Trace buffer sized for max cascade batch
+//   - Double-buffered Irradiance/Distance with ping-pong parity accessors
+//   - RGBA8_SNORM storage-image capability query with rgba16Sfloat fallback
 //
 // All resources go through rhi:: handles. No native backend types in this header.
 // Resource creation is gated on DDGIConfig::runtimeMode == DDGIRuntimeMode::flaxStyle.
@@ -21,6 +21,7 @@
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <cmath>
+#include <vector>
 
 namespace demo
 {
@@ -93,7 +94,7 @@ namespace probe_state
   }
 }
 
-// --- Flax-style DDGI resource owner ---
+// --- Flax-style DDGI resource owner (R1: per-cascade model) ---
 class FlaxDDGIResources
 {
 public:
@@ -101,21 +102,25 @@ public:
   static constexpr uint32_t kProbeResolutionIrradiance = 6u;  // texels per probe (excl. padding)
   static constexpr uint32_t kProbeResolutionDistance   = 14u;
   static constexpr uint32_t kProbeBorderTexels         = 2u;  // 1px each side
+  static constexpr uint32_t kMaxCascades               = 4u;
+
+  // Indirect arg passes
+  enum class IndirectPass : uint32_t { Trace = 0, Distance = 1, Irradiance = 2, Count = 3 };
 
   [[nodiscard]] bool isInitialized() const { return m_device != nullptr; }
 
-  // Allocate all Flax DDGI resources. Safe to re-call (deinits first).
+  // Allocate all Flax DDGI resources. probesPerCascade[c] gives the grid dims for cascade c.
   void init(rhi::Device& device, const DDGIConfig& config,
-            uint32_t cascadeCount, const glm::uvec3& probesPerCascade);
+            const std::vector<glm::uvec3>& probesPerCascade);
 
   void deinit();
 
   // Compute cascade descriptors from config + camera
   static void computeCascades(const DDGIConfig& config,
-                               const glm::vec3& cameraPosition,
-                               uint32_t cascadeCount,
-                               const glm::uvec3& probesPerCascade,
-                               std::vector<DDGICascadeDesc>& outCascades);
+                              const glm::vec3& cameraPosition,
+                              const glm::vec3& coverageCenter,
+                              const std::vector<glm::uvec3>& probesPerCascade,
+                              std::vector<DDGICascadeDesc>& outCascades);
 
   // Compute max probes per cascade from config (bounded by max texture size)
   [[nodiscard]] static glm::uvec3 computeProbesPerCascade(const DDGIConfig& config,
@@ -125,17 +130,43 @@ public:
   // --- Accessors ---
   [[nodiscard]] rhi::TextureHandle getProbesTrace() const { return m_probesTrace; }
   [[nodiscard]] rhi::TextureHandle getProbesData() const { return m_probesData; }
-  [[nodiscard]] rhi::TextureHandle getProbesIrradiance() const { return m_probesIrradiance; }
-  [[nodiscard]] rhi::TextureHandle getProbesDistance() const { return m_probesDistance; }
-  [[nodiscard]] rhi::BufferHandle getActiveProbes() const { return m_activeProbes; }
+
+  // Double-buffered irradiance (R1): parity 0 writes A/reads B, parity 1 reversed
+  [[nodiscard]] rhi::TextureHandle getProbesIrradianceWrite(uint32_t parity) const {
+    return (parity & 1u) == 0u ? m_probesIrradiance : m_probesIrradianceHistory;
+  }
+  [[nodiscard]] rhi::TextureHandle getProbesIrradianceRead(uint32_t parity) const {
+    return (parity & 1u) == 0u ? m_probesIrradianceHistory : m_probesIrradiance;
+  }
+
+  // Double-buffered distance (R1)
+  [[nodiscard]] rhi::TextureHandle getProbesDistanceWrite(uint32_t parity) const {
+    return (parity & 1u) == 0u ? m_probesDistance : m_probesDistanceHistory;
+  }
+  [[nodiscard]] rhi::TextureHandle getProbesDistanceRead(uint32_t parity) const {
+    return (parity & 1u) == 0u ? m_probesDistanceHistory : m_probesDistance;
+  }
+
+  // Per-cascade active probes buffer (R1)
+  [[nodiscard]] rhi::BufferHandle getActiveProbes(uint32_t cascade) const {
+    return cascade < m_activeProbes.size() ? m_activeProbes[cascade] : rhi::BufferHandle{};
+  }
+
+  // Indirect args: cascade × batch × IndirectPass
   [[nodiscard]] rhi::BufferHandle getUpdateProbesInitArgs() const { return m_updateProbesInitArgs; }
 
-  [[nodiscard]] uint32_t getActiveProbeBatchSize() const { return m_activeProbeBatchSize; }
   [[nodiscard]] uint32_t getCascadeCount() const { return m_cascadeCount; }
-  [[nodiscard]] const glm::uvec3& getProbesPerCascade() const { return m_probesPerCascade; }
+  [[nodiscard]] uint32_t getMaxBatchesPerCascade() const { return m_maxBatchesPerCascade; }
+  [[nodiscard]] uint32_t getMaxProbesPerCascade() const { return m_maxProbesPerCascade; }
+  [[nodiscard]] uint32_t getRaysPerProbe() const { return m_raysPerProbe; }
+
   [[nodiscard]] rhi::Extent2D getIrradianceAtlasExtent() const { return m_irradianceAtlasExtent; }
   [[nodiscard]] rhi::Extent2D getDistanceAtlasExtent() const { return m_distanceAtlasExtent; }
   [[nodiscard]] rhi::Extent2D getTraceExtent() const { return m_traceExtent; }
+  [[nodiscard]] rhi::Extent2D getDataExtent() const { return m_dataExtent; }
+
+  [[nodiscard]] const std::vector<glm::uvec3>& getProbesPerCascade() const { return m_probesPerCascade; }
+  [[nodiscard]] bool usesSNORM() const { return m_usesSNORM; }
 
   // Estimated memory in bytes
   [[nodiscard]] uint64_t getTotalMemoryBytes() const;
@@ -143,20 +174,26 @@ public:
 private:
   rhi::Device* m_device{nullptr};
   uint32_t m_cascadeCount{0};
-  uint32_t m_activeProbeBatchSize{256};  // probes per batch
+  uint32_t m_maxBatchesPerCascade{1};
+  uint32_t m_maxProbesPerCascade{0};
   uint32_t m_raysPerProbe{64};
-  glm::uvec3 m_probesPerCascade{0u};
+  bool m_usesSNORM{false};
+
+  std::vector<glm::uvec3> m_probesPerCascade;
 
   rhi::Extent2D m_irradianceAtlasExtent{};
   rhi::Extent2D m_distanceAtlasExtent{};
   rhi::Extent2D m_traceExtent{};
+  rhi::Extent2D m_dataExtent{};
 
   rhi::TextureHandle m_probesTrace{};
   rhi::TextureHandle m_probesData{};
   rhi::TextureHandle m_probesIrradiance{};
+  rhi::TextureHandle m_probesIrradianceHistory{};
   rhi::TextureHandle m_probesDistance{};
-  rhi::BufferHandle  m_activeProbes{};
-  rhi::BufferHandle  m_updateProbesInitArgs{};
+  rhi::TextureHandle m_probesDistanceHistory{};
+  std::vector<rhi::BufferHandle> m_activeProbes;
+  rhi::BufferHandle m_updateProbesInitArgs{};
 };
 
 } // namespace demo

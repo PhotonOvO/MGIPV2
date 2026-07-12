@@ -24,6 +24,7 @@
 #include "FlaxDDGIResources.h"
 #include "passes/GlobalSDFPass.h"
 #include "passes/DDGIDebugPass.h"
+#include "passes/FlaxDDGIPass.h"
 #include "passes/GlobalSurfaceAtlasPass.h"
 #include "passes/SurfaceAtlasRasterPass.h"
 #include "passes/GPUDrivenShadowAtlasPass.h"
@@ -363,6 +364,21 @@ namespace demo
 		void resetDDGIHistory();
 		[[nodiscard]] DDGIConfig getEditableDDGIConfig() const { return getDDGIConfig(); }
 		void setEditableDDGIConfig(const DDGIConfig& config);
+		[[nodiscard]] FlaxGIDebugStatus getFlaxGIDebugStatus() const;
+		[[nodiscard]] FlaxDDGIResources& getFlaxDDGIResources() { return m_flaxDDGIResources; }
+		[[nodiscard]] const FlaxDDGIResources& getFlaxDDGIResources() const { return m_flaxDDGIResources; }
+		[[nodiscard]] const std::vector<DDGICascadeDesc>& getFlaxDDGICascadeDescs() const { return m_flaxDDGICascades; }
+		[[nodiscard]] GlobalSurfaceAtlasPass* getSurfaceAtlasPass() { return &m_surfaceAtlasPass; }
+		[[nodiscard]] const GlobalSurfaceAtlasPass* getSurfaceAtlasPass() const { return &m_surfaceAtlasPass; }
+	[[nodiscard]] const glm::vec3& getFlaxLastCameraPosition() const { return m_flaxLastCameraPosition; }
+	[[nodiscard]] const glm::vec3& getCachedLightDirection() const { return m_cachedLightDirection; }
+	[[nodiscard]] const glm::vec3& getCachedLightColor() const { return m_cachedLightColor; }
+	[[nodiscard]] const std::vector<shaderio::FlaxDDGIRadianceSource>& getFlaxRadianceSources() const
+	{
+		return m_flaxRadianceSources;
+	}
+	void disarmFlaxSingleStep();
+	void rebuildSurfaceAtlasObjects();
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const
 		{
@@ -1322,6 +1338,16 @@ namespace demo
 		SurfaceAtlasRasterPass m_surfaceAtlasRasterPass;
 		// Flax DDGI cascade descriptors (CPU-computed each frame).
 		std::vector<DDGICascadeDesc> m_flaxDDGICascades;
+	// Flax GI (FGI-056): per-cascade update scheduling
+	static constexpr uint32_t kFlaxCascadeUpdateFrequencies[4] = {2, 3, 5, 7};
+	std::vector<uint32_t> m_flaxCascadeFrameCounters;
+	glm::vec3 m_flaxLastCameraPosition{0.0f};
+	bool m_flaxCascadesNeedUpdate{true};
+	glm::vec3 m_cachedLightDirection{0.4f, 0.7f, 0.3f};
+	glm::vec3 m_cachedLightColor{0.7f, 0.55f, 0.35f};
+	[[nodiscard]] glm::vec3 computeFlaxCoverageCenter(const glm::vec3& cameraPosition) const;
+	void rebuildFlaxRadianceSources();
+	void updateFlaxCascadeScheduling(const glm::vec3& cameraPos);
 		// DDGI (Wave D2-2): GISDFRays SDF ray trace compute pass. Resources are
 		// only created for the current DDGI path (default false).
 		std::unique_ptr<DDGIRayTracePass> m_ddgiRayTracePass;
@@ -1347,6 +1373,7 @@ namespace demo
 		// created for the current DDGI path; the draw additionally
 		// requires the ImGui "DDGI Probe Visualize" checkbox (default false).
 		std::unique_ptr<DDGIDebugPass> m_ddgiDebugPass;
+	std::unique_ptr<FlaxDDGIPass> m_flaxDDGIPass;
 		std::unique_ptr<GPUDrivenVelocityPass> m_velocityPass;
 		std::unique_ptr<GPUDrivenTAAResolvePass> m_taaResolvePass;
 		std::unique_ptr<GPUDrivenBloomPrefilterPass> m_bloomPrefilterPass;
@@ -1437,6 +1464,7 @@ namespace demo
 		uint32_t m_shadowAtlasAllocatedTiles{0};
 		std::vector<shaderio::LightData> m_gpuDrivenPointLights;
 		std::vector<shaderio::LightData> m_gpuDrivenSpotLights;
+		std::vector<shaderio::FlaxDDGIRadianceSource> m_flaxRadianceSources;
 		rhi::TextureHandle m_iblEnvironmentImage{};
 		rhi::TextureViewHandle m_iblEnvironmentView{};
 		IBLResources m_iblResources{};

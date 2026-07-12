@@ -81,7 +81,7 @@ float2 ddgiTextureCoordFromDirection(float3 dir, int probeIndex, int2 atlasSize,
 // Returns world-space irradiance (already includes the 2*pi factor); the
 // caller applies its own albedo/BRDF energy convention.
 float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
-                            Sampler2D irradianceAtlas, Sampler2D depthAtlas)
+                             Sampler2D irradianceAtlas, Sampler2D depthAtlas)
 {
     // Probe origins through the position-buffer BDA (same pattern as
     // ddgi_gi_sdf_rays.slang rayTraceUniforms.probePositionAddress).
@@ -91,7 +91,7 @@ float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 
     const int3 baseGridCoord = clamp(
         int3((P - volume.gridOrigin) / volume.probeSpacing), int3(0, 0, 0), maxGridCoord);
     const float3 baseProbePos =
-        probePositions[ddgiGridCoordToProbeIndex(volume, baseGridCoord)].xyz;
+        volume.gridOrigin + float3(baseGridCoord) * volume.probeSpacing;
 
     float3 sumIrradiance = float3(0.0, 0.0, 0.0);
     float sumWeight = 0.0;
@@ -104,7 +104,12 @@ float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 
         const int3 offset = int3(i, i >> 1, i >> 2) & int3(1, 1, 1);
         const int3 probeGridCoord = clamp(baseGridCoord + offset, int3(0, 0, 0), maxGridCoord);
         const int probeIdx = ddgiGridCoordToProbeIndex(volume, probeGridCoord);
-        const float3 probePos = probePositions[probeIdx].xyz;
+        const float4 probeData = probePositions[probeIdx];
+        if (probeData.w < 0.5)
+        {
+            continue;
+        }
+        const float3 probePos = probeData.xyz;
 
         const float3 trilinear = lerp(1.0 - alpha, alpha, float3(offset));
         float weight = 1.0;
@@ -157,6 +162,55 @@ float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 
     float3 netIrradiance = sumIrradiance / max(sumWeight, 0.000001);
     netIrradiance *= netIrradiance;
 
+    return 2.0 * kDDGICommonPi * netIrradiance;
+}
+
+float3 sampleDDGIIrradianceNoVisibility(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
+                                         Sampler2D irradianceAtlas)
+{
+    float4* probePositions = (float4*)volume.probePositionAddress;
+
+    const int3 maxGridCoord = volume.probeCounts - int3(1, 1, 1);
+    const int3 baseGridCoord = clamp(
+        int3((P - volume.gridOrigin) / volume.probeSpacing), int3(0, 0, 0), maxGridCoord);
+    const float3 baseProbePos =
+        volume.gridOrigin + float3(baseGridCoord) * volume.probeSpacing;
+
+    float3 sumIrradiance = float3(0.0, 0.0, 0.0);
+    float sumWeight = 0.0;
+
+    const float3 alpha =
+        clamp((P - baseProbePos) / volume.probeSpacing, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const int3 offset = int3(i, i >> 1, i >> 2) & int3(1, 1, 1);
+        const int3 probeGridCoord = clamp(baseGridCoord + offset, int3(0, 0, 0), maxGridCoord);
+        const int probeIdx = ddgiGridCoordToProbeIndex(volume, probeGridCoord);
+        const float4 probeData = probePositions[probeIdx];
+        if (probeData.w < 0.5)
+        {
+            continue;
+        }
+        const float3 probePos = probeData.xyz;
+        const float3 trilinear = lerp(1.0 - alpha, alpha, float3(offset));
+
+        const float3 dirToProbe = normalize(probePos - P);
+        float weight = ddgiSquare(max(0.0001, (dot(dirToProbe, N) + 1.0) * 0.5)) + 0.2;
+        weight *= trilinear.x * trilinear.y * trilinear.z;
+
+        float2 texCoord = ddgiTextureCoordFromDirection(
+            normalize(N), probeIdx, volume.irradianceAtlasSize, volume.irradianceSideLength);
+        float3 probeIrradiance = irradianceAtlas.SampleLevel(texCoord, 0.0).rgb;
+        probeIrradiance = pow(probeIrradiance,
+                              float3(volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5));
+
+        sumIrradiance += weight * probeIrradiance;
+        sumWeight += weight;
+    }
+
+    float3 netIrradiance = sumIrradiance / max(sumWeight, 0.000001);
+    netIrradiance *= netIrradiance;
     return 2.0 * kDDGICommonPi * netIrradiance;
 }
 

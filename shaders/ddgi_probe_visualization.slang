@@ -100,7 +100,12 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
     // Probe world position through the position-buffer BDA (same pattern as
     // ddgi_gi_sdf_rays.slang / ddgi_sample_probe.slang).
     float4* probePositions = (float4*)probeVisUniforms.probePositionAddress;
-    const float3 probeCenter = probePositions[instanceId].xyz;
+    const float4 probeData = probePositions[instanceId];
+    if (probeData.w < 0.5)
+    {
+        return output;
+    }
+    const float3 probeCenter = probeData.xyz;
 
     const float3 dir = probeVisSphereDirection(vertexId);
     const float3 worldPos = probeCenter + dir * probeVisUniforms.probeRadius;

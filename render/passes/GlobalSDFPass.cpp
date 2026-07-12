@@ -528,6 +528,12 @@ namespace demo
 		{
 			return;
 		}
+		const DDGIConfig& ddgiConfig = m_renderer->getDDGIConfig();
+		if (m_renderer->isFlaxStyleDDGIRequested() && ddgiConfig.flaxGIFreeze
+			&& !ddgiConfig.flaxGISingleStep)
+		{
+			return;
+		}
 		if (m_device == nullptr || m_volume.sdfTexture.isNull() || m_volume.albedoTexture.isNull()
 			|| m_clearTable.isNull()
 			|| m_clearPipeline.isNull() || m_composePipeline.isNull() || m_mipmapPipeline.isNull()

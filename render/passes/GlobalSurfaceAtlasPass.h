@@ -43,6 +43,7 @@ public:
 
   // --- Data manager ---
   [[nodiscard]] GlobalSurfaceAtlasDataManager& getDataManager() { return m_dataManager; }
+  [[nodiscard]] const GlobalSurfaceAtlasDataManager& getDataManager() const { return m_dataManager; }
 
 private:
   rhi::Device* m_device{nullptr};

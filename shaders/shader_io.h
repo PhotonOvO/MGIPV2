@@ -299,7 +299,7 @@ struct DDGIRayTraceUniforms
   uint32_t resolution;  // global SDF voxel resolution (cubic, mip 0)
   uint32_t firstFrame;  // 1 = history atlases hold no valid data: skip probe
                         //     sampling, use the constant-sky indirect fallback
-  uint32_t _ddgiRayPadding0;
+  uint32_t debugMode;   // 0 = normal shading, 1 = valid-hit albedo, 2 = branch colors
 };
 
 // DDGI probe irradiance/depth update (Wave D2-3). 96 bytes: fits the 128B
@@ -527,6 +527,17 @@ struct GPUCullingUniforms
 // CPU mirror: render/DDGIConfig.h or future FlaxDDGIData struct.
 // ---------------------------------------------------------------------------
 STATIC_CONST int LFlaxDDGIMaxCascades = 4;
+STATIC_CONST int LFlaxDDGIMaxRadianceSources = 16;
+STATIC_CONST uint32_t LFlaxRadianceSourcePoint = 0u;
+STATIC_CONST uint32_t LFlaxRadianceSourceSpot = 1u;
+STATIC_CONST uint32_t LFlaxRadianceSourceEmissive = 2u;
+
+struct FlaxDDGIRadianceSource
+{
+  vec4 positionAndRange;  // xyz = world position, w = influence range
+  vec4 colorAndType;      // rgb = emitted radiance, w = LFlaxRadianceSource*
+  vec4 directionAndCone;  // xyz = spot travel direction, w = cos(outer cone)
+};
 
 struct FlaxDDGIData
 {
@@ -542,6 +553,13 @@ struct FlaxDDGIData
   vec3 viewPos;
   uint32_t raysCount;
   vec4 fallbackIrradiance;                              // rgb = fallback color, a unused
+	vec4 sdfBoundsMinAndVoxel;                            // xyz = bounds min, w = voxel size
+	vec4 sdfBoundsMaxAndRes;                              // xyz = bounds max, w = resolution as float
+	vec4 sceneLightDirection;                              // xyz = direction to light, w unused
+	vec4 sceneLightColor;                                  // rgb = light intensity, w unused
+	uvec4 updateParams;                                    // x = rotating probe offset, y = update budget
+	uvec4 radianceSourceParams;                             // x = valid source count
+	FlaxDDGIRadianceSource radianceSources[LFlaxDDGIMaxRadianceSources];
 };
 
 // ---------------------------------------------------------------------------
@@ -601,7 +619,7 @@ struct LightParams
   vec4 ddgiOriginAndSpacing;              // xyz = probe grid world-space origin, w = probeSpacing
   vec4 ddgiParams0;                       // x = ddgiWeight, y = ddgiGamma, z = normalBias, w = irradiance texel side
   vec4 ddgiParams1;                       // x = depth texel side, y = irr atlas width, z = irr atlas height, w = depth atlas width
-	vec4 ddgiParams2;                       // x = depth atlas height, yzw = reserved
+	vec4 ddgiParams2;                       // x = depth atlas height, y = FlaxGI debug mode, z = debug scale, w = reserved
 	uint64_t ddgiProbePositionAddress;      // BDA of float4[totalProbes] probe positions (0 when disabled)
 	uint32_t _ddgiLightPadding0;
 	uint32_t _ddgiLightPadding1;

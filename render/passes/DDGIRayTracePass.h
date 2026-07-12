@@ -38,6 +38,7 @@ namespace demo
 	public:
 		// Shader local_size_x: dispatchX = ceil(raysPerProbe / 16), Y = totalProbes.
 		static constexpr uint32_t kGroupSizeX = 16u;
+		static constexpr uint32_t kRelocationGroupSizeX = 64u;
 		// Sphere-march step budget (plan range 64-128; uniform-adjustable).
 		static constexpr uint32_t kDefaultMaxSteps = 96u;
 		static constexpr float kDefaultStepScale = 1.0f;
@@ -58,6 +59,12 @@ namespace demo
 		// have run; only called when DDGIConfig::enabled is true.
 		void initResources(rhi::Device& device, uint32_t frameCount);
 		void shutdownResources();
+		[[nodiscard]] bool isReady() const
+		{
+			return m_device != nullptr && !m_pipeline.isNull() && !m_relocationPipeline.isNull()
+				&& !m_radianceView.isNull()
+				&& !m_globalSDFView.isNull() && !m_globalAlbedoView.isNull();
+		}
 
 		[[nodiscard]] const char* getName() const override { return "DDGIRayTracePass"; }
 		[[nodiscard]] HandleSlice<PassResourceDependency> getDependencies() const override;
@@ -84,11 +91,14 @@ namespace demo
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};
+		rhi::ArgumentLayoutHandle m_relocationLayout{};
+		rhi::PipelineHandle m_relocationPipeline{};
 		// Two tables per frame in flight (index = frameIndex * 2 + parity):
 		// views are static (written once at init), only the per-frame uniform
 		// buffer contents change. Both parity tables of a frame share that
 		// frame's uniform buffer; they differ only in the history atlas pair.
 		std::vector<rhi::ArgumentTableHandle> m_tables;
+		std::vector<rhi::ArgumentTableHandle> m_relocationTables;
 		std::vector<rhi::BufferHandle> m_uniformBuffers;
 
 		// Lazily transitions the radiance texture AND the four probe atlases
@@ -98,5 +108,6 @@ namespace demo
 		// as the "no valid history yet" first-frame latch for the shader-side
 		// constant-sky indirect fallback.
 		mutable bool m_radianceLayoutInitialized{false};
+		mutable bool m_probeRelocationInitialized{false};
 	};
 } // namespace demo

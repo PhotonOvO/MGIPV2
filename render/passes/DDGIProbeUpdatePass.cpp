@@ -292,11 +292,11 @@ namespace demo
 		{
 			return;
 		}
-		// Current DDGI and FlaxGI bridge both need the shared probe atlas data.
-		if (!m_renderer->isDDGIProbeDataPathEnabled())
-		{
-			return;
-		}
+// Current DDGI only; Flax mode uses FlaxDDGIPass.
+			if (!m_renderer->isDDGIProbeDataPathEnabled() || m_renderer->isFlaxStyleDDGIRequested())
+			{
+				return;
+			}
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
 		if (m_device == nullptr || !probeVolume.isInitialized() || probeVolume.getTotalProbes() == 0u
 			|| m_irradianceUpdatePipeline.isNull() || m_depthUpdatePipeline.isNull()

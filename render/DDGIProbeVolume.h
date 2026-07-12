@@ -22,7 +22,7 @@ namespace demo
 {
 	// Creation parameters (plan section 4, Wave D2-1 data-structure draft).
 	// gridDims == 0 means "derive from the scene bounds":
-	// ivec3(sceneLength / probeSpacing) + 2, clamped per axis by
+	// ceil(sceneLength / probeSpacing), clamped per axis by
 	// DDGIProbeVolume::kMaxGridDims to bound GPU memory.
 	struct DDGIProbeVolumeDesc
 	{
@@ -47,10 +47,9 @@ namespace demo
 		// Outer guard band around the whole atlas (LuxGI layout).
 		static constexpr uint32_t kAtlasEdgeTexels = 2u;
 
-		// Adaptive grid sizing: ivec3(sceneLength / probeSpacing) + 2, clamped
-		// per axis to kMaxGridDims (each axis is at least 2 probes). When the
-		// clamp would under-cover the bounds, init() raises the effective
-		// spacing and recenters the grid around the requested AABB.
+		// Adaptive grid sizing: ceil(sceneLength / probeSpacing), clamped per
+		// axis to kMaxGridDims (each axis is at least 2 probes). Probe centers
+		// are recentered with a half-cell margin inside the requested AABB.
 		[[nodiscard]] static glm::uvec3 computeGridDims(const glm::vec3& boundsMin,
 		                                                const glm::vec3& boundsMax,
 		                                                float probeSpacing);

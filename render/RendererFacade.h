@@ -55,6 +55,7 @@ namespace demo
 		void resetDDGIHistory();
 		[[nodiscard]] DDGIConfig getDDGIConfig() const;
 		void setDDGIConfig(const DDGIConfig& config);
+		[[nodiscard]] FlaxGIDebugStatus getFlaxGIDebugStatus() const;
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;

@@ -774,6 +774,18 @@ namespace demo::rhi::vulkan
 		m_deviceFeatures.pNext = m_featuresChainHead;
 		vkGetPhysicalDeviceFeatures2(m_physicalDevice, &m_deviceFeatures);
 
+		// Explicitly enable bindless descriptor indexing features required for
+		// UPDATE_AFTER_BIND_BIT (needed for per-frame descriptor writes without
+		// double-buffering descriptor sets). Without these, argument layouts with
+		// sampler + UBO bindings silently degrade to smaller layouts.
+		if (m_features12.descriptorIndexing == VK_TRUE)
+		{
+			m_features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+			m_features12.descriptorBindingPartiallyBound = VK_TRUE;
+			m_features12.runtimeDescriptorArray = VK_TRUE;
+			m_features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+		}
+
 		m_featureInfo.timelineSemaphore = m_features12.timelineSemaphore == VK_TRUE;
 		m_featureInfo.synchronization2 = m_features13.synchronization2 == VK_TRUE;
 		m_featureInfo.dynamicRendering = m_features13.dynamicRendering == VK_TRUE;
@@ -1689,7 +1701,9 @@ namespace demo::rhi::vulkan
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentLayout");
 		std::vector<VkDescriptorSetLayoutBinding> bindings(desc.bindingCount);
+		std::vector<VkDescriptorBindingFlags> bindingFlags;
 		std::vector<uint32_t> dynamicBindings;
+		bool hasDynamicBinding = false;
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
 			const ArgumentBinding& b = desc.bindings[i];
@@ -1702,10 +1716,30 @@ namespace demo::rhi::vulkan
 			if (b.dynamicOffset)
 			{
 				dynamicBindings.push_back(b.binding);
+				hasDynamicBinding = true;
 			}
+		}
+		// UPDATE_AFTER_BIND_BIT: only allowed when NO binding in the set is dynamic
+		// (VUID-03001: dynamic UBO/SSBO + UPDATE_AFTER_BIND on same set is illegal).
+		if (!hasDynamicBinding)
+		{
+			bindingFlags.assign(desc.bindingCount, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+		}
+		VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+		VkDescriptorSetLayoutCreateFlags layoutCreateFlags = 0;
+		if (!bindingFlags.empty())
+		{
+			flagsInfo = {
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+				.bindingCount = static_cast<uint32_t>(bindingFlags.size()),
+				.pBindingFlags = bindingFlags.data(),
+			};
+			layoutCreateFlags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 		}
 		const VkDescriptorSetLayoutCreateInfo info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			.pNext = bindingFlags.empty() ? nullptr : &flagsInfo,
+			.flags = layoutCreateFlags,
 			.bindingCount = static_cast<uint32_t>(bindings.size()),
 			.pBindings = bindings.empty() ? nullptr : bindings.data(),
 		};
@@ -1749,14 +1783,15 @@ namespace demo::rhi::vulkan
 					{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384},
 				}
 			};
-			const VkDescriptorPoolCreateInfo poolInfo{
-				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-				.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-				.maxSets = 4096,
-				.poolSizeCount = static_cast<uint32_t>(sizes.size()),
-				.pPoolSizes = sizes.data(),
-			};
-			VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_argumentPool));
+		const VkDescriptorPoolCreateInfo poolInfo{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+			       | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+			.maxSets = 4096,
+			.poolSizeCount = static_cast<uint32_t>(sizes.size()),
+			.pPoolSizes = sizes.data(),
+		};
+		VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_argumentPool));
 		}
 
 		const uint64_t nativeLayout = m_resourceTable->resolveArgumentLayout(layout);

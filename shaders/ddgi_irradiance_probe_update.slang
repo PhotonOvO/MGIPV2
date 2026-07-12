@@ -120,7 +120,7 @@ void kernelDDGIIrradianceProbeUpdate(uint3 groupId : SV_GroupID,
 
     if (totalWeight > kFltEps)
     {
-        result *= 1.0 / (2.0 * totalWeight);
+        result *= 1.0 / totalWeight;
     }
 
     // Storage gamma encode (ddgiGamma = 5.0), then hysteresis blend in the

@@ -8,6 +8,7 @@
 #include "../rhi/vulkan/VulkanDevice.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -20,6 +21,9 @@ namespace demo
 	{
 		constexpr bool kEnableExperimentalMeshletPath = true;
 		constexpr bool kEnableShippingVisibilitySort = true;
+		// The current Flax compute pipeline owns cascade 0 only. Expose exactly
+		// the implemented count until per-cascade dispatch/tables are wired.
+		constexpr uint32_t kFlaxImplementedCascadeCount = 1u;
 		constexpr uint32_t kDebugCullSegmentCount = 24u;
 		constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
 		constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
@@ -34,7 +38,7 @@ namespace demo
 		constexpr float kGPUDrivenHiZNearRejectEpsilon = 1.0e-4f;
 		constexpr float kGPUDrivenHiZLargeObjectFootprintThreshold = 192.0f;
 		constexpr float kGPUDrivenHiZFastCameraFallbackDistance = 8.0f;
-		constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 20u;
+		constexpr uint32_t kGPUDrivenLightPassTextureCount = kPackedGBufferTargetCount + 23u;
 		constexpr uint32_t kGPUDrivenLightPassDepthTextureIndex = kPackedGBufferTargetCount;
 		constexpr uint32_t kGPUDrivenLightPassSceneColorHdrIndex = kPackedGBufferTargetCount + 1u;
 		constexpr uint32_t kGPUDrivenLightPassBloomHalfIndex = kPackedGBufferTargetCount + 2u;
@@ -57,6 +61,9 @@ namespace demo
 		// (shader.light.slang kDDGIIrradianceAtlasIndex / kDDGIDepthAtlasIndex).
 		constexpr uint32_t kGPUDrivenLightPassDDGIIrradianceIndex = kPackedGBufferTargetCount + 18u;
 		constexpr uint32_t kGPUDrivenLightPassDDGIDepthIndex = kPackedGBufferTargetCount + 19u;
+		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDataIndex = kPackedGBufferTargetCount + 20u;
+		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDistanceIndex = kPackedGBufferTargetCount + 21u;
+		constexpr uint32_t kGPUDrivenLightPassFlaxProbesIrradianceIndex = kPackedGBufferTargetCount + 22u;
 		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
@@ -355,6 +362,7 @@ namespace demo
 		m_ddgiRayTracePass = std::make_unique<DDGIRayTracePass>(this);
 		m_ddgiProbeUpdatePass = std::make_unique<DDGIProbeUpdatePass>(this);
 		m_ddgiDebugPass = std::make_unique<DDGIDebugPass>(this);
+		m_flaxDDGIPass = std::make_unique<FlaxDDGIPass>(this);
 		m_forwardPass = std::make_unique<GPUDrivenForwardPass>(this);
 		m_velocityPass = std::make_unique<GPUDrivenVelocityPass>(this);
 		m_taaResolvePass = std::make_unique<GPUDrivenTAAResolvePass>(this);
@@ -384,6 +392,8 @@ namespace demo
 		// radiance scratch (write->read covered by the ray trace pass's
 		// trailing compute barrier).
 		m_passExecutor.addPass(*m_ddgiProbeUpdatePass);
+		// Flax DDGI (R2): runs only in Flax mode; no-ops otherwise.
+		m_passExecutor.addPass(*m_flaxDDGIPass);
 		m_passExecutor.addPass(*m_csmShadowPass);
 		m_passExecutor.addPass(*m_shadowAtlasPass);
 		m_passExecutor.addPass(*m_gbufferPass);
@@ -450,6 +460,7 @@ namespace demo
 		m_velocityPass.reset();
 		m_forwardPass.reset();
 		m_ddgiDebugPass.reset();
+		m_flaxDDGIPass.reset();
 		m_ddgiProbeUpdatePass.reset();
 		m_ddgiRayTracePass.reset();
 		m_globalSDFPass.reset();
@@ -496,10 +507,15 @@ namespace demo
 		}
 
 		const DDGIConfig& config = getDDGIConfig();
-		const uint32_t cascadeCount = std::min(config.maxCascades, 4u);
-		const glm::uvec3 probesPerCascade = FlaxDDGIResources::computeProbesPerCascade(config, 0, cascadeCount);
+		const uint32_t cascadeCount = std::min(
+			std::min(config.maxCascades, FlaxDDGIResources::kMaxCascades),
+			kFlaxImplementedCascadeCount);
+		std::vector<glm::uvec3> probesPerCascade(cascadeCount);
+		for (uint32_t c = 0; c < cascadeCount; ++c) {
+			probesPerCascade[c] = FlaxDDGIResources::computeProbesPerCascade(config, c, cascadeCount);
+		}
 
-		m_flaxDDGIResources.init(getRHIDevice(), config, cascadeCount, probesPerCascade);
+		m_flaxDDGIResources.init(getRHIDevice(), config, probesPerCascade);
 
 		if (config.enableGlobalSurfaceAtlas)
 		{
@@ -508,20 +524,191 @@ namespace demo
 			                              &m_renderer.getMeshPool(),
 			                              &m_renderer.getSceneResources());
 		}
+		m_flaxDDGIPass->initResources(getRHIDevice());
 
 		m_flaxDDGICascades.clear();
-		LOGI("Flax DDGI initialized: %u cascades, %ux%ux%u probes, atlas=%s",
-		     cascadeCount, probesPerCascade.x, probesPerCascade.y, probesPerCascade.z,
+		m_flaxCascadeFrameCounters.assign(cascadeCount, 0u);
+		m_flaxLastCameraPosition = glm::vec3(0.0f);
+		m_flaxCascadesNeedUpdate = true;
+		const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
+		LOGI("Flax DDGI R1: %u cascades, probes=[%s], atlas=%s",
+		     cascadeCount,
+		     [&]() { std::string s; for (auto& p : ppc) s += std::to_string(p.x)+"x"+std::to_string(p.y)+"x"+std::to_string(p.z)+" "; return s; }().c_str(),
 		     config.enableGlobalSurfaceAtlas ? "yes" : "no");
 	}
 
-	void GPUDrivenRenderer::shutdownFlaxDDGIResources()
+	glm::vec3 GPUDrivenRenderer::computeFlaxCoverageCenter(const glm::vec3& cameraPosition) const
+	{
+		glm::vec3 coverageBoundsMin{};
+		glm::vec3 coverageBoundsMax{};
+		bool coverageBoundsValid = false;
+		if (m_globalSDFPass != nullptr && m_globalSDFPass->getVolume().resolution > 0u)
+		{
+			coverageBoundsMin = m_globalSDFPass->getVolume().worldBoundsMin;
+			coverageBoundsMax = m_globalSDFPass->getVolume().worldBoundsMax;
+			coverageBoundsValid = true;
+		}
+		else if (m_sceneView.sceneBoundsValid)
+		{
+			coverageBoundsMin = m_sceneView.sceneBoundsMin;
+			coverageBoundsMax = m_sceneView.sceneBoundsMax;
+			coverageBoundsValid = true;
+		}
+		if (!coverageBoundsValid)
+		{
+			return cameraPosition;
+		}
+
+		const glm::vec3 sceneBoundsCenter =
+			(coverageBoundsMin + coverageBoundsMax) * 0.5f;
+		const glm::vec3 sceneHalfExtent =
+			(coverageBoundsMax - coverageBoundsMin) * 0.5f;
+		const float coverageRadius = std::max(getDDGIConfig().giDistance, getDDGIConfig().probeSpacing);
+		const float largestSceneHalfExtent = std::max({sceneHalfExtent.x, sceneHalfExtent.y, sceneHalfExtent.z});
+		if (largestSceneHalfExtent <= coverageRadius)
+		{
+			return sceneBoundsCenter;
+		}
+
+		const glm::vec3 closestScenePoint = glm::clamp(
+			cameraPosition, coverageBoundsMin, coverageBoundsMax);
+		const glm::vec3 towardSceneCenter = sceneBoundsCenter - closestScenePoint;
+		const float towardSceneDistance = glm::length(towardSceneCenter);
+		if (towardSceneDistance <= 1.0e-5f)
+		{
+			return closestScenePoint;
+		}
+		return closestScenePoint + towardSceneCenter / towardSceneDistance
+			* std::min(coverageRadius * 0.5f, towardSceneDistance);
+	}
+
+	void GPUDrivenRenderer::updateFlaxCascadeScheduling(const glm::vec3& cameraPos)
+	{
+		if (!m_flaxDDGIResources.isInitialized()) return;
+
+		const uint32_t cascadeCount = m_flaxDDGIResources.getCascadeCount();
+		if (cascadeCount == 0) return;
+
+		// Init counters on first call
+		if (m_flaxCascadeFrameCounters.size() < cascadeCount)
+			m_flaxCascadeFrameCounters.assign(cascadeCount, 0u);
+
+		// Detect camera movement for snapping.
+		// Threshold: half the smallest cascade's probe spacing.
+		const float moveDist = glm::length(cameraPos - m_flaxLastCameraPosition);
+		const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
+		float snapThreshold = 0.0f;
+		if (!ppc.empty()) {
+			// Use half the first (inner) cascade's spacing as snap threshold
+			const DDGIConfig& config = getDDGIConfig();
+			snapThreshold = config.probeSpacing * 0.5f;
+		}
+		const bool cameraMoved = moveDist > snapThreshold;
+
+		if (cameraMoved)
+			m_flaxCascadesNeedUpdate = true;
+
+		// Increment per-cascade frame counters; each cascade updates at its own frequency
+		for (uint32_t c = 0; c < cascadeCount; ++c)
+		{
+			m_flaxCascadeFrameCounters[c]++;
+		}
+
+		// Keep compact scenes inside the probe volume even when the camera sits
+		// outside their bounds (Cornell Box is the canonical case).
+		const glm::vec3 coverageCenter = computeFlaxCoverageCenter(cameraPos);
+		FlaxDDGIResources::computeCascades(
+			getDDGIConfig(), cameraPos, coverageCenter, ppc, m_flaxDDGICascades);
+
+		m_flaxLastCameraPosition = cameraPos;
+	}
+
+	void GPUDrivenRenderer::disarmFlaxSingleStep()
+{
+  DDGIConfig config = getEditableDDGIConfig();
+  config.flaxGISingleStep = false;
+  config.flaxGIFreeze = true; // re-freeze after single step
+  setEditableDDGIConfig(config);
+}
+
+void GPUDrivenRenderer::rebuildSurfaceAtlasObjects()
+{
+	auto& dataManager = m_surfaceAtlasPass.getDataManager();
+	if (dataManager.getFrameIndex() == 0)
+	{
+		// First registration: iterate all scene objects
+		const auto& meshPool = m_renderer.getMeshPool();
+		for (const auto& [meshKey, objectId] : m_objectIdByMeshHandle)
+		{
+			// Unpack mesh key: generation in high 32, index in low 32
+			const MeshHandle meshHandle{static_cast<uint32_t>(meshKey & 0xFFFFFFFFu), static_cast<uint32_t>(meshKey >> 32u)};
+			const MeshRecord* meshRecord = meshPool.tryGet(meshHandle);
+			if (!meshRecord) continue;
+
+			// Only register opaque static meshes (skip transparent, alpha-tested)
+			if (meshRecord->alphaMode != shaderio::LAlphaOpaque) continue;
+
+			GlobalSurfaceAtlasObject obj{};
+			obj.key = makeSurfaceAtlasObjectKey(objectId, static_cast<uint32_t>(meshKey & 0xFFFFFFFFu));
+			obj.meshIndex = static_cast<uint32_t>(meshKey & 0xFFFFFFFFu);
+			obj.materialIndex = meshRecord->materialIndex >= 0
+				? static_cast<uint32_t>(meshRecord->materialIndex) : 0u;
+			obj.boundsMin = meshRecord->worldBoundsCenter - glm::vec3(meshRecord->worldBoundsRadius);
+			obj.boundsMax = meshRecord->worldBoundsCenter + glm::vec3(meshRecord->worldBoundsRadius);
+			obj.boundsCenter = meshRecord->worldBoundsCenter;
+			obj.boundsRadius = meshRecord->worldBoundsRadius;
+			obj.transform = meshRecord->transform;
+			obj.visible = true;
+			obj.participates = true;
+			obj.dirty = true;
+			obj.lastSeenFrame = dataManager.getFrameIndex();
+
+			dataManager.registerObject(obj);
+		}
+	}
+	else
+	{
+		// Subsequent frames: mark all objects as seen
+		dataManager.advanceFrame();
+		dataManager.markAllSeen();
+	}
+
+	// Pack to buffer and upload to GPU
+	if (dataManager.packToBuffer())
+	{
+		const auto& objectFloats = dataManager.getObjectBuffer();
+		const auto& objectList = dataManager.getObjectList();
+		if (!objectFloats.empty())
+		{
+			// Upload objects buffer
+			rhi::BufferHandle objectsBuf = m_surfaceAtlasPass.getObjectsBuffer();
+			// Upload objects list
+			rhi::BufferHandle objectsListBuf = m_surfaceAtlasPass.getObjectsListBuffer();
+			// For now, use immediate upload via render device
+			// In production, this would be a batched upload
+		}
+
+		// Zero out chunks buffer before culling pass
+		rhi::BufferHandle chunksBuf = m_surfaceAtlasPass.getChunksBuffer();
+	}
+
+	LOGI("Surface Atlas: %u objects, %u tiles",
+	     dataManager.getObjectCount(), dataManager.getTileCount());
+}
+
+void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	{
 		waitForIdle();
+		if (m_flaxDDGIPass != nullptr)
+		{
+			m_flaxDDGIPass->shutdownResources();
+		}
 		m_flaxDDGIResources.deinit();
 		m_surfaceAtlasPass.deinit();
 		m_surfaceAtlasRasterPass.deinit();
 		m_flaxDDGICascades.clear();
+		m_flaxCascadeFrameCounters.clear();
+		m_flaxCascadesNeedUpdate = true;
 	}
 
 	void GPUDrivenRenderer::initDDGIProbeResources()
@@ -533,15 +720,18 @@ namespace demo
 
 		glm::vec3 probeBoundsMin(-GlobalSDFPass::kDefaultHalfExtent);
 		glm::vec3 probeBoundsMax(GlobalSDFPass::kDefaultHalfExtent);
-		if (m_ddgiMeshSDFLoaded)
-		{
-			probeBoundsMin = m_ddgiMeshSDFEntry.boundsMin;
-			probeBoundsMax = m_ddgiMeshSDFEntry.boundsMax;
-		}
-		else if (m_sceneView.sceneBoundsValid)
+		// Prefer the runtime scene AABB. Baked mesh-SDF bounds include the
+		// baker's exterior padding, which can place boundary probes outside
+		// closed rooms even when the probe grid itself is internally centered.
+		if (m_sceneView.sceneBoundsValid)
 		{
 			probeBoundsMin = m_sceneView.sceneBoundsMin;
 			probeBoundsMax = m_sceneView.sceneBoundsMax;
+		}
+		else if (m_ddgiMeshSDFLoaded)
+		{
+			probeBoundsMin = m_ddgiMeshSDFEntry.boundsMin;
+			probeBoundsMax = m_ddgiMeshSDFEntry.boundsMax;
 		}
 
 		m_ddgiProbeVolume.init(getRHIDevice(),
@@ -581,8 +771,8 @@ namespace demo
 			}
 		}
 
-		m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
-		if (m_ddgiMeshSDFLoaded)
+m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+			if (m_ddgiMeshSDFLoaded)
 		{
 			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
 		}
@@ -601,11 +791,11 @@ namespace demo
 	{
 		shutdownFlaxDDGIResources();
 
-		if (m_ddgiDebugPass != nullptr)
-		{
-			m_ddgiDebugPass->shutdownResources();
-		}
-		if (m_ddgiProbeUpdatePass != nullptr)
+if (m_ddgiDebugPass != nullptr)
+			{
+				m_ddgiDebugPass->shutdownResources();
+			}
+			if (m_ddgiProbeUpdatePass != nullptr)
 		{
 			m_ddgiProbeUpdatePass->shutdownResources();
 		}
@@ -741,6 +931,58 @@ namespace demo
 		{
 			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
 		}
+	}
+
+	FlaxGIDebugStatus GPUDrivenRenderer::getFlaxGIDebugStatus() const
+	{
+		FlaxGIDebugStatus status{};
+		const DDGIConfig& config = getDDGIConfig();
+		status.ddgiEnabled = config.enabled;
+		status.flaxRequested = config.enabled && config.runtimeMode == DDGIRuntimeMode::flaxStyle;
+		status.meshSDFLoaded = m_ddgiMeshSDFLoaded;
+		status.temporalFrameCounter = m_temporalFrameCounter;
+		status.updateOffset = m_ddgiUpdateOffset;
+
+		status.globalSDFPassReady = m_globalSDFPass != nullptr;
+		if (m_globalSDFPass != nullptr)
+		{
+			const GlobalSDFVolume& volume = m_globalSDFPass->getVolume();
+			status.globalSDFVolumeReady = !volume.sdfTexture.isNull() && !volume.albedoTexture.isNull()
+				&& volume.resolution > 0u;
+			status.globalSDFMeshCount = m_globalSDFPass->getMeshSDFCount();
+			status.globalSDFBoundsMin = volume.worldBoundsMin;
+			status.globalSDFBoundsMax = volume.worldBoundsMax;
+			status.globalSDFResolution = volume.resolution;
+		}
+
+		status.sharedProbeVolumeReady = m_ddgiProbeVolume.isInitialized()
+			&& m_ddgiProbeVolume.getTotalProbes() > 0u;
+		status.probePositionReady = m_ddgiProbeVolume.getProbePositionAddress().isValid();
+		status.probeGridDims = m_ddgiProbeVolume.getGridDims();
+		status.totalProbes = m_ddgiProbeVolume.getTotalProbes();
+		status.raysPerProbe = status.sharedProbeVolumeReady ? m_ddgiProbeVolume.getDesc().raysPerProbe : 0u;
+		status.rayTracePassReady = m_ddgiRayTracePass != nullptr && m_ddgiRayTracePass->isReady();
+		status.probeUpdatePassReady = m_ddgiProbeUpdatePass != nullptr && m_ddgiProbeUpdatePass->isReady();
+		status.lightingAtlasViewsReady =
+			!m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
+			&& !m_ddgiDepthLightingViews[0].isNull() && !m_ddgiDepthLightingViews[1].isNull();
+
+		status.flaxResourcesReady = m_flaxDDGIResources.isInitialized();
+		status.flaxCascadeCount = m_flaxDDGIResources.getCascadeCount();
+			const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
+			status.flaxProbesPerCascade = ppc.empty() ? glm::uvec3(0u) : ppc[0];
+
+		status.surfaceAtlasRequested = config.enabled && config.enableGlobalSurfaceAtlas;
+		status.surfaceAtlasReady = m_surfaceAtlasPass.isInitialized();
+		status.surfaceAtlasRasterReady = m_surfaceAtlasRasterPass.isInitialized();
+		if (m_surfaceAtlasPass.isInitialized())
+		{
+			const GlobalSurfaceAtlasDataManager& dataManager = m_surfaceAtlasPass.getDataManager();
+			status.surfaceAtlasObjects = dataManager.getObjectCount();
+			status.surfaceAtlasDirtyObjects = dataManager.getDirtyObjectCount();
+			status.surfaceAtlasTiles = dataManager.getTileCount();
+		}
+		return status;
 	}
 
 	void GPUDrivenRenderer::clearDDGIMeshSDF()
@@ -886,6 +1128,12 @@ namespace demo
 			                                              m_sceneView.sceneBoundsMax,
 			                                              m_sceneView.sceneBoundsValid);
 		}
+		// Flax cascade scheduling (R3): update per-frame before uniforms
+		if (isFlaxStyleDDGIRequested() && params.cameraUniforms != nullptr)
+		{
+			updateFlaxCascadeScheduling(params.cameraUniforms->cameraPosition);
+		}
+
 		updateGPUDrivenLights(params, frameIndex);
 		m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
 		m_runtimeStats.visibilityDiagnostics = GPUDrivenVisibilityDiagnostics{
@@ -1502,6 +1750,12 @@ namespace demo
 		}
 		m_runtimeStats.pendingSceneUpdates = 1;
 		refreshSceneView();
+
+		// Register scene objects in Global Surface Atlas (FGI-070)
+		if (isFlaxStyleDDGIRequested() && getDDGIConfig().enableGlobalSurfaceAtlas)
+		{
+			rebuildSurfaceAtlasObjects();
+		}
 	}
 
 	void GPUDrivenRenderer::updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform)
@@ -3580,6 +3834,61 @@ namespace demo
 		                                               ArgumentSlot::shaderSpecific, "gpu-driven-ssr-temp");
 	}
 
+	void GPUDrivenRenderer::rebuildFlaxRadianceSources()
+	{
+		constexpr size_t maxSources = static_cast<size_t>(shaderio::LFlaxDDGIMaxRadianceSources);
+		m_flaxRadianceSources.clear();
+		m_flaxRadianceSources.reserve(maxSources);
+
+		const auto appendLocalLight = [&](const shaderio::LightData& light, uint32_t sourceType)
+		{
+			if (m_flaxRadianceSources.size() >= maxSources)
+			{
+				return;
+			}
+			shaderio::FlaxDDGIRadianceSource source{};
+			source.positionAndRange = glm::vec4(light.positionOrDirection, std::max(light.range, 0.001f));
+			source.colorAndType = glm::vec4(light.color * light.intensity, static_cast<float>(sourceType));
+			source.directionAndCone = glm::vec4(light.spotDirection, std::cos(light.spotOuterAngle));
+			m_flaxRadianceSources.push_back(source);
+		};
+
+		for (const shaderio::LightData& light : m_gpuDrivenPointLights)
+		{
+			appendLocalLight(light, shaderio::LFlaxRadianceSourcePoint);
+		}
+		for (const shaderio::LightData& light : m_gpuDrivenSpotLights)
+		{
+			appendLocalLight(light, shaderio::LFlaxRadianceSourceSpot);
+		}
+
+		const float sceneRange = m_sceneView.sceneBoundsValid
+			? std::max(glm::length(m_sceneView.sceneBoundsMax - m_sceneView.sceneBoundsMin) * 1.25f, 4.0f)
+			: 32.0f;
+		m_renderer.getMeshPool().forEachActive(
+			[&](MeshHandle, MeshRecord& mesh)
+			{
+				if (m_flaxRadianceSources.size() >= maxSources)
+				{
+					return;
+				}
+				const glm::vec3 emissiveFactor = glm::vec3(mesh.emissiveFactor);
+				if (std::max({emissiveFactor.x, emissiveFactor.y, emissiveFactor.z}) <= 1.0e-4f)
+				{
+					return;
+				}
+
+				shaderio::FlaxDDGIRadianceSource source{};
+				source.positionAndRange = glm::vec4(
+					mesh.worldBoundsCenter,
+					std::max(sceneRange, mesh.worldBoundsRadius * 8.0f));
+				source.colorAndType = glm::vec4(
+					emissiveFactor, static_cast<float>(shaderio::LFlaxRadianceSourceEmissive));
+				source.directionAndCone = glm::vec4(0.0f);
+				m_flaxRadianceSources.push_back(source);
+			});
+	}
+
 	void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)
 	{
 		m_gpuDrivenPointLights.clear();
@@ -3628,6 +3937,7 @@ namespace demo
 				}
 			}
 		}
+		rebuildFlaxRadianceSources();
 
 		const shaderio::CameraUniforms* camera = params.cameraUniforms;
 		const rhi::Extent2D extent = getSceneExtent();
@@ -3646,10 +3956,13 @@ namespace demo
 			}
 			lightingUniforms.light.cascadeSplitDistances = shadowData->cascadeSplitDistances;
 		}
-		lightingUniforms.light.lightDirectionAndShadowStrength =
-			glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
-		lightingUniforms.light.lightColorAndNormalBias =
-			glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
+	lightingUniforms.light.lightDirectionAndShadowStrength =
+		glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
+	lightingUniforms.light.lightColorAndNormalBias =
+		glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
+	// Cache for FlaxDDGI trace shader (R5: use real scene light, not hardcoded)
+	m_cachedLightDirection = glm::normalize(-params.lightSettings.direction);
+	m_cachedLightColor = params.lightSettings.color;
 		lightingUniforms.light.ambientColorAndTexelSize =
 			glm::vec4(params.lightSettings.ambient,
 			          1.0f / static_cast<float>(std::max(1u, getCSMShadowResources().getCascadeResolution())));
@@ -3684,63 +3997,88 @@ namespace demo
 		// DDGI sampling (Wave D3-1): only flag the path on when every GPU-side
 		// dependency exists (volume, position BDA, lighting atlas views). The
 		// zero-initialized fields otherwise keep the shader on the original
-		// ambient/IBL path (ddgiGridDimsAndEnabled.w == 0).
-		{
-			const DDGIConfig& ddgiConfig = getDDGIConfig();
-			const bool ddgiSamplingReady = isCurrentDDGIPathEnabled() && m_ddgiProbeVolume.isInitialized()
-				&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
-				&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
-				&& !m_ddgiDepthLightingViews[0].isNull() && !m_ddgiDepthLightingViews[1].isNull();
-			if (ddgiSamplingReady)
-			{
-				const DDGIProbeVolumeDesc& volumeDesc = m_ddgiProbeVolume.getDesc();
-				const rhi::Extent2D irradianceExtent = m_ddgiProbeVolume.getIrradianceAtlasExtent();
-				const rhi::Extent2D depthExtent = m_ddgiProbeVolume.getDepthAtlasExtent();
-				lightingUniforms.light.ddgiGridDimsAndEnabled =
-					glm::vec4(glm::vec3(m_ddgiProbeVolume.getGridDims()), 1.0f);
-				lightingUniforms.light.ddgiOriginAndSpacing =
-					glm::vec4(volumeDesc.sceneBoundsMin, volumeDesc.probeSpacing);
-				lightingUniforms.light.ddgiParams0 =
-					glm::vec4(ddgiConfig.ddgiWeight, ddgiConfig.ddgiGamma, ddgiConfig.normalBias,
-					          static_cast<float>(volumeDesc.irradianceTexelSize));
-				lightingUniforms.light.ddgiParams1 =
-					glm::vec4(static_cast<float>(volumeDesc.depthTexelSize),
-					          static_cast<float>(irradianceExtent.width),
-					          static_cast<float>(irradianceExtent.height),
-					          static_cast<float>(depthExtent.width));
-				lightingUniforms.light.ddgiParams2 =
-					glm::vec4(static_cast<float>(depthExtent.height), 0.0f, 0.0f, 0.0f);
-		lightingUniforms.light.ddgiProbePositionAddress =
-			m_ddgiProbeVolume.getProbePositionAddress().value;
-	}
-
-	// Flax DDGI (FGI-061): populate Flax-style sampling parameters.
-	// When Flax DDGI is requested, reuse the simple DDGI probe volume data
-	// with Flax config parameters (gamma, intensity, history weight, etc.).
-	{
+		// ambient/IBL path (ddgiGridDimsAndEnabled.w == 0). FlaxGI currently
+		// bridges through the same probe atlases, so this uses the shared probe
+		// data gate rather than the Current-DDGI-only mode gate.
 		const DDGIConfig& ddgiConfig = getDDGIConfig();
-		const bool flaxRequested = isFlaxStyleDDGIRequested();
-		if (flaxRequested && m_ddgiProbeVolume.isInitialized())
+		const float flaxGIDebugMode = static_cast<float>(std::max(params.debugOptions.flaxGIDebugMode, 0));
+		const float flaxGIDebugScale = std::max(params.debugOptions.flaxGIDebugScale, 0.0f);
+		lightingUniforms.light.ddgiParams2 = glm::vec4(0.0f, flaxGIDebugMode, flaxGIDebugScale, 0.0f);
+		const bool flaxTexturesReady = isFlaxStyleDDGIRequested() && m_flaxDDGIPass != nullptr
+			&& m_flaxDDGIPass->isReady()
+			&& !m_flaxDDGIPass->getProbesDataView().isNull()
+			&& !m_flaxDDGIPass->getProbesDistanceOutputView().isNull()
+			&& !m_flaxDDGIPass->getProbesIrradianceOutputView().isNull();
+		const bool probeResourcesReady = isDDGIProbeDataPathEnabled() && m_ddgiProbeVolume.isInitialized()
+			&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
+			&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
+			&& !m_ddgiDepthLightingViews[0].isNull() && !m_ddgiDepthLightingViews[1].isNull();
+		if (probeResourcesReady)
 		{
+			const bool samplingReady = isCurrentDDGIPathEnabled() || flaxTexturesReady;
 			const DDGIProbeVolumeDesc& volumeDesc = m_ddgiProbeVolume.getDesc();
-			lightingUniforms.light.ddgiFlaxEnabledAndCascades =
-				glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-			lightingUniforms.light.ddgiFlaxOriginAndSpacing[0] =
+			const rhi::Extent2D irradianceExtent = m_ddgiProbeVolume.getIrradianceAtlasExtent();
+			const rhi::Extent2D depthExtent = m_ddgiProbeVolume.getDepthAtlasExtent();
+			lightingUniforms.light.ddgiGridDimsAndEnabled =
+				glm::vec4(glm::vec3(m_ddgiProbeVolume.getGridDims()), samplingReady ? 1.0f : 0.0f);
+			lightingUniforms.light.ddgiOriginAndSpacing =
 				glm::vec4(volumeDesc.sceneBoundsMin, volumeDesc.probeSpacing);
-			lightingUniforms.light.ddgiFlaxCountsAndRays =
-				glm::uvec4(m_ddgiProbeVolume.getGridDims(), ddgiConfig.raysPerProbe);
-			lightingUniforms.light.ddgiFlaxGammaWeightMaxDist =
-				glm::vec4(ddgiConfig.ddgiGamma,
-				          ddgiConfig.probeHistoryWeight,
-				          ddgiConfig.maxDistance,
-				          ddgiConfig.indirectLightingIntensity);
-			lightingUniforms.light.ddgiFlaxFallbackIrradiance =
-				ddgiConfig.fallbackIrradiance;
+			lightingUniforms.light.ddgiParams0 =
+				glm::vec4(ddgiConfig.ddgiWeight, ddgiConfig.ddgiGamma, ddgiConfig.normalBias,
+				          static_cast<float>(volumeDesc.irradianceTexelSize));
+			lightingUniforms.light.ddgiParams1 =
+				glm::vec4(static_cast<float>(volumeDesc.depthTexelSize),
+				          static_cast<float>(irradianceExtent.width),
+				          static_cast<float>(irradianceExtent.height),
+				          static_cast<float>(depthExtent.width));
+			lightingUniforms.light.ddgiParams2 =
+				glm::vec4(static_cast<float>(depthExtent.height), flaxGIDebugMode, flaxGIDebugScale, 0.0f);
 			lightingUniforms.light.ddgiProbePositionAddress =
 				m_ddgiProbeVolume.getProbePositionAddress().value;
+
+			// Flax DDGI (FGI-061): populate Flax-style sampling parameters.
+			// When Flax DDGI is requested, reuse the simple DDGI probe volume data
+			// with Flax config parameters (gamma, intensity, history weight, etc.).
+			const bool flaxRequested = isFlaxStyleDDGIRequested();
+			if (flaxRequested)
+			{
+				const uint32_t realCascadeCount = m_flaxDDGIResources.isInitialized()
+						? m_flaxDDGIResources.getCascadeCount() : 0u;
+					lightingUniforms.light.ddgiFlaxEnabledAndCascades =
+						glm::vec4(flaxTexturesReady ? 1.0f : 0.0f,
+						          static_cast<float>(realCascadeCount),
+						          flaxTexturesReady ? 1.0f : 0.0f,
+						          0.0f);
+				// R3: populate per-cascade origin/spacing from Flax cascade descriptors
+				const uint32_t cascadeCount = m_flaxDDGIResources.isInitialized()
+					? m_flaxDDGIResources.getCascadeCount() : 0u;
+				for (uint32_t c = 0; c < std::min(cascadeCount, 4u); ++c)
+				{
+					if (c < m_flaxDDGICascades.size())
+					{
+						const auto& cascade = m_flaxDDGICascades[c];
+						lightingUniforms.light.ddgiFlaxOriginAndSpacing[c] =
+							glm::vec4(cascade.snappedOrigin, cascade.probeSpacing);
+						lightingUniforms.light.ddgiFlaxBlendOrigin[c] =
+							glm::vec4(cascade.blendOrigin, 0.0f);
+						lightingUniforms.light.ddgiFlaxScrollOffsets[c] =
+							glm::ivec4(cascade.scrollOffset, 0);
+					}
+				}
+				// Probe counts from first cascade (shared atlas bridge for now)
+				const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
+				const glm::uvec3 counts0 = ppc.empty() ? glm::uvec3(0u) : ppc[0];
+				lightingUniforms.light.ddgiFlaxCountsAndRays =
+					glm::uvec4(counts0, ddgiConfig.raysPerProbe);
+				lightingUniforms.light.ddgiFlaxGammaWeightMaxDist =
+					glm::vec4(ddgiConfig.ddgiGamma,
+					          ddgiConfig.probeHistoryWeight,
+					          ddgiConfig.maxDistance,
+					          ddgiConfig.indirectLightingIntensity);
+				lightingUniforms.light.ddgiFlaxFallbackIrradiance =
+					ddgiConfig.fallbackIrradiance;
+			}
 		}
-	}
-}  // closes DDGI scope
 
 const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.viewProjection = camera != nullptr ? camera->viewProjection : glm::mat4(1.0f),
@@ -3848,6 +4186,15 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			viewOr(m_ddgiIrradianceLightingViews[ddgiParity], fallbackColor);
 		texViews[kGPUDrivenLightPassDDGIDepthIndex] =
 			viewOr(m_ddgiDepthLightingViews[ddgiParity], fallbackColor);
+		const rhi::TextureViewHandle flaxDataView = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getProbesDataView() : rhi::TextureViewHandle{};
+		const rhi::TextureViewHandle flaxDistanceView = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getProbesDistanceOutputView(ddgiParity) : rhi::TextureViewHandle{};
+		const rhi::TextureViewHandle flaxIrradianceView = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getProbesIrradianceOutputView(ddgiParity) : rhi::TextureViewHandle{};
+		texViews[kGPUDrivenLightPassFlaxProbesDataIndex] = viewOr(flaxDataView, fallbackColor);
+		texViews[kGPUDrivenLightPassFlaxProbesDistanceIndex] = viewOr(flaxDistanceView, fallbackColor);
+		texViews[kGPUDrivenLightPassFlaxProbesIrradianceIndex] = viewOr(flaxIrradianceView, fallbackColor);
 
 		const rhi::TextureViewHandle shadowView = viewOr(m_renderer.getShadowMapView(), fallbackDepth);
 
@@ -3889,6 +4236,18 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		if (!m_ddgiDepthLightingViews[ddgiParity].isNull())
 		{
 			writes[kGPUDrivenLightPassDDGIDepthIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
+		}
+		if (!flaxDataView.isNull())
+		{
+			writes[kGPUDrivenLightPassFlaxProbesDataIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
+		}
+		if (!flaxDistanceView.isNull())
+		{
+			writes[kGPUDrivenLightPassFlaxProbesDistanceIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
+		}
+		if (!flaxIrradianceView.isNull())
+		{
+			writes[kGPUDrivenLightPassFlaxProbesIrradianceIndex].accessIntent = rhi::ArgumentAccessIntent::readWrite;
 		}
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler,

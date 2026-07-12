@@ -13,6 +13,29 @@ static const uint kDDGIProbeStateActive     = 2;
 static const float kDDGIProbeAttentionMin   = 0.02f;
 static const float kDDGIProbeAttentionMax   = 0.98f;
 static const float kDDGICascadeBlendSize    = 2.0f;
+static const float kFlaxDDGIPi              = 3.14159265359f;
+
+float3 flaxSphericalFibonacci(float rayIndex, float rayCount)
+{
+    float phiGolden = sqrt(5.0f) * 0.5f + 0.5f;
+    float fraction = frac(rayIndex * (phiGolden - 1.0f));
+    float phi = 2.0f * kFlaxDDGIPi * fraction;
+    float cosTheta = 1.0f - (2.0f * rayIndex + 1.0f) / rayCount;
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+float3 flaxOctahedralDecode(float2 encoded)
+{
+    float3 direction = float3(encoded, 1.0f - abs(encoded.x) - abs(encoded.y));
+    if (direction.z < 0.0f)
+    {
+        float2 signs = float2(direction.x >= 0.0f ? 1.0f : -1.0f,
+                              direction.y >= 0.0f ? 1.0f : -1.0f);
+        direction.xy = (1.0f - abs(direction.yx)) * signs;
+    }
+    return normalize(direction);
+}
 
 // --- Probe index / coordinate math ---
 
@@ -128,10 +151,9 @@ float2 getProbeUV(FlaxDDGIData ddgi, uint cascadeIndex, uint probeIndex,
 // biasedWorldPosition = worldPosition + worldNormal * normalBias
 float3 sampleFlaxDDGIIrradianceCascade(
     FlaxDDGIData ddgi,
-    Texture2D<float4> probesData,
-    Texture2D<float4> probesDistance,
-    Texture2D<float4> probesIrradiance,
-    SamplerState linearSampler,
+    Sampler2D<float4> probesData,
+    Sampler2D<float4> probesDistance,
+    Sampler2D<float4> probesIrradiance,
     float3 worldPosition,
     float3 worldNormal,
     uint cascadeIndex,
@@ -178,9 +200,12 @@ float3 sampleFlaxDDGIIrradianceCascade(
         if (state == kDDGIProbeStateInactive)
         {
             uint3 fallbackCoords = decodeFallbackCoords(probeData.xyz);
-            probeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, fallbackCoords);
-            texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
-            probeData = probesData.Load(int3(texelCoord, 0));
+            if (fallbackCoordsValid(probeData.xyz))
+            {
+                probeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, fallbackCoords);
+                texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
+                probeData = probesData.Load(int3(texelCoord, 0));
+            }
         }
 
         // Decode real probe position and compute visibility
@@ -196,8 +221,7 @@ float3 sampleFlaxDDGIIrradianceCascade(
         float distVis = 1.0f;
         float2 probeUV = getProbeUV(ddgi, cascadeIndex, probeIndex,
                                      float2(0,0), 6); // irradiance res
-        float4 distData = probesDistance.SampleLevel(
-            linearSampler, probeUV, 0);
+        float4 distData = probesDistance.SampleLevel(probeUV, 0);
         float meanDist = distData.x * ddgi.rayMaxDistance;
         if (distToProbe > meanDist * 1.5f)
             distVis = 0.2f;
@@ -215,7 +239,7 @@ float3 sampleFlaxDDGIIrradianceCascade(
         }
 
         float2 irrUV = getProbeUV(ddgi, cascadeIndex, probeIndex, oct, 6);
-        float3 irrSample = probesIrradiance.SampleLevel(linearSampler, irrUV, 0).rgb;
+        float3 irrSample = probesIrradiance.SampleLevel(irrUV, 0).rgb;
         irrSample = pow(irrSample, ddgi.irradianceGamma); // gamma decode
 
         float contribWeight = weight * backFaceWeight * distVis;
@@ -234,10 +258,9 @@ float3 sampleFlaxDDGIIrradianceCascade(
 // Main entry: sample cascaded DDGI irradiance with cascade blending
 float3 sampleFlaxDDGIIrradiance(
     FlaxDDGIData ddgi,
-    Texture2D<float4> probesData,
-    Texture2D<float4> probesDistance,
-    Texture2D<float4> probesIrradiance,
-    SamplerState linearSampler,
+    Sampler2D<float4> probesData,
+    Sampler2D<float4> probesDistance,
+    Sampler2D<float4> probesIrradiance,
     float3 worldPosition,
     float3 worldNormal,
     float normalBias,
@@ -254,7 +277,6 @@ float3 sampleFlaxDDGIIrradiance(
 
         float3 cascadeIrradiance = sampleFlaxDDGIIrradianceCascade(
             ddgi, probesData, probesDistance, probesIrradiance,
-            linearSampler,
             worldPosition, worldNormal, c, spacing, biasedPos);
 
         // Cascade blending weight (fade at cascade boundary)

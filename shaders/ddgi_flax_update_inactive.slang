@@ -5,10 +5,10 @@
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> probesData      : register(u0); // read/write probe data
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes : register(u1);
-
-[[vk::push_constant]] ConstantBuffer<FlaxDDGIData> ddgi;
+[[vk::binding(0, 0)]] RWTexture2D<float4> probesData         : register(u0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes    : register(u1);
+[[vk::binding(2, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData  : register(t1);
+static FlaxDDGIData ddgi = ddgiData[0];
 
 [numthreads(8, 8, 1)]
 void CS_UpdateInactive(uint3 dispatchThreadId : SV_DispatchThreadID)

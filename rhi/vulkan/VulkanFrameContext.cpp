@@ -310,10 +310,24 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandBuffer& commandB
     };
   }
 
-  const uint64_t currentTimelineValue = m_timelineSemaphore->getCurrentValue();
-  const uint64_t signalValue =
-      (m_frameCounter > currentTimelineValue ? m_frameCounter : currentTimelineValue) + 1;
-  m_frameCounter = signalValue;
+	  uint64_t currentTimelineValue = m_timelineSemaphore->getCurrentValue();
+	  // Guard against stale/wrapped semaphore from previous process runs.
+	  // Timeline semaphores persist across VkDevice lifetimes; if a previous run
+	  // left the counter near UINT64_MAX, the next signal would overflow.
+	  if (currentTimelineValue >= UINT64_MAX - 64)
+	  {
+	    LOGW("Timeline semaphore near overflow (%llu), draining GPU and recreating", (unsigned long long)currentTimelineValue);
+	    vkQueueWaitIdle(m_graphicsQueue);
+	    m_timelineSemaphore->deinit();
+	    m_timelineSemaphore->init(m_device, 0);
+	    currentTimelineValue = 0;
+	    m_frameCounter = 0;
+	    for (auto& slot : m_frames)
+	      slot.lastSignalValue = 0;
+	  }
+	  const uint64_t signalValue =
+	      (m_frameCounter > currentTimelineValue ? m_frameCounter : currentTimelineValue) + 1;
+	  m_frameCounter = signalValue;
   signalInfos[signalCount++] = VkSemaphoreSubmitInfo{
       .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       .semaphore = m_timelineSemaphore->nativeSemaphore(),

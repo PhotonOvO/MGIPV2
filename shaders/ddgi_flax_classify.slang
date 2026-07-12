@@ -8,9 +8,11 @@
 [[vk::binding(0, 0)]] RWTexture2D<float4> probesData        : register(u0);
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes   : register(u1);
 [[vk::binding(2, 0)]] Texture3D<float> globalSDFTex           : register(t0);
-[[vk::binding(3, 0)]] SamplerState linearSampler              : register(s0);
+[[vk::binding(3, 0)]] SamplerState linearSampler                 : register(s0);
+[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData   : register(t1);
 
-[[vk::push_constant]] ConstantBuffer<FlaxDDGIData> ddgi;
+// Helper: access the single-element structured buffer like a constant buffer
+static FlaxDDGIData ddgi = ddgiData[0];
 
 // Cascade index is set via specialization constant or push constant
 #ifndef DDGI_CLASSIFY_CASCADE
@@ -64,6 +66,8 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     float4 probeData = probesData[dataCoord];
     float attention = decodeProbeAttention(probeData);
     uint state = decodeProbeState(probeData);
+    uint stateOld = state;
+    bool newlyActivated = wasScrolled || stateOld == kDDGIProbeStateInactive;
     float3 probeOffset = probeData.xyz * probesSpacing;
 
     if (wasScrolled || state == kDDGIProbeStateInactive)
@@ -74,19 +78,33 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     float3 probePosition = probeBasePos + probeOffset;
 
-    // Sample SDF distance
-    float3 sdfUvw = (probePosition - float3(-16,-16,-16)) / float3(32,32,32);
-    float sdf = globalSDFTex.SampleLevel(linearSampler, sdfUvw, 0) * 32.0f;
+    // Sample SDF distance using real bounds from FlaxDDGIData
+    float3 boundsMin = ddgi.sdfBoundsMinAndVoxel.xyz;
+    float3 boundsMax = ddgi.sdfBoundsMaxAndRes.xyz;
+    float voxelSize = ddgi.sdfBoundsMinAndVoxel.w;
+    float sdfRes = ddgi.sdfBoundsMaxAndRes.w;
+    float3 sdfExtent = max(boundsMax - boundsMin, float3(1e-4f, 1e-4f, 1e-4f));
+    bool outsideSDFBounds = any(probePosition < boundsMin) || any(probePosition > boundsMax);
+    if (outsideSDFBounds)
+    {
+        probesData[dataCoord] = encodeProbeData(float3(0,0,0), kDDGIProbeStateInactive, 0.0f);
+        return;
+    }
+    float3 sdfUvw = (probePosition - boundsMin) / sdfExtent;
+    float maxEncodeDistance = max(max(sdfExtent.x, sdfExtent.y), sdfExtent.z);
+    float encodedSDF = globalSDFTex.SampleLevel(linearSampler, sdfUvw, 0);
+    float sdf = (encodedSDF * 2.0f - 1.0f) * maxEncodeDistance;
     float sdfDist = abs(sdf);
-    float voxelLimit = 0.25f * 0.8f;
+    float voxelLimit = voxelSize * 0.8f;
     float distanceLimit = probesSpacing * 2.3f;
-    uint stateOld = state;
 
-    // Empty area fallback (sparse probes for dynamic objects)
-    if (sdf > probesSpacing * ddgi.probesCounts.x * 0.3f)
+	// Empty area fallback: only for probes within cascade range of the SDF volume.
+	// Tight threshold avoids marking far probes active that can never trace into SDF.
+	float emptyAreaThreshold = probesSpacing * ddgi.probesCounts.x * 0.08f;
+	if (sdf > emptyAreaThreshold && sdfDist < distanceLimit * 4.0f)
     {
         probeOffset = float3(0,0,0);
-        state = wasScrolled ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
+        state = newlyActivated ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
         attention = kDDGIProbeAttentionMin;
     }
     else if (sdfDist > distanceLimit + length(probeOffset))
@@ -99,7 +117,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     else
     {
         // Active probe
-        state = kDDGIProbeStateActive;
+        state = newlyActivated ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
         float3 viewToProbe = probePosition - ddgi.viewPos;
         float distToProbe = length(viewToProbe);
         viewToProbe /= max(distToProbe, 0.0001f);
@@ -110,7 +128,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
         // Relocate away from surfaces
         if (sdf <= voxelLimit)
         {
-            float eps = 1.0f / 128.0f;
+            float eps = 1.0f / max(sdfRes, 1.0f);
             float xp = globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(eps,0,0), 0);
             float xn = globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(eps,0,0), 0);
             float yp = globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,eps,0), 0);
@@ -133,12 +151,22 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Write probe data
     probesData[dataCoord] = encodeProbeData(probeOffset / probesSpacing, state, attention);
 
-    // Append active probe
-    if (state != kDDGIProbeStateInactive)
+    // Select a rotating probe-index window so a bounded per-frame budget
+    // eventually covers the complete volume instead of repeatedly updating
+    // the append-list prefix.
+    uint updateBudget = ddgi.updateParams.y;
+    uint updateOffset = totalProbes > 0u ? ddgi.updateParams.x % totalProbes : 0u;
+    uint relativeProbeIndex = totalProbes > 0u
+        ? (probeIndex + totalProbes - updateOffset) % totalProbes : 0u;
+    bool selectedForUpdate = updateBudget == 0u || relativeProbeIndex < updateBudget;
+
+    // Append selected active probes (cap at buffer capacity minus counter slot).
+    if (state != kDDGIProbeStateInactive && selectedForUpdate)
     {
         uint slot;
         InterlockedAdd(activeProbes[0], 1, slot);
-        if (slot < 4095)
+        uint maxSlots = totalProbes; // buffer capacity = totalProbes + 1 (counter)
+        if (slot < maxSlots)
             activeProbes[1 + slot] = probeIndex;
     }
 }

@@ -123,7 +123,7 @@ void kernelDDGIDepthProbeUpdate(uint3 groupId : SV_GroupID,
 
     if (totalWeight > kFltEps)
     {
-        result *= 1.0 / (2.0 * totalWeight);
+        result *= 1.0 / totalWeight;
     }
 
     // Hysteresis blend (LuxGI ProbeUpdate.glsl:144-145); first frame writes

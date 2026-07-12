@@ -72,6 +72,15 @@ float sampleGlobalSDFDistance(Sampler3D<float> sdfTexture, GlobalSDFTraceConfig 
     return dist;
 }
 
+float sampleGlobalSDFWorldDistance(Sampler3D<float> sdfTexture, GlobalSDFTraceConfig config,
+                                   float3 worldPos)
+{
+    const float3 extent = max(config.boundsMax - config.boundsMin, float3(1e-4, 1e-4, 1e-4));
+    const float3 uvw =
+        clamp((worldPos - config.boundsMin) / extent, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+    return sampleGlobalSDFDistance(sdfTexture, config, uvw);
+}
+
 // Sphere-march through the single-cascade global SDF. Returns hitTime < 0 on miss.
 GlobalSDFTraceHit traceGlobalSDF(Sampler3D<float> sdfTexture, GlobalSDFTraceConfig config,
                                  float3 origin, float3 direction, float maxDistance)
