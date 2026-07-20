@@ -23,12 +23,64 @@ Sampler2D irradianceAtlas;
 [[vk::binding(1, 0)]]
 ConstantBuffer<DDGIProbeVisualizationUniforms> probeVisUniforms;
 
+[[vk::binding(2, 0)]]
+Texture2D<float4> flaxProbeData;
+
 struct ProbeVisVertexOutput
 {
     float4 position : SV_Position;
     float3 normalWS : NORMAL0;
     nointerpolation uint probeIndex : TEXCOORD0;
 };
+
+bool usesFlaxProbeResources()
+{
+    return probeVisUniforms.flaxProbeCountsAndMode.w != 0u;
+}
+
+uint3 flaxProbeCoordsFromIndex(uint probeIndex)
+{
+    const uint3 counts = probeVisUniforms.flaxProbeCountsAndMode.xyz;
+    const uint probesPerPlane = counts.x * counts.z;
+    return uint3(
+        probeIndex % counts.x,
+        probeIndex / probesPerPlane,
+        (probeIndex / counts.x) % counts.z);
+}
+
+uint flaxProbeIndexFromCoords(uint3 coords)
+{
+    const uint3 counts = probeVisUniforms.flaxProbeCountsAndMode.xyz;
+    return coords.y * counts.x * counts.z + coords.x + counts.x * coords.z;
+}
+
+uint flaxScrollingProbeIndex(uint3 logicalCoords)
+{
+    const int3 counts = int3(probeVisUniforms.flaxProbeCountsAndMode.xyz);
+    int3 scrolled = (int3(logicalCoords) + probeVisUniforms.flaxProbeScrollAndCascade.xyz) % counts;
+    scrolled = (scrolled + counts) % counts;
+    return flaxProbeIndexFromCoords(uint3(scrolled));
+}
+
+uint2 flaxProbeTexelCoords(uint physicalProbeIndex)
+{
+    const uint3 counts = probeVisUniforms.flaxProbeCountsAndMode.xyz;
+    const uint3 coords = flaxProbeCoordsFromIndex(physicalProbeIndex);
+    return uint2(coords.x + coords.y * counts.x, coords.z);
+}
+
+float2 flaxProbeTextureCoordFromDirection(float3 dir, uint physicalProbeIndex)
+{
+    const float2 oct = octEncode(normalize(dir));
+    const float tileSize = float(probeVisUniforms.irradianceSideLength + 2u);
+    const float2 atlasSize = float2(
+        float(probeVisUniforms.irradianceAtlasWidth),
+        float(probeVisUniforms.irradianceAtlasHeight));
+    float2 texel = float2(flaxProbeTexelCoords(physicalProbeIndex)) * tileSize
+        + tileSize * 0.5;
+    texel += oct * float(probeVisUniforms.irradianceSideLength) * 0.5;
+    return texel / atlasSize;
+}
 
 float3 decodeProbeVisIrradiance(float2 uv)
 {
@@ -44,8 +96,11 @@ float3 sampleProbeVisDirection(uint probeIndex, float3 dir)
 {
     const int2 atlasSize = int2(int(probeVisUniforms.irradianceAtlasWidth),
                                 int(probeVisUniforms.irradianceAtlasHeight));
-    const float2 uv = ddgiTextureCoordFromDirection(
-        normalize(dir), int(probeIndex), atlasSize, int(probeVisUniforms.irradianceSideLength));
+    const float2 uv = usesFlaxProbeResources()
+        ? flaxProbeTextureCoordFromDirection(dir, probeIndex)
+        : ddgiTextureCoordFromDirection(
+            normalize(dir), int(probeIndex), atlasSize,
+            int(probeVisUniforms.irradianceSideLength));
     return decodeProbeVisIrradiance(uv);
 }
 
@@ -99,13 +154,38 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
 
     // Probe world position through the position-buffer BDA (same pattern as
     // ddgi_gi_sdf_rays.slang / ddgi_sample_probe.slang).
-    float4* probePositions = (float4*)probeVisUniforms.probePositionAddress;
-    const float4 probeData = probePositions[instanceId];
-    if (probeData.w < 0.5)
+    float3 probeCenter;
+    if (usesFlaxProbeResources())
     {
-        return output;
+        const uint3 logicalCoords = flaxProbeCoordsFromIndex(instanceId);
+        const uint physicalProbeIndex = flaxScrollingProbeIndex(logicalCoords);
+        const uint2 dataTexel = flaxProbeTexelCoords(physicalProbeIndex);
+        const float4 probeData = flaxProbeData.Load(int3(dataTexel, 0));
+        if (probeData.w <= -1.0f)
+        {
+            return output;
+        }
+
+        const float spacing = probeVisUniforms.flaxProbeOriginAndSpacing.w;
+        const float3 gridOffset =
+            spacing * (float3(probeVisUniforms.flaxProbeCountsAndMode.xyz) - 1.0) * 0.5;
+        const float3 scrollOffset =
+            float3(probeVisUniforms.flaxProbeScrollAndCascade.xyz) * spacing;
+        probeCenter = probeVisUniforms.flaxProbeOriginAndSpacing.xyz
+            + float3(logicalCoords) * spacing - gridOffset + scrollOffset
+            + probeData.xyz * spacing;
+        output.probeIndex = physicalProbeIndex;
     }
-    const float3 probeCenter = probeData.xyz;
+    else
+    {
+        float4* probePositions = (float4*)probeVisUniforms.probePositionAddress;
+        const float4 probeData = probePositions[instanceId];
+        if (probeData.w < 0.5)
+        {
+            return output;
+        }
+        probeCenter = probeData.xyz;
+    }
 
     const float3 dir = probeVisSphereDirection(vertexId);
     const float3 worldPos = probeCenter + dir * probeVisUniforms.probeRadius;
@@ -120,6 +200,7 @@ float4 fragmentProbeVisMain(ProbeVisVertexOutput input) : SV_Target
     const float3 n = normalize(input.normalWS);
     const float3 averageIrradiance = sampleProbeVisAverage(input.probeIndex);
     const float3 directionalIrradiance = sampleProbeVisDirection(input.probeIndex, n);
-    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.75);
+    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.75)
+        * probeVisUniforms.debugScale;
     return float4(irradiance, 1.0);
 }

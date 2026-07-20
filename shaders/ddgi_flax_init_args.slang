@@ -18,27 +18,27 @@ struct FlaxDDGIInitArgsPush
 [numthreads(1, 1, 1)]
 void CS_UpdateProbesInitArgs(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint activeCount = min(activeProbes[0], initArgs.maxActiveProbes);
+    uint totalActiveCount = min(activeProbes[0], initArgs.maxActiveProbes);
+    uint updateCount = totalActiveCount;
     if (initArgs.maxUpdatedProbesPerFrame != 0)
-        activeCount = min(activeCount, initArgs.maxUpdatedProbesPerFrame);
+        updateCount = min(updateCount, initArgs.maxUpdatedProbesPerFrame);
 
-    // Publish the clamped count so the final partially occupied thread group
-    // cannot process entries beyond the configured budget.
-    activeProbes[0] = activeCount;
+    // Preserve totalActiveCount in activeProbes[0]. Trace/update shaders apply
+    // the budget and rotating offset over the compacted list.
 
     // Trace: 256 probe threads per group.
     const uint kTraceBatchSize = 256;
-    updateProbesInitArgs[0] = (activeCount + kTraceBatchSize - 1) / kTraceBatchSize;
+    updateProbesInitArgs[0] = (updateCount + kTraceBatchSize - 1) / kTraceBatchSize;
     updateProbesInitArgs[1] = 1;
     updateProbesInitArgs[2] = 1;
 
     // Distance: one 16x16 tile per probe, covered by four 8x8 groups.
-    updateProbesInitArgs[3] = activeCount * 4;
+    updateProbesInitArgs[3] = updateCount * 4;
     updateProbesInitArgs[4] = 1;
     updateProbesInitArgs[5] = 1;
 
     // Irradiance: one 8x8 group covers one complete probe tile.
-    updateProbesInitArgs[6] = activeCount;
+    updateProbesInitArgs[6] = updateCount;
     updateProbesInitArgs[7] = 1;
     updateProbesInitArgs[8] = 1;
 }

@@ -347,6 +347,13 @@ struct DDGIProbeVisualizationUniforms
   uint32_t irradianceSideLength;  // irradiance texels per probe (no border)
   float probeRadius;              // debug sphere world-space radius (0.1)
   float ddgiGamma;                // decode: pow(x, gamma*0.5) then square
+  uvec4 flaxProbeCountsAndMode;   // xyz = cascade-0 counts, w = 1 for Flax resources
+  vec4 flaxProbeOriginAndSpacing; // xyz = snapped origin, w = probe spacing
+  ivec4 flaxProbeScrollAndCascade;// xyz = scroll offset, w = selected cascade
+  float debugScale;               // visualization-only radiance multiplier
+  float _probeVisPadding0;
+  float _probeVisPadding1;
+  float _probeVisPadding2;
 };
 
 struct LightCullingUniforms
@@ -634,7 +641,7 @@ struct LightParams
 	ivec4 ddgiFlaxScrollOffsets[4];
 	uvec4 ddgiFlaxCountsAndRays;            // xyz = probesCounts, w = raysCount
 	vec4 ddgiFlaxGammaWeightMaxDist;        // x = gamma, y = historyWeight, z = maxDist, w = intensity
-	vec4 ddgiFlaxFallbackIrradiance;        // rgb = fallback, w unused
+	vec4 ddgiFlaxFallbackIrradiance;        // rgb = fallback, w = normal bias
 };
 
 struct LightingUniforms

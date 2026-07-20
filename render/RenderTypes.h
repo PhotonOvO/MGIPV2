@@ -11,6 +11,7 @@
 #include "../scene/SceneLight.h"
 #include "../scene/SceneAsset.h"
 #include "../loader/GltfLoader.h"
+#include "FlaxGIDebugModel.h"
 #include "Pass.h"
 
 #include <array>
@@ -115,6 +116,7 @@ namespace demo
 		// effect when DDGIConfig::enabled is also true; default rendering is
 		// unchanged.
 		bool ddgiDebugVisualize{false};
+		float flaxGIProbeVisualizationScale{5.0f};
 		// Reserved Flax GI debug toggles. They do not allocate or dispatch
 		// resources until the matching Surface Atlas / cascaded DDGI stages land.
 		bool ddgiDebugSurfaceAtlasCoverage{false};
@@ -124,10 +126,13 @@ namespace demo
 		int flaxGIDebugMode{0}; // 0=Off, 1=Irradiance, 2=No visibility, 3=Diffuse, 4=Gate, 5=Direct atlas
 		float flaxGIDebugScale{1.0f};
 		int flaxGIRayDebugMode{0}; // 0=Normal, 1=Hit albedo, 2=Branch colors
-		// Flax GI runtime controls (R10: freeze/reset/single-step)
-		bool flaxGIFreeze{false};
-		bool flaxGIReset{false};
-		bool flaxGISingleStep{false};
+		bool flaxGIDebugOverlayEnabled{true};
+		uint32_t flaxGIDebugViewMask{0xffu};
+		float flaxGIDebugSDFSlice{0.5f};
+		float flaxGIDebugExposure{1.0f};
+		uint64_t flaxGIResetRequestId{0};
+		uint64_t flaxGIRunToStageRequestId{0};
+		FlaxGIDebugStage flaxGIRunToStage{FlaxGIDebugStage::updateIrradiance};
 		bool flaxGIDisableIBL{false};  // Disable IBL to isolate Flax GI contribution
 		bool flaxGIBootstrapShading{false}; // Use simple direct-light-only shading in trace
 

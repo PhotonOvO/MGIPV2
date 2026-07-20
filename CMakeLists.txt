@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(Demo VERSION 1.0 LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -332,6 +334,7 @@ add_library(demo_core STATIC
   render/passes/SurfaceAtlasRasterPass.cpp
   render/FlaxDDGIResources.h
   render/FlaxDDGIResources.cpp
+  render/FlaxGIDebugModel.h
   render/GlobalSurfaceAtlasObject.h
   render/GlobalSurfaceAtlasTilePacker.h
   render/GlobalSurfaceAtlasData.h
@@ -391,6 +394,7 @@ add_library(demo_core STATIC
   render/UploadUtils.cpp
   render/UploadUtils.h
   common/Common.h
+  common/FrameDeferredValue.h
   common/Handles.h
   common/HandlePool.h
   common/ProfilerMarkers.h
@@ -540,6 +544,14 @@ else()
   add_executable(Demo app/MinimalLatestApp.cpp)
   target_link_libraries(Demo PRIVATE demo_core)
 endif()
+if(BUILD_TESTING AND NOT ANDROID)
+  add_executable(flax_gi_debug_model_tests
+    tests/flax_gi_debug_model_tests.cpp
+  )
+  target_include_directories(flax_gi_debug_model_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+  add_test(NAME flax_gi_debug_model COMMAND flax_gi_debug_model_tests)
+endif()
+
 
 if(NOT ANDROID)
 add_executable(texture_converter  

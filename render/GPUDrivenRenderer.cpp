@@ -525,6 +525,8 @@ namespace demo
 			                              &m_renderer.getSceneResources());
 		}
 		m_flaxDDGIPass->initResources(getRHIDevice());
+		m_ddgiDebugPass->initResources(
+			getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 
 		m_flaxDDGICascades.clear();
 		m_flaxCascadeFrameCounters.assign(cascadeCount, 0u);
@@ -699,6 +701,10 @@ void GPUDrivenRenderer::rebuildSurfaceAtlasObjects()
 void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	{
 		waitForIdle();
+		if (m_ddgiDebugPass != nullptr)
+		{
+			m_ddgiDebugPass->shutdownResources();
+		}
 		if (m_flaxDDGIPass != nullptr)
 		{
 			m_flaxDDGIPass->shutdownResources();
@@ -771,8 +777,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 		}
 
-m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
-			if (m_ddgiMeshSDFLoaded)
+		m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		if (m_ddgiMeshSDFLoaded)
 		{
 			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
 		}
@@ -791,11 +797,11 @@ m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCou
 	{
 		shutdownFlaxDDGIResources();
 
-if (m_ddgiDebugPass != nullptr)
-			{
-				m_ddgiDebugPass->shutdownResources();
-			}
-			if (m_ddgiProbeUpdatePass != nullptr)
+		if (m_ddgiDebugPass != nullptr)
+		{
+			m_ddgiDebugPass->shutdownResources();
+		}
+		if (m_ddgiProbeUpdatePass != nullptr)
 		{
 			m_ddgiProbeUpdatePass->shutdownResources();
 		}
@@ -854,6 +860,8 @@ if (m_ddgiDebugPass != nullptr)
 			config.enabled && config.runtimeMode == DDGIRuntimeMode::flaxStyle;
 		const bool requiresResourceReset =
 			previousConfig.probeSpacing != config.probeSpacing ||
+			previousConfig.maxDistance != config.maxDistance ||
+			previousConfig.ddgiGamma != config.ddgiGamma ||
 			previousConfig.irradianceTexelSize != config.irradianceTexelSize ||
 			previousConfig.depthTexelSize != config.depthTexelSize ||
 			previousConfig.raysPerProbe != config.raysPerProbe ||
@@ -893,6 +901,11 @@ if (m_ddgiDebugPass != nullptr)
 		{
 			waitForIdle();
 			shutdownFlaxDDGIResources();
+			if (willCurrentPathBeEnabled)
+			{
+				m_ddgiDebugPass->initResources(
+					getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+			}
 		}
 		else if (!wasFlaxPathEnabled && willFlaxPathBeEnabled)
 		{
@@ -983,6 +996,65 @@ if (m_ddgiDebugPass != nullptr)
 			status.surfaceAtlasTiles = dataManager.getTileCount();
 		}
 		return status;
+	}
+
+	FlaxGIDebugSnapshot GPUDrivenRenderer::getFlaxGIDebugSnapshot() const
+	{
+		FlaxGIDebugSnapshot snapshot = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getDebugSnapshot() : FlaxGIDebugSnapshot{};
+		const FlaxGIDebugStatus readiness = getFlaxGIDebugStatus();
+		const uint64_t frame = m_temporalFrameCounter;
+		const auto setStage = [&](FlaxGIDebugStage stage, FlaxGIDebugStageState state,
+		                          std::string_view reason = {})
+		{
+			FlaxGIDebugStageStatus& status = snapshot.stages[static_cast<size_t>(stage)];
+			status.state = state;
+			status.lastExecutedFrame = frame;
+			status.reason = reason;
+		};
+
+		setStage(FlaxGIDebugStage::meshSDFInput,
+		         readiness.meshSDFLoaded ? FlaxGIDebugStageState::valid
+		                                 : FlaxGIDebugStageState::blocked,
+		         readiness.meshSDFLoaded ? std::string_view{}
+		                                 : std::string_view{"Load a mesh SDF before running FlaxGI"});
+		setStage(FlaxGIDebugStage::globalSDF,
+		         readiness.globalSDFVolumeReady ? FlaxGIDebugStageState::valid
+		                                         : FlaxGIDebugStageState::blocked,
+		         readiness.globalSDFVolumeReady ? std::string_view{}
+		                                         : std::string_view{"Global SDF volume is unavailable"});
+		setStage(FlaxGIDebugStage::surfaceAtlas, FlaxGIDebugStageState::notImplemented,
+		         "Raster pass is a skeleton and trace sampling is disabled");
+		setStage(FlaxGIDebugStage::cascadeLayout,
+		         readiness.flaxResourcesReady ? FlaxGIDebugStageState::valid
+		                                      : FlaxGIDebugStageState::blocked,
+		         readiness.flaxResourcesReady ? std::string_view{}
+		                                      : std::string_view{"Flax-owned probe resources are unavailable"});
+		snapshot.cascadeCount = readiness.flaxCascadeCount;
+		snapshot.implementedCascadeCount = readiness.flaxResourcesReady ? 1u : 0u;
+		snapshot.totalProbes = readiness.flaxResourcesReady
+			? readiness.flaxProbesPerCascade.x * readiness.flaxProbesPerCascade.y
+			  * readiness.flaxProbesPerCascade.z
+			: 0u;
+		snapshot.raysPerProbe = getDDGIConfig().raysPerProbe;
+		snapshot.surfaceAtlasSampledByTrace = false;
+
+		const bool outputReady = readiness.flaxResourcesReady && readiness.flaxRequested;
+		setStage(FlaxGIDebugStage::lightingSample,
+		         outputReady ? FlaxGIDebugStageState::executed : FlaxGIDebugStageState::blocked,
+		         outputReady ? std::string_view{}
+		                     : std::string_view{"FlaxGI is not enabled or its atlases are unavailable"});
+		setStage(FlaxGIDebugStage::finalComposite,
+		         outputReady ? FlaxGIDebugStageState::executed : FlaxGIDebugStageState::blocked,
+		         outputReady ? std::string_view{}
+		                     : std::string_view{"Lighting sample has no valid Flax input"});
+		return snapshot;
+	}
+
+	FlaxGIDebugViewSet GPUDrivenRenderer::getFlaxGIDebugViewSet() const
+	{
+		return m_flaxDDGIPass != nullptr ? m_flaxDDGIPass->getDebugViewSet()
+		                                     : FlaxGIDebugViewSet{};
 	}
 
 	void GPUDrivenRenderer::clearDDGIMeshSDF()
@@ -3971,8 +4043,10 @@ if (m_ddgiDebugPass != nullptr)
 			          params.lightSettings.depthBias,
 			          params.lightSettings.normalBias,
 			          static_cast<float>(shaderio::LCascadeCount));
+		const bool disableIBLForFlax = isFlaxStyleDDGIRequested()
+			&& (getDDGIConfig().flaxGIDisableIBL || params.debugOptions.flaxGIDisableIBL);
 		lightingUniforms.light.iblParams =
-			glm::vec4(params.debugOptions.enableIBL ? 1.0f : 0.0f,
+			glm::vec4(params.debugOptions.enableIBL && !disableIBLForFlax ? 1.0f : 0.0f,
 			          params.debugOptions.iblIntensity,
 			          static_cast<float>(m_iblResources.isSplitSumReady()
 				                             ? m_iblResources.getMaxMipLevel()
@@ -4076,7 +4150,10 @@ if (m_ddgiDebugPass != nullptr)
 					          ddgiConfig.maxDistance,
 					          ddgiConfig.indirectLightingIntensity);
 				lightingUniforms.light.ddgiFlaxFallbackIrradiance =
-					ddgiConfig.fallbackIrradiance;
+					glm::vec4(ddgiConfig.fallbackIrradiance.x,
+					          ddgiConfig.fallbackIrradiance.y,
+					          ddgiConfig.fallbackIrradiance.z,
+					          ddgiConfig.normalBias);
 			}
 		}
 

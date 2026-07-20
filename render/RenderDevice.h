@@ -83,6 +83,9 @@ namespace demo
 
 		TextureHandle getViewportTextureHandle() const;
 		ImTextureID getViewportTextureID(TextureHandle handle) const;
+		DebugInteropBridge::TextureID registerDebugTexture(rhi::SamplerHandle sampler,
+		                                                   rhi::TextureViewHandle view);
+		void unregisterDebugTexture(DebugInteropBridge::TextureID textureId);
 		MaterialHandle getMaterialHandle(uint32_t slot) const;
 
 		// glTF model support

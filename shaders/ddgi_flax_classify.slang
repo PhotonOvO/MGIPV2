@@ -69,6 +69,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint stateOld = state;
     bool newlyActivated = wasScrolled || stateOld == kDDGIProbeStateInactive;
     float3 probeOffset = probeData.xyz * probesSpacing;
+    bool relocationChanged = false;
 
     if (wasScrolled || state == kDDGIProbeStateInactive)
     {
@@ -118,12 +119,14 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         // Active probe
         state = newlyActivated ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
-        float3 viewToProbe = probePosition - ddgi.viewPos;
-        float distToProbe = length(viewToProbe);
-        viewToProbe /= max(distToProbe, 0.0001f);
-        attention *= lerp(0.1f, 1.0f, saturate(dot(viewToProbe, float3(0,0,-1))));
-        attention *= lerp(1.0f, 0.5f, saturate(sdfDist / voxelLimit));
-        attention = clamp(attention, kDDGIProbeAttentionMin, kDDGIProbeAttentionMax);
+        float distToProbe = length(probePosition - ddgi.viewPos);
+        float attentionRange = max(probesSpacing * float(ddgi.probesCounts.x), probesSpacing);
+        float viewAttention = lerp(0.35f, 1.0f,
+                                   1.0f - saturate(distToProbe / attentionRange));
+        float geometryAttention = lerp(1.0f, 0.5f,
+                                       saturate(sdfDist / max(voxelLimit, 0.0001f)));
+        attention = clamp(viewAttention * geometryAttention,
+                          kDDGIProbeAttentionMin, kDDGIProbeAttentionMax);
 
         // Relocate away from surfaces
         if (sdf <= voxelLimit)
@@ -138,30 +141,54 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
             float3 gradient = float3(xp - xn, yp - yn, zp - zn);
             float3 sdfNormal = length(gradient) > 1e-6f ? normalize(gradient) : float3(0,1,0);
 
-            float speed = stateOld != kDDGIProbeStateActive ? 1.0f : 0.3f;
-            float3 offsetToSet = probeOffset + sdfNormal * ((sdf + voxelLimit) * speed);
+            // A negative SDF means the probe is inside geometry. Move toward
+            // increasing SDF by the full clearance instead of reversing the
+            // gradient when sdf is less than -voxelLimit.
+            float speed = (stateOld != kDDGIProbeStateActive || sdf <= 0.0f) ? 1.0f : 0.3f;
+            float relocationDistance = max(voxelLimit - sdf, 0.0f);
+            float3 offsetToSet = probeOffset + sdfNormal * (relocationDistance * speed);
             float relocateLimit = probesSpacing * 0.5f;
             if (length(offsetToSet) < relocateLimit)
+            {
+                relocationChanged = length(offsetToSet - probeOffset) > voxelSize * 0.01f;
                 probeOffset = offsetToSet;
+
+                // The finite-difference gradient is approximate. Do not trace
+                // or sample a candidate that still resolves inside geometry.
+                float3 relocatedPosition = probeBasePos + probeOffset;
+                float3 relocatedUvw =
+                    clamp((relocatedPosition - boundsMin) / sdfExtent,
+                          float3(0,0,0), float3(1,1,1));
+                float relocatedEncodedSDF =
+                    globalSDFTex.SampleLevel(linearSampler, relocatedUvw, 0);
+                float relocatedSDF =
+                    (relocatedEncodedSDF * 2.0f - 1.0f) * maxEncodeDistance;
+                if (relocatedSDF <= 0.0f)
+                {
+                    state = kDDGIProbeStateInactive;
+                    attention = 0.0f;
+                }
+            }
             else
-                probeOffset = float3(0,0,0); // reset if too far
+            {
+                probeOffset = float3(0,0,0);
+                state = kDDGIProbeStateInactive;
+                attention = 0.0f;
+            }
         }
+
+        // Relocated probes must discard stale irradiance/distance history.
+        if (state != kDDGIProbeStateInactive && relocationChanged)
+            state = kDDGIProbeStateActivated;
     }
 
     // Write probe data
     probesData[dataCoord] = encodeProbeData(probeOffset / probesSpacing, state, attention);
 
-    // Select a rotating probe-index window so a bounded per-frame budget
-    // eventually covers the complete volume instead of repeatedly updating
-    // the append-list prefix.
-    uint updateBudget = ddgi.updateParams.y;
-    uint updateOffset = totalProbes > 0u ? ddgi.updateParams.x % totalProbes : 0u;
-    uint relativeProbeIndex = totalProbes > 0u
-        ? (probeIndex + totalProbes - updateOffset) % totalProbes : 0u;
-    bool selectedForUpdate = updateBudget == 0u || relativeProbeIndex < updateBudget;
-
-    // Append selected active probes (cap at buffer capacity minus counter slot).
-    if (state != kDDGIProbeStateInactive && selectedForUpdate)
+    // Compact every active probe first. The per-frame budget is applied later
+    // over this compacted list, otherwise sparse active probes are almost always
+    // missed by a small window over the complete logical volume.
+    if (state != kDDGIProbeStateInactive)
     {
         uint slot;
         InterlockedAdd(activeProbes[0], 1, slot);

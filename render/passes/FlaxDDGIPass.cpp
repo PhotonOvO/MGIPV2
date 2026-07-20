@@ -13,6 +13,7 @@
 #include "_autogen/ddgi_flax_trace_rays.slang.h"
 #include "_autogen/ddgi_flax_update_distance.slang.h"
 #include "_autogen/ddgi_flax_update_irradiance.slang.h"
+#include "_autogen/ddgi_flax_debug_views.slang.h"
 #endif
 
 namespace demo
@@ -41,6 +42,15 @@ struct FlaxDDGIInitArgsPush
   uint32_t maxUpdatedProbesPerFrame{0};
 };
 static_assert(sizeof(FlaxDDGIInitArgsPush) == 2 * sizeof(uint32_t));
+
+struct FlaxGIDebugViewPush
+{
+  float sdfSlice{0.5f};
+  float exposure{1.0f};
+  uint32_t viewMask{0xffu};
+  uint32_t surfaceAtlasAvailable{0};
+};
+static_assert(sizeof(FlaxGIDebugViewPush) == 4 * sizeof(uint32_t));
 } // namespace
 
 FlaxDDGIPass::FlaxDDGIPass(GPUDrivenRenderer* renderer)
@@ -86,6 +96,12 @@ void FlaxDDGIPass::initResources(rhi::Device& device)
 			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
 			.debugName = "FlaxDDGI.Data",
 		});
+		m_debugReadbackBuffers[i] = device.createBuffer(rhi::BufferDesc{
+			.size = kDebugReadbackUintCount * sizeof(uint32_t),
+			.usage = rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+			.debugName = "FlaxDDGI.DebugReadback",
+		});
 	}
 
 	// --- Create texture views ---
@@ -123,6 +139,20 @@ void FlaxDDGIPass::initResources(rhi::Device& device)
   m_probesDistanceViewB = createTextureView(m_flaxResources->getProbesDistanceRead(0),
                                              rhi::TextureFormat::rg16Sfloat,
                                              rhi::TextureAspect::color, "FlaxDDGI.DistanceB.View");
+
+  m_debugAtlas = device.createTexture(rhi::TextureDesc{
+    .dimension = rhi::TextureDimension::e2D,
+    .format = rhi::TextureFormat::rgba8Unorm,
+    .usage = rhi::TextureUsageFlags::storage | rhi::TextureUsageFlags::sampled
+           | rhi::TextureUsageFlags::transferDst,
+    .extent = {kDebugAtlasWidth, kDebugAtlasHeight, 1u},
+    .mipLevels = 1u,
+    .arrayLayers = 1u,
+    .memoryUsage = rhi::MemoryUsage::gpuOnly,
+    .debugName = "FlaxDDGI.DebugAtlas",
+  });
+  m_debugAtlasView = createTextureView(m_debugAtlas, rhi::TextureFormat::rgba8Unorm,
+                                       rhi::TextureAspect::color, "FlaxDDGI.DebugAtlas.View");
 
   // The classify and trace layouts both require a sampler. Own a valid
   // linear-clamp sampler for the full Flax pass lifetime so argument-table
@@ -214,6 +244,19 @@ void FlaxDDGIPass::initResources(rhi::Device& device)
 		bindings.push_back({4, rhi::ArgumentType::storageBuffer, rhi::ShaderStage::compute, 1});
 		bindings.push_back({5, rhi::ArgumentType::storageBuffer, rhi::ShaderStage::compute, 1});
 		m_irradianceLayout = device.createArgumentLayout({bindings.data(), static_cast<uint32_t>(bindings.size()), "FlaxDDGI.Irradiance"});
+	}
+
+	{
+		std::vector<rhi::ArgumentBinding> bindings;
+		bindings.push_back({0, rhi::ArgumentType::storageTexture, rhi::ShaderStage::compute, 1});
+		for(uint32_t binding = 1; binding <= 7; ++binding)
+		{
+			bindings.push_back({binding, rhi::ArgumentType::sampledTexture, rhi::ShaderStage::compute, 1});
+		}
+		bindings.push_back({8, rhi::ArgumentType::sampler, rhi::ShaderStage::compute, 1});
+		bindings.push_back({9, rhi::ArgumentType::storageBuffer, rhi::ShaderStage::compute, 1});
+		m_debugViewsLayout = device.createArgumentLayout({
+			bindings.data(), static_cast<uint32_t>(bindings.size()), "FlaxDDGI.DebugViews"});
 	}
 
   // --- Argument tables ---
@@ -383,6 +426,19 @@ void FlaxDDGIPass::initResources(rhi::Device& device)
 	writeBufferRW(m_irradianceTable, 4, m_flaxResources->getActiveProbes(0));
 	writeUniformBuffer(m_irradianceTable, 5, m_ddgiUniformBuffers[0], ddgiUBOSize);
 
+	m_debugViewsTable = device.createArgumentTable(m_debugViewsLayout);
+	writeTextureRW(m_debugViewsTable, 0, m_debugAtlasView);
+	writeTextureRO(m_debugViewsTable, 1, m_traceSDFView);
+	writeTextureRO(m_debugViewsTable, 2, m_traceAlbedoView);
+	writeTextureRO(m_debugViewsTable, 3, m_probesDataView);
+	writeTextureRO(m_debugViewsTable, 4, m_probesTraceView);
+	writeTextureRO(m_debugViewsTable, 5, m_probesDistanceViewA);
+	writeTextureRO(m_debugViewsTable, 6, m_probesIrradianceViewA);
+	writeTextureRO(m_debugViewsTable, 7,
+	               m_atlasLightingView.isNull() ? m_probesIrradianceViewA : m_atlasLightingView);
+	writeSampler(m_debugViewsTable, 8, m_fallbackSampler);
+	writeUniformBuffer(m_debugViewsTable, 9, m_ddgiUniformBuffers[0], ddgiUBOSize);
+
 	// --- Pipelines ---
 #ifdef USE_SLANG
   const auto createPipeline = [&](const uint32_t* spirv, size_t wordCount, const char* entryPoint,
@@ -411,11 +467,13 @@ void FlaxDDGIPass::initResources(rhi::Device& device)
   m_traceRaysPipeline = createPipeline(ddgi_flax_trace_rays_slang, std::size(ddgi_flax_trace_rays_slang), "CS_TraceRays", m_traceRaysLayout, 0, 0x1004u);
   m_distancePipeline = createPipeline(ddgi_flax_update_distance_slang, std::size(ddgi_flax_update_distance_slang), "CS_UpdateDistance", m_distanceLayout, 0, 0x1005u);
   m_irradiancePipeline = createPipeline(ddgi_flax_update_irradiance_slang, std::size(ddgi_flax_update_irradiance_slang), "CS_UpdateIrradiance", m_irradianceLayout, 0, 0x1006u);
+  m_debugViewsPipeline = createPipeline(ddgi_flax_debug_views_slang, std::size(ddgi_flax_debug_views_slang), "CS_FlaxGIDebugViews", m_debugViewsLayout, sizeof(FlaxGIDebugViewPush), 0x1007u);
 #endif
 
   m_pipelinesCreated = true;
+  m_debugTextureId = m_renderer->registerDebugTexture(m_fallbackSampler, m_debugAtlasView);
 
-  LOGI("FlaxDDGIPass initialized: %u cascades, %u max probes, %u max batches, 6 pipelines",
+  LOGI("FlaxDDGIPass initialized: %u cascades, %u max probes, %u max batches, 7 pipelines + debug atlas",
        m_flaxResources->getCascadeCount(),
        m_flaxResources->getMaxProbesPerCascade(),
        m_flaxResources->getMaxBatchesPerCascade());
@@ -426,6 +484,12 @@ void FlaxDDGIPass::shutdownResources()
   m_pipelinesCreated = false;
   m_textureLayoutsInitialized = false;
   if (!m_device) { m_flaxResources = nullptr; return; }
+
+  if(m_debugTextureId != 0 && m_renderer != nullptr)
+  {
+    m_renderer->unregisterDebugTexture(m_debugTextureId);
+    m_debugTextureId = 0;
+  }
 
   auto destroyPipeline = [&](rhi::PipelineHandle& h) { if (!h.isNull()) m_device->destroyPipeline(h); h = {}; };
   auto destroyTable = [&](rhi::ArgumentTableHandle& h) { if (!h.isNull()) m_device->destroyArgumentTable(h); h = {}; };
@@ -438,6 +502,7 @@ void FlaxDDGIPass::shutdownResources()
   destroyPipeline(m_traceRaysPipeline);
   destroyPipeline(m_distancePipeline);
   destroyPipeline(m_irradiancePipeline);
+  destroyPipeline(m_debugViewsPipeline);
 
   destroyTable(m_classifyTable);
   destroyTable(m_initArgsTable);
@@ -445,6 +510,7 @@ void FlaxDDGIPass::shutdownResources()
   destroyTable(m_traceRaysTable);
   destroyTable(m_distanceTable);
   destroyTable(m_irradianceTable);
+  destroyTable(m_debugViewsTable);
 
   destroyLayout(m_classifyLayout);
   destroyLayout(m_initArgsLayout);
@@ -452,6 +518,7 @@ void FlaxDDGIPass::shutdownResources()
   destroyLayout(m_traceRaysLayout);
   destroyLayout(m_distanceLayout);
   destroyLayout(m_irradianceLayout);
+  destroyLayout(m_debugViewsLayout);
 
   destroyView(m_probesDataView);
   destroyView(m_probesTraceView);
@@ -464,14 +531,27 @@ void FlaxDDGIPass::shutdownResources()
 	destroyView(m_atlasDepthView);
 	destroyView(m_atlasLightingView);
 	destroyView(m_traceAlbedoView);
+	destroyView(m_debugAtlasView);
+	if(!m_debugAtlas.isNull())
+	{
+		m_device->destroyTexture(m_debugAtlas);
+		m_debugAtlas = {};
+	}
 
 	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i)
 	{
 		if (!m_ddgiUniformBuffers[i].isNull()) m_device->destroyBuffer(m_ddgiUniformBuffers[i]);
+		if (!m_debugReadbackBuffers[i].isNull()) m_device->destroyBuffer(m_debugReadbackBuffers[i]);
 		m_ddgiUniformBuffers[i] = {};
+		m_debugReadbackBuffers[i] = {};
+		m_debugReadbackSourceFrames[i] = 0;
 	}
 	if (!m_fallbackSampler.isNull()) { m_device->destroySampler(m_fallbackSampler); m_fallbackSampler = {}; }
 
+	m_debugSnapshot = {};
+	m_debugAtlasSourceFrame = 0;
+	m_consumedResetRequestId = 0;
+	m_consumedRunToStageRequestId = 0;
 	m_flaxResources = nullptr;
   m_device = nullptr;
 }
@@ -613,25 +693,143 @@ void FlaxDDGIPass::bindFlaxHistoryParity(uint32_t parity) const
   writeTexture(m_distanceTable, 5, rhi::ArgumentType::sampledTexture, distanceRead);
   writeTexture(m_irradianceTable, 2, rhi::ArgumentType::storageTexture, irradianceWrite);
   writeTexture(m_irradianceTable, 3, rhi::ArgumentType::sampledTexture, irradianceRead);
+  writeTexture(m_debugViewsTable, 5, rhi::ArgumentType::sampledTexture, distanceWrite);
+  writeTexture(m_debugViewsTable, 6, rhi::ArgumentType::sampledTexture, irradianceWrite);
+}
+
+FlaxGIDebugViewSet FlaxDDGIPass::getDebugViewSet() const
+{
+  return FlaxGIDebugViewSet{
+    .textureId = m_debugTextureId,
+    .atlasWidth = kDebugAtlasWidth,
+    .atlasHeight = kDebugAtlasHeight,
+    .columns = 4u,
+    .rows = 2u,
+    .sourceFrame = m_debugAtlasSourceFrame,
+  };
+}
+
+void FlaxDDGIPass::markDebugStage(FlaxGIDebugStage stage, FlaxGIDebugStageState state,
+                                  uint64_t frame, std::string_view reason) const
+{
+  const size_t index = static_cast<size_t>(stage);
+  if(index >= m_debugSnapshot.stages.size()) return;
+  FlaxGIDebugStageStatus& status = m_debugSnapshot.stages[index];
+  status.state = state;
+  status.lastExecutedFrame = frame;
+  status.outputVersion = frame;
+  status.reason = reason;
+}
+
+void FlaxDDGIPass::readDebugTelemetry(uint32_t frameIndex, uint32_t maximumProbeCount,
+                                      uint32_t maximumUpdatedProbesPerFrame) const
+{
+  if(m_device == nullptr || frameIndex >= kMaxFramesInFlight
+     || m_debugReadbackSourceFrames[frameIndex] == 0
+     || m_debugReadbackBuffers[frameIndex].isNull())
+  {
+    return;
+  }
+
+  const auto* words = static_cast<const uint32_t*>(m_device->mapBuffer(m_debugReadbackBuffers[frameIndex]));
+  if(words == nullptr) return;
+
+  FlaxGIDebugTelemetry telemetry{};
+  telemetry.sourceFrame = m_debugReadbackSourceFrames[frameIndex];
+  telemetry.gpuReadbackValid = true;
+  telemetry.classifiedActiveProbeCount = words[0];
+  telemetry.activeProbeCountValid = isFlaxGIActiveProbeCountValid(words[0], maximumProbeCount);
+  telemetry.expectedDispatch = computeFlaxGIIndirectDispatch(
+    words[0], maximumProbeCount, maximumUpdatedProbesPerFrame);
+  telemetry.actualDispatch = FlaxGIIndirectDispatch{
+    .activeProbeCount = telemetry.expectedDispatch.activeProbeCount,
+    .trace = {words[1], words[2], words[3]},
+    .distance = {words[4], words[5], words[6]},
+    .irradiance = {words[7], words[8], words[9]},
+  };
+  telemetry.indirectArgsValid = telemetry.actualDispatch == telemetry.expectedDispatch;
+  m_debugSnapshot.telemetry = telemetry;
+  markDebugStage(FlaxGIDebugStage::classify,
+                 telemetry.activeProbeCountValid ? FlaxGIDebugStageState::valid
+                                                 : FlaxGIDebugStageState::invalid,
+                 telemetry.sourceFrame,
+                 telemetry.activeProbeCountValid ? std::string_view{}
+                                                 : std::string_view{"Probe volume exists but Classify produced no active probes"});
+  markDebugStage(FlaxGIDebugStage::initArgs,
+                 telemetry.indirectArgsValid ? FlaxGIDebugStageState::valid
+                                             : FlaxGIDebugStageState::invalid,
+                 telemetry.sourceFrame,
+                 telemetry.indirectArgsValid ? std::string_view{}
+                                             : std::string_view{"Indirect dispatch does not match active probe count"});
+  m_device->unmapBuffer(m_debugReadbackBuffers[frameIndex]);
+}
+
+void FlaxDDGIPass::recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex,
+                                       uint64_t sourceFrame) const
+{
+  if(frameIndex >= kMaxFramesInFlight || m_debugReadbackBuffers[frameIndex].isNull()) return;
+
+  cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::transfer, rhi::HazardFlags::bufferWrites);
+  rhi::ComputeEncoder* copy = cmd.beginComputePass();
+  copy->copyBuffer(m_flaxResources->getActiveProbes(0), 0,
+                   m_debugReadbackBuffers[frameIndex], 0, sizeof(uint32_t));
+  copy->copyBuffer(m_flaxResources->getUpdateProbesInitArgs(), 0,
+                   m_debugReadbackBuffers[frameIndex], sizeof(uint32_t),
+                   9u * sizeof(uint32_t));
+  cmd.endEncoding();
+  m_debugReadbackSourceFrames[frameIndex] = sourceFrame;
+}
+
+void FlaxDDGIPass::executeDebugViews(rhi::CommandBuffer& cmd, const PassContext& context) const
+{
+  if(context.params == nullptr || !context.params->debugOptions.flaxGIDebugOverlayEnabled
+     || m_debugViewsPipeline.isNull() || m_debugViewsTable.isNull()) return;
+
+  const FlaxGIDebugViewPush push{
+    .sdfSlice = glm::clamp(context.params->debugOptions.flaxGIDebugSDFSlice, 0.0f, 1.0f),
+    .exposure = std::max(context.params->debugOptions.flaxGIDebugExposure, 0.001f),
+    .viewMask = context.params->debugOptions.flaxGIDebugViewMask,
+    .surfaceAtlasAvailable = 0u, // Surface Atlas raster path is not implemented yet.
+  };
+
+  cmd.beginEvent("DDGI.DebugViews");
+  rhi::ComputeEncoder* enc = cmd.beginComputePass();
+  enc->setPipeline(m_debugViewsPipeline);
+  enc->setArgumentTable(0, m_debugViewsTable);
+  enc->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+  enc->dispatch({(kDebugAtlasWidth + 7u) / 8u, (kDebugAtlasHeight + 7u) / 8u, 1u});
+  cmd.endEncoding();
+  cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader,
+              rhi::HazardFlags::textureWrites);
+  cmd.endEvent();
+  m_debugAtlasSourceFrame = m_renderer->getTemporalFrameCounter();
 }
 
 void FlaxDDGIPass::execute(const PassContext& context) const
 {
-  if (!m_renderer || !m_device || !m_flaxResources || !m_flaxResources->isInitialized() || !m_pipelinesCreated)
+  if (!m_renderer || !m_device || !m_flaxResources || !m_flaxResources->isInitialized()
+      || !m_pipelinesCreated || context.commandBuffer == nullptr)
+  {
     return;
+  }
 
   if (!m_renderer->isFlaxStyleDDGIRequested())
     return;
 
-  // Honor freeze/single-step controls (R10)
-  const auto& ddgiConfig = m_renderer->getDDGIConfig();
-  if (ddgiConfig.flaxGIFreeze && !ddgiConfig.flaxGISingleStep)
-    return;
+  const DDGIConfig& ddgiConfig = m_renderer->getDDGIConfig();
+  const DebugPassOptions* debugOptions = context.params != nullptr ? &context.params->debugOptions : nullptr;
+  const bool runToStageRequested = debugOptions != nullptr
+    && isNewFlaxGIDebugRequest(debugOptions->flaxGIRunToStageRequestId,
+                              m_consumedRunToStageRequestId);
+  const FlaxGIDebugStage stopAfterStage = runToStageRequested
+    ? debugOptions->flaxGIRunToStage
+    : FlaxGIDebugStage::updateIrradiance;
 
-  if (context.commandBuffer == nullptr)
+  if (ddgiConfig.flaxGIFreeze && !ddgiConfig.flaxGISingleStep && !runToStageRequested)
     return;
 
   rhi::CommandBuffer& cmd = *context.commandBuffer;
+  const uint64_t sourceFrame = m_renderer->getTemporalFrameCounter();
   cmd.beginEvent("FlaxDDGIPass");
 
   if (!m_textureLayoutsInitialized)
@@ -651,13 +849,14 @@ void FlaxDDGIPass::execute(const PassContext& context) const
         },
       };
     };
-    const std::array<rhi::TextureBarrier, 6> initBarriers{
+    const std::array<rhi::TextureBarrier, 7> initBarriers{
       makeInitBarrier(m_flaxResources->getProbesTrace()),
       makeInitBarrier(m_flaxResources->getProbesData()),
       makeInitBarrier(m_flaxResources->getProbesIrradianceWrite(0)),
       makeInitBarrier(m_flaxResources->getProbesIrradianceRead(0)),
       makeInitBarrier(m_flaxResources->getProbesDistanceWrite(0)),
       makeInitBarrier(m_flaxResources->getProbesDistanceRead(0)),
+      makeInitBarrier(m_debugAtlas),
     };
     cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()), nullptr, 0);
 
@@ -676,30 +875,26 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     cmd.clearColorTexture(m_flaxResources->getProbesDistanceRead(0), colorRange, zero);
     cmd.clearColorTexture(m_flaxResources->getProbesData(), colorRange,
                           {0.0f, 0.0f, 0.0f, -1.0f});
+    cmd.clearColorTexture(m_debugAtlas, colorRange, zero);
     cmd.barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
     m_textureLayoutsInitialized = true;
   }
 
-  // Handle probe reset — clear history atlases (R10)
-  if (context.params && context.params->debugOptions.flaxGIReset)
+  const bool resetRequested = debugOptions != nullptr
+    && isNewFlaxGIDebugRequest(debugOptions->flaxGIResetRequestId, m_consumedResetRequestId);
+  if (resetRequested)
   {
-	  m_probeUpdateOffset = 0u;
-    cmd.clearColorTexture(m_flaxResources->getProbesIrradianceWrite(0),
-                          {rhi::TextureAspect::color, 0, 1, 0, 1},
-                          {0.0f, 0.0f, 0.0f, 0.0f});
-    cmd.clearColorTexture(m_flaxResources->getProbesDistanceWrite(0),
-                          {rhi::TextureAspect::color, 0, 1, 0, 1},
-                          {0.0f, 0.0f, 0.0f, 0.0f});
-    cmd.clearColorTexture(m_flaxResources->getProbesIrradianceRead(0),
-                          {rhi::TextureAspect::color, 0, 1, 0, 1},
-                          {0.0f, 0.0f, 0.0f, 0.0f});
-    cmd.clearColorTexture(m_flaxResources->getProbesDistanceRead(0),
-                          {rhi::TextureAspect::color, 0, 1, 0, 1},
-                          {0.0f, 0.0f, 0.0f, 0.0f});
-    // Also reset probe data to inactive
-    cmd.clearColorTexture(m_flaxResources->getProbesData(),
-                          {rhi::TextureAspect::color, 0, 1, 0, 1},
+    m_consumedResetRequestId = debugOptions->flaxGIResetRequestId;
+    m_probeUpdateOffset = 0u;
+    const rhi::TextureSubresourceRange colorRange{
+      rhi::TextureAspect::color, 0, 1, 0, 1};
+    const rhi::ClearColorValue zero{0.0f, 0.0f, 0.0f, 0.0f};
+    cmd.clearColorTexture(m_flaxResources->getProbesIrradianceWrite(0), colorRange, zero);
+    cmd.clearColorTexture(m_flaxResources->getProbesDistanceWrite(0), colorRange, zero);
+    cmd.clearColorTexture(m_flaxResources->getProbesIrradianceRead(0), colorRange, zero);
+    cmd.clearColorTexture(m_flaxResources->getProbesDistanceRead(0), colorRange, zero);
+    cmd.clearColorTexture(m_flaxResources->getProbesData(), colorRange,
                           {0.0f, 0.0f, 0.0f, -1.0f});
     cmd.barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
@@ -707,16 +902,23 @@ void FlaxDDGIPass::execute(const PassContext& context) const
 
   const uint32_t cascadeCount = m_flaxResources->getCascadeCount();
   const uint32_t totalProbes = m_flaxResources->getMaxProbesPerCascade();
+  m_debugSnapshot.cascadeCount = cascadeCount;
+  m_debugSnapshot.implementedCascadeCount = std::min(cascadeCount, 1u);
+  m_debugSnapshot.totalProbes = totalProbes;
+  m_debugSnapshot.raysPerProbe = ddgiConfig.raysPerProbe;
+  m_debugSnapshot.surfaceAtlasSampledByTrace = false;
 
   if (totalProbes == 0 || cascadeCount == 0)
   {
+    markDebugStage(FlaxGIDebugStage::cascadeLayout, FlaxGIDebugStageState::invalid,
+                   sourceFrame, "No allocated Flax probe cascade");
     cmd.endEvent();
     return;
   }
 
-  // Classification appends into ActiveProbes. Reset its counter every frame;
-  // otherwise the indirect trace count grows without bound and reads beyond
-  // the probe-index storage on the second frame.
+  const uint32_t frameIndex = context.frameIndex % kMaxFramesInFlight;
+  readDebugTelemetry(frameIndex, totalProbes, ddgiConfig.maxUpdatedProbesPerFrame);
+
   const rhi::BufferHandle activeProbes = m_flaxResources->getActiveProbes(0);
   rhi::ComputeEncoder* clear = cmd.beginComputePass();
   clear->fillBuffer(activeProbes, 0, sizeof(uint32_t), 0u);
@@ -724,45 +926,86 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   cmd.barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
               rhi::HazardFlags::bufferWrites);
 
-	// Keep the per-frame SSBO write and descriptor selection on the same frame
-	// index. Binding buffer 0 permanently while rotating writes across 0/1/2
-	// leaves two out of every three frames reading stale FlaxDDGIData.
-	const uint32_t frameIndex = context.frameIndex % kMaxFramesInFlight;
-	const uint32_t historyParity =
-	  static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
-	if (!m_ddgiUniformBuffers[frameIndex].isNull())
-	{
-		writeFlaxDDGIDataToBuffer(frameIndex);
-		bindFlaxDDGIDataBuffer(frameIndex);
-		bindFlaxHistoryParity(historyParity);
-	}
-	else
-	{
-		LOGW("FlaxDDGIPass::execute: UBO buffer is null at index %u, skipping GI work", frameIndex);
-		cmd.endEvent();
-		return;
-	}
-
-  // --- DDGI.Classify (FGI-050) ---
+  const uint32_t historyParity = static_cast<uint32_t>(sourceFrame & 1u);
+  if (m_ddgiUniformBuffers[frameIndex].isNull())
   {
-    cmd.beginEvent("DDGI.Classify");
+    markDebugStage(FlaxGIDebugStage::cascadeLayout, FlaxGIDebugStageState::invalid,
+                   sourceFrame, "Per-frame FlaxDDGIData buffer is unavailable");
+    cmd.endEvent();
+    return;
+  }
+  writeFlaxDDGIDataToBuffer(frameIndex);
+  bindFlaxDDGIDataBuffer(frameIndex);
+  bindFlaxHistoryParity(historyParity);
+
+  if (runToStageRequested)
+  {
+    for (uint8_t value = static_cast<uint8_t>(FlaxGIDebugStage::classify);
+         value <= static_cast<uint8_t>(FlaxGIDebugStage::updateIrradiance); ++value)
+    {
+      const FlaxGIDebugStage stage = static_cast<FlaxGIDebugStage>(value);
+      if (!shouldExecuteFlaxGIStage(stage, stopAfterStage))
+      {
+        markDebugStage(stage, FlaxGIDebugStageState::pending, sourceFrame,
+                       "Stopped by Run To Stage");
+      }
+    }
+  }
+
+  const auto finishPass = [&](bool recordReadback, bool advanceProbeWindow)
+  {
+    executeDebugViews(cmd, context);
+    if (recordReadback)
+      recordDebugReadback(cmd, frameIndex, sourceFrame);
+    cmd.barrier(rhi::StageFlags::compute,
+                rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
+                rhi::HazardFlags::textureWrites | rhi::HazardFlags::bufferWrites);
+    cmd.endEvent();
+
+    if (advanceProbeWindow)
+    {
+      const uint32_t updateBudget = ddgiConfig.maxUpdatedProbesPerFrame == 0u
+        ? totalProbes
+        : std::min(ddgiConfig.maxUpdatedProbesPerFrame, totalProbes);
+      m_probeUpdateOffset = ddgiConfig.maxUpdatedProbesPerFrame == 0u
+        ? 0u : m_probeUpdateOffset + updateBudget;
+    }
+    if (ddgiConfig.flaxGISingleStep)
+      m_renderer->disarmFlaxSingleStep();
+  };
+
+  const auto stopAfter = [&](FlaxGIDebugStage stage, bool readbackAvailable)
+  {
+    markDebugStage(stage, FlaxGIDebugStageState::executed, sourceFrame);
+    if (!runToStageRequested || stopAfterStage != stage)
+      return false;
+    m_consumedRunToStageRequestId = debugOptions->flaxGIRunToStageRequestId;
+    finishPass(readbackAvailable, stage == FlaxGIDebugStage::updateIrradiance);
+    return true;
+  };
+
+  if (!shouldExecuteFlaxGIStage(FlaxGIDebugStage::classify, stopAfterStage))
+  {
+    m_consumedRunToStageRequestId = debugOptions->flaxGIRunToStageRequestId;
+    finishPass(false, false);
+    return;
+  }
+
+  cmd.beginEvent("DDGI.Classify");
+  {
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
     enc->setPipeline(m_classifyPipeline);
     enc->setArgumentTable(0, m_classifyTable);
-
-    // One thread per probe across all cascades (each probe maps to one texel in ProbesData)
-    const uint32_t groupsX = (totalProbes + 31u) / 32u;
-    enc->dispatch({groupsX, 1, 1});
-
+    enc->dispatch({(totalProbes + 31u) / 32u, 1, 1});
     cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites | rhi::HazardFlags::bufferWrites);
-    cmd.endEvent();
   }
+  cmd.endEvent();
+  if (stopAfter(FlaxGIDebugStage::classify, false)) return;
 
-  // --- DDGI.InitArgs (FGI-051) ---
+  cmd.beginEvent("DDGI.InitArgs");
   {
-    cmd.beginEvent("DDGI.InitArgs");
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
     enc->setPipeline(m_initArgsPipeline);
     enc->setArgumentTable(0, m_initArgsTable);
@@ -771,108 +1014,70 @@ void FlaxDDGIPass::execute(const PassContext& context) const
       .maxUpdatedProbesPerFrame = ddgiConfig.maxUpdatedProbesPerFrame,
     };
     enc->setRootConstants(kPrimaryRootConstantsSlot, &initArgs, sizeof(initArgs));
-
-    // Single group of 1 thread (reads counter, writes dispatch args)
     enc->dispatch({1, 1, 1});
-
     cmd.endEncoding();
-    cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute | rhi::StageFlags::commandInput,
+    cmd.barrier(rhi::StageFlags::compute,
+                rhi::StageFlags::compute | rhi::StageFlags::commandInput,
                 rhi::HazardFlags::bufferWrites);
-    cmd.endEvent();
   }
+  cmd.endEvent();
+  if (stopAfter(FlaxGIDebugStage::initArgs, true)) return;
 
-  // --- DDGI.UpdateInactive (FGI-052) ---
+  cmd.beginEvent("DDGI.UpdateInactive");
   {
-    cmd.beginEvent("DDGI.UpdateInactive");
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
     enc->setPipeline(m_updateInactivePipeline);
     enc->setArgumentTable(0, m_updateInactiveTable);
-
-    // One thread per probe data texel
     const auto& dataExt = m_flaxResources->getDataExtent();
-    const uint32_t gx = (dataExt.width + 7u) / 8u;
-    const uint32_t gy = (dataExt.height + 7u) / 8u;
-    enc->dispatch({gx, gy, 1});
-
+    enc->dispatch({(dataExt.width + 7u) / 8u, (dataExt.height + 7u) / 8u, 1});
     cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
-    cmd.endEvent();
   }
+  cmd.endEvent();
+  if (stopAfter(FlaxGIDebugStage::updateInactive, true)) return;
 
-  // --- DDGI.TraceRays (FGI-053) ---
+  cmd.beginEvent("DDGI.TraceRays");
   {
-    cmd.beginEvent("DDGI.TraceRays");
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
     enc->setPipeline(m_traceRaysPipeline);
     enc->setArgumentTable(0, m_traceRaysTable);
-
-    // Dispatch: one group per active probe batch (256 probes per batch)
-    // Indirect dispatch reads InitArgs
-    rhi::DispatchIndirectDesc indirectDesc{
-      m_flaxResources->getUpdateProbesInitArgs(), kTraceIndirectOffset};
-    enc->dispatchIndirect(indirectDesc);
-
+    enc->dispatchIndirect({m_flaxResources->getUpdateProbesInitArgs(), kTraceIndirectOffset});
     cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
-    cmd.endEvent();
   }
+  cmd.endEvent();
+  if (stopAfter(FlaxGIDebugStage::traceRays, true)) return;
 
-  // --- DDGI.UpdateDistance (FGI-054) ---
+  cmd.beginEvent("DDGI.UpdateDistance");
   {
-    cmd.beginEvent("DDGI.UpdateDistance");
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
-		enc->setPipeline(m_distancePipeline);
-		enc->setArgumentTable(0, m_distanceTable);
-
-		rhi::DispatchIndirectDesc indirectDist{
-		  m_flaxResources->getUpdateProbesInitArgs(), kDistanceIndirectOffset};
-		enc->dispatchIndirect(indirectDist);
-
+    enc->setPipeline(m_distancePipeline);
+    enc->setArgumentTable(0, m_distanceTable);
+    enc->dispatchIndirect({m_flaxResources->getUpdateProbesInitArgs(), kDistanceIndirectOffset});
     cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
-    cmd.endEvent();
   }
+  cmd.endEvent();
+  if (stopAfter(FlaxGIDebugStage::updateDistance, true)) return;
 
-  // --- DDGI.UpdateIrradiance (FGI-055) ---
+  cmd.beginEvent("DDGI.UpdateIrradiance");
   {
-    cmd.beginEvent("DDGI.UpdateIrradiance");
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
-		enc->setPipeline(m_irradiancePipeline);
-		enc->setArgumentTable(0, m_irradianceTable);
-
-		rhi::DispatchIndirectDesc indirectIrr{
-		  m_flaxResources->getUpdateProbesInitArgs(), kIrradianceIndirectOffset};
-		enc->dispatchIndirect(indirectIrr);
-
+    enc->setPipeline(m_irradiancePipeline);
+    enc->setArgumentTable(0, m_irradianceTable);
+    enc->dispatchIndirect({m_flaxResources->getUpdateProbesInitArgs(), kIrradianceIndirectOffset});
     cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::textureWrites);
-    cmd.endEvent();
   }
-
-  // Final barrier: Flax atlases → future compute/fragment reads (lighting pass R8)
-  cmd.barrier(rhi::StageFlags::compute,
-              rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
-              rhi::HazardFlags::textureWrites | rhi::HazardFlags::bufferWrites);
-
-  cmd.endEvent(); // FlaxDDGIPass
-
-	const uint32_t updateBudget = ddgiConfig.maxUpdatedProbesPerFrame == 0u
-	  ? totalProbes
-	  : std::min(ddgiConfig.maxUpdatedProbesPerFrame, totalProbes);
-	if (totalProbes > 0u)
-	{
-	  m_probeUpdateOffset = (m_probeUpdateOffset + updateBudget) % totalProbes;
-	}
-
-  // Disarm single-step after one frame
-  if (ddgiConfig.flaxGISingleStep)
-  {
-    m_renderer->disarmFlaxSingleStep();
-  }
+  cmd.endEvent();
+  markDebugStage(FlaxGIDebugStage::updateIrradiance, FlaxGIDebugStageState::executed, sourceFrame);
+  if (runToStageRequested)
+    m_consumedRunToStageRequestId = debugOptions->flaxGIRunToStageRequestId;
+  finishPass(true, true);
 }
 
 } // namespace demo

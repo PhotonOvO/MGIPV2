@@ -160,7 +160,8 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     const uint32_t probeCount = probesPerCascade[c].x * probesPerCascade[c].y * probesPerCascade[c].z;
     rhi::BufferDesc desc{};
     desc.size = static_cast<uint64_t>(probeCount + 1) * sizeof(uint32_t);
-    desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst;
+    desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst
+               | rhi::BufferUsageFlags::transferSrc;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
     desc.allowIndirectArgument = true;
     desc.debugName = "FlaxDDGI.ActiveProbes";
@@ -175,7 +176,8 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     rhi::BufferDesc desc{};
     desc.size = static_cast<uint64_t>(cascadeCount)
               * m_maxBatchesPerCascade * passCount * 3 * sizeof(uint32_t);
-    desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect;
+    desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+               | rhi::BufferUsageFlags::transferSrc;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
     desc.allowIndirectArgument = true;
     desc.debugName = "FlaxDDGI.UpdateProbesInitArgs";

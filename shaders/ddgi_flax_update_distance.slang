@@ -23,14 +23,17 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     static const uint kGroupsPerProbe = kGroupsPerTileAxis * kGroupsPerTileAxis;
 
     uint activeSlot = groupId.x / kGroupsPerProbe;
-    uint activeCount = activeProbes[0];
-    if (activeSlot >= activeCount) return;
+    uint totalActiveCount = activeProbes[0];
+    uint updateCount = ddgi.updateParams.y == 0u
+        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
+    if (activeSlot >= updateCount || totalActiveCount == 0u) return;
 
     uint tileGroup = groupId.x % kGroupsPerProbe;
     uint2 tileBlock = uint2(tileGroup % kGroupsPerTileAxis, tileGroup / kGroupsPerTileAxis);
     uint2 localTexel = tileBlock * 8 + groupThreadId.xy;
 
-    uint probeIndex = activeProbes[1 + activeSlot];
+    uint selectedActiveSlot = (activeSlot + ddgi.updateParams.x) % totalActiveCount;
+    uint probeIndex = activeProbes[1 + selectedActiveSlot];
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
     uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
     uint2 probeTile = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
@@ -46,6 +49,8 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     }
 
     float sumDist = 0.0f;
+    float probesSpacing = ddgi.probesOriginAndSpacing[kCascadeIndex].w;
+    float distanceLimit = probesSpacing * 1.5f;
     float sumDist2 = 0.0f;
     float accumulatedWeight = 0.0f;
     float2 octahedralCoord = ((float2(localTexel) + 0.5f) / float(kTileSize)) * 2.0f - 1.0f;
@@ -55,12 +60,17 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     {
         float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
         float hitDist = traceData.w;
-        if (hitDist > 0.0f)
+        // Misses are -1; an immediate zero-distance hit is still an occluder.
+        // Counting it prevents an inside probe from falling back to rayMaxDistance.
+        if (hitDist >= 0.0f)
         {
             float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
             float rayWeight = saturate(dot(texelDirection, rayDirection));
-            sumDist += hitDist * rayWeight;
-            sumDist2 += hitDist * hitDist * rayWeight;
+            // Flax sharpens the directional lobe to preserve depth discontinuities.
+            rayWeight = pow(rayWeight, 10.0f);
+            float rayDistance = min(hitDist, distanceLimit);
+            sumDist += rayDistance * rayWeight;
+            sumDist2 += rayDistance * rayDistance * rayWeight;
             accumulatedWeight += rayWeight;
         }
     }
@@ -71,7 +81,9 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
         ? max(sumDist2 / accumulatedWeight - meanDist * meanDist, 0.0f) : 0.0f;
 
     float2 historyData = probesDistanceHist.Load(int3(texel, 0));
-    float historyWeight = state == kDDGIProbeStateActivated ? 0.0f : ddgi.probeHistoryWeight;
+    bool historyValid = any(historyData > float2(0.0f, 0.0f));
+    float historyWeight = (state == kDDGIProbeStateActivated || !historyValid)
+        ? 0.0f : ddgi.probeHistoryWeight;
     float historyMeanDistance = historyData.x * ddgi.rayMaxDistance;
     meanDist = lerp(meanDist, historyMeanDistance, historyWeight);
     varDist = lerp(varDist, historyData.y, historyWeight);

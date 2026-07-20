@@ -616,7 +616,7 @@ vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
 vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 {
     FlaxDDGIData ddgi = buildFlaxDDGIData(lighting);
-    float normalBias = lighting.light.lightColorAndNormalBias.w;
+    float normalBias = lighting.light.ddgiFlaxFallbackIrradiance.w;
     float cascadeBlendDist = kDDGICascadeBlendSize;
 
     return sampleFlaxDDGIIrradiance(

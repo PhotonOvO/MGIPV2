@@ -10,6 +10,8 @@
 static const uint kDDGIProbeStateInactive   = 0;
 static const uint kDDGIProbeStateActivated  = 1;
 static const uint kDDGIProbeStateActive     = 2;
+static const uint kDDGIProbeIrradianceResolution = 6;
+static const uint kDDGIProbeDistanceResolution   = 14;
 static const float kDDGIProbeAttentionMin   = 0.02f;
 static const float kDDGIProbeAttentionMax   = 0.98f;
 static const float kDDGICascadeBlendSize    = 2.0f;
@@ -35,6 +37,20 @@ float3 flaxOctahedralDecode(float2 encoded)
         direction.xy = (1.0f - abs(direction.yx)) * signs;
     }
     return normalize(direction);
+}
+
+float2 flaxOctahedralEncode(float3 direction)
+{
+    direction = normalize(direction);
+    float l1 = abs(direction.x) + abs(direction.y) + abs(direction.z);
+    float2 encoded = direction.xy / max(l1, 0.0001f);
+    if (direction.z < 0.0f)
+    {
+        float2 signs = float2(direction.x >= 0.0f ? 1.0f : -1.0f,
+                              direction.y >= 0.0f ? 1.0f : -1.0f);
+        encoded = (1.0f - abs(encoded.yx)) * signs;
+    }
+    return encoded;
 }
 
 // --- Probe index / coordinate math ---
@@ -71,6 +87,22 @@ uint getScrollingProbeIndex(FlaxDDGIData ddgi, uint cascadeIndex, uint3 probeCoo
     int3 offset = int3(ddgi.probesCounts) + ddgi.probesScrollOffsets[cascadeIndex].xyz;
     uint3 scrolled = (probeCoords + uint3(offset)) % ddgi.probesCounts;
     return getProbeIndex(ddgi, scrolled);
+}
+
+// ProbeData packs physical (scrolled) coordinates as
+// X = probeX + probeY * countX, Y = cascade * countZ + probeZ.
+// Fallback coordinates are stored in logical grid space, so undo scrolling.
+uint3 getLogicalProbeCoordsFromDataTexel(
+    FlaxDDGIData ddgi, uint cascadeIndex, uint2 texelCoord)
+{
+    int3 counts = int3(ddgi.probesCounts);
+    int3 scrolledCoords = int3(
+        texelCoord.x % ddgi.probesCounts.x,
+        texelCoord.x / ddgi.probesCounts.x,
+        texelCoord.y % ddgi.probesCounts.z);
+    int3 logicalCoords = (scrolledCoords - ddgi.probesScrollOffsets[cascadeIndex].xyz) % counts;
+    logicalCoords = (logicalCoords + counts) % counts;
+    return uint3(logicalCoords);
 }
 
 float3 getProbeWorldPosition(FlaxDDGIData ddgi, uint cascadeIndex, uint3 probeCoords)
@@ -123,9 +155,12 @@ uint3 decodeFallbackCoords(float3 data)
     return uint3(data * 128.0f - 1.0f);
 }
 
-bool fallbackCoordsValid(float3 data)
+bool fallbackCoordsValid(FlaxDDGIData ddgi, float3 data)
 {
-    return length(data) > 0.0f;
+    if (any(data <= float3(0,0,0)))
+        return false;
+    uint3 coords = decodeFallbackCoords(data);
+    return all(coords < ddgi.probesCounts);
 }
 
 // --- Texture UV helpers ---
@@ -180,6 +215,7 @@ float3 sampleFlaxDDGIIrradianceCascade(
     // Trilinear interpolation over 8 nearest probes
     float3 irradiance = float3(0,0,0);
     float totalWeight = 0.0f;
+    float2 surfaceNormalOct = flaxOctahedralEncode(worldNormal);
 
     for (uint i = 0; i < 8; i++)
     {
@@ -199,46 +235,58 @@ float3 sampleFlaxDDGIIrradianceCascade(
         // Inactive probe -> use fallback
         if (state == kDDGIProbeStateInactive)
         {
+            if (!fallbackCoordsValid(ddgi, probeData.xyz))
+                continue;
+
             uint3 fallbackCoords = decodeFallbackCoords(probeData.xyz);
-            if (fallbackCoordsValid(probeData.xyz))
-            {
-                probeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, fallbackCoords);
-                texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
-                probeData = probesData.Load(int3(texelCoord, 0));
-            }
+            probeCoords = fallbackCoords;
+            probeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
+            texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
+            probeData = probesData.Load(int3(texelCoord, 0));
+            if (decodeProbeState(probeData) == kDDGIProbeStateInactive)
+                continue;
         }
 
         // Decode real probe position and compute visibility
         float3 probeWorldPos = decodeProbePosition(ddgi, probeData, cascadeIndex, probeIndex, probeCoords);
-        float3 toProbe = probeWorldPos - worldPosition;
-        float distToProbe = length(toProbe);
-        float3 probeDir = toProbe / max(distToProbe, 0.0001f);
+        float3 pointToProbe = probeWorldPos - biasedWorldPosition;
+        float distToProbe = length(pointToProbe);
+        float3 pointToProbeDir = pointToProbe / max(distToProbe, 0.0001f);
+        float3 probeToPointDir = -pointToProbeDir;
+        float2 probeToPointOct = flaxOctahedralEncode(probeToPointDir);
 
-        // Back-face test
-        float backFaceWeight = saturate(dot(probeDir, worldNormal) + 0.2f);
+        // Preserve smooth wrap shading near the tangent plane, but reject
+        // probes far behind the receiving surface. Tiny back-face weights can
+        // otherwise dominate after normalization when visibility is invalid.
+        float normalAlignment = dot(pointToProbeDir, worldNormal);
+        float surfaceSideWeight = smoothstep(-0.35f, 0.0f, normalAlignment);
+        float wrapShading = max(
+            0.0001f, (normalAlignment + 1.0f) * 0.5f);
+        float backFaceWeight = max(0.1f, wrapShading * wrapShading);
+        const float minWeightThreshold = 0.2f;
+        if (backFaceWeight < minWeightThreshold)
+            backFaceWeight *= (backFaceWeight * backFaceWeight) /
+                (minWeightThreshold * minWeightThreshold);
+        backFaceWeight *= surfaceSideWeight;
+
 
         // Distance visibility (simplified — full version uses moments)
-        float distVis = 1.0f;
         float2 probeUV = getProbeUV(ddgi, cascadeIndex, probeIndex,
-                                     float2(0,0), 6); // irradiance res
-        float4 distData = probesDistance.SampleLevel(probeUV, 0);
-        float meanDist = distData.x * ddgi.rayMaxDistance;
-        if (distToProbe > meanDist * 1.5f)
-            distVis = 0.2f;
+                                     probeToPointOct, kDDGIProbeDistanceResolution);
+        float2 distanceMoments = probesDistance.SampleLevel(probeUV, 0).xy;
+        float meanDistance = distanceMoments.x * ddgi.rayMaxDistance;
+        float variance = max(distanceMoments.y, 0.0001f);
+        float visibilityDelta = max(distToProbe - meanDistance, 0.0f);
+        float chebyshevWeight = variance /
+            (variance + visibilityDelta * visibilityDelta);
+        chebyshevWeight =
+            chebyshevWeight * chebyshevWeight * chebyshevWeight;
+        float distVis = distToProbe <= meanDistance ? 1.0f : chebyshevWeight;
 
-        // Sample irradiance
-        float3 probeDirLocal = probeDir;
-        // Octahedral encode probeDir -> UV
-        float l1 = abs(probeDirLocal.x) + abs(probeDirLocal.y) + abs(probeDirLocal.z);
-        float2 oct = probeDirLocal.xy / l1;
-        if (probeDirLocal.z < 0.0f)
-        {
-            float sx = probeDirLocal.x >= 0.0f ? 1.0f : -1.0f;
-            float sy = probeDirLocal.y >= 0.0f ? 1.0f : -1.0f;
-            oct = (float2(1,1) - abs(oct.yx)) * float2(sx, sy);
-        }
-
-        float2 irrUV = getProbeUV(ddgi, cascadeIndex, probeIndex, oct, 6);
+        // Irradiance is directional over the receiving surface normal, while
+        // the distance moments above are directional from probe to point.
+        float2 irrUV = getProbeUV(ddgi, cascadeIndex, probeIndex, surfaceNormalOct,
+                                  kDDGIProbeIrradianceResolution);
         float3 irrSample = probesIrradiance.SampleLevel(irrUV, 0).rgb;
         irrSample = pow(irrSample, ddgi.irradianceGamma); // gamma decode
 

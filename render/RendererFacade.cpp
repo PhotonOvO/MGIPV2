@@ -173,6 +173,15 @@ namespace demo
 	{
 		return gpuDriven().getFlaxGIDebugStatus();
 	}
+	FlaxGIDebugSnapshot RendererFacade::getFlaxGIDebugSnapshot() const
+	{
+		return gpuDriven().getFlaxGIDebugSnapshot();
+	}
+
+	FlaxGIDebugViewSet RendererFacade::getFlaxGIDebugViewSet() const
+	{
+		return gpuDriven().getFlaxGIDebugViewSet();
+	}
 
 	const shaderio::GPUCullStats& RendererFacade::getLastGPUCullingStats() const
 	{

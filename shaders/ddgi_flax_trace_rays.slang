@@ -67,10 +67,13 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
 void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     uint batchIndex = dispatchThreadId.x;
-    uint activeCount = activeProbes[0];
-    if (batchIndex >= activeCount) return;
+    uint totalActiveCount = activeProbes[0];
+    uint updateCount = ddgi.updateParams.y == 0u
+        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
+    if (batchIndex >= updateCount || totalActiveCount == 0u) return;
 
-    uint probeIndex = activeProbes[1 + batchIndex];
+    uint selectedActiveSlot = (batchIndex + ddgi.updateParams.x) % totalActiveCount;
+    uint probeIndex = activeProbes[1 + selectedActiveSlot];
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
     uint cascadeIndex = 0; // TODO: parameterize from dispatch
     uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
@@ -92,7 +95,7 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
 	sdfConfig.maxEncodeDistance = max(max(sdfExtent.x, sdfExtent.y), sdfExtent.z);
 	sdfConfig.resolution = ddgi.sdfBoundsMaxAndRes.w;
 	sdfConfig.stepScale = 1.0f;
-	sdfConfig.maxSteps = 64;
+	sdfConfig.maxSteps = 128;
 
     GlobalSurfaceAtlasData atlasData;
     atlasData.viewPos = ddgi.viewPos;

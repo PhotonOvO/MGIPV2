@@ -52,7 +52,10 @@ namespace demo
 		// (2)): index = frame parity, view = that parity's WRITE atlas (the
 		// one the probe update produced this frame; DDGIProbeVolume contract).
 		std::array<rhi::TextureViewHandle, 2> m_irradianceViews{};
+		rhi::TextureViewHandle m_probeDataView{};
 		rhi::SamplerHandle m_sampler{};
+		bool m_usesFlaxResources{false};
+		uint32_t m_visualizedProbeCount{0};
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};

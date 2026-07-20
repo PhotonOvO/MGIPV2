@@ -21,10 +21,13 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
     static const uint kTileSize = 8;
 
     uint activeSlot = groupId.x;
-    uint activeCount = activeProbes[0];
-    if (activeSlot >= activeCount) return;
+    uint totalActiveCount = activeProbes[0];
+    uint updateCount = ddgi.updateParams.y == 0u
+        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
+    if (activeSlot >= updateCount || totalActiveCount == 0u) return;
 
-    uint probeIndex = activeProbes[1 + activeSlot];
+    uint selectedActiveSlot = (activeSlot + ddgi.updateParams.x) % totalActiveCount;
+    uint probeIndex = activeProbes[1 + selectedActiveSlot];
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
     uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
     uint2 probeTile = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
@@ -60,7 +63,9 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
     float3 irradiance = accumulatedWeight > 0.0f
         ? accumulated / accumulatedWeight : float3(0, 0, 0);
     float4 historyIrradiance = probesIrradianceHist.Load(int3(texel, 0));
-    float historyWeight = state == kDDGIProbeStateActivated ? 0.0f : ddgi.probeHistoryWeight;
+    bool historyValid = historyIrradiance.a > 0.0f;
+    float historyWeight = (state == kDDGIProbeStateActivated || !historyValid)
+        ? 0.0f : ddgi.probeHistoryWeight;
     float3 historyLinear = pow(max(historyIrradiance.rgb, float3(0, 0, 0)),
                                ddgi.irradianceGamma);
     irradiance = lerp(irradiance, historyLinear, historyWeight);

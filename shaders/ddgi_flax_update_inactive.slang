@@ -28,47 +28,50 @@ void CS_UpdateInactive(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Only process inactive probes
     if (state != kDDGIProbeStateInactive) return;
 
-    // Jump-flood: check neighbors at increasing distances
-    // Iteration 0: check immediate neighbors (1px)
-    // Iteration 1: check distance 2 neighbors
-    // (Full version runs multiple passes with growing step sizes)
-
-    int step = 1; // step size grows each iteration (1, 2, 4, 8...)
+    // Search the 3D logical grid. The ProbeData texture is a scrolled 2D packing,
+    // so texture-neighbor coordinates are not valid fallback probe coordinates.
+    uint3 targetProbeCoords = getLogicalProbeCoordsFromDataTexel(ddgi, cascadeIndex, texel);
+    int3 probeCounts = int3(ddgi.probesCounts);
+    int step = 1;
     float bestDist = 9999.0f;
     float3 bestFallback = float3(0,0,0);
 
-    for (int dy = -step; dy <= step; dy += step)
+    for (int dz = -step; dz <= step; dz += step)
     {
-        for (int dx = -step; dx <= step; dx += step)
+        for (int dy = -step; dy <= step; dy += step)
         {
-            if (dx == 0 && dy == 0) continue;
-            int2 neighborCoord = int2(texel) + int2(dx, dy);
-            if (neighborCoord.x < 0 || neighborCoord.x >= int(probesPerRow) ||
-                neighborCoord.y < 0 || neighborCoord.y >= int(ddgi.probesCounts.z * ddgi.cascadesCount))
-                continue;
-
-            float4 neighborData = probesData[neighborCoord];
-            uint neighborState = decodeProbeState(neighborData);
-
-            if (neighborState != kDDGIProbeStateInactive)
+            for (int dx = -step; dx <= step; dx += step)
             {
-                float dist = length(float2(dx, dy));
-                if (dist < bestDist)
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+
+                int3 neighborCoords = int3(targetProbeCoords) + int3(dx, dy, dz);
+                if (any(neighborCoords < int3(0,0,0)) || any(neighborCoords >= probeCounts))
+                    continue;
+
+                uint3 neighborProbeCoords = uint3(neighborCoords);
+                uint neighborProbeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, neighborProbeCoords);
+                uint2 neighborTexel = getProbeTexelCoords(ddgi, cascadeIndex, neighborProbeIndex);
+                float4 neighborData = probesData[neighborTexel];
+                uint neighborState = decodeProbeState(neighborData);
+
+                if (neighborState != kDDGIProbeStateInactive)
                 {
-                    bestDist = dist;
-                    bestFallback = float3(neighborCoord.x, neighborCoord.y % ddgi.probesCounts.z,
-                                          neighborCoord.y / ddgi.probesCounts.z);
+                    float dist = length(float3(neighborProbeCoords) - float3(targetProbeCoords));
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestFallback = encodeFallbackCoords(neighborProbeCoords);
+                    }
                 }
-            }
-            else if (fallbackCoordsValid(neighborData.xyz))
-            {
-                uint3 fb = decodeFallbackCoords(neighborData.xyz);
-                float dist = length(float3(fb) - float3(texel.x, texel.y % ddgi.probesCounts.z,
-                                                         texel.y / ddgi.probesCounts.z));
-                if (dist < bestDist)
+                else if (fallbackCoordsValid(ddgi, neighborData.xyz))
                 {
-                    bestDist = dist;
-                    bestFallback = neighborData.xyz;
+                    uint3 fallbackCoords = decodeFallbackCoords(neighborData.xyz);
+                    float dist = length(float3(fallbackCoords) - float3(targetProbeCoords));
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestFallback = neighborData.xyz;
+                    }
                 }
             }
         }

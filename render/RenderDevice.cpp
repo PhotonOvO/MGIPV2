@@ -1137,6 +1137,18 @@ namespace demo
 		return ImTextureID{};
 	}
 
+	DebugInteropBridge::TextureID RenderDevice::registerDebugTexture(
+		rhi::SamplerHandle sampler, rhi::TextureViewHandle view)
+	{
+		return m_debugBridge.registerTexture(getRHIDevice(), sampler, view,
+		                                     DebugInteropBridge::ImageLayout::General);
+	}
+
+	void RenderDevice::unregisterDebugTexture(DebugInteropBridge::TextureID textureId)
+	{
+		m_debugBridge.unregisterTexture(textureId);
+	}
+
 	MaterialHandle RenderDevice::getMaterialHandle(uint32_t slot) const
 	{
 		if (slot < kDemoMaterialSlotCount)

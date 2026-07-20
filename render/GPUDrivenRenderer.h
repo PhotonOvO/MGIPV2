@@ -22,6 +22,7 @@
 #include "passes/DDGIProbeUpdatePass.h"
 #include "DDGIProbeVolume.h"
 #include "FlaxDDGIResources.h"
+#include "FlaxGIDebugModel.h"
 #include "passes/GlobalSDFPass.h"
 #include "passes/DDGIDebugPass.h"
 #include "passes/FlaxDDGIPass.h"
@@ -306,6 +307,15 @@ namespace demo
 		void render(const RenderParams& params);
 		void setSceneRenderingSuspended(bool suspended) { m_suspendSceneRendering = suspended; }
 		[[nodiscard]] bool isSceneRenderingSuspended() const { return m_suspendSceneRendering; }
+		DebugInteropBridge::TextureID registerDebugTexture(rhi::SamplerHandle sampler,
+		                                                   rhi::TextureViewHandle view)
+		{
+			return m_renderer.registerDebugTexture(sampler, view);
+		}
+		void unregisterDebugTexture(DebugInteropBridge::TextureID textureId)
+		{
+			m_renderer.unregisterDebugTexture(textureId);
+		}
 
 		TextureHandle getViewportTextureHandle() const { return m_renderer.getViewportTextureHandle(); }
 		ImTextureID getViewportTextureID(TextureHandle handle) const { return m_renderer.getViewportTextureID(handle); }
@@ -365,6 +375,8 @@ namespace demo
 		[[nodiscard]] DDGIConfig getEditableDDGIConfig() const { return getDDGIConfig(); }
 		void setEditableDDGIConfig(const DDGIConfig& config);
 		[[nodiscard]] FlaxGIDebugStatus getFlaxGIDebugStatus() const;
+		[[nodiscard]] FlaxGIDebugSnapshot getFlaxGIDebugSnapshot() const;
+		[[nodiscard]] FlaxGIDebugViewSet getFlaxGIDebugViewSet() const;
 		[[nodiscard]] FlaxDDGIResources& getFlaxDDGIResources() { return m_flaxDDGIResources; }
 		[[nodiscard]] const FlaxDDGIResources& getFlaxDDGIResources() const { return m_flaxDDGIResources; }
 		[[nodiscard]] const std::vector<DDGICascadeDesc>& getFlaxDDGICascadeDescs() const { return m_flaxDDGICascades; }

@@ -54,6 +54,16 @@ float2 rayAABBIntersection(float3 origin, float3 direction, float3 boxMin, float
     return float2(max(max(tMin.x, tMin.y), tMin.z), min(min(tMax.x, tMax.y), tMax.z));
 }
 
+// Mip 0 is authoritative for hit testing. Coarse min-mips remain useful for
+// stepping, but their interpolation can skip a one-voxel wall when the next
+// sample lands on the far side of the surface.
+float sampleGlobalSDFFineDistance(Sampler3D<float> sdfTexture,
+                                  GlobalSDFTraceConfig config, float3 uvw)
+{
+    float encoded = sdfTexture.SampleLevel(uvw, 0.0);
+    return (encoded * 2.0 - 1.0) * config.maxEncodeDistance;
+}
+
 // Two-level distance query (LuxGI mip-coarse -> fine pattern, single cascade):
 // sample the coarsest min mip first; only when its conservative distance drops
 // below the refine threshold pay for a mip-0 sample.
@@ -66,8 +76,7 @@ float sampleGlobalSDFDistance(Sampler3D<float> sdfTexture, GlobalSDFTraceConfig 
     const float refineThreshold = config.voxelSize * float(2 << (LGlobalSDFMipCount - 1));
     if (dist < refineThreshold)
     {
-        encoded = sdfTexture.SampleLevel(uvw, 0.0);
-        dist = (encoded * 2.0 - 1.0) * config.maxEncodeDistance;
+        dist = sampleGlobalSDFFineDistance(sdfTexture, config, uvw);
     }
     return dist;
 }
@@ -99,6 +108,8 @@ GlobalSDFTraceHit traceGlobalSDF(Sampler3D<float> sdfTexture, GlobalSDFTraceConf
 
     const float3 extent = max(config.boundsMax - config.boundsMin, float3(1e-4, 1e-4, 1e-4));
     const float voxelHalf = config.voxelSize * 0.5;
+    const float minimumStep = config.voxelSize * 0.25f;
+    const float maximumStep = config.voxelSize * 2.0f;
 
     for (uint step = 0u; step < config.maxSteps && stepTime < tEnd; ++step)
     {
@@ -107,18 +118,34 @@ GlobalSDFTraceHit traceGlobalSDF(Sampler3D<float> sdfTexture, GlobalSDFTraceConf
         const float3 uvw =
             clamp((stepPosition - config.boundsMin) / extent, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
         const float stepDistance = sampleGlobalSDFDistance(sdfTexture, config, uvw);
+        const float fineDistance = sampleGlobalSDFFineDistance(sdfTexture, config, uvw);
 
         // Adaptive hit threshold (LuxGI SDFCommon.glsl:166): tight right at the
         // ray origin, half a voxel once the ray has travelled one voxel.
         const float minSurfaceThickness = voxelHalf * clamp(stepTime / config.voxelSize, 0.0, 1.0);
-        if (stepDistance < minSurfaceThickness)
+        if (fineDistance < minSurfaceThickness)
         {
-            hit.hitTime = max(stepTime + stepDistance - minSurfaceThickness, 0.0);
+            hit.hitTime = max(stepTime + fineDistance - minSurfaceThickness, 0.0);
             break;
         }
 
-        // March at least one voxel per step (LuxGI SDFCommon.glsl:189).
-        stepTime += max(stepDistance * config.stepScale, config.voxelSize);
+        // Keep a safety margin and never advance more than two voxels without
+        // another mip-0 test. This prevents crossing a one-voxel wall.
+        float marchDistance = max(stepDistance - voxelHalf, minimumStep);
+        marchDistance = min(marchDistance * config.stepScale, maximumStep);
+        const float nextStepTime = min(stepTime + marchDistance, tEnd);
+        const float3 nextPosition = origin + direction * nextStepTime;
+        const float3 nextUvw = clamp(
+            (nextPosition - config.boundsMin) / extent,
+            float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+        const float nextFineDistance = sampleGlobalSDFFineDistance(
+            sdfTexture, config, nextUvw);
+        if (nextFineDistance < voxelHalf)
+        {
+            hit.hitTime = max(nextStepTime + nextFineDistance - voxelHalf, stepTime);
+            break;
+        }
+        stepTime = nextStepTime;
     }
     return hit;
 }

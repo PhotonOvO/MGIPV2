@@ -30,14 +30,23 @@ namespace demo
 			return;
 		}
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
-		if (!probeVolume.isInitialized() || probeVolume.getTotalProbes() == 0u)
+		const FlaxDDGIResources& flaxResources = m_renderer->getFlaxDDGIResources();
+		const bool flaxReady = m_renderer->isFlaxStyleDDGIRequested()
+			&& flaxResources.isInitialized()
+			&& !flaxResources.getProbesPerCascade().empty();
+		const bool currentReady = probeVolume.isInitialized() && probeVolume.getTotalProbes() > 0u;
+		if (!flaxReady && !currentReady)
 		{
-			LOGW("DDGIDebugPass::initResources skipped: probe volume not ready");
+			LOGW("DDGIDebugPass::initResources skipped: no DDGI probe resources are ready");
 			return;
 		}
 
 		m_device = &device;
 		m_frameCount = std::max(frameCount, 1u);
+		m_usesFlaxResources = flaxReady;
+		m_visualizedProbeCount = flaxReady
+			? flaxResources.getMaxProbesPerCascade()
+			: probeVolume.getTotalProbes();
 
 		// Sampled views over BOTH irradiance atlases (D4-1 ping-pong): index =
 		// frame parity, view = that parity's WRITE atlas — the one the probe
@@ -45,15 +54,35 @@ namespace demo
 		for (uint32_t parity = 0; parity < 2u; ++parity)
 		{
 			rhi::TextureViewCreateDesc viewDesc{};
-			viewDesc.image = probeVolume.getIrradianceAtlasWrite(parity);
+			viewDesc.image = flaxReady
+				? flaxResources.getProbesIrradianceWrite(parity)
+				: probeVolume.getIrradianceAtlasWrite(parity);
 			viewDesc.format = rhi::TextureFormat::rgba16Sfloat;
 			viewDesc.viewType = rhi::ImageViewType::e2D;
 			viewDesc.aspect = rhi::TextureAspect::color;
 			viewDesc.baseMipLevel = 0;
 			viewDesc.levelCount = 1;
-			viewDesc.debugName = parity == 0u ? "ddgi-debug-irradiance-view-p0"
-			                                  : "ddgi-debug-irradiance-view-p1";
+			viewDesc.debugName = flaxReady
+				? (parity == 0u ? "flax-ddgi-debug-irradiance-p0"
+				                 : "flax-ddgi-debug-irradiance-p1")
+				: (parity == 0u ? "ddgi-debug-irradiance-view-p0"
+				                 : "ddgi-debug-irradiance-view-p1");
 			m_irradianceViews[parity] = device.createTextureView(viewDesc);
+		}
+
+		if (flaxReady)
+		{
+			rhi::TextureViewCreateDesc dataViewDesc{};
+			dataViewDesc.image = flaxResources.getProbesData();
+			dataViewDesc.format = flaxResources.usesSNORM()
+				? rhi::TextureFormat::rgba8Snorm
+				: rhi::TextureFormat::rgba16Sfloat;
+			dataViewDesc.viewType = rhi::ImageViewType::e2D;
+			dataViewDesc.aspect = rhi::TextureAspect::color;
+			dataViewDesc.baseMipLevel = 0;
+			dataViewDesc.levelCount = 1;
+			dataViewDesc.debugName = "flax-ddgi-debug-probe-data";
+			m_probeDataView = device.createTextureView(dataViewDesc);
 		}
 
 		m_sampler = device.createSampler(rhi::SamplerDesc{
@@ -66,7 +95,7 @@ namespace demo
 			.debugName = "ddgi-debug-sampler",
 		});
 
-		const std::array<rhi::ArgumentBinding, 2> bindings{
+		const std::array<rhi::ArgumentBinding, 3> bindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -75,6 +104,10 @@ namespace demo
 				rhi::ArgumentBinding{
 					.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
 					.visibility = rhi::ShaderStage::allGraphics, .arrayCount = 1
+				},
+				rhi::ArgumentBinding{
+					.binding = 2, .type = rhi::ArgumentType::sampledTexture,
+					.visibility = rhi::ShaderStage::vertex, .arrayCount = 1
 				},
 			}
 		};
@@ -101,7 +134,7 @@ namespace demo
 			{
 				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
 				table = device.createArgumentTable(m_layout);
-				const std::array<rhi::ArgumentWrite, 2> writes{
+				const std::array<rhi::ArgumentWrite, 3> writes{
 					{
 						// The atlas stays in the General layout (the probe update
 						// pass writes it as a storage image and never transitions
@@ -117,6 +150,12 @@ namespace demo
 							.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
 							.buffer = m_uniformBuffers[i],
 							.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
+						},
+						rhi::ArgumentWrite{
+							.binding = 2, .type = rhi::ArgumentType::sampledTexture,
+							.textureView = m_usesFlaxResources
+								? m_probeDataView : m_irradianceViews[parity],
+							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 						},
 					}
 				};
@@ -214,6 +253,8 @@ namespace demo
 		if (!m_layout.isNull()) m_device->destroyArgumentLayout(m_layout);
 		m_layout = {};
 
+		if (!m_probeDataView.isNull()) m_device->destroyTextureView(m_probeDataView);
+		m_probeDataView = {};
 		if (!m_sampler.isNull()) m_device->destroySampler(m_sampler);
 		m_sampler = {};
 		for (rhi::TextureViewHandle& view : m_irradianceViews)
@@ -223,6 +264,8 @@ namespace demo
 		}
 
 		m_frameCount = 0;
+		m_usesFlaxResources = false;
+		m_visualizedProbeCount = 0;
 		m_device = nullptr;
 	}
 
@@ -246,20 +289,49 @@ namespace demo
 	void DDGIDebugPass::writeUniforms(uint32_t frameIndex, const PassContext& context) const
 	{
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
+		const FlaxDDGIResources& flaxResources = m_renderer->getFlaxDDGIResources();
 		const DDGIConfig& config = m_renderer->getDDGIConfig();
-		const rhi::Extent2D atlasExtent = probeVolume.getIrradianceAtlasExtent();
 
 		shaderio::DDGIProbeVisualizationUniforms uniforms{};
 		// Jittered VP: the spheres must match the jittered scene depth buffer
 		// they are tested against (TAA resolves the jitter afterwards).
 		uniforms.viewProjection = context.params->cameraUniforms->viewProjection;
-		uniforms.probePositionAddress = probeVolume.getProbePositionAddress().value;
-		uniforms.totalProbes = probeVolume.getTotalProbes();
-		uniforms.irradianceAtlasWidth = atlasExtent.width;
-		uniforms.irradianceAtlasHeight = atlasExtent.height;
-		uniforms.irradianceSideLength = probeVolume.getDesc().irradianceTexelSize;
+		uniforms.totalProbes = m_visualizedProbeCount;
 		uniforms.probeRadius = kProbeRadius;
 		uniforms.ddgiGamma = config.ddgiGamma;
+		uniforms.debugScale = std::max(
+			context.params->debugOptions.flaxGIProbeVisualizationScale, 0.0f);
+		if (m_usesFlaxResources)
+		{
+			const rhi::Extent2D atlasExtent = flaxResources.getIrradianceAtlasExtent();
+			const glm::uvec3 counts = flaxResources.getProbesPerCascade().empty()
+				? glm::uvec3(0u) : flaxResources.getProbesPerCascade()[0];
+			uniforms.probePositionAddress = 0u;
+			uniforms.irradianceAtlasWidth = atlasExtent.width;
+			uniforms.irradianceAtlasHeight = atlasExtent.height;
+			uniforms.irradianceSideLength = FlaxDDGIResources::kProbeResolutionIrradiance;
+			uniforms.flaxProbeCountsAndMode =
+				shaderio::uvec4{counts.x, counts.y, counts.z, 1u};
+			const auto& cascades = m_renderer->getFlaxDDGICascadeDescs();
+			if (!cascades.empty())
+			{
+				const DDGICascadeDesc& cascade = cascades[0];
+				uniforms.flaxProbeOriginAndSpacing = shaderio::vec4{
+					cascade.snappedOrigin.x, cascade.snappedOrigin.y,
+					cascade.snappedOrigin.z, cascade.probeSpacing};
+				uniforms.flaxProbeScrollAndCascade = shaderio::ivec4{
+					cascade.scrollOffset.x, cascade.scrollOffset.y,
+					cascade.scrollOffset.z, 0};
+			}
+		}
+		else
+		{
+			const rhi::Extent2D atlasExtent = probeVolume.getIrradianceAtlasExtent();
+			uniforms.probePositionAddress = probeVolume.getProbePositionAddress().value;
+			uniforms.irradianceAtlasWidth = atlasExtent.width;
+			uniforms.irradianceAtlasHeight = atlasExtent.height;
+			uniforms.irradianceSideLength = probeVolume.getDesc().irradianceTexelSize;
+		}
 
 		// cpuToGpu memory is host-coherent on desktop; no explicit flush needed
 		// (same contract as DDGIRayTracePass's uniform upload).
@@ -280,10 +352,16 @@ namespace demo
 			return;
 		}
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
+		const FlaxDDGIResources& flaxResources = m_renderer->getFlaxDDGIResources();
+		const bool flaxReady = m_usesFlaxResources
+			&& flaxResources.isInitialized() && !m_probeDataView.isNull();
+		const bool currentReady = !m_usesFlaxResources
+			&& probeVolume.isInitialized()
+			&& probeVolume.getProbePositionAddress().isValid();
 		if (m_device == nullptr || m_pipeline.isNull()
 			|| m_irradianceViews[0].isNull() || m_irradianceViews[1].isNull()
-			|| !probeVolume.isInitialized() || probeVolume.getTotalProbes() == 0u
-			|| !probeVolume.getProbePositionAddress().isValid()
+			|| m_visualizedProbeCount == 0u
+			|| (!flaxReady && !currentReady)
 			|| context.params->cameraUniforms == nullptr)
 		{
 			return;
@@ -347,7 +425,7 @@ namespace demo
 			static_cast<uint32_t>(shaderio::LDDGIProbeVisStacks * shaderio::LDDGIProbeVisSlices * 6);
 		enc->draw(rhi::DrawDesc{
 			.vertexCount = kSphereVertexCount,
-			.instanceCount = probeVolume.getTotalProbes(),
+			.instanceCount = m_visualizedProbeCount,
 			.firstVertex = 0,
 			.firstInstance = 0
 		});
