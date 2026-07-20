@@ -2,6 +2,7 @@
 #include "../loader/GltfLoader.h"
 #include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
+#include "../render/SceneViewResolver.h"
 #include "../render/RendererFacade.h"
 
 #include <android/asset_manager.h>
@@ -164,9 +165,14 @@ public:
     params.deltaTime = ImGui::GetIO().DeltaTime;
     params.timeSeconds = static_cast<float>(ImGui::GetTime());
     params.cameraUniforms = &m_cameraUniforms;
-    params.lightSettings = m_lightSettings;
+    params.lightSettings = resolveLightSettings();
     params.debugOptions = m_debugOptions;
     params.gltfModel = m_uploadResult.has_value() ? &(*m_uploadResult) : nullptr;
+    if(m_sceneModel.has_value())
+    {
+      params.sceneLights = m_sceneModel->lights;
+      params.sceneLightGltfNodes = m_sceneModel->nodes;
+    }
     params.recordUi = []() {
       ImGui::Render();
     };
@@ -187,17 +193,35 @@ private:
   void updateCamera()
   {
     m_camera.update();
-    m_cameraUniforms.view = m_camera.getViewMatrix();
-    m_cameraUniforms.projection = m_camera.getProjectionMatrix();
-    m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
-    m_cameraUniforms.inverseViewProjection = glm::inverse(m_cameraUniforms.viewProjection);
-    m_cameraUniforms.unjitteredViewProjection = m_cameraUniforms.viewProjection;
-    m_cameraUniforms.unjitteredInverseViewProjection = m_cameraUniforms.inverseViewProjection;
-    m_cameraUniforms.prevUnjitteredViewProjection = m_cameraUniforms.viewProjection;
-    m_cameraUniforms.prevJitteredViewProjection = m_cameraUniforms.viewProjection;
-    m_cameraUniforms.cameraPosition = m_camera.getPosition();
-    m_cameraUniforms.shadowConstantBias = 0.0f;
-    m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
+    const demo::clipspace::ProjectionConvention projectionConvention =
+        demo::clipspace::getProjectionConvention(demo::clipspace::BackendConvention::vulkan);
+    const bool usingSceneCamera = m_sceneModel.has_value()
+        && demo::populatePrimarySceneCameraUniforms(
+            m_sceneModel->cameras,
+            std::span<const demo::SceneNode>{},
+            m_sceneModel->nodes,
+            m_viewportSize,
+            projectionConvention,
+            m_cameraUniforms);
+    if(!usingSceneCamera)
+    {
+      demo::populateCameraUniforms(
+          m_camera.getViewMatrix(), m_camera.getProjectionMatrix(), m_camera.getPosition(), m_cameraUniforms);
+    }
+  }
+
+  [[nodiscard]] demo::DirectionalLightSettings resolveLightSettings() const
+  {
+    demo::DirectionalLightSettings settings = m_lightSettings;
+    if(m_sceneModel.has_value())
+    {
+      (void)demo::applyPrimarySceneDirectionalLight(
+          m_sceneModel->lights,
+          std::span<const demo::SceneNode>{},
+          m_sceneModel->nodes,
+          settings);
+    }
+    return settings;
   }
 
   void loadDefaultScene()
@@ -246,6 +270,7 @@ private:
 
     m_loadStatus = "Preparing GPU upload...";
     m_sceneModel = std::move(model);
+    updateCamera();
     m_uploadResult.emplace();
     m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_uploadResult);
 

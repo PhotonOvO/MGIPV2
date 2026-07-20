@@ -17,6 +17,12 @@ uint32_t SceneJobSystem::defaultWorkerCount()
 }
 
 bool SceneJobSystem::execute(const SceneLoadJobGraph& graph,
+                             const JobCallback& callback) const
+{
+  return execute(graph, callback, ExecuteOptions{});
+}
+
+bool SceneJobSystem::execute(const SceneLoadJobGraph& graph,
                              const JobCallback&       callback,
                              const ExecuteOptions&   options) const
 {

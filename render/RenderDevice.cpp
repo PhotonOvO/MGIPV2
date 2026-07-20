@@ -3868,8 +3868,8 @@ namespace demo
 		const clipspace::ProjectionConvention projectionConvention =
 			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
 		const float nearPlane = std::abs(
-			clipspace::extractPerspectiveNearPlane(camera.projection, projectionConvention));
-		const float farPlane = std::abs(clipspace::extractPerspectiveFarPlane(camera.projection, projectionConvention));
+			clipspace::extractNearPlane(camera.projection, projectionConvention));
+		const float farPlane = std::abs(clipspace::extractFarPlane(camera.projection, projectionConvention));
 
 		uniforms.screenSizeAndClipPlanes = glm::vec4(
 			static_cast<float>(extent.width),
@@ -4010,12 +4010,14 @@ namespace demo
 		const clipspace::ProjectionConvention projectionConvention =
 			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
 		const float cameraNear = std::abs(
-			clipspace::extractPerspectiveNearPlane(camera.projection, projectionConvention));
+			clipspace::extractNearPlane(camera.projection, projectionConvention));
 		const float cameraFar =
-			std::abs(clipspace::extractPerspectiveFarPlane(camera.projection, projectionConvention));
+			std::abs(clipspace::extractFarPlane(camera.projection, projectionConvention));
 		state.shadowDistance = glm::clamp(params.lightSettings.shadowDistance, cameraNear + 0.5f,
 		                                  std::max(cameraFar, cameraNear + 1.0f));
-		state.viewFrustumCorners = computePerspectiveFrustumCorners(camera, cameraNear, state.shadowDistance);
+		state.viewFrustumCorners = clipspace::isOrthographicProjection(camera.projection)
+			? computeOrthoFrustumCorners(camera.inverseViewProjection)
+			: computePerspectiveFrustumCorners(camera, cameraNear, state.shadowDistance);
 
 		std::array<glm::vec3, 8> shadowFitCorners = state.viewFrustumCorners;
 		if (state.sceneBounds.valid)

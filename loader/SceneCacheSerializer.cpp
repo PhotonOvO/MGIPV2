@@ -1,6 +1,7 @@
 #include "SceneCacheSerializer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -18,6 +19,7 @@ constexpr uint32_t kMaxReasonableMeshCount = 1u << 16;
 constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageCount = 1u << 14;
 constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
+constexpr uint32_t kMaxReasonableCameraCount = 1u << 14;
 constexpr uint32_t kMaxReasonableLightCount = 1u << 14;
 constexpr uint32_t kMaxReasonableRootNodeCount = 1u << 14;
 constexpr uint32_t kMaxReasonableDependencyCount = 1u << 14;
@@ -36,6 +38,7 @@ struct CacheHeader
   uint32_t materialCount{0};
   uint32_t imageCount{0};
   uint32_t nodeCount{0};
+  uint32_t cameraCount{0};
   uint32_t lightCount{0};
   uint32_t rootNodeCount{0};
   uint32_t dependencyCount{0};
@@ -47,6 +50,7 @@ struct CacheHeader
          && header.materialCount <= kMaxReasonableMaterialCount
          && header.imageCount <= kMaxReasonableImageCount
          && header.nodeCount <= kMaxReasonableNodeCount
+         && header.cameraCount <= kMaxReasonableCameraCount
          && header.lightCount <= kMaxReasonableLightCount
          && header.rootNodeCount <= kMaxReasonableRootNodeCount
          && header.dependencyCount <= kMaxReasonableDependencyCount;
@@ -58,6 +62,7 @@ struct CacheHeader
          && model.materials.size() <= kMaxReasonableMaterialCount
          && model.images.size() <= kMaxReasonableImageCount
          && model.nodes.size() <= kMaxReasonableNodeCount
+         && model.cameras.size() <= kMaxReasonableCameraCount
          && model.lights.size() <= kMaxReasonableLightCount
          && model.rootNodes.size() <= kMaxReasonableRootNodeCount
          && model.dependencies.size() <= kMaxReasonableDependencyCount;
@@ -147,6 +152,11 @@ struct CacheHeader
 
   return std::all_of(model.rootNodes.begin(), model.rootNodes.end(), [&model](int rootNode) {
     return rootNode >= 0 && static_cast<size_t>(rootNode) < model.nodes.size();
+  }) && std::all_of(model.cameras.begin(), model.cameras.end(), [&model](const SceneCamera& camera) {
+    return camera.nodeIndex >= 0
+        && static_cast<size_t>(camera.nodeIndex) < model.nodes.size()
+        && (camera.type == SceneCameraType::perspective || camera.type == SceneCameraType::orthographic)
+        && std::isfinite(camera.nearPlane) && std::isfinite(camera.farPlane);
   }) && std::all_of(model.lights.begin(), model.lights.end(), [&model](const SceneLight& light) {
     return light.nodeIndex < 0 || static_cast<size_t>(light.nodeIndex) < model.nodes.size();
   });
@@ -396,6 +406,32 @@ bool readNode(std::istream& stream, GltfNodeData& node)
          && readPod(stream, node.meshCount);
 }
 
+void writeCamera(std::ostream& stream, const SceneCamera& camera)
+{
+  writeString(stream, camera.name);
+  writePod(stream, camera.nodeIndex);
+  writePod(stream, camera.type);
+  writePod(stream, camera.aspectRatio);
+  writePod(stream, camera.verticalFieldOfViewRadians);
+  writePod(stream, camera.nearPlane);
+  writePod(stream, camera.farPlane);
+  writePod(stream, camera.horizontalMagnification);
+  writePod(stream, camera.verticalMagnification);
+}
+
+bool readCamera(std::istream& stream, SceneCamera& camera)
+{
+  return readString(stream, camera.name)
+         && readPod(stream, camera.nodeIndex)
+         && readPod(stream, camera.type)
+         && readPod(stream, camera.aspectRatio)
+         && readPod(stream, camera.verticalFieldOfViewRadians)
+         && readPod(stream, camera.nearPlane)
+         && readPod(stream, camera.farPlane)
+         && readPod(stream, camera.horizontalMagnification)
+         && readPod(stream, camera.verticalMagnification);
+}
+
 void writeLight(std::ostream& stream, const SceneLight& light)
 {
   writeString(stream, light.name);
@@ -462,6 +498,7 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   header.materialCount        = static_cast<uint32_t>(model.materials.size());
   header.imageCount           = static_cast<uint32_t>(model.images.size());
   header.nodeCount            = static_cast<uint32_t>(model.nodes.size());
+  header.cameraCount          = static_cast<uint32_t>(model.cameras.size());
   header.lightCount           = static_cast<uint32_t>(model.lights.size());
   header.rootNodeCount        = static_cast<uint32_t>(model.rootNodes.size());
   header.dependencyCount      = static_cast<uint32_t>(model.dependencies.size());
@@ -486,6 +523,10 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   for(const auto& node : model.nodes)
   {
     writeNode(stream, node);
+  }
+  for(const SceneCamera& camera : model.cameras)
+  {
+    writeCamera(stream, camera);
   }
   for(const SceneLight& light : model.lights)
   {
@@ -543,6 +584,7 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
     loadedModel.materials.resize(header.materialCount);
     loadedModel.images.resize(header.imageCount);
     loadedModel.nodes.resize(header.nodeCount);
+    loadedModel.cameras.resize(header.cameraCount);
     loadedModel.lights.resize(header.lightCount);
     loadedModel.dependencies.resize(header.dependencyCount);
 
@@ -586,6 +628,14 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
       if(!readNode(stream, node))
       {
         m_lastError = "Failed to read node payload";
+        return false;
+      }
+    }
+    for(SceneCamera& camera : loadedModel.cameras)
+    {
+      if(!readCamera(stream, camera))
+      {
+        m_lastError = "Failed to read camera payload";
         return false;
       }
     }

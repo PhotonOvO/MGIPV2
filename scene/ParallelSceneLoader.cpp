@@ -23,6 +23,11 @@ SceneDrawBucket classifyDrawBucket(int32_t alphaMode)
 
 }  // namespace
 
+ParallelSceneLoader::BuildResult ParallelSceneLoader::build(const SceneAssetView& asset) const
+{
+  return build(asset, BuildOptions{});
+}
+
 ParallelSceneLoader::BuildResult ParallelSceneLoader::build(const SceneAssetView& asset, const BuildOptions& options) const
 {
   BuildResult result;

@@ -22,12 +22,14 @@ public:
     bool buildDrawPlans = true;
   };
 
+  [[nodiscard]] static SceneLoadJobGraph buildJobGraph(const SceneAssetView& asset);
   [[nodiscard]] static SceneLoadJobGraph buildJobGraph(const SceneAssetView& asset,
-                                                       const BuildOptions&   options = {});
+                                                       const BuildOptions&   options);
   [[nodiscard]] static SceneUploadPlanValidationResult validate(const SceneAssetView& asset,
                                                                const SceneUploadPlan& plan);
+  [[nodiscard]] SceneUploadPlanBuildResult build(const SceneAssetView& asset) const;
   [[nodiscard]] SceneUploadPlanBuildResult build(const SceneAssetView& asset,
-                                                 const BuildOptions& options = {}) const;
+                                                 const BuildOptions& options) const;
 };
 
 }  // namespace demo

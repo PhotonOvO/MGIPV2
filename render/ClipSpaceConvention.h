@@ -7,6 +7,8 @@
 #include <glm/glm.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
 
+#include <cmath>
+
 namespace demo::clipspace
 {
 	enum class BackendConvention
@@ -58,8 +60,8 @@ namespace demo::clipspace
 	                                           const ProjectionConvention& convention)
 	{
 		const glm::mat4 projection = usesReverseZ(convention)
-			                             ? glm::perspective(fovRadians, aspectRatio, farPlane, nearPlane)
-			                             : glm::perspective(fovRadians, aspectRatio, nearPlane, farPlane);
+			                             ? glm::perspectiveRH_ZO(fovRadians, aspectRatio, farPlane, nearPlane)
+			                             : glm::perspectiveRH_ZO(fovRadians, aspectRatio, nearPlane, farPlane);
 		return applyProjectionConvention(projection, convention);
 	}
 
@@ -72,8 +74,8 @@ namespace demo::clipspace
 	                                            const ProjectionConvention& convention)
 	{
 		const glm::mat4 projection = usesReverseZ(convention)
-			                             ? glm::ortho(left, right, bottom, top, farPlane, nearPlane)
-			                             : glm::ortho(left, right, bottom, top, nearPlane, farPlane);
+			                             ? glm::orthoRH_ZO(left, right, bottom, top, farPlane, nearPlane)
+			                             : glm::orthoRH_ZO(left, right, bottom, top, nearPlane, farPlane);
 		return applyProjectionConvention(projection, convention);
 	}
 
@@ -97,6 +99,42 @@ namespace demo::clipspace
 			return std::abs(a) > 1e-5f ? b / a : 100.0f;
 		}
 		return std::abs(a + 1.0f) > 1e-5f ? b / (a + 1.0f) : 100.0f;
+	}
+
+	inline bool isOrthographicProjection(const glm::mat4& projection)
+	{
+		return std::abs(projection[3][3] - 1.0f) < 1e-5f
+			&& std::abs(projection[2][3]) < 1e-5f;
+	}
+
+	inline float extractOrthographicNearPlane(const glm::mat4& projection,
+	                                          const ProjectionConvention& convention)
+	{
+		const float a = projection[2][2];
+		const float b = projection[3][2];
+		return std::abs(a) > 1e-5f ? (b - convention.ndcNearZ) / a : 0.1f;
+	}
+
+	inline float extractOrthographicFarPlane(const glm::mat4& projection,
+	                                         const ProjectionConvention& convention)
+	{
+		const float a = projection[2][2];
+		const float b = projection[3][2];
+		return std::abs(a) > 1e-5f ? (b - convention.ndcFarZ) / a : 100.0f;
+	}
+
+	inline float extractNearPlane(const glm::mat4& projection, const ProjectionConvention& convention)
+	{
+		return isOrthographicProjection(projection)
+			? extractOrthographicNearPlane(projection, convention)
+			: extractPerspectiveNearPlane(projection, convention);
+	}
+
+	inline float extractFarPlane(const glm::mat4& projection, const ProjectionConvention& convention)
+	{
+		return isOrthographicProjection(projection)
+			? extractOrthographicFarPlane(projection, convention)
+			: extractPerspectiveFarPlane(projection, convention);
 	}
 
 	inline glm::mat4 makeNdcToShadowTextureMatrix(const ProjectionConvention& convention)

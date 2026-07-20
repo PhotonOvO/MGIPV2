@@ -9,8 +9,8 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  // Bumped 4->5: SceneTexture::format width changed VkFormat(4B)->rhi::TextureFormat(1B)
-  static constexpr uint32_t kCurrentVersion = 5;
+  // Bumped 5->6: scene cameras are now preserved in the asset cache.
+  static constexpr uint32_t kCurrentVersion = 6;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 

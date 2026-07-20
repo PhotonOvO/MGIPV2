@@ -17,6 +17,7 @@
 #include "../loader/SceneCacheSerializer.h"
 #include "../render/AsyncLoadingCoordinator.h"
 #include "../render/Camera.h"
+#include "../render/SceneViewResolver.h"
 #include "../scene/SceneAssetBuilder.h"
 #include "../scene/SceneAssetSerializer.h"
 #include "../scene/ParallelSceneLoader.h"
@@ -55,6 +56,7 @@ public:
     m_camera.setPosition(glm::vec3(8.0f, 1.5f, 0.0f));
     m_camera.setYawPitch(180.0, 0.0);
     m_camera.update();
+    resetSceneCameraNavigation();
     syncLightAnglesFromDirection();
 
 
@@ -143,10 +145,11 @@ public:
             f1Pressed = false;
           }
 
+          demo::Camera& navigationCamera = hasActiveSceneCamera() ? m_sceneCameraNavigation : m_camera;
           if(glm::length(moveDir) > 0.0f)
           {
               moveDir = glm::normalize(moveDir) * m_moveSpeed * ImGui::GetIO().DeltaTime;
-              m_camera.move(moveDir);
+              navigationCamera.move(moveDir);
           }
 
           // Mouse rotation (right-click to capture)
@@ -167,7 +170,7 @@ public:
                   float deltaX = static_cast<float>(xpos - m_lastMousePos.x) * m_rotateSpeed;
                   float deltaY = static_cast<float>(ypos - m_lastMousePos.y) * m_rotateSpeed;
                   m_lastMousePos = glm::vec2(xpos, ypos);
-                  m_camera.rotate(deltaX, -deltaY);  // Inverted Y for natural feel
+                  navigationCamera.rotate(deltaX, -deltaY);  // Inverted Y for natural feel
               }
           }
           else if(m_cursorCaptured)
@@ -176,21 +179,7 @@ public:
               m_cursorCaptured = false;
           }
 
-          // Update camera matrices
-          m_camera.update();
-
-          // Update camera uniforms for rendering
-          m_cameraUniforms.view = m_camera.getViewMatrix();
-          m_cameraUniforms.projection = m_camera.getProjectionMatrix();
-          m_cameraUniforms.viewProjection = m_camera.getViewProjectionMatrix();
-          m_cameraUniforms.inverseViewProjection = glm::inverse(m_cameraUniforms.viewProjection);
-          m_cameraUniforms.unjitteredViewProjection = m_cameraUniforms.viewProjection;
-          m_cameraUniforms.unjitteredInverseViewProjection = m_cameraUniforms.inverseViewProjection;
-          m_cameraUniforms.prevUnjitteredViewProjection = m_cameraUniforms.viewProjection;
-          m_cameraUniforms.prevJitteredViewProjection = m_cameraUniforms.viewProjection;
-          m_cameraUniforms.cameraPosition = m_camera.getPosition();
-          m_cameraUniforms.shadowConstantBias = 0.0f;
-          m_cameraUniforms.shadowDirectionAndSlopeBias = glm::vec4(0.0f);
+          updateActiveCamera();
       }
       }
 
@@ -289,7 +278,7 @@ public:
         // Camera coordinates display
         ImGui::Separator();
         ImGui::Text("Camera Position:");
-        const glm::vec3& camPos = m_camera.getPosition();
+        const glm::vec3& camPos = m_cameraUniforms.cameraPosition;
         ImGui::Text("  X: %.2f", camPos.x);
         ImGui::Text("  Y: %.2f", camPos.y);
         ImGui::Text("  Z: %.2f", camPos.z);
@@ -965,6 +954,7 @@ private:
 
   // Camera
   demo::Camera m_camera;
+  demo::Camera m_sceneCameraNavigation;
   float m_moveSpeed{5.0f};       // Units per second
   float m_rotateSpeed{0.1f};     // Mouse sensitivity
   bool m_cursorCaptured{false};  // Mouse capture state
@@ -1068,17 +1058,80 @@ private:
   void updateAsyncLoading();
   void beginLegacySceneUpload();
   void beginExperimentalSceneUpload();
+  void resetSceneCameraNavigation();
+  [[nodiscard]] bool populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const;
+  [[nodiscard]] bool hasActiveSceneCamera() const;
+  void updateActiveCamera();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
   std::vector<demo::SceneLight>* editableSceneLights();
   const std::vector<demo::SceneLight>* currentSceneLights() const;
-  glm::mat4 resolveSceneLightNodeTransform(const demo::SceneLight& light) const;
   demo::DirectionalLightSettings resolveSceneLightSettings() const;
   void drawSceneLightsUI();
   void drawCSMDebugPanel();
   void updateRuntimeProfiler();
   void drawRuntimeProfilerPanel();
 };
+
+inline void MinimalLatestApp::resetSceneCameraNavigation()
+{
+  m_sceneCameraNavigation.setPosition(glm::vec3(0.0f));
+  m_sceneCameraNavigation.setYawPitch(-90.0f, 0.0f);
+  m_sceneCameraNavigation.update();
+}
+
+inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const
+{
+  const demo::clipspace::ProjectionConvention projectionConvention =
+      demo::clipspace::getProjectionConvention(demo::clipspace::BackendConvention::vulkan);
+
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    return demo::populatePrimarySceneCameraUniforms(
+        m_sceneAsset->cameras,
+        m_sceneAsset->nodes,
+        std::span<const demo::GltfNodeData>{},
+        m_viewportSize,
+        projectionConvention,
+        uniforms);
+  }
+  if(m_sceneModel.has_value())
+  {
+    return demo::populatePrimarySceneCameraUniforms(
+        m_sceneModel->cameras,
+        std::span<const demo::SceneNode>{},
+        m_sceneModel->nodes,
+        m_viewportSize,
+        projectionConvention,
+        uniforms);
+  }
+
+  return false;
+}
+
+inline bool MinimalLatestApp::hasActiveSceneCamera() const
+{
+  shaderio::CameraUniforms sceneCameraUniforms{};
+  return populateActiveSceneCameraUniforms(sceneCameraUniforms);
+}
+
+inline void MinimalLatestApp::updateActiveCamera()
+{
+  m_camera.update();
+  m_sceneCameraNavigation.update();
+
+  shaderio::CameraUniforms sceneCameraUniforms{};
+  if(populateActiveSceneCameraUniforms(sceneCameraUniforms))
+  {
+    demo::populateNavigatedSceneCameraUniforms(
+        sceneCameraUniforms, m_sceneCameraNavigation.getViewMatrix(), m_cameraUniforms);
+  }
+  else
+  {
+    demo::populateCameraUniforms(
+        m_camera.getViewMatrix(), m_camera.getProjectionMatrix(), m_camera.getPosition(), m_cameraUniforms);
+  }
+}
 
 inline void MinimalLatestApp::syncLightAnglesFromDirection()
 {
@@ -1127,27 +1180,34 @@ inline const std::vector<demo::SceneLight>* MinimalLatestApp::currentSceneLights
   return m_sceneModel.has_value() ? &m_sceneModel->lights : nullptr;
 }
 
-inline glm::mat4 MinimalLatestApp::resolveSceneLightNodeTransform(const demo::SceneLight& light) const
-{
-  if(light.nodeIndex >= 0)
-  {
-    const size_t nodeIndex = static_cast<size_t>(light.nodeIndex);
-    if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value()
-       && nodeIndex < m_sceneAsset->nodes.size())
-    {
-      return m_sceneAsset->nodes[nodeIndex].worldTransform;
-    }
-    if(m_sceneModel.has_value() && nodeIndex < m_sceneModel->nodes.size())
-    {
-      return m_sceneModel->nodes[nodeIndex].worldTransform;
-    }
-  }
-  return glm::mat4(1.0f);
-}
 
 inline demo::DirectionalLightSettings MinimalLatestApp::resolveSceneLightSettings() const
 {
   demo::DirectionalLightSettings settings = m_lightSettings;
+
+  if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
+  {
+    if(demo::applyPrimarySceneDirectionalLight(
+           m_sceneAsset->lights,
+           m_sceneAsset->nodes,
+           std::span<const demo::GltfNodeData>{},
+           settings))
+    {
+      return settings;
+    }
+  }
+  else if(m_sceneModel.has_value())
+  {
+    if(demo::applyPrimarySceneDirectionalLight(
+           m_sceneModel->lights,
+           std::span<const demo::SceneNode>{},
+           m_sceneModel->nodes,
+           settings))
+    {
+      return settings;
+    }
+  }
+
   settings.color = glm::vec3(0.0f);
   settings.ambient = glm::vec3(0.0f);
 
@@ -1155,31 +1215,6 @@ inline demo::DirectionalLightSettings MinimalLatestApp::resolveSceneLightSetting
   {
     settings.direction = m_lightSettings.direction;
     settings.color = m_testDirectionalLightColor * m_testDirectionalLightIntensity;
-    return settings;
-  }
-
-  const std::vector<demo::SceneLight>* lights = currentSceneLights();
-  if(lights == nullptr)
-  {
-    return settings;
-  }
-
-  for(const demo::SceneLight& light : *lights)
-  {
-    if(!light.enabled || light.type != demo::SceneLightType::directional)
-    {
-      continue;
-    }
-
-    const glm::mat4 worldTransform = resolveSceneLightNodeTransform(light);
-    glm::vec3 direction = glm::vec3(worldTransform * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f));
-    if(glm::length(direction) < 0.001f)
-    {
-      direction = m_lightSettings.direction;
-    }
-    settings.direction = glm::normalize(direction);
-    settings.color = light.color * light.intensity;
-    return settings;
   }
 
   return settings;
@@ -1713,10 +1748,12 @@ inline void MinimalLatestApp::beginLegacySceneUpload()
   ASSERT(m_sceneModel.has_value(), "Legacy scene upload requires a loaded glTF model");
 
   m_activeSceneLoadPath = SceneLoadPath::legacyGltf;
+  resetSceneCameraNavigation();
   m_currentModel.emplace();
+  updateActiveCamera();
   m_renderer.initializeGltfUploadResult(*m_sceneModel, *m_currentModel);
   m_asyncLoadingCoordinator.emplace();
-  m_asyncLoadingCoordinator->begin(*m_sceneModel, m_camera.getPosition(), 24, 96);
+  m_asyncLoadingCoordinator->begin(*m_sceneModel, m_cameraUniforms.cameraPosition, 24, 96);
 }
 
 inline void MinimalLatestApp::beginExperimentalSceneUpload()
@@ -1728,11 +1765,13 @@ inline void MinimalLatestApp::beginExperimentalSceneUpload()
   ASSERT(m_sceneUploadPlan.has_value(), "Experimental scene upload requires a SceneUploadPlan");
 
   m_activeSceneLoadPath = SceneLoadPath::experimentalSceneUploadPlan;
+  resetSceneCameraNavigation();
   m_loadStatus = "Scheduling SceneUploadPlan...";
   m_loadProgress = 0.4f;
   m_currentModel.emplace();
+  updateActiveCamera();
   m_asyncLoadingCoordinator.emplace();
-  m_asyncLoadingCoordinator->begin(*m_sceneAssetView, *m_sceneUploadPlan, m_camera.getPosition(), 24, 96);
+  m_asyncLoadingCoordinator->begin(*m_sceneAssetView, *m_sceneUploadPlan, m_cameraUniforms.cameraPosition, 24, 96);
   m_experimentalSceneCommitPending = true;
 }
 

@@ -69,6 +69,10 @@ float extractNear()
 {
     const float a = camera.projection[2][2];
     const float b = camera.projection[2][3];
+    if(abs(camera.projection[3][3] - 1.0) < 1.0e-5)
+    {
+        return abs(a) > 1.0e-5 ? abs((b - 1.0) / a) : 0.1;
+    }
     const float denom = a + 1.0;
     return abs(denom) > 1.0e-5 ? abs(b / denom) : 0.1;
 }
@@ -78,6 +82,12 @@ float extractNear()
 // Formula: linearZ = near / depth   (matches the matrix derivation above).
 float linearizeDepth(float ndcDepth, float near)
 {
+    if(abs(camera.projection[3][3] - 1.0) < 1.0e-5)
+    {
+        const float a = camera.projection[2][2];
+        const float b = camera.projection[2][3];
+        return abs(a) > 1.0e-5 ? abs((b - ndcDepth) / a) : near;
+    }
     return near / max(ndcDepth, 1.0e-7);
 }
 

@@ -25,16 +25,16 @@ namespace demo
 		constexpr float kCascadeCasterExtrusionPaddingScale = 0.25f;
 		constexpr float kCascadeCasterMinGuardTexels = 8.0f;
 
-		[[nodiscard]] float extractNearPlane(const glm::mat4& projection,
-		                                     const clipspace::ProjectionConvention& convention)
+		[[nodiscard]] float extractCameraNearPlane(const glm::mat4& projection,
+		                                           const clipspace::ProjectionConvention& convention)
 		{
-			return clipspace::extractPerspectiveNearPlane(projection, convention);
+			return clipspace::extractNearPlane(projection, convention);
 		}
 
-		[[nodiscard]] float extractFarPlane(const glm::mat4& projection,
-		                                    const clipspace::ProjectionConvention& convention)
+		[[nodiscard]] float extractCameraFarPlane(const glm::mat4& projection,
+		                                          const clipspace::ProjectionConvention& convention)
 		{
-			return clipspace::extractPerspectiveFarPlane(projection, convention);
+			return clipspace::extractFarPlane(projection, convention);
 		}
 
 		[[nodiscard]] glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
@@ -71,9 +71,9 @@ namespace demo
 			float sliceFar)
 		{
 			const glm::mat4 invViewProjection = glm::inverse(resolveCascadeCameraViewProjection(camera));
-			const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection, projectionConvention));
+			const float cameraNear = std::max(0.01f, extractCameraNearPlane(camera.projection, projectionConvention));
 			const float cameraFar = std::max(cameraNear + 0.01f,
-			                                 extractFarPlane(camera.projection, projectionConvention));
+			                                 extractCameraFarPlane(camera.projection, projectionConvention));
 
 			// Clamp slice distances to valid range
 			sliceNear = glm::clamp(sliceNear, cameraNear, cameraFar);
@@ -312,8 +312,8 @@ namespace demo
 	                                               const glm::vec3& casterBoundsMax,
 	                                               bool casterBoundsValid)
 	{
-		const float cameraFar = std::max(1.0f, extractFarPlane(camera.projection, m_projectionConvention));
-		const float cameraNear = std::max(0.01f, extractNearPlane(camera.projection, m_projectionConvention));
+		const float cameraFar = std::max(1.0f, extractCameraFarPlane(camera.projection, m_projectionConvention));
+		const float cameraNear = std::max(0.01f, extractCameraNearPlane(camera.projection, m_projectionConvention));
 		const float requestedShadowDistance = requestedMaxShadowDistance > 0.0f
 			                                      ? requestedMaxShadowDistance
 			                                      : kDefaultMaxShadowDistance;

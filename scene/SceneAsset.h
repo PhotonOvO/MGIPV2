@@ -3,6 +3,7 @@
 #include "../common/Common.h"
 #include "../rhi/RHITypes.h"
 #include "../rhi/RHIDevice.h"
+#include "SceneCamera.h"
 #include "SceneLight.h"
 
 #include <glm/gtc/quaternion.hpp>
@@ -112,6 +113,7 @@ struct SceneAsset {
   std::vector<SceneMaterial> materials;
   std::vector<SceneTexture>  textures;
   std::vector<SceneNode>     nodes;
+  std::vector<SceneCamera>   cameras;
   std::vector<SceneLight>    lights;
   std::vector<uint32_t>      rootNodes;
   std::vector<SceneDependency> dependencies;

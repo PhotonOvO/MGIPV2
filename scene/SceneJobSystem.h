@@ -21,8 +21,10 @@ public:
 
   [[nodiscard]] static uint32_t defaultWorkerCount();
   [[nodiscard]] bool execute(const SceneLoadJobGraph& graph,
+                             const JobCallback&       callback) const;
+  [[nodiscard]] bool execute(const SceneLoadJobGraph& graph,
                              const JobCallback&       callback,
-                             const ExecuteOptions&   options = {}) const;
+                             const ExecuteOptions&   options) const;
 };
 
 }  // namespace demo

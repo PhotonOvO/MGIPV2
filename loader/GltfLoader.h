@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "../scene/SceneCamera.h"
 #include "../scene/SceneLight.h"
 
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -98,6 +99,7 @@ struct GltfModel {
     std::vector<GltfMaterialData> materials;
     std::vector<GltfImageData> images;
     std::vector<GltfNodeData> nodes;
+    std::vector<SceneCamera> cameras;
     std::vector<SceneLight> lights;
     std::vector<int> rootNodes;
     std::string name;

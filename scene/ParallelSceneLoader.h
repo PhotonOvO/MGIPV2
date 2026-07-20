@@ -35,7 +35,8 @@ public:
     bool                      cancelled{false};
   };
 
-  [[nodiscard]] BuildResult build(const SceneAssetView& asset, const BuildOptions& options = {}) const;
+  [[nodiscard]] BuildResult build(const SceneAssetView& asset) const;
+  [[nodiscard]] BuildResult build(const SceneAssetView& asset, const BuildOptions& options) const;
 };
 
 }  // namespace demo

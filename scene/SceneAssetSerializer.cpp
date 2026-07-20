@@ -21,6 +21,7 @@ constexpr uint32_t kMaxReasonableMeshCount = 1u << 16;
 constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
 constexpr uint32_t kMaxReasonableTextureCount = 1u << 14;
 constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
+constexpr uint32_t kMaxReasonableCameraCount = 1u << 14;
 constexpr uint32_t kMaxReasonableLightCount = 1u << 14;
 constexpr uint32_t kMaxReasonableDependencyCount = 1u << 14;
 constexpr uint64_t kMaxReasonablePayloadBytes = 8ull << 30;
@@ -36,6 +37,7 @@ struct AssetHeader {
   uint32_t materialCount{0};
   uint32_t textureCount{0};
   uint32_t nodeCount{0};
+  uint32_t cameraCount{0};
   uint32_t lightCount{0};
   uint32_t rootNodeCount{0};
   uint32_t dependencyCount{0};
@@ -53,6 +55,8 @@ struct SectionTable {
   uint64_t texturesSize{0};
   uint64_t nodesOffset{0};
   uint64_t nodesSize{0};
+  uint64_t camerasOffset{0};
+  uint64_t camerasSize{0};
   uint64_t lightsOffset{0};
   uint64_t lightsSize{0};
   uint64_t rootNodesOffset{0};
@@ -72,6 +76,7 @@ struct SectionTable {
       && h.materialCount <= kMaxReasonableMaterialCount
       && h.textureCount <= kMaxReasonableTextureCount
       && h.nodeCount <= kMaxReasonableNodeCount
+      && h.cameraCount <= kMaxReasonableCameraCount
       && h.lightCount <= kMaxReasonableLightCount
       && h.dependencyCount <= kMaxReasonableDependencyCount
       && h.vertexPayloadBytes <= kMaxReasonablePayloadBytes
@@ -90,6 +95,7 @@ struct SectionTable {
   }
 
   if(table.meshesSize != static_cast<uint64_t>(h.meshCount) * sizeof(SceneMesh)
+     || (table.camerasSize == 0 && h.cameraCount != 0)
      || (table.lightsSize == 0 && h.lightCount != 0)
      || table.rootNodesSize != static_cast<uint64_t>(h.rootNodeCount) * sizeof(uint32_t)
      || table.vertexPayloadSize != h.vertexPayloadBytes
@@ -98,11 +104,12 @@ struct SectionTable {
     return false;
   }
 
-  const std::array<std::pair<uint64_t, uint64_t>, 10> sections{{
+  const std::array<std::pair<uint64_t, uint64_t>, 11> sections{{
       {table.meshesOffset, table.meshesSize},
       {table.materialsOffset, table.materialsSize},
       {table.texturesOffset, table.texturesSize},
       {table.nodesOffset, table.nodesSize},
+      {table.camerasOffset, table.camerasSize},
       {table.lightsOffset, table.lightsSize},
       {table.rootNodesOffset, table.rootNodesSize},
       {table.dependenciesOffset, table.dependenciesSize},
@@ -305,6 +312,30 @@ bool readNode(std::istream& stream, SceneNode& node) {
       && readPod(stream, node.worldTransform);
 }
 
+void writeCamera(std::ostream& stream, const SceneCamera& camera) {
+  writeString(stream, camera.name);
+  writePod(stream, camera.nodeIndex);
+  writePod(stream, camera.type);
+  writePod(stream, camera.aspectRatio);
+  writePod(stream, camera.verticalFieldOfViewRadians);
+  writePod(stream, camera.nearPlane);
+  writePod(stream, camera.farPlane);
+  writePod(stream, camera.horizontalMagnification);
+  writePod(stream, camera.verticalMagnification);
+}
+
+bool readCamera(std::istream& stream, SceneCamera& camera) {
+  return readString(stream, camera.name)
+      && readPod(stream, camera.nodeIndex)
+      && readPod(stream, camera.type)
+      && readPod(stream, camera.aspectRatio)
+      && readPod(stream, camera.verticalFieldOfViewRadians)
+      && readPod(stream, camera.nearPlane)
+      && readPod(stream, camera.farPlane)
+      && readPod(stream, camera.horizontalMagnification)
+      && readPod(stream, camera.verticalMagnification);
+}
+
 void writeLight(std::ostream& stream, const SceneLight& light) {
   writeString(stream, light.name);
   writePod(stream, light.nodeIndex);
@@ -351,6 +382,7 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   std::string materialsData;
   std::string texturesData;
   std::string nodesData;
+  std::string camerasData;
   std::string lightsData;
   std::string dependenciesData;
   {
@@ -373,6 +405,13 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
       writeNode(nodeStream, node);
     }
     nodesData = nodeStream.str();
+  }
+  {
+    std::ostringstream cameraStream(std::ios::binary);
+    for(const SceneCamera& camera : asset.cameras) {
+      writeCamera(cameraStream, camera);
+    }
+    camerasData = cameraStream.str();
   }
   {
     std::ostringstream lightStream(std::ios::binary);
@@ -399,6 +438,7 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   header.materialCount        = static_cast<uint32_t>(asset.materials.size());
   header.textureCount         = static_cast<uint32_t>(asset.textures.size());
   header.nodeCount            = static_cast<uint32_t>(asset.nodes.size());
+  header.cameraCount          = static_cast<uint32_t>(asset.cameras.size());
   header.lightCount           = static_cast<uint32_t>(asset.lights.size());
   header.rootNodeCount        = static_cast<uint32_t>(asset.rootNodes.size());
   header.dependencyCount      = static_cast<uint32_t>(asset.dependencies.size());
@@ -427,6 +467,10 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   table.nodesOffset = currentOffset;
   table.nodesSize   = nodesData.size();
   currentOffset += table.nodesSize;
+
+  table.camerasOffset = currentOffset;
+  table.camerasSize   = camerasData.size();
+  currentOffset += table.camerasSize;
 
   table.lightsOffset = currentOffset;
   table.lightsSize   = lightsData.size();
@@ -481,6 +525,10 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   // Write nodes
   if (!nodesData.empty()) {
     stream.write(nodesData.data(), static_cast<std::streamsize>(nodesData.size()));
+  }
+
+  if(!camerasData.empty()) {
+    stream.write(camerasData.data(), static_cast<std::streamsize>(camerasData.size()));
   }
 
   if(!lightsData.empty()) {
@@ -559,6 +607,7 @@ bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAss
     loaded.materials.resize(header.materialCount);
     loaded.textures.resize(header.textureCount);
     loaded.nodes.resize(header.nodeCount);
+    loaded.cameras.resize(header.cameraCount);
     loaded.lights.resize(header.lightCount);
     loaded.rootNodes.resize(header.rootNodeCount);
     loaded.dependencies.resize(header.dependencyCount);
@@ -595,6 +644,15 @@ bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAss
     for (auto& node : loaded.nodes) {
       if (!readNode(stream, node)) {
         m_lastError = "Failed to read node payload";
+        return false;
+      }
+    }
+
+    // Read cameras
+    stream.seekg(static_cast<std::streamoff>(table.camerasOffset), std::ios::beg);
+    for(SceneCamera& camera : loaded.cameras) {
+      if(!readCamera(stream, camera)) {
+        m_lastError = "Failed to read camera payload";
         return false;
       }
     }

@@ -797,6 +797,10 @@ float linearizeViewZ(float ndcDepth)
 {
     const float a = camera.projection[2][2];
     const float b = camera.projection[2][3];
+    if(abs(camera.projection[3][3] - 1.0) < 1.0e-5)
+    {
+        return abs(a) > 1.0e-5 ? abs((b - ndcDepth) / a) : 0.0;
+    }
     const float denom = a + 1.0;
     const float near = abs(denom) > 1.0e-5 ? abs(b / denom) : 0.1;
     return near / max(ndcDepth, 1.0e-7);

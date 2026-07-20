@@ -99,6 +99,11 @@ SceneLoadJobGraph SceneUploadPlanner::buildJobGraph(const SceneAssetView& asset,
   return graph;
 }
 
+SceneLoadJobGraph SceneUploadPlanner::buildJobGraph(const SceneAssetView& asset)
+{
+  return buildJobGraph(asset, BuildOptions{});
+}
+
 SceneUploadPlanValidationResult SceneUploadPlanner::validate(const SceneAssetView& asset,
                                                              const SceneUploadPlan& plan)
 {
@@ -195,6 +200,11 @@ SceneUploadPlanValidationResult SceneUploadPlanner::validate(const SceneAssetVie
   }
 
   return {};
+}
+
+SceneUploadPlanBuildResult SceneUploadPlanner::build(const SceneAssetView& asset) const
+{
+  return build(asset, BuildOptions{});
 }
 
 SceneUploadPlanBuildResult SceneUploadPlanner::build(const SceneAssetView& asset,

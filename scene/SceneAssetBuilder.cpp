@@ -69,6 +69,11 @@ void buildInterleavedVertexData(const GltfMeshData& meshData,
 
 }  // namespace
 
+SceneAsset SceneAssetBuilder::build(const GltfModel& model)
+{
+  return build(model, BuildOptions{});
+}
+
 SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& options)
 {
   SceneAsset asset;
@@ -88,6 +93,7 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
   buildMaterials(asset, model);
   buildTextures(asset, model);
   buildNodes(asset, model);
+  asset.cameras = model.cameras;
   asset.lights = model.lights;
 
   if(options.buildMeshlets) {

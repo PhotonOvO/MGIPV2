@@ -407,6 +407,7 @@ add_library(demo_core STATIC
   loader/SceneCacheSerializer.h
   loader/SceneCacheSerializer.cpp
   scene/SceneAsset.h
+  scene/SceneCamera.h
   scene/SceneAssetView.h
   scene/SceneAssetBuilder.h
   scene/SceneAssetBuilder.cpp
@@ -427,6 +428,8 @@ add_library(demo_core STATIC
   render/MeshPool.cpp
   render/Camera.h
   render/Camera.cpp
+  render/SceneViewResolver.h
+  render/SceneViewResolver.cpp
   render/CSMShadowResources.h
   render/CSMShadowResources.cpp
 )
@@ -550,6 +553,12 @@ if(BUILD_TESTING AND NOT ANDROID)
   )
   target_include_directories(flax_gi_debug_model_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
   add_test(NAME flax_gi_debug_model COMMAND flax_gi_debug_model_tests)
+
+  add_executable(scene_import_defaults_tests
+    tests/scene_import_defaults_tests.cpp
+  )
+  target_link_libraries(scene_import_defaults_tests PRIVATE demo_core)
+  add_test(NAME scene_import_defaults COMMAND scene_import_defaults_tests)
 endif()
 
 

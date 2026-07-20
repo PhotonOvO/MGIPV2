@@ -1371,8 +1371,16 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				const glm::vec2 jitterNdc = glm::vec2(jitter.x / static_cast<float>(temporalExtent.width),
 				                                      jitter.y / static_cast<float>(temporalExtent.height));
 				m_currentTAAJitterUv = jitterNdc * 0.5f;
-				m_temporalCameraUniforms.projection[2][0] += jitterNdc.x;
-				m_temporalCameraUniforms.projection[2][1] += jitterNdc.y;
+				if (clipspace::isOrthographicProjection(m_temporalCameraUniforms.projection))
+				{
+					m_temporalCameraUniforms.projection[3][0] += jitterNdc.x;
+					m_temporalCameraUniforms.projection[3][1] += jitterNdc.y;
+				}
+				else
+				{
+					m_temporalCameraUniforms.projection[2][0] += jitterNdc.x;
+					m_temporalCameraUniforms.projection[2][1] += jitterNdc.y;
+				}
 				m_temporalCameraUniforms.viewProjection = m_temporalCameraUniforms.projection * m_temporalCameraUniforms
 					.view;
 				m_temporalCameraUniforms.inverseViewProjection = glm::inverse(m_temporalCameraUniforms.viewProjection);

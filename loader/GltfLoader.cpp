@@ -31,6 +31,8 @@ constexpr size_t kMaxReasonableNodes = 1u << 16;
 constexpr size_t kMaxReasonableMeshes = 1u << 16;
 constexpr size_t kMaxReasonableMaterials = 1u << 14;
 constexpr size_t kMaxReasonableImages = 1u << 14;
+constexpr size_t kMaxReasonableCameras = 1u << 14;
+constexpr size_t kMaxReasonableLights = 1u << 14;
 constexpr size_t kMaxReasonableImageDimension = 1u << 14;
 constexpr size_t kMaxReasonableImageBytes = 1u << 28;
 constexpr size_t kMaxReasonableAccessorElements = 1u << 24;
@@ -45,7 +47,9 @@ bool hasReasonableModelShape(const tinygltf::Model& model)
     return model.nodes.size() <= kMaxReasonableNodes
         && model.meshes.size() <= kMaxReasonableMeshes
         && model.materials.size() <= kMaxReasonableMaterials
-        && model.images.size() <= kMaxReasonableImages;
+        && model.images.size() <= kMaxReasonableImages
+        && model.cameras.size() <= kMaxReasonableCameras
+        && model.lights.size() <= kMaxReasonableLights;
 }
 
 uint64_t estimateModelPayloadBytes(const GltfModel& model)
@@ -730,6 +734,31 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
         outModel.nodes[parentNodeIndex].children.push_back(currentNodeIndex);
     } else {
         outModel.rootNodes.push_back(currentNodeIndex);
+    }
+
+    if(node.camera >= 0 && static_cast<size_t>(node.camera) < model.cameras.size())
+    {
+        const tinygltf::Camera& gltfCamera = model.cameras[static_cast<size_t>(node.camera)];
+        SceneCamera camera{};
+        camera.name = gltfCamera.name.empty() ? nodeData.name : gltfCamera.name;
+        camera.nodeIndex = currentNodeIndex;
+        if(gltfCamera.type == "orthographic")
+        {
+            camera.type = SceneCameraType::orthographic;
+            camera.horizontalMagnification = static_cast<float>(gltfCamera.orthographic.xmag);
+            camera.verticalMagnification = static_cast<float>(gltfCamera.orthographic.ymag);
+            camera.nearPlane = static_cast<float>(gltfCamera.orthographic.znear);
+            camera.farPlane = static_cast<float>(gltfCamera.orthographic.zfar);
+        }
+        else
+        {
+            camera.type = SceneCameraType::perspective;
+            camera.aspectRatio = static_cast<float>(gltfCamera.perspective.aspectRatio);
+            camera.verticalFieldOfViewRadians = static_cast<float>(gltfCamera.perspective.yfov);
+            camera.nearPlane = static_cast<float>(gltfCamera.perspective.znear);
+            camera.farPlane = static_cast<float>(gltfCamera.perspective.zfar);
+        }
+        outModel.cameras.push_back(std::move(camera));
     }
 
     int lightIndex = node.light;

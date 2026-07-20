@@ -10,7 +10,7 @@ namespace demo {
 class SceneCacheSerializer
 {
 public:
-  static constexpr uint32_t kCurrentVersion = 8;
+  static constexpr uint32_t kCurrentVersion = 9;
 
   [[nodiscard]] static std::filesystem::path buildCachePath(const std::filesystem::path& sourcePath);
 

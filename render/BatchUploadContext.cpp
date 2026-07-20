@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cstring>
+#if !defined(__ANDROID__) && !defined(ANDROID)
 #include <execution>
+#endif
 #include <numeric>
 
 namespace demo
@@ -93,7 +95,7 @@ namespace demo
 
 		std::vector<size_t> indices(slices.size());
 		std::iota(indices.begin(), indices.end(), size_t{0});
-		std::for_each(std::execution::par, indices.begin(), indices.end(), [&](size_t index)
+		auto copySlice = [&](size_t index)
 		{
 			const Slice& slice = slices[index];
 			const std::span<const std::byte> source = sources[index];
@@ -103,7 +105,12 @@ namespace demo
 				return;
 			}
 			std::memcpy(slice.cpuPtr, source.data(), source.size_bytes());
-		});
+		};
+#if defined(__ANDROID__) || defined(ANDROID)
+		std::for_each(indices.begin(), indices.end(), copySlice);
+#else
+		std::for_each(std::execution::par, indices.begin(), indices.end(), copySlice);
+#endif
 	}
 
 	void BatchUploadContext::recordTextureUpload(const Slice& slice,

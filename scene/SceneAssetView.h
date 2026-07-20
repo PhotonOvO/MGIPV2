@@ -12,6 +12,7 @@ struct SceneAssetView {
   std::span<const SceneMaterial> materials;
   std::span<const SceneTexture> textures;
   std::span<const SceneNode> nodes;
+  std::span<const SceneCamera> cameras;
   std::span<const SceneLight> lights;
   std::span<const uint32_t> rootNodes;
 
@@ -32,6 +33,7 @@ struct SceneAssetValidationResult {
       .materials = asset.materials,
       .textures = asset.textures,
       .nodes = asset.nodes,
+      .cameras = asset.cameras,
       .lights = asset.lights,
       .rootNodes = asset.rootNodes,
       .vertexPayload = asset.vertexPayload,
@@ -115,6 +117,12 @@ struct SceneAssetValidationResult {
   for(const SceneLight& light : asset.lights) {
     if(light.nodeIndex >= 0 && static_cast<size_t>(light.nodeIndex) >= asset.nodes.size()) {
       return {false, "light node index is out of bounds"};
+    }
+  }
+
+  for(const SceneCamera& camera : asset.cameras) {
+    if(camera.nodeIndex < 0 || static_cast<size_t>(camera.nodeIndex) >= asset.nodes.size()) {
+      return {false, "camera node index is out of bounds"};
     }
   }
 

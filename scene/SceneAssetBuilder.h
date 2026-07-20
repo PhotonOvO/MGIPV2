@@ -12,7 +12,8 @@ public:
     bool keepRawVertexData = false;  // Keep raw separated attributes for meshlet conversion fallback
   };
 
-  [[nodiscard]] static SceneAsset build(const GltfModel& model, const BuildOptions& options = {});
+  [[nodiscard]] static SceneAsset build(const GltfModel& model);
+  [[nodiscard]] static SceneAsset build(const GltfModel& model, const BuildOptions& options);
 
 private:
   static void buildMeshes(SceneAsset& asset, const GltfModel& model, const BuildOptions& options);
