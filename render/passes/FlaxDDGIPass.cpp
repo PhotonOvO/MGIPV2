@@ -907,6 +907,22 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   m_debugSnapshot.totalProbes = totalProbes;
   m_debugSnapshot.raysPerProbe = ddgiConfig.raysPerProbe;
   m_debugSnapshot.surfaceAtlasSampledByTrace = false;
+  const auto& cascadeDescs = m_renderer->getFlaxDDGICascadeDescs();
+  const float probeSpacing = cascadeDescs.empty()
+    ? ddgiConfig.probeSpacing : cascadeDescs[0].probeSpacing;
+  float sdfVoxelSize = 0.0f;
+  if(const GlobalSDFPass* sdfPass = m_renderer->getGlobalSDFPass())
+  {
+    sdfVoxelSize = sdfPass->getVolume().voxelSize;
+  }
+  m_debugSnapshot.probeSpacing = probeSpacing;
+  m_debugSnapshot.distanceMomentHorizon =
+    computeFlaxGIDistanceLimit(probeSpacing, ddgiConfig.maxDistance);
+  m_debugSnapshot.sdfVoxelSize = sdfVoxelSize;
+  m_debugSnapshot.traceRayStartOffset =
+    computeFlaxGIRayStartOffset(probeSpacing, sdfVoxelSize);
+  m_debugSnapshot.selfHitThreshold = std::max(sdfVoxelSize, 0.0001f);
+  m_debugSnapshot.minimumVisibility = kFlaxGIMinVisibility;
 
   if (totalProbes == 0 || cascadeCount == 0)
   {

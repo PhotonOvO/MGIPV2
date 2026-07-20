@@ -8,6 +8,49 @@
 
 namespace demo
 {
+	inline constexpr float kFlaxGIDistanceHorizonToSpacing = 2.598076211f;
+	inline constexpr float kFlaxGIMinVisibility = 0.05f;
+
+	[[nodiscard]] constexpr float computeFlaxGIDistanceLimit(
+		float probeSpacing, float rayMaxDistance) noexcept
+	{
+		const float spacing = std::max(probeSpacing, 0.0001f);
+		const float maxDistance = std::max(rayMaxDistance, 0.0001f);
+		return std::min(maxDistance, spacing * kFlaxGIDistanceHorizonToSpacing);
+	}
+
+	[[nodiscard]] constexpr float computeFlaxGIRayStartOffset(
+		float probeSpacing, float sdfVoxelSize) noexcept
+	{
+		const float spacing = std::max(probeSpacing, 0.0001f);
+		const float voxelSize = std::max(sdfVoxelSize, 0.0001f);
+		return std::min(voxelSize * 0.25f, spacing * 0.05f);
+	}
+
+	struct FlaxGIDistanceMoments
+	{
+		float first{0.0f};
+		float second{0.0f};
+	};
+
+	[[nodiscard]] constexpr FlaxGIDistanceMoments blendFlaxGIDistanceMoments(
+		FlaxGIDistanceMoments current,
+		FlaxGIDistanceMoments history,
+		float historyWeight) noexcept
+	{
+		const float weight = std::clamp(historyWeight, 0.0f, 1.0f);
+		return {
+			current.first + (history.first - current.first) * weight,
+			current.second + (history.second - current.second) * weight,
+		};
+	}
+
+	[[nodiscard]] constexpr float computeFlaxGIDistanceVariance(
+		FlaxGIDistanceMoments moments) noexcept
+	{
+		return std::max(moments.second - moments.first * moments.first, 0.0f);
+	}
+
 	enum class FlaxGIDebugStage : uint8_t
 	{
 		meshSDFInput = 0,
@@ -98,6 +141,13 @@ namespace demo
 		uint32_t totalProbes{0};
 		uint32_t raysPerProbe{0};
 		bool surfaceAtlasSampledByTrace{false};
+		float probeSpacing{0.0f};
+		float distanceMomentHorizon{0.0f};
+		float sdfVoxelSize{0.0f};
+		float traceRayStartOffset{0.0f};
+		float selfHitThreshold{0.0f};
+		float minimumVisibility{kFlaxGIMinVisibility};
+		uint32_t distanceMomentSchemaVersion{2u};
 	};
 
 	struct FlaxGIDebugViewSet
@@ -184,7 +234,7 @@ namespace demo
 		constexpr std::array names{
 			std::string_view{"Global SDF Distance"}, std::string_view{"Global SDF Albedo"},
 			std::string_view{"Probe State / Relocation"}, std::string_view{"Trace Radiance"},
-			std::string_view{"Trace Hit Distance"}, std::string_view{"Probe Distance"},
+			std::string_view{"Trace Hit Distance"}, std::string_view{"Probe Distance Moments"},
 			std::string_view{"Probe Irradiance"}, std::string_view{"Surface Atlas Lighting"},
 		};
 		const size_t index = static_cast<size_t>(view);

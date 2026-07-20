@@ -1,15 +1,11 @@
 #include "SceneViewResolver.h"
 
-#include <glm/gtc/constants.hpp>
-
 #include <algorithm>
 #include <cmath>
 
 namespace demo {
 
 namespace {
-
-constexpr float kDefaultFiniteCameraFarPlane = 10000.0f;
 
 [[nodiscard]] const glm::mat4* findWorldTransform(int32_t nodeIndex,
                                                    std::span<const SceneNode> sceneNodes,
@@ -88,11 +84,10 @@ bool populatePrimarySceneCameraUniforms(
     std::span<const SceneCamera> cameras,
     std::span<const SceneNode> sceneNodes,
     std::span<const GltfNodeData> gltfNodes,
-    rhi::Extent2D viewportSize,
-    const clipspace::ProjectionConvention& projectionConvention,
+    const glm::mat4& flightCameraProjection,
     shaderio::CameraUniforms& uniforms)
 {
-  if(cameras.empty() || viewportSize.width == 0 || viewportSize.height == 0) {
+  if(cameras.empty()) {
     return false;
   }
 
@@ -102,38 +97,23 @@ bool populatePrimarySceneCameraUniforms(
     return false;
   }
 
-  const float determinant = glm::determinant(*worldTransform);
-  if(!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-8f) {
+  if(!isFiniteMatrix(flightCameraProjection)) {
     return false;
   }
 
-  const float nearPlane = std::max(camera.nearPlane, 1.0e-4f);
-  const float farPlane = camera.farPlane > nearPlane
-      ? camera.farPlane
-      : std::max(kDefaultFiniteCameraFarPlane, nearPlane + 1.0f);
-
-  glm::mat4 projection{1.0f};
-  if(camera.type == SceneCameraType::orthographic) {
-    const float xmag = std::max(std::abs(camera.horizontalMagnification), 1.0e-4f);
-    const float ymag = std::max(std::abs(camera.verticalMagnification), 1.0e-4f);
-    projection = clipspace::makeOrthographicProjection(
-        -xmag, xmag, -ymag, ymag, nearPlane, farPlane, projectionConvention);
-  } else {
-    const float viewportAspect = static_cast<float>(viewportSize.width)
-                               / static_cast<float>(viewportSize.height);
-    const float aspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : viewportAspect;
-    const float fieldOfView = glm::clamp(
-        camera.verticalFieldOfViewRadians, 1.0e-4f, glm::pi<float>() - 1.0e-4f);
-    projection = clipspace::makePerspectiveProjection(
-        fieldOfView, std::max(aspect, 1.0e-4f), nearPlane, farPlane, projectionConvention);
-  }
-
-  const glm::mat4 view = glm::inverse(*worldTransform);
-  if(!isFiniteMatrix(view) || !isFiniteMatrix(projection)) {
+  const glm::vec3 position((*worldTransform)[3]);
+  const glm::vec3 forward = safeNormalize(-glm::vec3((*worldTransform)[2]), glm::vec3(0.0f, 0.0f, -1.0f));
+  const glm::vec3 importedUp = safeNormalize(glm::vec3((*worldTransform)[1]), glm::vec3(0.0f, 1.0f, 0.0f));
+  const glm::vec3 right = safeNormalize(glm::cross(forward, importedUp),
+                                        safeNormalize(glm::vec3((*worldTransform)[0]),
+                                                      glm::vec3(1.0f, 0.0f, 0.0f)));
+  const glm::vec3 up = safeNormalize(glm::cross(right, forward), glm::vec3(0.0f, 1.0f, 0.0f));
+  const glm::mat4 view = glm::lookAt(position, position + forward, up);
+  if(!isFiniteMatrix(view)) {
     return false;
   }
 
-  populateCameraUniforms(view, projection, glm::vec3((*worldTransform)[3]), uniforms);
+  populateCameraUniforms(view, flightCameraProjection, position, uniforms);
   return true;
 }
 

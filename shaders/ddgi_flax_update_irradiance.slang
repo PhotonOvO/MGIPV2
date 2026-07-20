@@ -46,28 +46,31 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
 
     float3 accumulated = float3(0, 0, 0);
     float accumulatedWeight = 0.0f;
-    float2 octahedralCoord = ((float2(groupThreadId.xy) + 0.5f) / float(kTileSize)) * 2.0f - 1.0f;
+    uint2 interiorTexel = flaxProbeTileInteriorTexel(
+        groupThreadId.xy, kDDGIProbeIrradianceResolution);
+    float2 octahedralCoord =
+        ((float2(interiorTexel - uint2(1u, 1u)) + 0.5f)
+         / float(kDDGIProbeIrradianceResolution)) * 2.0f - 1.0f;
     float3 texelDirection = flaxOctahedralDecode(octahedralCoord);
     for (uint r = 0; r < ddgi.raysCount; r++)
     {
         float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
-        if (traceData.w >= 0.0f)
-        {
-            float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
-            float rayWeight = saturate(dot(texelDirection, rayDirection));
-            accumulated += traceData.rgb * rayWeight;
-            accumulatedWeight += rayWeight;
-        }
+        // Miss rays carry sky radiance and must participate in the directional
+        // irradiance integral just like surface hits.
+        float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
+        float rayWeight = saturate(dot(texelDirection, rayDirection));
+        accumulated += traceData.rgb * rayWeight;
+        accumulatedWeight += rayWeight;
     }
 
     float3 irradiance = accumulatedWeight > 0.0f
         ? accumulated / accumulatedWeight : float3(0, 0, 0);
     float4 historyIrradiance = probesIrradianceHist.Load(int3(texel, 0));
     bool historyValid = historyIrradiance.a > 0.0f;
-    float historyWeight = (state == kDDGIProbeStateActivated || !historyValid)
-        ? 0.0f : ddgi.probeHistoryWeight;
     float3 historyLinear = pow(max(historyIrradiance.rgb, float3(0, 0, 0)),
                                ddgi.irradianceGamma);
+    float historyWeight = flaxIrradianceHistoryWeight(
+        ddgi, state, historyValid, irradiance, historyLinear);
     irradiance = lerp(irradiance, historyLinear, historyWeight);
     irradiance = pow(max(irradiance, float3(0, 0, 0)), 1.0f / ddgi.irradianceGamma);
 

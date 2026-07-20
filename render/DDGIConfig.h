@@ -57,6 +57,9 @@ namespace demo
 		// Temporal response weight for irradiance/distance history blend.
 		// Lower = faster response, higher = more stable. Flax default ~0.98.
 		float probeHistoryWeight{0.98f};
+		// Surface-to-camera bias used with normalBias during FlaxGI sampling.
+		// A separate view term reduces visibility discontinuities at silhouettes.
+		float viewBias{0.1f};
 		// Indirect lighting multiplier applied when sampling DDGI in the light pass.
 		float indirectLightingIntensity{1.0f};
 		// Fallback irradiance color when no valid probe data is available.

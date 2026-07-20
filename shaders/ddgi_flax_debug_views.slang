@@ -94,10 +94,11 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         else
         {
-            const float normalizedDistance = trace.w >= 0.0f
-                ? saturate(trace.w / max(ddgiData[0].rayMaxDistance, 0.001f)) : 1.0f;
-            color = trace.w < 0.0f ? float3(0.02f, 0.04f, 0.3f)
-                                  : float3(normalizedDistance, 1.0f - normalizedDistance, 0.05f);
+            const float distanceLimit = flaxProbeDistanceLimit(ddgiData[0], 0u);
+            const float normalizedDistance = saturate(trace.w / distanceLimit);
+            const bool openRay = normalizedDistance >= 0.999f;
+            color = openRay ? float3(0.02f, 0.15f, 0.8f)
+                            : float3(normalizedDistance, 1.0f - normalizedDistance, 0.05f);
         }
     }
     else if (tileIndex == 5u)
@@ -105,7 +106,12 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
         uint width, height;
         probesDistance.GetDimensions(width, height);
         const float2 distanceMoments = probesDistance.Load(int3(sourceCoord(uv, uint2(width, height)), 0));
-        color = float3(saturate(distanceMoments.x), saturate(distanceMoments.y * 4.0f), 0.05f);
+        const float normalizedMean = saturate(distanceMoments.x);
+        const float normalizedSecondMoment = saturate(distanceMoments.y);
+        const float normalizedVariance = max(
+            normalizedSecondMoment - normalizedMean * normalizedMean, 0.0f);
+        color = float3(normalizedMean, sqrt(normalizedVariance),
+                       normalizedSecondMoment);
     }
     else if (tileIndex == 6u)
     {

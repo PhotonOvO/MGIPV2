@@ -1082,17 +1082,13 @@ inline void MinimalLatestApp::resetSceneCameraNavigation()
 
 inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const
 {
-  const demo::clipspace::ProjectionConvention projectionConvention =
-      demo::clipspace::getProjectionConvention(demo::clipspace::BackendConvention::vulkan);
-
   if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
   {
     return demo::populatePrimarySceneCameraUniforms(
         m_sceneAsset->cameras,
         m_sceneAsset->nodes,
         std::span<const demo::GltfNodeData>{},
-        m_viewportSize,
-        projectionConvention,
+        m_camera.getProjectionMatrix(),
         uniforms);
   }
   if(m_sceneModel.has_value())
@@ -1101,8 +1097,7 @@ inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::Camera
         m_sceneModel->cameras,
         std::span<const demo::SceneNode>{},
         m_sceneModel->nodes,
-        m_viewportSize,
-        projectionConvention,
+        m_camera.getProjectionMatrix(),
         uniforms);
   }
 
@@ -1993,6 +1988,8 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
   configChanged |= ImGui::SliderFloat("Coverage Radius", &config.giDistance, 5.0f, 200.0f, "%.0f");
   configChanged |= ImGui::SliderFloat("Ray Max Distance", &config.maxDistance, 5.0f, 200.0f, "%.0f");
   configChanged |= ImGui::SliderFloat("History Weight", &config.probeHistoryWeight, 0.5f, 0.999f, "%.3f");
+  configChanged |= ImGui::SliderFloat("Normal Bias", &config.normalBias, 0.0f, 2.0f, "%.3f");
+  configChanged |= ImGui::SliderFloat("View Bias", &config.viewBias, 0.0f, 2.0f, "%.3f");
   configChanged |= ImGui::SliderFloat("Indirect Intensity", &config.indirectLightingIntensity, 0.0f, 5.0f, "%.2f");
   int maxProbes = static_cast<int>(config.maxUpdatedProbesPerFrame);
   if(ImGui::InputInt("Max Probes / Frame", &maxProbes, 64, 256))
@@ -2047,6 +2044,15 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
 
   ImGui::SeparatorText("Stage Validation");
   const demo::FlaxGIDebugSnapshot snapshot = m_renderer.getFlaxGIDebugSnapshot();
+  ImGui::Text("Distance Moments: v%u, normalized E[d] / E[d^2]",
+              snapshot.distanceMomentSchemaVersion);
+  ImGui::Text("Spacing / Horizon: %.3f / %.3f", snapshot.probeSpacing,
+              snapshot.distanceMomentHorizon);
+  ImGui::Text("SDF Voxel / Ray Start / Self Hit: %.4f / %.4f / %.4f",
+              snapshot.sdfVoxelSize, snapshot.traceRayStartOffset,
+              snapshot.selfHitThreshold);
+  ImGui::Text("Visibility Floor: %.3f", snapshot.minimumVisibility);
+  ImGui::Separator();
   for(uint32_t index = 0; index < static_cast<uint32_t>(demo::FlaxGIDebugStage::count); ++index)
   {
     const demo::FlaxGIDebugStage stage = static_cast<demo::FlaxGIDebugStage>(index);

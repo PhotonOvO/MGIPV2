@@ -103,72 +103,88 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
     atlasData.chunkSize = atlasData.resolution / 40.0f;
     atlasData.objectsCount = 0;
 
+    const float distanceLimit = flaxProbeDistanceLimit(ddgi, cascadeIndex);
+    const float rayStartOffset = flaxProbeRayStartOffset(ddgi, cascadeIndex);
+    const float selfHitThreshold = flaxProbeSelfHitThreshold(ddgi);
+    const float3 probeUvw = clamp(
+        (probePos - sdfConfig.boundsMin) / (sdfConfig.boundsMax - sdfConfig.boundsMin),
+        float3(0,0,0), float3(1,1,1));
+    const float probeClearance =
+        sampleGlobalSDFFineDistance(globalSDFTex, sdfConfig, probeUvw);
+
     // Ray tracing loop
     uint raysPerProbe = ddgi.raysCount;
     for (uint r = 0; r < raysPerProbe; r++)
     {
         float3 rayDir = flaxSphericalFibonacci(float(r), float(raysPerProbe));
-        float3 origin = probePos + rayDir * 0.1f; // offset from probe center
+        float3 origin = probePos + rayDir * rayStartOffset;
 
         GlobalSDFTraceHit hit = traceGlobalSDF(globalSDFTex, sdfConfig,
                                                 origin, rayDir, ddgi.rayMaxDistance);
 
-        float3 radiance = float3(0,0,0);
+        // A miss represents known free space up to the finite moment horizon.
+        // It also contributes sky radiance to the irradiance convolution.
+        float storedDistance = distanceLimit;
+        float3 radiance = float3(0.01f, 0.015f, 0.03f);
 
         if (isGlobalSDFHit(hit))
         {
             float3 hitPos = origin + rayDir * hit.hitTime;
-            // Compute SDF normal at hit point
             float3 uvw = clamp(
                 (hitPos - sdfConfig.boundsMin) / (sdfConfig.boundsMax - sdfConfig.boundsMin),
                 float3(0,0,0), float3(1,1,1));
-            float3 grad = float3(0,0,1);
-            float eps = 1.0f / max(sdfConfig.resolution, 1.0f);
-            float xp = globalSDFTex.SampleLevel(uvw + float3(eps,0,0), 0);
-            float xn = globalSDFTex.SampleLevel(uvw - float3(eps,0,0), 0);
-            float yp = globalSDFTex.SampleLevel(uvw + float3(0,eps,0), 0);
-            float yn = globalSDFTex.SampleLevel(uvw - float3(0,eps,0), 0);
-            float zp = globalSDFTex.SampleLevel(uvw + float3(0,0,eps), 0);
-            float zn = globalSDFTex.SampleLevel(uvw - float3(0,0,eps), 0);
-            float3 gradient = float3(xp - xn, yp - yn, zp - zn);
-            float3 hitNormal = length(gradient) > 1e-6f ? normalize(gradient) : float3(0,1,0);
+            float3 hitNormal =
+                computeGlobalSDFGradientNormal(globalSDFTex, sdfConfig, hitPos);
+            bool nearHit = hit.hitTime <= selfHitThreshold;
+            bool frontFaceHit = dot(hitNormal, rayDir) < -0.05f;
+            // Relocation should keep probes outside geometry. If a coarse SDF
+            // still produces an immediate back-facing/tangent hit, treat that
+            // sample as numerical self-intersection, not as a zero-distance
+            // occluder. A near front-face hit remains a real nearby wall.
+            bool probeInside = probeClearance < -0.5f * selfHitThreshold;
+            bool unreliableNearHit = nearHit && !frontFaceHit;
+            bool reliableHit = !probeInside && !unreliableNearHit;
 
-	        // Try Surface Atlas sampling for colored hit
-	        float4 atlasSample = float4(0, 0, 0, 0);
-	        if (kUseSurfaceAtlas)
-	        {
-	            atlasSample = sampleGlobalSurfaceAtlas(
-	                atlasData, chunks, culledObjs, objects,
-	                atlasDepth, atlasLighting, linearSampler,
-	                hitPos, hitNormal, 20.0f);
-	        }
+            if (reliableHit)
+            {
+                // hitTime is measured from the biased origin. Add that offset
+                // back so moment distances remain measured from the probe.
+                storedDistance = min(rayStartOffset + hit.hitTime,
+                                     ddgi.rayMaxDistance);
 
-	        if (atlasSample.a > 0.01f)
-	        {
-	            radiance = atlasSample.rgb;
-	        }
-	        else
-	        {
-	            // R5 fallback: sample SDF albedo + scene directional light
-	            float3 albedoSample = globalAlbedoTex.SampleLevel(linearSampler, uvw, 0).rgb;
-	            float3 sunDir = normalize(ddgi.sceneLightDirection.xyz);
-	            float3 sunColor = ddgi.sceneLightColor.rgb;
-	            float NdotL = saturate(dot(hitNormal, sunDir));
-	            float3 directRadiance = sunColor * NdotL;
-	            directRadiance += evaluateFlaxRadianceSources(hitPos, hitNormal);
-	            // Lambert: reflected radiance uses energy-conserving 1/PI.
-	            radiance = albedoSample * directRadiance * (1.0f / kFlaxDDGIPi);
-	            // Small ambient so dark faces get minimal colored bounce
-	            radiance += albedoSample * 0.04f;
-	        }
-	    }
-	    else
-	    {
-	        // Miss — very dim blue sky
-	        radiance = float3(0.01f, 0.015f, 0.03f);
+                float4 atlasSample = float4(0, 0, 0, 0);
+                if (kUseSurfaceAtlas)
+                {
+                    atlasSample = sampleGlobalSurfaceAtlas(
+                        atlasData, chunks, culledObjs, objects,
+                        atlasDepth, atlasLighting, linearSampler,
+                        hitPos, hitNormal, 20.0f);
+                }
+
+                if (atlasSample.a > 0.01f)
+                {
+                    radiance = atlasSample.rgb;
+                }
+                else
+                {
+                    // R5 fallback: sample SDF albedo + scene directional light.
+                    float3 albedoSample =
+                        globalAlbedoTex.SampleLevel(linearSampler, uvw, 0).rgb;
+                    float3 sunDir = normalize(ddgi.sceneLightDirection.xyz);
+                    float3 sunColor = ddgi.sceneLightColor.rgb;
+                    float NdotL = saturate(dot(hitNormal, sunDir));
+                    float3 directRadiance = sunColor * NdotL;
+                    directRadiance +=
+                        evaluateFlaxRadianceSources(hitPos, hitNormal);
+                    radiance = albedoSample * directRadiance
+                             * (1.0f / kFlaxDDGIPi);
+                    radiance += albedoSample * 0.04f;
+                }
+            }
 	    }
 
         // Write to trace buffer (column = ray, row = batch probe)
-        probesTrace[uint2(r, batchIndex)] = float4(radiance, hit.hitTime);
+        probesTrace[uint2(r, batchIndex)] =
+            float4(radiance, storedDistance);
     }
 }

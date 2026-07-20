@@ -49,44 +49,52 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     }
 
     float sumDist = 0.0f;
-    float probesSpacing = ddgi.probesOriginAndSpacing[kCascadeIndex].w;
-    float distanceLimit = probesSpacing * 1.5f;
+    float distanceLimit = flaxProbeDistanceLimit(ddgi, kCascadeIndex);
     float sumDist2 = 0.0f;
     float accumulatedWeight = 0.0f;
-    float2 octahedralCoord = ((float2(localTexel) + 0.5f) / float(kTileSize)) * 2.0f - 1.0f;
+    uint2 interiorTexel = flaxProbeTileInteriorTexel(
+        localTexel, kDDGIProbeDistanceResolution);
+    float2 octahedralCoord =
+        ((float2(interiorTexel - uint2(1u, 1u)) + 0.5f)
+         / float(kDDGIProbeDistanceResolution)) * 2.0f - 1.0f;
     float3 texelDirection = flaxOctahedralDecode(octahedralCoord);
 
     for (uint r = 0; r < ddgi.raysCount; r++)
     {
         float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
-        float hitDist = traceData.w;
-        // Misses are -1; an immediate zero-distance hit is still an occluder.
-        // Counting it prevents an inside probe from falling back to rayMaxDistance.
-        if (hitDist >= 0.0f)
-        {
-            float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
-            float rayWeight = saturate(dot(texelDirection, rayDirection));
-            // Flax sharpens the directional lobe to preserve depth discontinuities.
-            rayWeight = pow(rayWeight, 10.0f);
-            float rayDistance = min(hitDist, distanceLimit);
-            sumDist += rayDistance * rayWeight;
-            sumDist2 += rayDistance * rayDistance * rayWeight;
-            accumulatedWeight += rayWeight;
-        }
+        // Trace writes the finite distance horizon for misses. Clamp here as
+        // well so captures made by older trace code cannot reintroduce a
+        // conditional-on-hit distance estimator.
+        float rayDistance = traceData.w < 0.0f
+            ? distanceLimit : min(traceData.w, distanceLimit);
+        float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
+        float rayWeight = saturate(dot(texelDirection, rayDirection));
+        // Flax sharpens the directional lobe to preserve depth discontinuities.
+        rayWeight = pow(rayWeight, 10.0f);
+        sumDist += rayDistance * rayWeight;
+        sumDist2 += rayDistance * rayDistance * rayWeight;
+        accumulatedWeight += rayWeight;
     }
 
     float meanDist = accumulatedWeight > 0.0f
-        ? sumDist / accumulatedWeight : ddgi.rayMaxDistance;
-    float varDist = accumulatedWeight > 0.0f
-        ? max(sumDist2 / accumulatedWeight - meanDist * meanDist, 0.0f) : 0.0f;
+        ? sumDist / accumulatedWeight : distanceLimit;
+    float secondMoment = accumulatedWeight > 0.0f
+        ? sumDist2 / accumulatedWeight : distanceLimit * distanceLimit;
 
     float2 historyData = probesDistanceHist.Load(int3(texel, 0));
     bool historyValid = any(historyData > float2(0.0f, 0.0f));
-    float historyWeight = (state == kDDGIProbeStateActivated || !historyValid)
-        ? 0.0f : ddgi.probeHistoryWeight;
-    float historyMeanDistance = historyData.x * ddgi.rayMaxDistance;
+    float historyMeanDistance = historyData.x * distanceLimit;
+    float historySecondMoment = historyData.y * distanceLimit * distanceLimit;
+    // A high fixed hysteresis can preserve an obsolete near-zero moment for
+    // hundreds of frames. Reject history when current rays disagree at probe
+    // or SDF-voxel scale.
+    float historyWeight = flaxDistanceHistoryWeight(
+        ddgi, kCascadeIndex, state, historyValid,
+        meanDist, historyMeanDistance);
     meanDist = lerp(meanDist, historyMeanDistance, historyWeight);
-    varDist = lerp(varDist, historyData.y, historyWeight);
+    secondMoment = lerp(secondMoment, historySecondMoment, historyWeight);
 
-    probesDistance[texel] = float2(meanDist / ddgi.rayMaxDistance, varDist);
+    probesDistance[texel] = float2(
+        saturate(meanDist / distanceLimit),
+        saturate(secondMoment / (distanceLimit * distanceLimit)));
 }

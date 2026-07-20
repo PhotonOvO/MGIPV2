@@ -635,7 +635,7 @@ struct LightParams
 	// lighting pass. Gated by ddgiFlaxEnabledAndCascades.x > 0.5.
 	// z = 1 when Flax textures (data/distance/irradiance) are bound in
 	// the bindless texture array; 0 = safe fallback to ambient/IBL.
-	vec4 ddgiFlaxEnabledAndCascades;        // x = enabled, y = cascade count, z = textures bound, w unused
+	vec4 ddgiFlaxEnabledAndCascades;        // x = enabled, y = cascade count, z = textures bound, w = view bias
 	vec4 ddgiFlaxOriginAndSpacing[4];       // xyz = cascade origin, w = spacing
 	vec4 ddgiFlaxBlendOrigin[4];            // xyz = blend origin, w unused
 	ivec4 ddgiFlaxScrollOffsets[4];

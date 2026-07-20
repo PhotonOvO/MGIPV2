@@ -312,7 +312,78 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertNotIn(
             "lerp(irradiance, historyIrradiance.rgb, historyWeight)", irradiance
         )
-        self.assertIn("historyData.x * ddgi.rayMaxDistance", distance)
+        self.assertIn("historyData.x * distanceLimit", distance)
+        self.assertIn("historySecondMoment", distance)
+        self.assertNotIn("lerp(varDist", distance)
+
+    def test_flax_distance_moments_include_misses_and_store_raw_moments(self) -> None:
+        distance = read("shaders/ddgi_flax_update_distance.slang")
+        trace = read("shaders/ddgi_flax_trace_rays.slang")
+        common = read("shaders/flax_ddgi_common.slang")
+
+        self.assertIn("traceData.w < 0.0f", distance)
+        self.assertIn("? distanceLimit", distance)
+        self.assertIn("secondMoment / (distanceLimit * distanceLimit)", distance)
+        self.assertIn("secondMoment - meanDistance * meanDistance", common)
+        self.assertIn("float storedDistance = distanceLimit", trace)
+
+    def test_flax_visibility_never_hard_rejects_an_entire_probe_cage(self) -> None:
+        common = read("shaders/flax_ddgi_common.slang")
+
+        self.assertIn("wrapShading * wrapShading + 0.2f", common)
+        self.assertIn("kFlaxDDGIMinVisibility", common)
+        self.assertNotIn("surfaceSideWeight", common)
+
+    def test_flax_probe_weights_remain_continuous_across_cells(self) -> None:
+        common = read("shaders/flax_ddgi_common.slang")
+
+        self.assertIn(
+            "float contribWeight = weight * backFaceWeight * distVis", common
+        )
+        self.assertNotIn("lowWeightThreshold", common)
+        self.assertNotIn("contribWeight *= (contribWeight * contribWeight)", common)
+
+    def test_flax_distance_history_rejects_large_moment_disagreement(self) -> None:
+        common = read("shaders/flax_ddgi_common.slang")
+        distance = read("shaders/ddgi_flax_update_distance.slang")
+
+        self.assertIn("flaxDistanceHistoryWeight", common)
+        self.assertIn("historyRejectionThreshold", common)
+        self.assertIn("flaxDistanceHistoryWeight(", distance)
+        self.assertNotIn(
+            "? 0.0f : ddgi.probeHistoryWeight", distance
+        )
+
+    def test_flax_probe_updates_write_interior_and_wrapped_border_texels(self) -> None:
+        common = read("shaders/flax_ddgi_common.slang")
+        irradiance = read("shaders/ddgi_flax_update_irradiance.slang")
+        distance = read("shaders/ddgi_flax_update_distance.slang")
+
+        self.assertIn("flaxProbeTileInteriorTexel", common)
+        self.assertIn("kDDGIProbeIrradianceResolution", irradiance)
+        self.assertIn("flaxProbeTileInteriorTexel", irradiance)
+        self.assertIn("kDDGIProbeDistanceResolution", distance)
+        self.assertIn("flaxProbeTileInteriorTexel", distance)
+        self.assertNotIn("/ float(kTileSize)) * 2.0f", irradiance)
+        self.assertNotIn("/ float(kTileSize)) * 2.0f", distance)
+
+    def test_flax_inactive_probes_use_stable_weighted_fallback(self) -> None:
+        common = read("shaders/flax_ddgi_common.slang")
+        inactive = read("shaders/ddgi_flax_update_inactive.slang")
+
+        self.assertIn("ddgi.fallbackIrradiance.rgb * weight", common)
+        self.assertIn("totalWeight += weight", common)
+        self.assertNotIn("fallbackCoordsValid(ddgi, probeData.xyz)", common)
+        self.assertNotIn("int step = 1", inactive)
+        self.assertNotIn("neighborData", inactive)
+
+    def test_flax_trace_bias_is_scale_aware_and_preserves_probe_distance(self) -> None:
+        trace = read("shaders/ddgi_flax_trace_rays.slang")
+
+        self.assertIn("flaxProbeRayStartOffset", trace)
+        self.assertIn("rayStartOffset + hit.hitTime", trace)
+        self.assertIn("frontFaceHit", trace)
+        self.assertNotIn("rayDir * 0.1f", trace)
 
     def test_flax_probe_tiles_preserve_directional_radiance(self) -> None:
         common = read("shaders/flax_ddgi_common.slang")

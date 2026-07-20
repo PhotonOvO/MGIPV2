@@ -25,8 +25,7 @@ void populateNavigatedSceneCameraUniforms(
     std::span<const SceneCamera> cameras,
     std::span<const SceneNode> sceneNodes,
     std::span<const GltfNodeData> gltfNodes,
-    rhi::Extent2D viewportSize,
-    const clipspace::ProjectionConvention& projectionConvention,
+    const glm::mat4& flightCameraProjection,
     shaderio::CameraUniforms& uniforms);
 
 // Returns true when the scene declares lights. In that case the scene is

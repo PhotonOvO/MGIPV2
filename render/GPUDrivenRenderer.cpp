@@ -4130,7 +4130,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						glm::vec4(flaxTexturesReady ? 1.0f : 0.0f,
 						          static_cast<float>(realCascadeCount),
 						          flaxTexturesReady ? 1.0f : 0.0f,
-						          0.0f);
+						          ddgiConfig.viewBias);
 				// R3: populate per-cascade origin/spacing from Flax cascade descriptors
 				const uint32_t cascadeCount = m_flaxDDGIResources.isInitialized()
 					? m_flaxDDGIResources.getCascadeCount() : 0u;

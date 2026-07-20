@@ -193,15 +193,12 @@ private:
   void updateCamera()
   {
     m_camera.update();
-    const demo::clipspace::ProjectionConvention projectionConvention =
-        demo::clipspace::getProjectionConvention(demo::clipspace::BackendConvention::vulkan);
     const bool usingSceneCamera = m_sceneModel.has_value()
         && demo::populatePrimarySceneCameraUniforms(
             m_sceneModel->cameras,
             std::span<const demo::SceneNode>{},
             m_sceneModel->nodes,
-            m_viewportSize,
-            projectionConvention,
+            m_camera.getProjectionMatrix(),
             m_cameraUniforms);
     if(!usingSceneCamera)
     {

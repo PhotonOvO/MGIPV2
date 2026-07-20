@@ -617,6 +617,7 @@ vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 {
     FlaxDDGIData ddgi = buildFlaxDDGIData(lighting);
     float normalBias = lighting.light.ddgiFlaxFallbackIrradiance.w;
+    float viewBias = lighting.light.ddgiFlaxEnabledAndCascades.w;
     float cascadeBlendDist = kDDGICascadeBlendSize;
 
     return sampleFlaxDDGIIrradiance(
@@ -624,7 +625,8 @@ vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
         inTexture[kFlaxDDGIProbesDataIndex],
         inTexture[kFlaxDDGIProbesDistanceIndex],
         inTexture[kFlaxDDGIProbesIrradianceIndex],
-        worldPos, N, normalBias, cascadeBlendDist);
+        worldPos, N, Wo, normalBias, viewBias,
+        cascadeBlendDist);
 }
 
 // DDGI (Wave D3-1) runtime gate: both the master enable flag and a non-zero

@@ -17,6 +17,109 @@ static const float kDDGIProbeAttentionMax   = 0.98f;
 static const float kDDGICascadeBlendSize    = 2.0f;
 static const float kFlaxDDGIPi              = 3.14159265359f;
 
+// RTXGI bounds the directional distance distribution to 1.5 probe-cell
+// diagonals. Keeping the horizon larger than a cell diagonal is important:
+// an all-miss probe must remain visible everywhere inside its interpolation
+// cell.
+static const float kFlaxDDGIDistanceHorizonScale = 1.5f;
+static const float kFlaxDDGIMinVisibility = 0.05f;
+
+float flaxProbeDistanceLimit(FlaxDDGIData ddgi, uint cascadeIndex)
+{
+    float spacing = max(ddgi.probesOriginAndSpacing[cascadeIndex].w, 0.0001f);
+    float cellDiagonal = length(float3(spacing, spacing, spacing));
+    return max(min(ddgi.rayMaxDistance,
+                   cellDiagonal * kFlaxDDGIDistanceHorizonScale), 0.0001f);
+}
+
+float flaxProbeRayStartOffset(FlaxDDGIData ddgi, uint cascadeIndex)
+{
+    float spacing = max(ddgi.probesOriginAndSpacing[cascadeIndex].w, 0.0001f);
+    float voxelSize = max(ddgi.sdfBoundsMinAndVoxel.w, 0.0001f);
+    // A sub-voxel offset avoids sampling the exact relocation boundary, while
+    // the spacing cap prevents coarse SDFs from skipping a nearby thin wall.
+    return min(voxelSize * 0.25f, spacing * 0.05f);
+}
+
+float flaxProbeSelfHitThreshold(FlaxDDGIData ddgi)
+{
+    return max(ddgi.sdfBoundsMinAndVoxel.w, 0.0001f);
+}
+
+uint2 flaxProbeTileInteriorTexel(uint2 tileTexel, uint interiorResolution)
+{
+    uint borderMax = interiorResolution + 1u;
+
+    if (tileTexel.x == 0u)
+    {
+        if (tileTexel.y == 0u)
+            return uint2(interiorResolution, interiorResolution);
+        if (tileTexel.y == borderMax)
+            return uint2(interiorResolution, 1u);
+        return uint2(1u, borderMax - tileTexel.y);
+    }
+    if (tileTexel.x == borderMax)
+    {
+        if (tileTexel.y == 0u)
+            return uint2(1u, interiorResolution);
+        if (tileTexel.y == borderMax)
+            return uint2(1u, 1u);
+        return uint2(interiorResolution, borderMax - tileTexel.y);
+    }
+    if (tileTexel.y == 0u)
+        return uint2(borderMax - tileTexel.x, 1u);
+    if (tileTexel.y == borderMax)
+        return uint2(borderMax - tileTexel.x, interiorResolution);
+    return tileTexel;
+}
+
+float flaxDistanceHistoryWeight(
+    FlaxDDGIData ddgi,
+    uint cascadeIndex,
+    uint probeState,
+    bool historyValid,
+    float currentMeanDistance,
+    float historyMeanDistance)
+{
+    if (probeState == kDDGIProbeStateActivated || !historyValid)
+        return 0.0f;
+
+    float spacing = max(ddgi.probesOriginAndSpacing[cascadeIndex].w, 0.0001f);
+    float voxelSize = max(ddgi.sdfBoundsMinAndVoxel.w, 0.0001f);
+    float historyRejectionThreshold = max(spacing * 0.25f, voxelSize * 2.0f);
+    float disagreement = abs(currentMeanDistance - historyMeanDistance);
+    float historyConfidence = 1.0f - smoothstep(
+        historyRejectionThreshold,
+        historyRejectionThreshold * 2.0f,
+        disagreement);
+    return saturate(ddgi.probeHistoryWeight) * historyConfidence;
+}
+
+float flaxIrradianceHistoryWeight(
+    FlaxDDGIData ddgi,
+    uint probeState,
+    bool historyValid,
+    float3 currentIrradiance,
+    float3 historyIrradiance)
+{
+    if (probeState == kDDGIProbeStateActivated || !historyValid)
+        return 0.0f;
+
+    float signal = max(max(max(currentIrradiance.x, currentIrradiance.y),
+                           currentIrradiance.z),
+                       max(max(historyIrradiance.x, historyIrradiance.y),
+                           historyIrradiance.z));
+    float historyRejectionThreshold = max(0.02f, signal * 0.35f);
+    float disagreement = max(
+        max(abs(currentIrradiance.x - historyIrradiance.x),
+            abs(currentIrradiance.y - historyIrradiance.y)),
+        abs(currentIrradiance.z - historyIrradiance.z));
+    float historyConfidence = 1.0f - smoothstep(
+        historyRejectionThreshold,
+        historyRejectionThreshold * 2.0f,
+        disagreement);
+    return saturate(ddgi.probeHistoryWeight) * historyConfidence;
+}
 float3 flaxSphericalFibonacci(float rayIndex, float rayCount)
 {
     float phiGolden = sqrt(5.0f) * 0.5f + 0.5f;
@@ -232,19 +335,15 @@ float3 sampleFlaxDDGIIrradianceCascade(
         float4 probeData = probesData.Load(int3(texelCoord, 0));
         uint state = decodeProbeState(probeData);
 
-        // Inactive probe -> use fallback
+        // Invalid probes have no trustworthy directional moments. Contribute
+        // the configured fallback with the original trilinear weight so the
+        // interpolation remains partition-of-unity and cannot form Voronoi
+        // bands from a nearest-active-probe substitution.
         if (state == kDDGIProbeStateInactive)
         {
-            if (!fallbackCoordsValid(ddgi, probeData.xyz))
-                continue;
-
-            uint3 fallbackCoords = decodeFallbackCoords(probeData.xyz);
-            probeCoords = fallbackCoords;
-            probeIndex = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
-            texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
-            probeData = probesData.Load(int3(texelCoord, 0));
-            if (decodeProbeState(probeData) == kDDGIProbeStateInactive)
-                continue;
+            irradiance += ddgi.fallbackIrradiance.rgb * weight;
+            totalWeight += weight;
+            continue;
         }
 
         // Decode real probe position and compute visibility
@@ -255,33 +354,34 @@ float3 sampleFlaxDDGIIrradianceCascade(
         float3 probeToPointDir = -pointToProbeDir;
         float2 probeToPointOct = flaxOctahedralEncode(probeToPointDir);
 
-        // Preserve smooth wrap shading near the tangent plane, but reject
-        // probes far behind the receiving surface. Tiny back-face weights can
-        // otherwise dominate after normalization when visibility is invalid.
+        // Smooth wrap shading with a non-zero floor. A hard surface-side gate
+        // can reject all probes on one side of a cell while moment visibility
+        // rejects the other side, producing a cell-aligned fallback band.
         float normalAlignment = dot(pointToProbeDir, worldNormal);
-        float surfaceSideWeight = smoothstep(-0.35f, 0.0f, normalAlignment);
-        float wrapShading = max(
-            0.0001f, (normalAlignment + 1.0f) * 0.5f);
-        float backFaceWeight = max(0.1f, wrapShading * wrapShading);
-        const float minWeightThreshold = 0.2f;
-        if (backFaceWeight < minWeightThreshold)
-            backFaceWeight *= (backFaceWeight * backFaceWeight) /
-                (minWeightThreshold * minWeightThreshold);
-        backFaceWeight *= surfaceSideWeight;
+        float wrapShading = saturate((normalAlignment + 1.0f) * 0.5f);
+        float backFaceWeight = wrapShading * wrapShading + 0.2f;
 
-
-        // Distance visibility (simplified — full version uses moments)
+        // The distance atlas stores normalized raw moments (E[d], E[d^2]),
+        // not variance. Raw moments can be blended temporally without losing
+        // the between-frame mean-shift term.
         float2 probeUV = getProbeUV(ddgi, cascadeIndex, probeIndex,
                                      probeToPointOct, kDDGIProbeDistanceResolution);
         float2 distanceMoments = probesDistance.SampleLevel(probeUV, 0).xy;
-        float meanDistance = distanceMoments.x * ddgi.rayMaxDistance;
-        float variance = max(distanceMoments.y, 0.0001f);
+        float distanceLimit = flaxProbeDistanceLimit(ddgi, cascadeIndex);
+        float meanDistance = saturate(distanceMoments.x) * distanceLimit;
+        float secondMoment = max(distanceMoments.y, 0.0f)
+                           * distanceLimit * distanceLimit;
+        float varianceFloor = max(distanceLimit * distanceLimit * 1.0e-6f,
+                                  1.0e-6f);
+        float variance = max(secondMoment - meanDistance * meanDistance,
+                             varianceFloor);
         float visibilityDelta = max(distToProbe - meanDistance, 0.0f);
         float chebyshevWeight = variance /
             (variance + visibilityDelta * visibilityDelta);
         chebyshevWeight =
             chebyshevWeight * chebyshevWeight * chebyshevWeight;
-        float distVis = distToProbe <= meanDistance ? 1.0f : chebyshevWeight;
+        float distVis = distToProbe <= meanDistance
+            ? 1.0f : max(chebyshevWeight, kFlaxDDGIMinVisibility);
 
         // Irradiance is directional over the receiving surface normal, while
         // the distance moments above are directional from probe to point.
@@ -290,12 +390,16 @@ float3 sampleFlaxDDGIIrradianceCascade(
         float3 irrSample = probesIrradiance.SampleLevel(irrUV, 0).rgb;
         irrSample = pow(irrSample, ddgi.irradianceGamma); // gamma decode
 
+        // Keep the interpolation continuous. Cubing low weights makes one
+        // probe abruptly become the winner at cell boundaries.
         float contribWeight = weight * backFaceWeight * distVis;
+        if (contribWeight <= 1.0e-8f)
+            continue;
         irradiance += irrSample * contribWeight;
         totalWeight += contribWeight;
     }
 
-    if (totalWeight > 0.0001f)
+    if (totalWeight > 1.0e-8f)
         irradiance /= totalWeight;
     else
         irradiance = ddgi.fallbackIrradiance.rgb;
@@ -311,13 +415,21 @@ float3 sampleFlaxDDGIIrradiance(
     Sampler2D<float4> probesIrradiance,
     float3 worldPosition,
     float3 worldNormal,
+    float3 worldToCameraDirection,
     float normalBias,
+    float viewBias,
     float cascadeBlendDistance)
 {
     float3 result = float3(0,0,0);
     float totalWeight = 0.0f;
 
-    float3 biasedPos = worldPosition + worldNormal * normalBias;
+    float3 safeNormal = length(worldNormal) > 0.0001f
+        ? normalize(worldNormal) : float3(0, 1, 0);
+    float3 safeViewDirection = length(worldToCameraDirection) > 0.0001f
+        ? normalize(worldToCameraDirection) : safeNormal;
+    float3 biasedPos = worldPosition
+        + safeNormal * normalBias
+        + safeViewDirection * viewBias;
 
     for (uint c = 0; c < ddgi.cascadesCount; c++)
     {
@@ -325,7 +437,7 @@ float3 sampleFlaxDDGIIrradiance(
 
         float3 cascadeIrradiance = sampleFlaxDDGIIrradianceCascade(
             ddgi, probesData, probesDistance, probesIrradiance,
-            worldPosition, worldNormal, c, spacing, biasedPos);
+            worldPosition, safeNormal, c, spacing, biasedPos);
 
         // Cascade blending weight (fade at cascade boundary)
         float blendWeight = 1.0f;
