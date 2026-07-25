@@ -9,8 +9,8 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  // Bumped 5->6: scene cameras are now preserved in the asset cache.
-  static constexpr uint32_t kCurrentVersion = 6;
+  // Bumped 6->7: imported emissive factors now include KHR emissive strength.
+  static constexpr uint32_t kCurrentVersion = 7;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 

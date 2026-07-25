@@ -407,6 +407,32 @@ vec3 evaluateSpotLight(uint lightIndex, vec3 N, vec3 V, vec3 worldPos, vec3 base
     return evaluateLocalLight(spotLightBuffer[lightIndex], N, V, worldPos, baseColor, metallic, roughness);
 }
 
+vec3 evaluateFlaxEmissiveAreaLights(
+    vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
+{
+    vec3 result = vec3(0.0);
+    uint sourceCount = min(lighting.light.ddgiFlaxRadianceSourceParams.x,
+                           uint(LFlaxDDGIMaxRadianceSources));
+    for(uint sourceIndex = 0u; sourceIndex < sourceCount; ++sourceIndex)
+    {
+        FlaxDDGIRadianceSource source = lighting.light.ddgiFlaxRadianceSources[sourceIndex];
+        if(uint(source.colorAndType.w + 0.5) != LFlaxRadianceSourceEmissive
+            || flaxPointOnEmissiveSource(source, worldPos, 0.02))
+            continue;
+
+        for(uint sampleIndex = 0u; sampleIndex < kFlaxEmissiveSampleCount; ++sampleIndex)
+        {
+            float3 L;
+            float distanceToLight;
+            float3 sampleRadiance = flaxEmissiveSampleRadiance(
+                source, worldPos, sampleIndex, L, distanceToLight);
+            result += evaluateDirectBRDF(
+                N, V, L, sampleRadiance, baseColor, metallic, roughness);
+        }
+    }
+    return result;
+}
+
 vec3 evaluatePointLightsCoarse(float2 uv, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
 {
     const uint2 tileCoord = computeLightTileCoord(uv);
@@ -510,7 +536,7 @@ FlaxDDGIData buildFlaxDDGIData(LightingUniforms lighting)
     ddgi.probeHistoryWeight = lighting.light.ddgiFlaxGammaWeightMaxDist.y;
     ddgi.rayMaxDistance = lighting.light.ddgiFlaxGammaWeightMaxDist.z;
     ddgi.indirectLightingIntensity = lighting.light.ddgiFlaxGammaWeightMaxDist.w;
-    ddgi.viewPos = float3(0,0,0); // filled by CPU per-frame
+    ddgi.viewPos = lighting.light.ddgiFlaxBlendOrigin[0].xyz;
     ddgi.raysCount = uint(lighting.light.ddgiFlaxCountsAndRays.w);
     ddgi.fallbackIrradiance = lighting.light.ddgiFlaxFallbackIrradiance;
     return ddgi;
@@ -706,7 +732,7 @@ vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float
 	        if(flaxDDGIEnabled())
 	        {
 	            const vec3 ddgiDiffuse = evaluateFlaxDDGIIrradiance(worldPos, N, V) * baseColor / PI * ao;
-	            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiFlaxGammaWeightMaxDist.w));
+	            return lerp(ambientTerm, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
 	        }
 	        if(ddgiSamplingEnabled())
 	        {
@@ -755,7 +781,7 @@ vec3 evaluateEnvironmentIBL(vec3 worldPos, vec3 N, vec3 V, vec3 baseColor, float
 	    if(flaxDDGIEnabled())
 	    {
 	        const vec3 ddgiDiffuse = kD * evaluateFlaxDDGIIrradiance(worldPos, N, V) * baseColor / PI;
-	        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiFlaxGammaWeightMaxDist.w));
+	        diffuse = lerp(diffuse, ddgiDiffuse, saturate(lighting.light.ddgiParams0.x));
 	    }
 	    else if(ddgiSamplingEnabled())
 	    {
@@ -942,8 +968,9 @@ float4 fragmentMain(VSOutput input) : SV_Target
     vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
+    vec3 emissiveAreaLights = evaluateFlaxEmissiveAreaLights(N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 color = ambient + directional + pointLights + emissiveSample.rgb;
+    vec3 color = ambient + directional + pointLights + emissiveAreaLights + emissiveSample.rgb;
     return float4(toneMapACES(color), 1.0);
 }
 
@@ -983,8 +1010,9 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
     vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
+    vec3 emissiveAreaLights = evaluateFlaxEmissiveAreaLights(N, V, worldPos, baseColor, metallic, roughness);
 
-    return float4(max(ambient + directional + pointLights + emissiveSample.rgb, 0.0), 1.0);
+    return float4(max(ambient + directional + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0), 1.0);
 }
 
 [shader("fragment")]

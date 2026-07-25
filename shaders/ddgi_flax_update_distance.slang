@@ -11,45 +11,43 @@
 [[vk::binding(2, 0)]] RWTexture2D<float2> probesDistance    : register(u0);
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint> activeProbes : register(u1); // counter + indices
 [[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t2);
-[[vk::binding(5, 0)]] Texture2D<float2> probesDistanceHist : register(t3);
+[[vk::binding(5, 0)]] RWTexture2D<float2> probesDistanceHist : register(u2);
 static FlaxDDGIData ddgi = ddgiData[0];
+struct FlaxDDGICascadePush
+{
+    uint cascadeIndex;
+};
+[[vk::push_constant]] ConstantBuffer<FlaxDDGICascadePush> cascadePush;
 
 [numthreads(8, 8, 1)]
 void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-    static const uint kCascadeIndex = 0;
     static const uint kTileSize = 16;
     static const uint kGroupsPerTileAxis = 2;
     static const uint kGroupsPerProbe = kGroupsPerTileAxis * kGroupsPerTileAxis;
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
 
     uint activeSlot = groupId.x / kGroupsPerProbe;
-    uint totalActiveCount = activeProbes[0];
-    uint updateCount = ddgi.updateParams.y == 0u
-        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
-    if (activeSlot >= updateCount || totalActiveCount == 0u) return;
-
     uint tileGroup = groupId.x % kGroupsPerProbe;
     uint2 tileBlock = uint2(tileGroup % kGroupsPerTileAxis, tileGroup / kGroupsPerTileAxis);
     uint2 localTexel = tileBlock * 8 + groupThreadId.xy;
 
-    uint selectedActiveSlot = (activeSlot + ddgi.updateParams.x) % totalActiveCount;
-    uint probeIndex = activeProbes[1 + selectedActiveSlot];
+    uint probeIndex;
+    uint requiredState;
+    if (!getProbeUpdateSelection(
+            ddgi, activeProbes, cascadeIndex, activeSlot, probeIndex, requiredState)) return;
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
-    uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
-    uint2 probeTile = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
+    uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
+    uint2 probeTile = getProbeTexelCoords(ddgi, cascadeIndex, scrolledIdx);
     uint2 texel = probeTile * kTileSize + localTexel;
 
     float4 probeData = probesData.Load(int3(probeTile, 0));
     uint state = decodeProbeState(probeData);
-    if (state == kDDGIProbeStateInactive)
-    {
-        float2 historyData = probesDistanceHist.Load(int3(texel, 0));
-        probesDistance[texel] = historyData;
+    if (!probeMatchesUpdateState(probeData, requiredState))
         return;
-    }
 
     float sumDist = 0.0f;
-    float distanceLimit = flaxProbeDistanceLimit(ddgi, kCascadeIndex);
+    float distanceLimit = flaxProbeDistanceLimit(ddgi, cascadeIndex);
     float sumDist2 = 0.0f;
     float accumulatedWeight = 0.0f;
     uint2 interiorTexel = flaxProbeTileInteriorTexel(
@@ -81,7 +79,7 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     float secondMoment = accumulatedWeight > 0.0f
         ? sumDist2 / accumulatedWeight : distanceLimit * distanceLimit;
 
-    float2 historyData = probesDistanceHist.Load(int3(texel, 0));
+    float2 historyData = probesDistanceHist.Load(int2(texel));
     bool historyValid = any(historyData > float2(0.0f, 0.0f));
     float historyMeanDistance = historyData.x * distanceLimit;
     float historySecondMoment = historyData.y * distanceLimit * distanceLimit;
@@ -89,12 +87,17 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     // hundreds of frames. Reject history when current rays disagree at probe
     // or SDF-voxel scale.
     float historyWeight = flaxDistanceHistoryWeight(
-        ddgi, kCascadeIndex, state, historyValid,
+        ddgi, cascadeIndex, state, historyValid,
         meanDist, historyMeanDistance);
     meanDist = lerp(meanDist, historyMeanDistance, historyWeight);
     secondMoment = lerp(secondMoment, historySecondMoment, historyWeight);
 
-    probesDistance[texel] = float2(
+    float2 encodedMoments = float2(
         saturate(meanDist / distanceLimit),
         saturate(secondMoment / (distanceLimit * distanceLimit)));
+    // Mirror each budgeted update into both atlases. Unselected probes are
+    // already identical, so frame-to-frame parity changes cannot reveal stale
+    // or zero tiles while still retaining the previous value as history.
+    probesDistance[texel] = encodedMoments;
+    probesDistanceHist[texel] = encodedMoments;
 }

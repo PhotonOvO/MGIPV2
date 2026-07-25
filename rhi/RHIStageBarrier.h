@@ -52,6 +52,7 @@ enum class HazardFlags : uint32_t
   depthStencil  = 1u << 2u,
   textureWrites = 1u << 3u,
   bufferWrites  = 1u << 4u,
+  readBeforeWrite = 1u << 5u,
 };
 
 constexpr HazardFlags operator|(HazardFlags a, HazardFlags b)

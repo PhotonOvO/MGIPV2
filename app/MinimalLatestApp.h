@@ -36,7 +36,7 @@
 class MinimalLatestApp
 {
 public:
-  MinimalLatestApp(demo::rhi::Extent2D size = {800, 600})
+  MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080})
       : m_windowSize(size)
   {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -936,8 +936,8 @@ private:
 
   GLFWwindow*                                       m_window{};
   std::unique_ptr<demo::rhi::Surface>               m_surface;
-  demo::rhi::Extent2D                               m_windowSize{800, 600};
-  demo::rhi::Extent2D                               m_viewportSize{800, 600};
+  demo::rhi::Extent2D                               m_windowSize{1920, 1080};
+  demo::rhi::Extent2D                               m_viewportSize{1920, 1080};
   demo::RendererFacade                              m_renderer;
   bool                       m_vSync{false};
   bool                       m_loggedFirstFrame{false};

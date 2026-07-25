@@ -1,6 +1,6 @@
 // ddgi_flax_classify.slang — Flax-style DDGI probe classification (FGI-050)
 // Uses flax_ddgi_common helpers for probe math, state encode/decode.
-// SDF distance check, relocation, empty-area fallback probes, active list append.
+// SDF distance check, relocation, empty-area fallback probes, active flags.
 
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"
@@ -14,31 +14,39 @@
 // Helper: access the single-element structured buffer like a constant buffer
 static FlaxDDGIData ddgi = ddgiData[0];
 
-// Cascade index is set via specialization constant or push constant
-#ifndef DDGI_CLASSIFY_CASCADE
-static const uint kCascadeIndex = 0;
-#else
-static const uint kCascadeIndex = DDGI_CLASSIFY_CASCADE;
-#endif
+struct FlaxDDGICascadePush
+{
+    uint cascadeIndex;
+};
+[[vk::push_constant]] ConstantBuffer<FlaxDDGICascadePush> cascadePush;
 
 [numthreads(32, 1, 1)]
 void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
     uint probeIndex = dispatchThreadId.x;
     uint probesPerPlane = ddgi.probesCounts.x * ddgi.probesCounts.z;
     uint totalProbes = probesPerPlane * ddgi.probesCounts.y;
     if (probeIndex >= totalProbes) return;
 
+    // Write one deterministic flag per logical probe. The compaction pass
+    // scans these flags in probe-index order, independent of wave scheduling.
+    uint priorityBase = 4u;
+    uint regularBase = priorityBase + totalProbes;
+    activeProbes[priorityBase + probeIndex] = 0u;
+    activeProbes[regularBase + probeIndex] = 0u;
+
+
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
-    uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
-    uint2 dataCoord = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
-    float probesSpacing = ddgi.probesOriginAndSpacing[kCascadeIndex].w;
-    float3 probeBasePos = getProbeWorldPosition(ddgi, kCascadeIndex, probeCoords);
+    uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
+    uint2 dataCoord = getProbeTexelCoords(ddgi, cascadeIndex, scrolledIdx);
+    float probesSpacing = ddgi.probesOriginAndSpacing[cascadeIndex].w;
+    float3 probeBasePos = getProbeWorldPosition(ddgi, cascadeIndex, probeCoords);
 
     // Check if higher-quality cascade covers this probe
-    if (kCascadeIndex > 0)
+    if (cascadeIndex > 0)
     {
-        uint prevC = kCascadeIndex - 1;
+        uint prevC = cascadeIndex - 1;
         float prevSpacing = ddgi.probesOriginAndSpacing[prevC].w;
         float3 prevOrigin = ddgi.probesOriginAndSpacing[prevC].xyz;
         float3 prevExtent = float3(ddgi.probesCounts - 1) * (prevSpacing * 0.5f);
@@ -51,15 +59,16 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
-    // Read scroll offsets to determine if probe was scrolled
-    int3 scrollClears = ddgi.probesScrollOffsets[kCascadeIndex].xyz;
+    // Mark only the logical slab exposed by this frame's origin movement.
+    int3 scrollDelta = ddgi.probesScrollDeltas[cascadeIndex].xyz;
     bool wasScrolled = false;
     for (uint p = 0; p < 3; p++)
     {
-        int newCoord = int(probeCoords[p]) + scrollClears[p];
-        if (newCoord < 0 || newCoord >= int(ddgi.probesCounts[p])) wasScrolled = true;
-        newCoord = int(probeCoords[p]) - scrollClears[p];
-        if (newCoord < 0 || newCoord >= int(ddgi.probesCounts[p])) wasScrolled = true;
+        int delta = scrollDelta[p];
+        int count = int(ddgi.probesCounts[p]);
+        if (abs(delta) >= count) wasScrolled = true;
+        else if (delta > 0 && int(probeCoords[p]) >= count - delta) wasScrolled = true;
+        else if (delta < 0 && int(probeCoords[p]) < -delta) wasScrolled = true;
     }
 
     // Load existing probe data
@@ -99,6 +108,25 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     float voxelLimit = voxelSize * 0.8f;
     float distanceLimit = probesSpacing * 2.3f;
 
+    // SDF curvature separates planar/empty regions from corners and thin
+    // geometry without changing the fixed probe-grid/atlas topology.
+    float sdfTexel = 1.0f / max(sdfRes, 1.0f);
+    float sdfXP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float sdfXN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float sdfYP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float sdfYN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float sdfZP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float sdfZN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+    float curvatureMagnitude =
+        abs(sdfXP + sdfXN - 2.0f * sdf)
+      + abs(sdfYP + sdfYN - 2.0f * sdf)
+      + abs(sdfZP + sdfZN - 2.0f * sdf);
+    float curvatureThreshold = max(voxelSize * 0.5f, probesSpacing * 0.05f);
+    float proximityComplexity = saturate(
+        1.0f - sdfDist / max(probesSpacing * 1.25f, voxelSize * 2.0f));
+    float curvatureComplexity = saturate(curvatureMagnitude / curvatureThreshold);
+    bool highGeometryComplexity =
+        max(proximityComplexity, curvatureComplexity) > 0.2f;
 	// Empty area fallback: only for probes within cascade range of the SDF volume.
 	// Tight threshold avoids marking far probes active that can never trace into SDF.
 	float emptyAreaThreshold = probesSpacing * ddgi.probesCounts.x * 0.08f;
@@ -127,18 +155,13 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
                                        saturate(sdfDist / max(voxelLimit, 0.0001f)));
         attention = clamp(viewAttention * geometryAttention,
                           kDDGIProbeAttentionMin, kDDGIProbeAttentionMax);
+        if (highGeometryComplexity)
+            attention = max(attention, kDDGIProbeHighPriorityAttention);
 
         // Relocate away from surfaces
         if (sdf <= voxelLimit)
         {
-            float eps = 1.0f / max(sdfRes, 1.0f);
-            float xp = globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(eps,0,0), 0);
-            float xn = globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(eps,0,0), 0);
-            float yp = globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,eps,0), 0);
-            float yn = globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,eps,0), 0);
-            float zp = globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,0,eps), 0);
-            float zn = globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,0,eps), 0);
-            float3 gradient = float3(xp - xn, yp - yn, zp - zn);
+            float3 gradient = float3(sdfXP - sdfXN, sdfYP - sdfYN, sdfZP - sdfZN);
             float3 sdfNormal = length(gradient) > 1e-6f ? normalize(gradient) : float3(0,1,0);
 
             // A negative SDF means the probe is inside geometry. Move toward
@@ -185,15 +208,14 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Write probe data
     probesData[dataCoord] = encodeProbeData(probeOffset / probesSpacing, state, attention);
 
-    // Compact every active probe first. The per-frame budget is applied later
-    // over this compacted list, otherwise sparse active probes are almost always
-    // missed by a small window over the complete logical volume.
+    // Mark disjoint deterministic inputs for the compaction pass.
     if (state != kDDGIProbeStateInactive)
     {
-        uint slot;
-        InterlockedAdd(activeProbes[0], 1, slot);
-        uint maxSlots = totalProbes; // buffer capacity = totalProbes + 1 (counter)
-        if (slot < maxSlots)
-            activeProbes[1 + slot] = probeIndex;
+        bool priorityProbe = state == kDDGIProbeStateActivated
+            || attention >= kDDGIProbeHighPriorityAttention;
+        if (priorityProbe)
+            activeProbes[priorityBase + probeIndex] = 1u;
+        else
+            activeProbes[regularBase + probeIndex] = 1u;
     }
 }

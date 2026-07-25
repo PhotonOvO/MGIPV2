@@ -19,7 +19,7 @@ int main()
 		ASSERT(glfwInit() == GLFW_TRUE, "Could not initialize GLFW!");
 		ASSERT(glfwVulkanSupported() == GLFW_TRUE, "GLFW: Vulkan not supported!");
 
-		MinimalLatestApp app({800, 600});
+		MinimalLatestApp app({1920, 1080});
 		app.run();
 
 		glfwTerminate();

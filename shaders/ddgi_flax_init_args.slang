@@ -1,44 +1,78 @@
-// ddgi_flax_init_args.slang — DDGI indirect dispatch args builder (FGI-051)
-// Reads active probe count and builds indirect dispatch arguments for
-// the trace rays and probe update passes.
+// Deterministic active-probe compaction and global update-budget allocation.
 
 #include "shader_io.h"
 
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> activeProbes       : register(u0); // counter at [0]
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> updateProbesInitArgs : register(u1); // 3 uint dispatch args
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> activeProbes          : register(u0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> updateProbesInitArgs : register(u1);
 
 struct FlaxDDGIInitArgsPush
 {
     uint maxActiveProbes;
-    uint maxUpdatedProbesPerFrame;
+    uint baseUpdateBudget;
+    uint argsOffset;
+    uint scratchOffset;
 };
 
 [[vk::push_constant]] ConstantBuffer<FlaxDDGIInitArgsPush> initArgs;
 
+// Classification writes flags by logical probe index. A single thread compacts
+// them in ascending order, making the list independent of GPU wave scheduling.
+[numthreads(1, 1, 1)]
+void CS_CompactActiveProbes(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint priorityBase = 4u;
+    uint regularBase = priorityBase + initArgs.maxActiveProbes;
+    uint priorityCount = 0u;
+    uint regularCount = 0u;
+
+    for (uint probeIndex = 0u; probeIndex < initArgs.maxActiveProbes; ++probeIndex)
+    {
+        bool priorityProbe = activeProbes[priorityBase + probeIndex] != 0u;
+        bool regularProbe = activeProbes[regularBase + probeIndex] != 0u;
+        if (priorityProbe)
+            activeProbes[priorityBase + priorityCount++] = probeIndex;
+        if (regularProbe)
+            activeProbes[regularBase + regularCount++] = probeIndex;
+    }
+
+    uint activeCount = priorityCount + regularCount;
+    uint initialUpdateCount = min(activeCount, initArgs.baseUpdateBudget);
+    activeProbes[0] = activeCount;
+    activeProbes[1] = priorityCount;
+    activeProbes[2] = regularCount;
+    activeProbes[3] = initialUpdateCount;
+
+    uint unusedBudget = initArgs.baseUpdateBudget - initialUpdateCount;
+    uint ignored;
+    InterlockedAdd(updateProbesInitArgs[initArgs.scratchOffset], unusedBudget, ignored);
+}
+
+// Cascades execute this kernel in order with a buffer barrier between dispatches.
+// Each keeps its fair base share, then consumes slack left by sparse cascades.
 [numthreads(1, 1, 1)]
 void CS_UpdateProbesInitArgs(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint totalActiveCount = min(activeProbes[0], initArgs.maxActiveProbes);
-    uint updateCount = totalActiveCount;
-    if (initArgs.maxUpdatedProbesPerFrame != 0)
-        updateCount = min(updateCount, initArgs.maxUpdatedProbesPerFrame);
+    uint activeCount = min(activeProbes[0], initArgs.maxActiveProbes);
+    uint updateCount = min(activeProbes[3], activeCount);
+    uint availableSlack = updateProbesInitArgs[initArgs.scratchOffset];
+    uint extraCount = min(activeCount - updateCount, availableSlack);
+    updateCount += extraCount;
+    activeProbes[3] = updateCount;
+    updateProbesInitArgs[initArgs.scratchOffset] = availableSlack - extraCount;
 
-    // Preserve totalActiveCount in activeProbes[0]. Trace/update shaders apply
-    // the budget and rotating offset over the compacted list.
+    uint argsOffset = initArgs.argsOffset;
 
-    // Trace: 256 probe threads per group.
     const uint kTraceBatchSize = 256;
-    updateProbesInitArgs[0] = (updateCount + kTraceBatchSize - 1) / kTraceBatchSize;
-    updateProbesInitArgs[1] = 1;
-    updateProbesInitArgs[2] = 1;
+    updateProbesInitArgs[argsOffset + 0u] =
+        (updateCount + kTraceBatchSize - 1u) / kTraceBatchSize;
+    updateProbesInitArgs[argsOffset + 1u] = 1u;
+    updateProbesInitArgs[argsOffset + 2u] = 1u;
 
-    // Distance: one 16x16 tile per probe, covered by four 8x8 groups.
-    updateProbesInitArgs[3] = updateCount * 4;
-    updateProbesInitArgs[4] = 1;
-    updateProbesInitArgs[5] = 1;
+    updateProbesInitArgs[argsOffset + 3u] = updateCount * 4u;
+    updateProbesInitArgs[argsOffset + 4u] = 1u;
+    updateProbesInitArgs[argsOffset + 5u] = 1u;
 
-    // Irradiance: one 8x8 group covers one complete probe tile.
-    updateProbesInitArgs[6] = updateCount;
-    updateProbesInitArgs[7] = 1;
-    updateProbesInitArgs[8] = 1;
+    updateProbesInitArgs[argsOffset + 6u] = updateCount;
+    updateProbesInitArgs[argsOffset + 7u] = 1u;
+    updateProbesInitArgs[argsOffset + 8u] = 1u;
 }

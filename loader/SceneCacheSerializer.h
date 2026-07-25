@@ -10,7 +10,8 @@ namespace demo {
 class SceneCacheSerializer
 {
 public:
-  static constexpr uint32_t kCurrentVersion = 9;
+  // Bumped 9->10: imported emissive factors now include KHR emissive strength.
+  static constexpr uint32_t kCurrentVersion = 10;
 
   [[nodiscard]] static std::filesystem::path buildCachePath(const std::filesystem::path& sourcePath);
 

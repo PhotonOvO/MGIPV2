@@ -614,8 +614,8 @@ namespace demo
 		{
 			std::unique_ptr<rhi::Swapchain> swapchain;
 			SceneResources sceneResources;
-			rhi::Extent2D windowSize{800, 600};
-			rhi::Extent2D viewportSize{800, 600};
+			rhi::Extent2D windowSize{1920, 1080};
+			rhi::Extent2D viewportSize{1920, 1080};
 			rhi::TextureFormat swapchainImageFormat{rhi::TextureFormat::bgra8Unorm};
 			uint32_t currentImageIndex{0};
 			bool hasAcquiredImage{false};

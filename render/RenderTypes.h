@@ -75,7 +75,7 @@ namespace demo
 		float cullDistance{25.0f};
 		float pointLightMaxRadius{4.0f};
 		float pointLightIntensityScale{4.0f};
-		bool enablePostProcessing{true};
+		bool enablePostProcessing{false};
 		bool enableBloom{true};
 		bool enableAdaptiveExposure{false};
 		bool enableColorGrading{true};
@@ -105,10 +105,10 @@ namespace demo
 		float lensDirtIntensity{0.0f};
 		float iblIntensity{1.0f};
 		int iblDebugMode{0}; // 0=Off, 1=Diffuse, 2=Specular, 3=Fallback ambient, 4=Environment
-		bool enableAO{true};
+		bool enableAO{false};
 		float aoRadius{12.0f};
 		float aoIntensity{1.0f};
-		bool enableSSR{true};
+		bool enableSSR{false};
 		int ssrMaxSteps{32};
 		float ssrThickness{0.3f};  // metres; passed directly to the shader thickness budget
 		bool enableShadowAtlas{false};

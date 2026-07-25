@@ -31,7 +31,7 @@ namespace demo
 		// Octahedral depth texel resolution per probe (excluding 2px border).
 		uint32_t depthTexelSize{16u};
 		// Rays traced per probe per update (mobile budget; LuxGI desktop default 256).
-		uint32_t raysPerProbe{64u};
+		uint32_t raysPerProbe{256u};
 		// Temporal blend factor: mix(newResult, history, hysteresis).
 		float hysteresis{0.98f};
 		// Irradiance storage gamma encode/decode exponent.
@@ -46,7 +46,7 @@ namespace demo
 		// Staggered update stride: each frame updates 1/updateStride of the probes.
 		uint32_t updateStride{4u};
 		// Blend weight between IBL and DDGI irradiance in the lighting pass.
-		float ddgiWeight{0.5f};
+		float ddgiWeight{0.65f};
 
 		// --- Flax-style settings (FGI-040, gated by runtimeMode == flaxStyle) ---
 		// Maximum world-space distance from camera to extend GI coverage.
@@ -65,7 +65,7 @@ namespace demo
 		// Fallback irradiance color when no valid probe data is available.
 		glm::vec4 fallbackIrradiance{0.02f, 0.02f, 0.02f, 1.0f};
 		// Maximum probes updated per frame (budget cap). 0 = unlimited.
-		uint32_t maxUpdatedProbesPerFrame{64u};
+		uint32_t maxUpdatedProbesPerFrame{2048u};
 		// Inner cascade update frequency (1 = every frame, 2 = every other, etc.).
 		uint32_t cascadeUpdateFrequency{1u};
 		// Debug override: force a specific cascade for visualization (-1 = off).
@@ -108,6 +108,8 @@ namespace demo
 
 		bool flaxResourcesReady{false};
 		uint32_t flaxCascadeCount{0};
+		bool flaxOutputReady{false};
+		uint32_t flaxOutputParity{0};
 		glm::uvec3 flaxProbesPerCascade{0u, 0u, 0u};
 
 		bool surfaceAtlasRequested{false};

@@ -366,11 +366,14 @@ namespace demo
 		{
 			return;
 		}
-		// Ping-pong parity from the MONOTONIC temporal counter (constraint 4)
-		// — selects the atlas the probe update wrote THIS frame, matching the
-		// lighting-pass read side.
-		const uint32_t parity =
-			static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
+		uint32_t parity = static_cast<uint32_t>(m_renderer->getTemporalFrameCounter() & 1u);
+		if(m_usesFlaxResources)
+		{
+			const FlaxGIOutputSelection output =
+				m_renderer->getFlaxDDGIPublishedOutputSelection();
+			if(!output.valid) return;
+			parity = output.parity;
+		}
 		const uint32_t frameIndex = context.frameIndex;
 		const uint32_t tableIndex = frameIndex * 2u + parity;
 		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())

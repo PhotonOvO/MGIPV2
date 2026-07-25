@@ -377,6 +377,7 @@ namespace demo
 		[[nodiscard]] FlaxGIDebugStatus getFlaxGIDebugStatus() const;
 		[[nodiscard]] FlaxGIDebugSnapshot getFlaxGIDebugSnapshot() const;
 		[[nodiscard]] FlaxGIDebugViewSet getFlaxGIDebugViewSet() const;
+		[[nodiscard]] FlaxGIOutputSelection getFlaxDDGIPublishedOutputSelection() const;
 		[[nodiscard]] FlaxDDGIResources& getFlaxDDGIResources() { return m_flaxDDGIResources; }
 		[[nodiscard]] const FlaxDDGIResources& getFlaxDDGIResources() const { return m_flaxDDGIResources; }
 		[[nodiscard]] const std::vector<DDGICascadeDesc>& getFlaxDDGICascadeDescs() const { return m_flaxDDGICascades; }
@@ -600,6 +601,9 @@ namespace demo
 
 		[[nodiscard]] bool getIBLEnvironmentLoaded() const { return m_iblEnvironmentLoaded; }
 		[[nodiscard]] bool getIBLUsingFallback() const { return m_iblUsingFallback; }
+		[[nodiscard]] rhi::TextureViewHandle getIBLEnvironmentView() const { return m_iblEnvironmentView; }
+		[[nodiscard]] bool isIBLEnvironmentEnabledForFlax() const { return m_cachedIBLEnvironmentEnabled; }
+		[[nodiscard]] float getIBLEnvironmentIntensityForFlax() const { return m_cachedIBLEnvironmentIntensity; }
 		[[nodiscard]] rhi::TextureFormat getIBLEnvironmentFormat() const;
 
 		[[nodiscard]] rhi::Extent2D getIBLEnvironmentExtent() const
@@ -1283,7 +1287,7 @@ namespace demo
 		void initIBLResources();
 		void shutdownIBLResources();
 		void updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex);
-		void updateLightingArgumentTable(uint32_t frameIndex);
+		void updateLightingArgumentTable(uint32_t frameIndex, const DebugPassOptions& debugOptions);
 		void initLightingPipelines();
 		void shutdownLightingPipelines();
 		void initDDGIProbeResources();
@@ -1487,6 +1491,8 @@ namespace demo
 		uint64_t m_iblEnvironmentEstimatedBytes{0};
 		bool m_iblEnvironmentLoaded{false};
 		bool m_iblUsingFallback{true};
+		bool m_cachedIBLEnvironmentEnabled{false};
+		float m_cachedIBLEnvironmentIntensity{1.0f};
 		std::string m_iblEnvironmentPath;
 		std::string m_iblEnvironmentStatus{"Not initialized"};
 		std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;

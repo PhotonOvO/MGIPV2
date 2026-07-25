@@ -31,7 +31,8 @@ struct DDGICascadeDesc
 {
   glm::vec3 snappedOrigin{0.0f};   // origin snapped to probe spacing grid
   glm::vec3 blendOrigin{0.0f};     // blend origin (unsnapped, for blending)
-  glm::ivec3 scrollOffset{0,0,0};  // current scroll offset in probe units
+  glm::ivec3 scrollOffset{0,0,0};  // cumulative toroidal texture offset
+  glm::ivec3 scrollDelta{0,0,0};   // logical cells exposed by this frame's move
   float probeSpacing{1.5f};        // world-space probe distance
   uint32_t probeCountX{0};
   uint32_t probeCountY{0};
@@ -147,12 +148,14 @@ public:
     return (parity & 1u) == 0u ? m_probesDistanceHistory : m_probesDistance;
   }
 
-  // Per-cascade active probes buffer (R1)
+  // Per-cascade active probes buffer. Layout: [0] active count,
+  // [1] priority count, [2] regular count, [3] dynamically allocated update
+  // count, followed by deterministic priority and regular probe-index lists.
   [[nodiscard]] rhi::BufferHandle getActiveProbes(uint32_t cascade) const {
     return cascade < m_activeProbes.size() ? m_activeProbes[cascade] : rhi::BufferHandle{};
   }
 
-  // Indirect args: cascade × batch × IndirectPass
+  // Indirect args: cascade x IndirectPass plus one shared slack counter.
   [[nodiscard]] rhi::BufferHandle getUpdateProbesInitArgs() const { return m_updateProbesInitArgs; }
 
   [[nodiscard]] uint32_t getCascadeCount() const { return m_cascadeCount; }

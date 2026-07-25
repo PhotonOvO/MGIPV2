@@ -51,13 +51,12 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("float2 distanceMoments", COMMON_SHADER)
         self.assertIn("float variance", COMMON_SHADER)
         self.assertIn("float chebyshevWeight", COMMON_SHADER)
-        self.assertIn("chebyshevWeight * chebyshevWeight * chebyshevWeight", COMMON_SHADER)
+        self.assertIn("rawChebyshevWeight * rawChebyshevWeight", COMMON_SHADER)
+        self.assertIn("conservativeVisibility, rawChebyshevWeight, frontFacing", COMMON_SHADER)
         self.assertIn("float wrapShading", COMMON_SHADER)
-        self.assertIn("max(0.1f, wrapShading * wrapShading)", COMMON_SHADER)
-        self.assertIn("minWeightThreshold", COMMON_SHADER)
-        self.assertIn("backFaceWeight * backFaceWeight", COMMON_SHADER)
-        self.assertNotIn("wrapShading * wrapShading + 0.2f", COMMON_SHADER)
-        self.assertNotIn("distVis = 0.2f", COMMON_SHADER)
+        self.assertIn("wrapShading * wrapShading + 0.2f", COMMON_SHADER)
+        self.assertIn("kFlaxDDGIMinVisibility", COMMON_SHADER)
+        self.assertNotIn("surfaceSideWeight", COMMON_SHADER)
 
     def test_thin_surface_trace_uses_fine_mip_and_conservative_steps(self) -> None:
         self.assertIn("sampleGlobalSDFFineDistance", SDF_COMMON_SHADER)
@@ -67,11 +66,11 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("stepDistance - voxelHalf", SDF_COMMON_SHADER)
         self.assertIn("sdfConfig.maxSteps = 128", TRACE_SHADER)
 
-    def test_sampling_rejects_strongly_backfacing_probe_leaks(self) -> None:
+    def test_sampling_preserves_a_continuous_low_backface_weight(self) -> None:
         self.assertIn("float normalAlignment", COMMON_SHADER)
-        self.assertIn("float surfaceSideWeight", COMMON_SHADER)
-        self.assertIn("smoothstep(-0.35f, 0.0f, normalAlignment)", COMMON_SHADER)
-        self.assertIn("backFaceWeight *= surfaceSideWeight", COMMON_SHADER)
+        self.assertIn("float wrapShading", COMMON_SHADER)
+        self.assertIn("wrapShading * wrapShading + 0.2f", COMMON_SHADER)
+        self.assertNotIn("surfaceSideWeight", COMMON_SHADER)
 
     def test_probe_attention_is_recomputed_instead_of_decaying_each_frame(self) -> None:
         active_classification = CLASSIFY_SHADER[
@@ -108,10 +107,9 @@ class FlaxGIShaderContractTests(unittest.TestCase):
     def test_empty_history_is_not_blended_for_budget_delayed_probe(self) -> None:
         self.assertIn("bool historyValid", IRRADIANCE_SHADER)
         self.assertIn("historyIrradiance.a > 0.0f", IRRADIANCE_SHADER)
-        self.assertIn("!historyValid", IRRADIANCE_SHADER)
         self.assertIn("bool historyValid", DISTANCE_SHADER)
         self.assertIn("any(historyData > float2(0.0f, 0.0f))", DISTANCE_SHADER)
-        self.assertIn("!historyValid", DISTANCE_SHADER)
+        self.assertIn("probeState == kDDGIProbeStateActivated || !historyValid", COMMON_SHADER)
 
     def test_probe_relocation_pushes_negative_sdf_toward_free_space(self) -> None:
         self.assertIn("float relocationDistance = max(voxelLimit - sdf, 0.0f)", CLASSIFY_SHADER)
@@ -124,20 +122,18 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertNotIn("if (sdfDist < voxelLimit)", CLASSIFY_SHADER)
 
     def test_zero_distance_trace_hits_remain_occluders(self) -> None:
-        self.assertIn("if (hitDist >= 0.0f)", DISTANCE_SHADER)
-        self.assertNotIn("if (hitDist > 0.0f)", DISTANCE_SHADER)
+        self.assertIn("traceData.w < 0.0f", DISTANCE_SHADER)
+        self.assertIn("? distanceLimit : min(traceData.w, distanceLimit)", DISTANCE_SHADER)
+        self.assertNotIn("traceData.w <= 0.0f", DISTANCE_SHADER)
 
     def test_relocated_probe_invalidates_history_for_its_next_update(self) -> None:
         self.assertIn("bool relocationChanged", CLASSIFY_SHADER)
     def test_distance_moments_use_flax_directional_reaction_filter(self) -> None:
-        self.assertIn("float distanceLimit = probesSpacing * 1.5f", DISTANCE_SHADER)
-        self.assertIn(
-            "float rayDistance = min(hitDist, distanceLimit)", DISTANCE_SHADER
-        )
+        self.assertIn("flaxProbeDistanceLimit(ddgi, cascadeIndex)", DISTANCE_SHADER)
+        self.assertIn("min(traceData.w, distanceLimit)", DISTANCE_SHADER)
         self.assertIn("rayWeight = pow(rayWeight, 10.0f)", DISTANCE_SHADER)
         self.assertIn("sumDist += rayDistance * rayWeight", DISTANCE_SHADER)
         self.assertIn("sumDist2 += rayDistance * rayDistance * rayWeight", DISTANCE_SHADER)
-
         self.assertIn("relocationChanged =", CLASSIFY_SHADER)
         self.assertRegex(
             CLASSIFY_SHADER,
@@ -167,43 +163,36 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("probeData.w <= -1.0f", PROBE_VIS_SHADER)
         self.assertIn("probeVisUniforms.debugScale", PROBE_VIS_SHADER)
 
-    def test_inactive_fallback_uses_encoded_logical_probe_coordinates(self) -> None:
-        self.assertIn("getLogicalProbeCoordsFromDataTexel", COMMON_SHADER)
-        self.assertIn("uint3 targetProbeCoords", INACTIVE_SHADER)
-        self.assertIn("uint3 neighborProbeCoords", INACTIVE_SHADER)
-        self.assertIn("encodeFallbackCoords(neighborProbeCoords)", INACTIVE_SHADER)
-        self.assertNotIn("float3(neighborCoord.x", INACTIVE_SHADER)
+    def test_inactive_probe_sanitation_is_deterministic(self) -> None:
+        self.assertIn("Deterministic inactive-probe sanitation", INACTIVE_SHADER)
+        self.assertIn("probesData[texel] = float4(0.0f, 0.0f, 0.0f, -1.0f)", INACTIVE_SHADER)
+        self.assertNotIn("neighborData", INACTIVE_SHADER)
+        self.assertNotIn("encodeFallbackCoords", INACTIVE_SHADER)
 
-    def test_fallback_coordinates_are_bounds_checked_before_use(self) -> None:
-        self.assertIn("fallbackCoordsValid(ddgi,", COMMON_SHADER)
-        self.assertIn("fallbackCoordsValid(ddgi,", INACTIVE_SHADER)
+    def test_update_budget_compacts_deterministically_and_reuses_slack(self) -> None:
+        self.assertIn("curvatureMagnitude", CLASSIFY_SHADER)
+        self.assertIn("highGeometryComplexity", CLASSIFY_SHADER)
+        self.assertIn("activeProbes[priorityBase + probeIndex] = 1u", CLASSIFY_SHADER)
+        self.assertNotIn("InterlockedAdd(activeProbes", CLASSIFY_SHADER)
+        self.assertIn("CS_CompactActiveProbes", INIT_ARGS_SHADER)
+        self.assertIn("activeProbes[priorityBase + priorityCount++] = probeIndex", INIT_ARGS_SHADER)
+        self.assertIn("activeProbes[regularBase + regularCount++] = probeIndex", INIT_ARGS_SHADER)
+        self.assertIn("initArgs.scratchOffset", INIT_ARGS_SHADER)
+        self.assertIn("availableSlack", INIT_ARGS_SHADER)
+        self.assertIn("uint priorityBase = 4u", COMMON_SHADER)
+        self.assertIn("uint updateCount = min(activeProbes[3], activeCount)", COMMON_SHADER)
+        self.assertIn("ddgi.updateParams[cascadeIndex].z", COMMON_SHADER)
+        self.assertIn("uint regularSlots", COMMON_SHADER)
+        self.assertIn("update every active probe exactly", COMMON_SHADER)
 
-    def test_update_budget_rotates_over_the_compacted_active_list(self) -> None:
-        self.assertNotIn("relativeProbeIndex", CLASSIFY_SHADER)
-        self.assertIn("state != kDDGIProbeStateInactive", CLASSIFY_SHADER)
-        self.assertIn("activeProbes[1 + slot] = probeIndex", CLASSIFY_SHADER)
-
-        self.assertIn("uint totalActiveCount", INIT_ARGS_SHADER)
-        self.assertIn("uint updateCount", INIT_ARGS_SHADER)
-        self.assertNotIn("activeProbes[0] = updateCount", INIT_ARGS_SHADER)
-
-        for shader in (TRACE_SHADER, DISTANCE_SHADER, IRRADIANCE_SHADER):
-            self.assertIn("totalActiveCount", shader)
-            self.assertIn("selectedActiveSlot", shader)
-            self.assertIn("ddgi.updateParams.x", shader)
-
-    def test_sampling_fallback_updates_coordinate_and_index_spaces_together(self) -> None:
-        fallback_block = re.search(
-            r"// Inactive probe -> use fallback\s*"
-            r"if \(state == kDDGIProbeStateInactive\)(.*?)"
-            r"// Decode real probe position",
-            COMMON_SHADER,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(fallback_block)
-        block = fallback_block.group(1)
-        self.assertIn("probeCoords = fallbackCoords;", block)
-        self.assertIn("getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords)", block)
+    def test_uninitialized_probe_sampling_uses_configured_fallback(self) -> None:
+        self.assertIn("state != kDDGIProbeStateActive", COMMON_SHADER)
+        self.assertIn("encodedIrradiance.a <= 0.0f", COMMON_SHADER)
+        self.assertIn("validTrilinearWeight += weight", COMMON_SHADER)
+        self.assertIn("inactiveTrilinearWeight += weight", COMMON_SHADER)
+        self.assertIn("float averageContributionScale", COMMON_SHADER)
+        self.assertIn("ddgi.fallbackIrradiance.rgb * fallbackWeight", COMMON_SHADER)
+        self.assertNotIn("ddgi.fallbackIrradiance.rgb * weight", COMMON_SHADER)
 
 
 if __name__ == "__main__":

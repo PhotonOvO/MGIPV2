@@ -21,9 +21,6 @@ namespace demo
 	{
 		constexpr bool kEnableExperimentalMeshletPath = true;
 		constexpr bool kEnableShippingVisibilitySort = true;
-		// The current Flax compute pipeline owns cascade 0 only. Expose exactly
-		// the implemented count until per-cascade dispatch/tables are wired.
-		constexpr uint32_t kFlaxImplementedCascadeCount = 1u;
 		constexpr uint32_t kDebugCullSegmentCount = 24u;
 		constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
 		constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
@@ -507,9 +504,8 @@ namespace demo
 		}
 
 		const DDGIConfig& config = getDDGIConfig();
-		const uint32_t cascadeCount = std::min(
-			std::min(config.maxCascades, FlaxDDGIResources::kMaxCascades),
-			kFlaxImplementedCascadeCount);
+		const uint32_t cascadeCount =
+			std::min(config.maxCascades, FlaxDDGIResources::kMaxCascades);
 		std::vector<glm::uvec3> probesPerCascade(cascadeCount);
 		for (uint32_t c = 0; c < cascadeCount; ++c) {
 			probesPerCascade[c] = FlaxDDGIResources::computeProbesPerCascade(config, c, cascadeCount);
@@ -524,7 +520,8 @@ namespace demo
 			                              &m_renderer.getMeshPool(),
 			                              &m_renderer.getSceneResources());
 		}
-		m_flaxDDGIPass->initResources(getRHIDevice());
+		m_flaxDDGIPass->initResources(
+			getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 		m_ddgiDebugPass->initResources(
 			getRHIDevice(), std::max(1u, getSwapchainImageCount()));
 
@@ -561,15 +558,27 @@ namespace demo
 			return cameraPosition;
 		}
 
+		const float coverageRadius =
+			std::max(getDDGIConfig().giDistance, getDDGIConfig().probeSpacing);
+		const auto keepInnerCascadeNearCamera =
+			[&](const glm::vec3& target)
+			{
+				const glm::vec3 delta = target - cameraPosition;
+				const float distance = glm::length(delta);
+				const float maximumOffset = coverageRadius * 0.5f;
+				return distance > maximumOffset && distance > 1.0e-5f
+					? cameraPosition + delta * (maximumOffset / distance)
+					: target;
+			};
+
 		const glm::vec3 sceneBoundsCenter =
 			(coverageBoundsMin + coverageBoundsMax) * 0.5f;
 		const glm::vec3 sceneHalfExtent =
 			(coverageBoundsMax - coverageBoundsMin) * 0.5f;
-		const float coverageRadius = std::max(getDDGIConfig().giDistance, getDDGIConfig().probeSpacing);
 		const float largestSceneHalfExtent = std::max({sceneHalfExtent.x, sceneHalfExtent.y, sceneHalfExtent.z});
 		if (largestSceneHalfExtent <= coverageRadius)
 		{
-			return sceneBoundsCenter;
+			return keepInnerCascadeNearCamera(sceneBoundsCenter);
 		}
 
 		const glm::vec3 closestScenePoint = glm::clamp(
@@ -578,10 +587,11 @@ namespace demo
 		const float towardSceneDistance = glm::length(towardSceneCenter);
 		if (towardSceneDistance <= 1.0e-5f)
 		{
-			return closestScenePoint;
+			return keepInnerCascadeNearCamera(closestScenePoint);
 		}
-		return closestScenePoint + towardSceneCenter / towardSceneDistance
-			* std::min(coverageRadius * 0.5f, towardSceneDistance);
+		return keepInnerCascadeNearCamera(
+			closestScenePoint + towardSceneCenter / towardSceneDistance
+				* std::min(coverageRadius * 0.5f, towardSceneDistance));
 	}
 
 	void GPUDrivenRenderer::updateFlaxCascadeScheduling(const glm::vec3& cameraPos)
@@ -982,6 +992,9 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 		status.flaxResourcesReady = m_flaxDDGIResources.isInitialized();
 		status.flaxCascadeCount = m_flaxDDGIResources.getCascadeCount();
+		const FlaxGIOutputSelection output = getFlaxDDGIPublishedOutputSelection();
+		status.flaxOutputReady = status.flaxRequested && output.valid;
+		status.flaxOutputParity = output.parity;
 			const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
 			status.flaxProbesPerCascade = ppc.empty() ? glm::uvec3(0u) : ppc[0];
 
@@ -1039,7 +1052,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		snapshot.raysPerProbe = getDDGIConfig().raysPerProbe;
 		snapshot.surfaceAtlasSampledByTrace = false;
 
-		const bool outputReady = readiness.flaxResourcesReady && readiness.flaxRequested;
+		const bool outputReady = readiness.flaxResourcesReady && readiness.flaxRequested
+			&& readiness.flaxOutputReady;
 		setStage(FlaxGIDebugStage::lightingSample,
 		         outputReady ? FlaxGIDebugStageState::executed : FlaxGIDebugStageState::blocked,
 		         outputReady ? std::string_view{}
@@ -1055,6 +1069,12 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	{
 		return m_flaxDDGIPass != nullptr ? m_flaxDDGIPass->getDebugViewSet()
 		                                     : FlaxGIDebugViewSet{};
+	}
+
+	FlaxGIOutputSelection GPUDrivenRenderer::getFlaxDDGIPublishedOutputSelection() const
+	{
+		return m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getPublishedOutputSelection() : FlaxGIOutputSelection{};
 	}
 
 	void GPUDrivenRenderer::clearDDGIMeshSDF()
@@ -3486,6 +3506,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_iblEnvironmentMipCount = 0;
 		m_iblEnvironmentEstimatedBytes = 0;
 		m_iblEnvironmentLoaded = false;
+		m_cachedIBLEnvironmentEnabled = false;
 		m_iblUsingFallback = true;
 		for (rhi::BufferHandle staging : m_gpuDrivenRhiStagingBuffers)
 		{
@@ -3958,13 +3979,42 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					return;
 				}
 
+				const glm::vec3 localHalfExtent =
+					glm::max((mesh.localBoundsMax - mesh.localBoundsMin) * 0.5f, glm::vec3(0.0f));
+				const glm::mat3 linearTransform(mesh.transform);
+				std::array<uint32_t, 3> axes{0u, 1u, 2u};
+				std::sort(axes.begin(), axes.end(), [&](uint32_t lhs, uint32_t rhs)
+				{
+					return localHalfExtent[lhs] * glm::length(linearTransform[lhs])
+					     > localHalfExtent[rhs] * glm::length(linearTransform[rhs]);
+				});
+
+				const uint32_t axisXIndex = axes[0];
+				const uint32_t axisYIndex = axes[1];
+				const uint32_t normalIndex = axes[2];
+				const glm::vec3 axisX = safeNormalize(
+					linearTransform[axisXIndex], glm::vec3(1.0f, 0.0f, 0.0f));
+				const glm::vec3 axisY = safeNormalize(
+					linearTransform[axisYIndex], glm::vec3(0.0f, 0.0f, 1.0f));
+				glm::vec3 localNormal(0.0f);
+				localNormal[normalIndex] = 1.0f;
+				const glm::vec3 normal = safeNormalize(
+					glm::transpose(glm::inverse(linearTransform)) * localNormal,
+					safeNormalize(glm::cross(axisX, axisY), glm::vec3(0.0f, -1.0f, 0.0f)));
+				const float halfWidth = std::max(
+					localHalfExtent[axisXIndex] * glm::length(linearTransform[axisXIndex]), 0.001f);
+				const float halfHeight = std::max(
+					localHalfExtent[axisYIndex] * glm::length(linearTransform[axisYIndex]), 0.001f);
+
 				shaderio::FlaxDDGIRadianceSource source{};
 				source.positionAndRange = glm::vec4(
 					mesh.worldBoundsCenter,
 					std::max(sceneRange, mesh.worldBoundsRadius * 8.0f));
 				source.colorAndType = glm::vec4(
 					emissiveFactor, static_cast<float>(shaderio::LFlaxRadianceSourceEmissive));
-				source.directionAndCone = glm::vec4(0.0f);
+				source.directionAndCone = glm::vec4(normal, 0.0f);
+				source.shapeAxisXAndHalfWidth = glm::vec4(axisX, halfWidth);
+				source.shapeAxisYAndHalfHeight = glm::vec4(axisY, halfHeight);
 				m_flaxRadianceSources.push_back(source);
 			});
 	}
@@ -4053,6 +4103,9 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			          static_cast<float>(shaderio::LCascadeCount));
 		const bool disableIBLForFlax = isFlaxStyleDDGIRequested()
 			&& (getDDGIConfig().flaxGIDisableIBL || params.debugOptions.flaxGIDisableIBL);
+		m_cachedIBLEnvironmentEnabled =
+			params.debugOptions.enableIBL && getIBLEnvironmentLoaded();
+		m_cachedIBLEnvironmentIntensity = std::max(params.debugOptions.iblIntensity, 0.0f);
 		lightingUniforms.light.iblParams =
 			glm::vec4(params.debugOptions.enableIBL && !disableIBLForFlax ? 1.0f : 0.0f,
 			          params.debugOptions.iblIntensity,
@@ -4083,14 +4136,28 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		// bridges through the same probe atlases, so this uses the shared probe
 		// data gate rather than the Current-DDGI-only mode gate.
 		const DDGIConfig& ddgiConfig = getDDGIConfig();
+		if (isFlaxStyleDDGIRequested())
+		{
+			const uint32_t sourceCount = static_cast<uint32_t>(std::min<size_t>(
+				m_flaxRadianceSources.size(), static_cast<size_t>(shaderio::LFlaxDDGIMaxRadianceSources)));
+			lightingUniforms.light.ddgiFlaxRadianceSourceParams = glm::uvec4(sourceCount, 0u, 0u, 0u);
+			for (uint32_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex)
+			{
+				lightingUniforms.light.ddgiFlaxRadianceSources[sourceIndex] =
+					m_flaxRadianceSources[sourceIndex];
+			}
+		}
 		const float flaxGIDebugMode = static_cast<float>(std::max(params.debugOptions.flaxGIDebugMode, 0));
 		const float flaxGIDebugScale = std::max(params.debugOptions.flaxGIDebugScale, 0.0f);
 		lightingUniforms.light.ddgiParams2 = glm::vec4(0.0f, flaxGIDebugMode, flaxGIDebugScale, 0.0f);
+		const FlaxGIOutputSelection flaxOutput = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getLightingOutputSelection(params.debugOptions)
+			: FlaxGIOutputSelection{};
 		const bool flaxTexturesReady = isFlaxStyleDDGIRequested() && m_flaxDDGIPass != nullptr
-			&& m_flaxDDGIPass->isReady()
+			&& m_flaxDDGIPass->isReady() && flaxOutput.valid
 			&& !m_flaxDDGIPass->getProbesDataView().isNull()
-			&& !m_flaxDDGIPass->getProbesDistanceOutputView().isNull()
-			&& !m_flaxDDGIPass->getProbesIrradianceOutputView().isNull();
+			&& !m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.parity).isNull()
+			&& !m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.parity).isNull();
 		const bool probeResourcesReady = isDDGIProbeDataPathEnabled() && m_ddgiProbeVolume.isInitialized()
 			&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
 			&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
@@ -4195,7 +4262,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		};
 		m_lightResources.updateLights(frameIndex, m_gpuDrivenPointLights, m_gpuDrivenSpotLights);
 		m_lightResources.updateUniforms(frameIndex, lightingUniforms, coarseUniforms, clusteredUniforms);
-		updateLightingArgumentTable(frameIndex);
+		updateLightingArgumentTable(frameIndex, params.debugOptions);
 	}
 
 	rhi::ArgumentTableHandle GPUDrivenRenderer::getCurrentLightCullingArgumentTable() const
@@ -4206,7 +4273,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			       : rhi::ArgumentTableHandle{};
 	}
 
-	void GPUDrivenRenderer::updateLightingArgumentTable(uint32_t frameIndex)
+	void GPUDrivenRenderer::updateLightingArgumentTable(
+		uint32_t frameIndex, const DebugPassOptions& debugOptions)
 	{
 		if (frameIndex >= m_lightingInputArgumentTables.size() || m_lightingInputArgumentTables[frameIndex].isNull())
 		{
@@ -4256,27 +4324,27 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		texViews[kGPUDrivenLightPassIBLEnvironmentIndex] = viewOr(m_iblEnvironmentView, fallbackColor);
 		texViews[kGPUDrivenLightPassAOIndex] = viewOr(m_aoDenoisedView, fallbackDepth);
 		texViews[kGPUDrivenLightPassSSRIndex] = viewOr(m_ssrDenoisedView, fallbackColor);
-		// DDGI (Wave D3-1/D4-1): atlas SRVs, selected by the ping-pong frame
-		// parity so lighting reads the atlas the probe update writes THIS
-		// frame. Parity comes from the MONOTONIC m_temporalFrameCounter
-		// (constraint 4 — never the frames-in-flight ring index), and this
-		// table write happens in updateGPUDrivenLights, i.e. before any pass
-		// of the frame encodes (TAA lesson c04c878: no descriptor lag). When
-		// DDGI is disabled the views are null -> bind the gbuffer0
-		// placeholder; the shader-side gate (ddgiGridDimsAndEnabled.w == 0)
-		// guarantees it is never sampled meaningfully, so disabled rendering
-		// stays bit-identical and safe.
+		// Current DDGI follows the renderer-wide temporal parity. FlaxGI uses
+		// its own published-output state: an updating frame binds the pending
+		// write atlas, while a frozen frame remains pinned to the last complete
+		// irradiance update. Descriptor selection happens before pass encoding,
+		// so the pending selection must match the Flax pass's next write parity.
 		const uint32_t ddgiParity = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
 		texViews[kGPUDrivenLightPassDDGIIrradianceIndex] =
 			viewOr(m_ddgiIrradianceLightingViews[ddgiParity], fallbackColor);
 		texViews[kGPUDrivenLightPassDDGIDepthIndex] =
 			viewOr(m_ddgiDepthLightingViews[ddgiParity], fallbackColor);
-		const rhi::TextureViewHandle flaxDataView = m_flaxDDGIPass != nullptr
+		const FlaxGIOutputSelection flaxOutput = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getLightingOutputSelection(debugOptions)
+			: FlaxGIOutputSelection{};
+		const rhi::TextureViewHandle flaxDataView = m_flaxDDGIPass != nullptr && flaxOutput.valid
 			? m_flaxDDGIPass->getProbesDataView() : rhi::TextureViewHandle{};
-		const rhi::TextureViewHandle flaxDistanceView = m_flaxDDGIPass != nullptr
-			? m_flaxDDGIPass->getProbesDistanceOutputView(ddgiParity) : rhi::TextureViewHandle{};
-		const rhi::TextureViewHandle flaxIrradianceView = m_flaxDDGIPass != nullptr
-			? m_flaxDDGIPass->getProbesIrradianceOutputView(ddgiParity) : rhi::TextureViewHandle{};
+		const rhi::TextureViewHandle flaxDistanceView = m_flaxDDGIPass != nullptr && flaxOutput.valid
+			? m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.parity)
+			: rhi::TextureViewHandle{};
+		const rhi::TextureViewHandle flaxIrradianceView = m_flaxDDGIPass != nullptr && flaxOutput.valid
+			? m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.parity)
+			: rhi::TextureViewHandle{};
 		texViews[kGPUDrivenLightPassFlaxProbesDataIndex] = viewOr(flaxDataView, fallbackColor);
 		texViews[kGPUDrivenLightPassFlaxProbesDistanceIndex] = viewOr(flaxDistanceView, fallbackColor);
 		texViews[kGPUDrivenLightPassFlaxProbesIrradianceIndex] = viewOr(flaxIrradianceView, fallbackColor);

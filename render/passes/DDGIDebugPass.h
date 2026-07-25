@@ -59,9 +59,9 @@ namespace demo
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};
-		// Two tables per frame in flight (index = frameIndex * 2 + parity,
-		// parity = temporalFrameCounter & 1 — monotonic counter, constraint
-		// 4): views are static, uniform contents change per frame. Both
+		// Two tables per frame in flight (index = frameIndex * 2 + parity).
+		// Current DDGI uses temporal parity; FlaxGI uses its published output
+		// parity. Views are static, uniform contents change per frame. Both
 		// parity tables of a frame share that frame's uniform buffer.
 		std::vector<rhi::ArgumentTableHandle> m_tables;
 		std::vector<rhi::BufferHandle> m_uniformBuffers;

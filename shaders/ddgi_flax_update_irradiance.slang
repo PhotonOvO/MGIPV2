@@ -7,42 +7,40 @@
 #include "ddgi_common.slang"
 
 [[vk::binding(0, 0)]] Texture2D<float4> probesTrace                  : register(t0);
-[[vk::binding(1, 0)]] Texture2D<float4> probesData                   : register(t1);
+[[vk::binding(1, 0)]] RWTexture2D<float4> probesData                 : register(u3);
 [[vk::binding(2, 0)]] RWTexture2D<float4> probesIrradianceOut        : register(u0);
-[[vk::binding(3, 0)]] Texture2D<float4> probesIrradianceHist         : register(t2);
+[[vk::binding(3, 0)]] RWTexture2D<float4> probesIrradianceHist       : register(u2);
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint> activeProbes             : register(u1);
 [[vk::binding(5, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData            : register(t3);
 static FlaxDDGIData ddgi = ddgiData[0];
+struct FlaxDDGICascadePush
+{
+    uint cascadeIndex;
+};
+[[vk::push_constant]] ConstantBuffer<FlaxDDGICascadePush> cascadePush;
 
 [numthreads(8, 8, 1)]
 void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-    static const uint kCascadeIndex = 0;
     static const uint kTileSize = 8;
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
 
     uint activeSlot = groupId.x;
-    uint totalActiveCount = activeProbes[0];
-    uint updateCount = ddgi.updateParams.y == 0u
-        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
-    if (activeSlot >= updateCount || totalActiveCount == 0u) return;
-
-    uint selectedActiveSlot = (activeSlot + ddgi.updateParams.x) % totalActiveCount;
-    uint probeIndex = activeProbes[1 + selectedActiveSlot];
+    uint probeIndex;
+    uint requiredState;
+    if (!getProbeUpdateSelection(
+            ddgi, activeProbes, cascadeIndex, activeSlot, probeIndex, requiredState)) return;
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
-    uint scrolledIdx = getScrollingProbeIndex(ddgi, kCascadeIndex, probeCoords);
-    uint2 probeTile = getProbeTexelCoords(ddgi, kCascadeIndex, scrolledIdx);
+    uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
+    uint2 probeTile = getProbeTexelCoords(ddgi, cascadeIndex, scrolledIdx);
     uint2 texel = probeTile * kTileSize + groupThreadId.xy;
 
-    float4 probeData = probesData.Load(int3(probeTile, 0));
+    float4 probeData = probesData.Load(int2(probeTile));
     uint state = decodeProbeState(probeData);
-    float attention = decodeProbeAttention(probeData);
-
-    if (state == kDDGIProbeStateInactive)
-    {
-        float4 historyIrradiance = probesIrradianceHist.Load(int3(texel, 0));
-        probesIrradianceOut[texel] = float4(historyIrradiance.rgb, 0);
+    if (!probeMatchesUpdateState(probeData, requiredState))
         return;
-    }
+    float attention = decodeProbeAttention(probeData);
+    float activeAttention = clamp(attention, kDDGIProbeAttentionMin, kDDGIProbeAttentionMax);
 
     float3 accumulated = float3(0, 0, 0);
     float accumulatedWeight = 0.0f;
@@ -65,7 +63,7 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
 
     float3 irradiance = accumulatedWeight > 0.0f
         ? accumulated / accumulatedWeight : float3(0, 0, 0);
-    float4 historyIrradiance = probesIrradianceHist.Load(int3(texel, 0));
+    float4 historyIrradiance = probesIrradianceHist.Load(int2(texel));
     bool historyValid = historyIrradiance.a > 0.0f;
     float3 historyLinear = pow(max(historyIrradiance.rgb, float3(0, 0, 0)),
                                ddgi.irradianceGamma);
@@ -74,5 +72,12 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
     irradiance = lerp(irradiance, historyLinear, historyWeight);
     irradiance = pow(max(irradiance, float3(0, 0, 0)), 1.0f / ddgi.irradianceGamma);
 
-    probesIrradianceOut[texel] = float4(irradiance, attention);
+    // Keep both parity atlases coherent under the partial per-frame probe
+    // budget. The history read happens before these stores in this invocation.
+    float4 encodedIrradiance = float4(irradiance, activeAttention);
+    probesIrradianceOut[texel] = encodedIrradiance;
+    probesIrradianceHist[texel] = encodedIrradiance;
+    if (all(groupThreadId.xy == uint2(0u, 0u)))
+        probesData[probeTile] = encodeProbeData(
+            probeData.xyz, kDDGIProbeStateActive, activeAttention);
 }

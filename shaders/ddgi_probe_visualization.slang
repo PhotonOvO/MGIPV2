@@ -169,10 +169,8 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
         const float spacing = probeVisUniforms.flaxProbeOriginAndSpacing.w;
         const float3 gridOffset =
             spacing * (float3(probeVisUniforms.flaxProbeCountsAndMode.xyz) - 1.0) * 0.5;
-        const float3 scrollOffset =
-            float3(probeVisUniforms.flaxProbeScrollAndCascade.xyz) * spacing;
         probeCenter = probeVisUniforms.flaxProbeOriginAndSpacing.xyz
-            + float3(logicalCoords) * spacing - gridOffset + scrollOffset
+            + float3(logicalCoords) * spacing - gridOffset
             + probeData.xyz * spacing;
         output.probeIndex = physicalProbeIndex;
     }

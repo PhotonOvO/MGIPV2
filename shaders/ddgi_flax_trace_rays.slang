@@ -14,6 +14,10 @@
 // Global SDF + albedo
 [[vk::binding(3, 0)]] Sampler3D<float> globalSDFTex            : register(t1);
 [[vk::binding(11, 0)]] Texture3D<float4> globalAlbedoTex        : register(t5);
+[[vk::binding(12, 0)]] Texture2D<float4> environmentTex         : register(t6);
+[[vk::binding(13, 0)]] Sampler2D<float4> probesDataHistory       : register(t7);
+[[vk::binding(14, 0)]] Sampler2D<float4> probesDistanceHistory   : register(t8);
+[[vk::binding(15, 0)]] Sampler2D<float4> probesIrradianceHistory : register(t9);
 
 // Surface Atlas resources (for hit shading)
 [[vk::binding(4, 0)]] SamplerState linearSampler              : register(s0);
@@ -24,6 +28,17 @@
 [[vk::binding(9, 0)]] RWStructuredBuffer<float4> objects      : register(u4);
 [[vk::binding(10, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t4);
 static FlaxDDGIData ddgi = ddgiData[0];
+struct FlaxDDGICascadePush
+{
+    uint cascadeIndex;
+};
+[[vk::push_constant]] ConstantBuffer<FlaxDDGICascadePush> cascadePush;
+
+static const float kFlaxDDGITwoPi = 6.28318530718f;
+static const float kFlaxDDGIMultiBounceFeedback = 0.5f;
+
+
+
 
 static const uint kBatchSize = 256;
 // Surface Atlas raster/lighting is not complete yet. Keep the bindings stable,
@@ -31,7 +46,26 @@ static const uint kBatchSize = 256;
 // contains real draws and lighting data.
 static const bool kUseSurfaceAtlas = false;
 
-float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
+float2 flaxDirectionToEquirectUV(float3 direction)
+{
+    float3 d = normalize(direction);
+    float u = atan2(d.z, d.x) / kFlaxDDGITwoPi + 0.5f;
+    float v = asin(clamp(d.y, -1.0f, 1.0f)) / kFlaxDDGIPi + 0.5f;
+    return float2(u, 1.0f - v);
+}
+
+bool flaxSDFVisible(GlobalSDFTraceConfig sdfConfig, float3 position, float3 normal,
+                    float3 lightDirection, float maximumDistance, float bias)
+{
+    float safeBias = max(bias, sdfConfig.voxelSize * 0.5f);
+    float3 shadowOrigin = position + normal * safeBias + lightDirection * safeBias;
+    GlobalSDFTraceHit shadowHit = traceGlobalSDF(
+        globalSDFTex, sdfConfig, shadowOrigin, lightDirection, maximumDistance);
+    return !isGlobalSDFHit(shadowHit) || shadowHit.hitTime >= maximumDistance - safeBias;
+}
+
+float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal,
+                                   GlobalSDFTraceConfig sdfConfig, float shadowBias)
 {
     float3 incomingRadiance = float3(0, 0, 0);
     uint sourceCount = min(ddgi.radianceSourceParams.x,
@@ -39,6 +73,29 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
     for (uint sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex)
     {
         FlaxDDGIRadianceSource source = ddgi.radianceSources[sourceIndex];
+        uint sourceType = uint(source.colorAndType.w + 0.5f);
+
+        if (sourceType == LFlaxRadianceSourceEmissive)
+        {
+            float3 centerDirection = source.positionAndRange.xyz - hitPosition;
+            float centerDistance = length(centerDirection);
+            centerDirection /= max(centerDistance, 0.001f);
+            if (centerDistance >= source.positionAndRange.w
+                || !flaxSDFVisible(sdfConfig, hitPosition, hitNormal, centerDirection,
+                                   max(centerDistance - shadowBias, 0.0f), shadowBias))
+                continue;
+
+            for (uint sampleIndex = 0u; sampleIndex < kFlaxEmissiveSampleCount; ++sampleIndex)
+            {
+                float3 lightDirection;
+                float distanceToLight;
+                float3 sampleRadiance = flaxEmissiveSampleRadiance(
+                    source, hitPosition, sampleIndex, lightDirection, distanceToLight);
+                incomingRadiance += sampleRadiance * saturate(dot(hitNormal, lightDirection));
+            }
+            continue;
+        }
+
         float3 toLight = source.positionAndRange.xyz - hitPosition;
         float distanceToLight = length(toLight);
         float sourceRange = max(source.positionAndRange.w, 0.001f);
@@ -46,10 +103,8 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
             continue;
 
         float3 lightDirection = toLight / max(distanceToLight, 0.001f);
-        float attenuation = saturate(1.0f - distanceToLight / sourceRange);
-        attenuation *= attenuation;
+        float attenuation = flaxWindowedInverseSquare(distanceToLight, sourceRange);
 
-        uint sourceType = uint(source.colorAndType.w + 0.5f);
         if (sourceType == LFlaxRadianceSourceSpot)
         {
             float coneCos = dot(-lightDirection, normalize(source.directionAndCone.xyz));
@@ -58,6 +113,10 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
         }
 
         float nDotL = saturate(dot(hitNormal, lightDirection));
+        if (nDotL <= 0.0f || !flaxSDFVisible(
+                sdfConfig, hitPosition, hitNormal, lightDirection,
+                max(distanceToLight - shadowBias, 0.0f), shadowBias))
+            continue;
         incomingRadiance += source.colorAndType.rgb * (attenuation * nDotL);
     }
     return incomingRadiance;
@@ -67,21 +126,20 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal)
 void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     uint batchIndex = dispatchThreadId.x;
-    uint totalActiveCount = activeProbes[0];
-    uint updateCount = ddgi.updateParams.y == 0u
-        ? totalActiveCount : min(totalActiveCount, ddgi.updateParams.y);
-    if (batchIndex >= updateCount || totalActiveCount == 0u) return;
-
-    uint selectedActiveSlot = (batchIndex + ddgi.updateParams.x) % totalActiveCount;
-    uint probeIndex = activeProbes[1 + selectedActiveSlot];
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
+    uint probeIndex;
+    uint requiredState;
+    if (!getProbeUpdateSelection(
+            ddgi, activeProbes, cascadeIndex, batchIndex, probeIndex, requiredState)) return;
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
-    uint cascadeIndex = 0; // TODO: parameterize from dispatch
     uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
     uint2 dataCoord = getProbeTexelCoords(ddgi, cascadeIndex, scrolledIdx);
     float3 probeWorldPos = getProbeWorldPosition(ddgi, cascadeIndex, probeCoords);
 
     // Read probe data for relocation offset
     float4 pd = probesData.Load(int3(dataCoord, 0));
+    if (!probeMatchesUpdateState(pd, requiredState))
+        return;
     float3 probePos = probeWorldPos + pd.xyz * ddgi.probesOriginAndSpacing[cascadeIndex].w;
 
 	// GlobalSDF config — matches GlobalSDFPass defaults (128^3, [-16,16])
@@ -125,7 +183,10 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
         // A miss represents known free space up to the finite moment horizon.
         // It also contributes sky radiance to the irradiance convolution.
         float storedDistance = distanceLimit;
-        float3 radiance = float3(0.01f, 0.015f, 0.03f);
+        float3 radiance = ddgi.environmentParams.x > 0.5f
+            ? max(environmentTex.SampleLevel(
+                linearSampler, flaxDirectionToEquirectUV(rayDir), 0.0f).rgb, float3(0,0,0))
+                * ddgi.environmentParams.y : ddgi.fallbackIrradiance.rgb / kFlaxDDGIPi;
 
         if (isGlobalSDFHit(hit))
         {
@@ -152,6 +213,21 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
                 storedDistance = min(rayStartOffset + hit.hitTime,
                                      ddgi.rayMaxDistance);
 
+                bool emissiveHit = false;
+                uint sourceCount = min(ddgi.radianceSourceParams.x,
+                                       uint(LFlaxDDGIMaxRadianceSources));
+                float hitTolerance = max(sdfConfig.voxelSize * 1.5f, 0.02f);
+                for (uint sourceIndex = 0u; sourceIndex < sourceCount; ++sourceIndex)
+                {
+                    FlaxDDGIRadianceSource source = ddgi.radianceSources[sourceIndex];
+                    if (flaxPointOnEmissiveSource(source, hitPos, hitTolerance))
+                    {
+                        radiance = source.colorAndType.rgb;
+                        emissiveHit = true;
+                        break;
+                    }
+                }
+
                 float4 atlasSample = float4(0, 0, 0, 0);
                 if (kUseSurfaceAtlas)
                 {
@@ -161,24 +237,39 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
                         hitPos, hitNormal, 20.0f);
                 }
 
-                if (atlasSample.a > 0.01f)
+                if (emissiveHit)
+                {
+                    // Direct emissive radiance is already in outgoing-radiance units.
+                }
+                else if (atlasSample.a > 0.01f)
                 {
                     radiance = atlasSample.rgb;
                 }
                 else
                 {
-                    // R5 fallback: sample SDF albedo + scene directional light.
+                    // Textured SDF fallback with explicit SDF visibility.
                     float3 albedoSample =
                         globalAlbedoTex.SampleLevel(linearSampler, uvw, 0).rgb;
                     float3 sunDir = normalize(ddgi.sceneLightDirection.xyz);
                     float3 sunColor = ddgi.sceneLightColor.rgb;
                     float NdotL = saturate(dot(hitNormal, sunDir));
-                    float3 directRadiance = sunColor * NdotL;
+                    float shadowBias = max(selfHitThreshold * 1.5f, rayStartOffset);
+                    float shadowMaxDistance = length(sdfConfig.boundsMax - sdfConfig.boundsMin);
+                    float sunVisibility =
+                        NdotL > 0.0f && flaxSDFVisible(
+                            sdfConfig, hitPos, hitNormal, sunDir, shadowMaxDistance, shadowBias)
+                        ? 1.0f : 0.0f;
+                    float3 directRadiance = sunColor * (NdotL * sunVisibility);
                     directRadiance +=
-                        evaluateFlaxRadianceSources(hitPos, hitNormal);
+                        evaluateFlaxRadianceSources(hitPos, hitNormal, sdfConfig, shadowBias);
+                    float3 bouncedIrradiance = sampleFlaxDDGIIrradiance(
+                        ddgi, probesDataHistory, probesDistanceHistory,
+                        probesIrradianceHistory, hitPos, hitNormal, -rayDir,
+                        max(selfHitThreshold, rayStartOffset), 0.0f,
+                        max(ddgi.probesOriginAndSpacing[0].w * 2.0f, 0.001f));
+                    directRadiance += bouncedIrradiance * kFlaxDDGIMultiBounceFeedback;
                     radiance = albedoSample * directRadiance
                              * (1.0f / kFlaxDDGIPi);
-                    radiance += albedoSample * 0.04f;
                 }
             }
 	    }

@@ -112,6 +112,61 @@ namespace demo
 		[[nodiscard]] constexpr bool operator==(const FlaxGIIndirectDispatch&) const noexcept = default;
 	};
 
+	struct FlaxGIOutputSelection
+	{
+		uint32_t parity{0};
+		bool valid{false};
+
+		[[nodiscard]] constexpr bool operator==(const FlaxGIOutputSelection&) const noexcept = default;
+	};
+
+	// Tracks the atlas pair independently from the renderer-wide temporal counter.
+	// A parity becomes visible to consumers only after a complete irradiance update.
+	struct FlaxGIOutputState
+	{
+		uint32_t nextWriteParity{0};
+		uint32_t publishedParity{0};
+		bool publishedValid{false};
+
+		[[nodiscard]] constexpr FlaxGIOutputSelection selectForFrame(
+			bool willPublish, bool willInvalidate) const noexcept
+		{
+			if(willPublish)
+			{
+				return {nextWriteParity & 1u, true};
+			}
+			if(willInvalidate)
+			{
+				return {publishedParity & 1u, false};
+			}
+			return {publishedParity & 1u, publishedValid};
+		}
+
+		[[nodiscard]] constexpr FlaxGIOutputSelection published() const noexcept
+		{
+			return {publishedParity & 1u, publishedValid};
+		}
+
+		constexpr void publishPending() noexcept
+		{
+			publishedParity = nextWriteParity & 1u;
+			publishedValid = true;
+			nextWriteParity = publishedParity ^ 1u;
+		}
+
+		constexpr void invalidate() noexcept
+		{
+			publishedValid = false;
+		}
+
+		constexpr void reset() noexcept
+		{
+			nextWriteParity = 0u;
+			publishedParity = 0u;
+			publishedValid = false;
+		}
+	};
+
 	struct FlaxGIDebugTelemetry
 	{
 		uint64_t sourceFrame{0};
@@ -165,22 +220,36 @@ namespace demo
 		}
 	};
 
+	[[nodiscard]] constexpr uint32_t computeFlaxGICascadeUpdateBudget(
+		uint32_t globalBudget,
+		uint32_t maximumProbeCount,
+		uint32_t cascadeIndex,
+		uint32_t cascadeCount) noexcept
+	{
+		if(cascadeCount == 0u) return 0u;
+		if(globalBudget == 0u) return maximumProbeCount;
+		const uint32_t baseBudget = globalBudget / cascadeCount;
+		const uint32_t remainder = globalBudget % cascadeCount;
+		return std::min(
+			maximumProbeCount,
+			baseBudget + (cascadeIndex < remainder ? 1u : 0u));
+	}
+
 	[[nodiscard]] constexpr FlaxGIIndirectDispatch computeFlaxGIIndirectDispatch(
 		uint32_t classifiedActiveProbeCount,
 		uint32_t maximumProbeCount,
-		uint32_t maximumUpdatedProbesPerFrame) noexcept
+		uint32_t cascadeUpdateBudget) noexcept
 	{
-		uint32_t activeCount = std::min(classifiedActiveProbeCount, maximumProbeCount);
-		if(maximumUpdatedProbesPerFrame != 0)
-		{
-			activeCount = std::min(activeCount, maximumUpdatedProbesPerFrame);
-		}
+		const uint32_t activeCount =
+			std::min(classifiedActiveProbeCount, maximumProbeCount);
+		const uint32_t updateCount = activeCount == 0u
+			? 0u : std::min(cascadeUpdateBudget, activeCount);
 
 		return FlaxGIIndirectDispatch{
 			.activeProbeCount = activeCount,
-			.trace = {(activeCount + 255u) / 256u, 1u, 1u},
-			.distance = {activeCount * 4u, 1u, 1u},
-			.irradiance = {activeCount, 1u, 1u},
+			.trace = {(updateCount + 255u) / 256u, 1u, 1u},
+			.distance = {updateCount * 4u, 1u, 1u},
+			.irradiance = {updateCount, 1u, 1u},
 		};
 	}
 

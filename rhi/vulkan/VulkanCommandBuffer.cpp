@@ -34,6 +34,10 @@ namespace demo::rhi::vulkan
 		// Conservative access masks; Wave 7 refines per-hazard. Correctness-first.
 		[[nodiscard]] VkAccessFlags2 inferProducerAccess(HazardFlags hazards)
 		{
+			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::readBeforeWrite)) != 0)
+				return VK_ACCESS_2_MEMORY_READ_BIT
+					| VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+					| VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 			VkAccessFlags2 out = VK_ACCESS_2_MEMORY_WRITE_BIT;
 			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::depthStencil)) != 0)
 				out |= VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -43,6 +47,10 @@ namespace demo::rhi::vulkan
 		[[nodiscard]] VkAccessFlags2 inferConsumerAccess(HazardFlags hazards)
 		{
 			VkAccessFlags2 out = VK_ACCESS_2_MEMORY_READ_BIT;
+			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::readBeforeWrite)) != 0)
+				return VK_ACCESS_2_MEMORY_WRITE_BIT
+					| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+
 			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::drawArguments)) != 0)
 				out |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
 			return out;

@@ -20,10 +20,13 @@
 #include "../FlaxGIDebugModel.h"
 #include "../Pass.h"
 
+#include <vector>
+
 namespace demo
 {
 class GPUDrivenRenderer;
 class GlobalSurfaceAtlasPass;
+struct DebugPassOptions;
 
 class FlaxDDGIPass : public ComputePassNode
 {
@@ -36,7 +39,7 @@ public:
   void execute(const PassContext& context) const override;
 
   // Call after FlaxDDGIResources are initialized (once, from GPUDrivenRenderer).
-  void initResources(rhi::Device& device);
+  void initResources(rhi::Device& device, uint32_t frameCount);
 
   // Call when FlaxDDGIResources are being deinitialized.
   void shutdownResources();
@@ -50,6 +53,12 @@ public:
   [[nodiscard]] rhi::TextureViewHandle getProbesIrradianceOutputView(uint32_t parity = 0u) const
   {
     return (parity & 1u) == 0u ? m_probesIrradianceViewA : m_probesIrradianceViewB;
+  }
+  [[nodiscard]] FlaxGIOutputSelection getLightingOutputSelection(
+    const DebugPassOptions& debugOptions) const;
+  [[nodiscard]] FlaxGIOutputSelection getPublishedOutputSelection() const
+  {
+    return m_outputState.published();
   }
   [[nodiscard]] FlaxGIDebugSnapshot getDebugSnapshot() const { return m_debugSnapshot; }
   [[nodiscard]] FlaxGIDebugViewSet getDebugViewSet() const;
@@ -71,17 +80,18 @@ private:
   rhi::ArgumentLayoutHandle m_irradianceLayout{};
 
   // --- Argument tables ---
-  rhi::ArgumentTableHandle m_classifyTable{};
-  rhi::ArgumentTableHandle m_initArgsTable{};
-  rhi::ArgumentTableHandle m_updateInactiveTable{};
-  rhi::ArgumentTableHandle m_traceRaysTable{};
-  rhi::ArgumentTableHandle m_distanceTable{};
-  rhi::ArgumentTableHandle m_debugViewsTable{};
-  rhi::ArgumentTableHandle m_irradianceTable{};
+  std::vector<rhi::ArgumentTableHandle> m_classifyTables;
+  std::vector<rhi::ArgumentTableHandle> m_initArgsTables;
+  std::vector<rhi::ArgumentTableHandle> m_updateInactiveTables;
+  std::vector<rhi::ArgumentTableHandle> m_traceRaysTables;
+  std::vector<rhi::ArgumentTableHandle> m_distanceTables;
+  std::vector<rhi::ArgumentTableHandle> m_debugViewsTables;
+  std::vector<rhi::ArgumentTableHandle> m_irradianceTables;
 
   // --- Compute pipelines ---
   rhi::PipelineHandle m_classifyPipeline{};
   rhi::PipelineHandle m_initArgsPipeline{};
+  rhi::PipelineHandle m_compactPipeline{};
   rhi::PipelineHandle m_updateInactivePipeline{};
   rhi::PipelineHandle m_traceRaysPipeline{};
   rhi::PipelineHandle m_distancePipeline{};
@@ -104,28 +114,42 @@ private:
 	uint64_t m_debugTextureId{0};
 	static constexpr uint32_t kDebugAtlasWidth = 1024;
 	static constexpr uint32_t kDebugAtlasHeight = 512;
-	static constexpr uint32_t kDebugReadbackUintCount = 10;
+	static constexpr uint32_t kDebugReadbackUintCount = 11;
 	mutable uint64_t m_consumedResetRequestId{0};
 	mutable uint64_t m_consumedRunToStageRequestId{0};
 	rhi::SamplerHandle m_fallbackSampler{};
 
-	// --- Per-frame uniform buffers (FlaxDDGIData, ~288 bytes) ---
-	static constexpr uint32_t kMaxFramesInFlight = 3;
-	rhi::BufferHandle m_ddgiUniformBuffers[kMaxFramesInFlight]{};
-	rhi::BufferHandle m_debugReadbackBuffers[kMaxFramesInFlight]{};
-	mutable uint64_t m_debugReadbackSourceFrames[kMaxFramesInFlight]{};
+	// --- Per-frame resources ---
+	static constexpr uint32_t kHistoryParityCount = 2u;
+	uint32_t m_frameCount{0};
+	std::vector<rhi::BufferHandle> m_ddgiUniformBuffers;
+	std::vector<rhi::BufferHandle> m_debugReadbackBuffers;
+	mutable std::vector<uint64_t> m_debugReadbackSourceFrames;
 	mutable uint64_t m_debugAtlasSourceFrame{0};
 	mutable FlaxGIDebugSnapshot m_debugSnapshot{};
+	mutable FlaxGIOutputState m_outputState{};
 
-	mutable uint32_t m_probeUpdateOffset{0u};
+	mutable std::vector<uint32_t> m_probeUpdateOffsets;
+	mutable std::vector<uint32_t> m_priorityProbeUpdateOffsets;
 
 	void writeFlaxDDGIDataToBuffer(uint32_t frameIndex) const;
-	void bindFlaxDDGIDataBuffer(uint32_t frameIndex) const;
-	void bindFlaxHistoryParity(uint32_t parity) const;
-	void readDebugTelemetry(uint32_t frameIndex, uint32_t maximumProbeCount,
-	                        uint32_t maximumUpdatedProbesPerFrame) const;
+	[[nodiscard]] bool plansFullOutputUpdate(const DebugPassOptions& debugOptions) const;
+	[[nodiscard]] bool hasPendingReset(const DebugPassOptions& debugOptions) const;
+	[[nodiscard]] uint32_t frameCascadeTableIndex(
+		uint32_t frameIndex, uint32_t cascadeIndex) const
+	{
+		return frameIndex * m_flaxResources->getCascadeCount() + cascadeIndex;
+	}
+	[[nodiscard]] uint32_t historyTableIndex(
+		uint32_t frameIndex, uint32_t cascadeIndex, uint32_t parity) const
+	{
+		return (frameCascadeTableIndex(frameIndex, cascadeIndex) * kHistoryParityCount)
+			+ (parity & 1u);
+	}
+	void readDebugTelemetry(uint32_t frameIndex, uint32_t maximumProbeCount) const;
 	void recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex, uint64_t sourceFrame) const;
-	void executeDebugViews(rhi::CommandBuffer& cmd, const PassContext& context) const;
+	void executeDebugViews(rhi::CommandBuffer& cmd, const PassContext& context,
+	                       rhi::ArgumentTableHandle table) const;
 	void markDebugStage(FlaxGIDebugStage stage, FlaxGIDebugStageState state,
 	                    uint64_t frame, std::string_view reason = {}) const;
 

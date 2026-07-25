@@ -154,12 +154,15 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     m_distanceAtlasExtent = {maxAtlasWidth, totalAtlasHeight};
   }
 
-  // --- ActiveProbes: per-cascade (counter at element 0, indices follow) ---
+  // --- ActiveProbes: counters + disjoint priority/regular compact lists ---
   m_activeProbes.resize(cascadeCount);
   for (uint32_t c = 0; c < cascadeCount; ++c) {
     const uint32_t probeCount = probesPerCascade[c].x * probesPerCascade[c].y * probesPerCascade[c].z;
     rhi::BufferDesc desc{};
-    desc.size = static_cast<uint64_t>(probeCount + 1) * sizeof(uint32_t);
+    // [0] active count, [1] priority count, [2] regular count,
+    // [3] dynamically allocated update count; then one probe-index array for
+    // each class, each with probeCount capacity.
+    desc.size = static_cast<uint64_t>(4u + 2u * probeCount) * sizeof(uint32_t);
     desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst
                | rhi::BufferUsageFlags::transferSrc;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
@@ -168,14 +171,14 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     m_activeProbes[c] = device.createBuffer(desc);
   }
 
-  // --- UpdateProbesInitArgs: [cascade][batch][pass] indirect dispatch args ---
+  // --- UpdateProbesInitArgs: [cascade][pass] indirect args + slack scratch ---
   // Each entry: (groupCountX, groupCountY, groupCountZ) = 3 × uint32_t
-  // Total: cascadeCount × maxBatchesPerCascade × 3 passes × 3 uints × 4 bytes
+  // Total: cascadeCount × 3 passes × 3 uints × 4 bytes
   {
     const uint32_t passCount = static_cast<uint32_t>(IndirectPass::Count);
     rhi::BufferDesc desc{};
-    desc.size = static_cast<uint64_t>(cascadeCount)
-              * m_maxBatchesPerCascade * passCount * 3 * sizeof(uint32_t);
+    desc.size = (static_cast<uint64_t>(cascadeCount) * passCount * 3u + 1u)
+              * sizeof(uint32_t);
     desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
                | rhi::BufferUsageFlags::transferSrc;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
@@ -243,11 +246,11 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
   // ActiveProbes per cascade
   for (size_t c = 0; c < m_probesPerCascade.size(); ++c) {
     const uint32_t n = m_probesPerCascade[c].x * m_probesPerCascade[c].y * m_probesPerCascade[c].z;
-    total += (static_cast<uint64_t>(n) + 1) * 4;
+    total += (static_cast<uint64_t>(4u) + 2u * n) * 4;
   }
-  // InitArgs: cascadeCount * maxBatches * 3passes * 3uints * 4bytes
-  total += static_cast<uint64_t>(m_cascadeCount) * m_maxBatchesPerCascade
-         * static_cast<uint32_t>(IndirectPass::Count) * 3 * 4;
+  // InitArgs plus one shared slack counter.
+  total += (static_cast<uint64_t>(m_cascadeCount)
+         * static_cast<uint32_t>(IndirectPass::Count) * 3u + 1u) * 4u;
   return total;
 }
 
@@ -259,10 +262,7 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
 {
   const uint32_t cascadeCount = static_cast<uint32_t>(probesPerCascade.size());
 
-  // Save previous origins to compute scroll offsets
-  std::vector<glm::vec3> prevOrigins(cascadeCount);
-  for (uint32_t c = 0; c < cascadeCount && c < outCascades.size(); ++c)
-    prevOrigins[c] = outCascades[c].snappedOrigin;
+  const std::vector<DDGICascadeDesc> previous = outCascades;
 
   outCascades.resize(cascadeCount);
 
@@ -287,23 +287,28 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
     cascade.probeCountY = probesPerCascade[c].y;
     cascade.probeCountZ = probesPerCascade[c].z;
 
-    // Compute scroll offset from previous origin (FGI-056)
-    if (c < prevOrigins.size())
+    // The origin is the current logical grid center. Texture scrolling is a
+    // separate cumulative ring offset; world positions must never include it.
+    if (c < previous.size() && previous[c].enabled)
     {
-      glm::vec3 delta = (cascade.snappedOrigin - prevOrigins[c]) / cascade.probeSpacing;
-      // Wrap delta to [-probeCount/2, probeCount/2] range for correct scrolling
-      glm::ivec3 halfCounts(static_cast<int>(cascade.probeCountX / 2),
-                            static_cast<int>(cascade.probeCountY / 2),
-                            static_cast<int>(cascade.probeCountZ / 2));
-      cascade.scrollOffset = glm::ivec3(
+      const glm::vec3 delta =
+        (cascade.snappedOrigin - previous[c].snappedOrigin) / cascade.probeSpacing;
+      cascade.scrollDelta = glm::ivec3(
         static_cast<int>(glm::round(delta.x)),
         static_cast<int>(glm::round(delta.y)),
         static_cast<int>(glm::round(delta.z)));
-      // Wrap to valid range (shader uses modulo with probesCounts)
+      const glm::ivec3 counts(
+        static_cast<int>(cascade.probeCountX),
+        static_cast<int>(cascade.probeCountY),
+        static_cast<int>(cascade.probeCountZ));
+      glm::ivec3 cumulative = previous[c].scrollOffset + cascade.scrollDelta;
+      cumulative = (cumulative % counts + counts) % counts;
+      cascade.scrollOffset = cumulative;
     }
     else
     {
       cascade.scrollOffset = glm::ivec3(0, 0, 0);
+      cascade.scrollDelta = glm::ivec3(0, 0, 0);
     }
   }
 }

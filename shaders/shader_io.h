@@ -543,14 +543,17 @@ struct FlaxDDGIRadianceSource
 {
   vec4 positionAndRange;  // xyz = world position, w = influence range
   vec4 colorAndType;      // rgb = emitted radiance, w = LFlaxRadianceSource*
-  vec4 directionAndCone;  // xyz = spot travel direction, w = cos(outer cone)
+  vec4 directionAndCone;  // xyz = spot travel direction / emissive normal, w = cos(outer cone)
+  vec4 shapeAxisXAndHalfWidth;   // emissive rectangle only
+  vec4 shapeAxisYAndHalfHeight;  // emissive rectangle only
 };
 
 struct FlaxDDGIData
 {
   vec4 probesOriginAndSpacing[LFlaxDDGIMaxCascades];  // xyz = cascade origin, w = probe spacing
   vec4 blendOrigin[LFlaxDDGIMaxCascades];             // xyz = blend origin, w unused
-  ivec4 probesScrollOffsets[LFlaxDDGIMaxCascades];     // xyz = scroll offset, w unused
+  ivec4 probesScrollOffsets[LFlaxDDGIMaxCascades];     // xyz = cumulative ring offset, w unused
+  ivec4 probesScrollDeltas[LFlaxDDGIMaxCascades];      // xyz = current-frame origin delta, w unused
   uvec3 probesCounts;                                   // grid resolution per cascade
   uint32_t cascadesCount;                               // active cascade count (1-4)
   float irradianceGamma;
@@ -564,8 +567,10 @@ struct FlaxDDGIData
 	vec4 sdfBoundsMaxAndRes;                              // xyz = bounds max, w = resolution as float
 	vec4 sceneLightDirection;                              // xyz = direction to light, w unused
 	vec4 sceneLightColor;                                  // rgb = light intensity, w unused
-	uvec4 updateParams;                                    // x = rotating probe offset, y = update budget
+	uvec4 updateParams[LFlaxDDGIMaxCascades];              // x = regular offset, y = cascade budget,
+	                                                        // z = priority offset, w = unlimited flag
 	uvec4 radianceSourceParams;                             // x = valid source count
+	vec4 environmentParams;                                 // x = environment valid, y = intensity
 	FlaxDDGIRadianceSource radianceSources[LFlaxDDGIMaxRadianceSources];
 };
 
@@ -642,6 +647,8 @@ struct LightParams
 	uvec4 ddgiFlaxCountsAndRays;            // xyz = probesCounts, w = raysCount
 	vec4 ddgiFlaxGammaWeightMaxDist;        // x = gamma, y = historyWeight, z = maxDist, w = intensity
 	vec4 ddgiFlaxFallbackIrradiance;        // rgb = fallback, w = normal bias
+	uvec4 ddgiFlaxRadianceSourceParams;      // x = valid source count
+	FlaxDDGIRadianceSource ddgiFlaxRadianceSources[LFlaxDDGIMaxRadianceSources];
 };
 
 struct LightingUniforms

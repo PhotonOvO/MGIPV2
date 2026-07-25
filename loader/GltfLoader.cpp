@@ -986,6 +986,15 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
             static_cast<float>(mat.emissiveFactor[1]),
             static_cast<float>(mat.emissiveFactor[2])
         );
+        const auto emissiveStrengthIt = mat.extensions.find("KHR_materials_emissive_strength");
+        if(emissiveStrengthIt != mat.extensions.end() && emissiveStrengthIt->second.IsObject())
+        {
+            const float parsedStrength = readFloatExtensionFactor(
+                emissiveStrengthIt->second, "emissiveStrength", 1.0f);
+            const float emissiveStrength = std::isfinite(parsedStrength)
+                ? std::max(parsedStrength, 0.0f) : 1.0f;
+            data.emissiveFactor *= emissiveStrength;
+        }
         if (mat.emissiveTexture.index >= 0) {
             data.emissiveTexture = resolveTextureSourceIndex(model, mat.emissiveTexture.index);
         }
