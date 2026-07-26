@@ -906,6 +906,45 @@ vec3 toneMapACES(vec3 color)
     return pow(color, vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
 }
 
+vec3 agxDefaultContrastApprox(vec3 x)
+{
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return 15.5 * x4 * x2
+         - 40.14 * x4 * x
+         + 31.96 * x4
+         - 6.868 * x2 * x
+         + 0.4298 * x2
+         + 0.1191 * x
+         - 0.00232;
+}
+
+vec3 toneMapAgX(vec3 color)
+{
+    // Minimal AgX base-contrast approximation for linear Rec.709 input.
+    // This target is UNORM, so keep the display-encoded result instead of
+    // applying the reference implementation's linearizing EOTF.
+    vec3 inset = vec3(
+        dot(color, vec3(0.842479062253094, 0.0784335999999992, 0.0792237451477643)),
+        dot(color, vec3(0.0423282422610123, 0.878468636469772, 0.0791661274605434)),
+        dot(color, vec3(0.0423756549057051, 0.0784336, 0.879142973793104)));
+
+    const float minEv = -12.47393;
+    const float maxEv = 4.026069;
+    vec3 encoded = clamp(
+        log2(max(inset, vec3(1.0e-10, 1.0e-10, 1.0e-10))),
+        vec3(minEv, minEv, minEv),
+        vec3(maxEv, maxEv, maxEv));
+    encoded = (encoded - minEv) / (maxEv - minEv);
+    encoded = agxDefaultContrastApprox(encoded);
+
+    vec3 displayEncoded = vec3(
+        dot(encoded, vec3(1.19687900512017, -0.0980208811401368, -0.0990297440797205)),
+        dot(encoded, vec3(-0.0528968517574562, 1.15190312990417, -0.0989611768448433)),
+        dot(encoded, vec3(-0.0529716355144438, -0.0980434501171241, 1.15107367264116)));
+    return saturate(displayEncoded);
+}
+
 struct VSOutput
 {
     float4 position : SV_Position;
@@ -1204,7 +1243,7 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
     float lensDirt = proceduralLensDirt(input.uv) * postProcess.params4.y * lensEnabled;
     float3 lensBloom = bloom * lensDirt;
     float3 color = (hdrColor + (bloom + lensBloom) * postProcess.params0.y * bloomEnabled) * exposure;
-    color = toneMapACES(max(color, 0.0));
+    color = toneMapAgX(max(color, 0.0));
     color = applyColorGrade(color, input.uv);
     return float4(saturate(color), 1.0);
 }

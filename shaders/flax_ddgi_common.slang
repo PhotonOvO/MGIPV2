@@ -495,8 +495,11 @@ float3 sampleFlaxDDGIIrradianceCascade(
             continue;
         }
         validTrilinearWeight += weight;
+        // The update pass stores a cosine-weighted radiance average. Its
+        // hemispherical irradiance integral is pi times that average; using
+        // 2*pi doubles all valid probe energy.
         float3 irrSample = pow(max(encodedIrradiance.rgb, float3(0,0,0)),
-                               ddgi.irradianceGamma) * (2.0f * kFlaxDDGIPi);
+                               ddgi.irradianceGamma) * kFlaxDDGIPi;
 
         // Decode real probe position and compute visibility
         float3 probeWorldPos = decodeProbePosition(ddgi, probeData, cascadeIndex, probeIndex, probeCoords);

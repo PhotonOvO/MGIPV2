@@ -366,12 +366,91 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         coverage = coverage[: coverage.index("GPUDrivenRenderer::updateFlaxCascadeScheduling")]
 
         compact_scene = coverage[coverage.index("if (compactSceneFits)") :]
-        compact_scene = compact_scene[: compact_scene.index("const glm::vec3 closestScenePoint")]
+        compact_scene = compact_scene[: compact_scene.index("const bool cameraInsideCoverageBounds")]
 
         self.assertIn("minimumCenter = coverageBoundsMax - coverageHalfExtent", compact_scene)
         self.assertIn("maximumCenter = coverageBoundsMin + coverageHalfExtent", compact_scene)
         self.assertIn("glm::clamp(cameraPosition, minimumCenter, maximumCenter)", compact_scene)
         self.assertNotIn("keepInnerCascadeNearCamera(sceneBoundsCenter)", compact_scene)
+
+    def test_flax_cascade_density_stays_config_driven_and_camera_local(self) -> None:
+        resources = read("render/FlaxDDGIResources.cpp")
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        coverage = renderer[renderer.index("GPUDrivenRenderer::computeFlaxCoverageCenter") :]
+        coverage = coverage[: coverage.index("GPUDrivenRenderer::updateFlaxCascadeScheduling")]
+
+        self.assertIn("cascade.probeSpacing = config.probeSpacing * spacingMultiplier", resources)
+        self.assertNotIn("kMinProbeSpacingVoxelScale", resources)
+        self.assertNotIn("computeRequiredCoverageSpacing", resources)
+        self.assertIn("cameraInsideCoverageBounds", coverage)
+        self.assertIn("return cameraPosition", coverage)
+
+    def test_flax_coarse_sdf_relocation_does_not_change_probe_density(self) -> None:
+        classify = read("shaders/ddgi_flax_classify.slang")
+
+        self.assertIn("relocationClearance = min(voxelLimit, probesSpacing * 0.35f)", classify)
+        self.assertIn("relocateLimit = probesSpacing * 0.45f", classify)
+        self.assertIn("cappedRelocationDistance", classify)
+        self.assertIn("deepInsideTolerance", classify)
+
+    def test_flax_probe_debug_defaults_to_local_active_cascade(self) -> None:
+        render_types = read("render/RenderTypes.h")
+
+        self.assertIn("int ddgiDebugCascadeIndex{0}", render_types)
+        self.assertIn("bool ddgiDebugActiveProbes{true}", render_types)
+
+    def test_flax_spacing_changes_request_history_reset(self) -> None:
+        resources = read("render/FlaxDDGIResources.cpp")
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        pass_header = read("render/passes/FlaxDDGIPass.h")
+        pass_source = read("render/passes/FlaxDDGIPass.cpp")
+
+        self.assertIn("spacingChanged", resources)
+        self.assertIn("requestRuntimeReset", renderer)
+        self.assertIn("requestRuntimeReset", pass_header)
+        self.assertIn("m_runtimeResetRequested", pass_source)
+        self.assertIn("m_runtimeResetRequested = false", pass_source)
+
+    def test_flax_ibl_exclusion_reaches_probe_trace_and_resets_history(self) -> None:
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        update = renderer[renderer.index("const bool disableIBLForFlax") :]
+        update = update[: update.index("lightingUniforms.light.iblParams")]
+
+        self.assertIn(
+            "params.debugOptions.enableIBL && !disableIBLForFlax "
+            "&& getIBLEnvironmentLoaded()",
+            update,
+        )
+        self.assertIn("flaxIBLEnvironmentChanged", update)
+        self.assertIn("m_flaxDDGIPass->requestRuntimeReset()", update)
+        self.assertIn(
+            "m_cachedIBLEnvironmentIntensity =\n\t\t\t"
+            "flaxIBLEnvironmentEnabled ? requestedIBLEnvironmentIntensity : 0.0f",
+            update,
+        )
+
+    def test_final_color_uses_blender_compatible_agx_display_transform(self) -> None:
+        shader = read("shaders/shader.light.slang")
+        final_color = shader[shader.index("float4 fragmentFinalColorMain") :]
+        final_color = final_color[: final_color.index("float4 fragmentVelocityMain")]
+
+        self.assertIn("vec3 toneMapAgX(vec3 color)", shader)
+        self.assertIn(
+            "vec3(0.842479062253094, 0.0784335999999992, 0.0792237451477643)",
+            shader,
+        )
+        self.assertIn(
+            "vec3(1.19687900512017, -0.0980208811401368, -0.0990297440797205)",
+            shader,
+        )
+        self.assertIn("color = toneMapAgX(max(color, 0.0));", final_color)
+        self.assertNotIn("color = toneMapACES(max(color, 0.0));", final_color)
+
+    def test_flax_global_sdf_preserves_sponza_curtain_resolution(self) -> None:
+        global_sdf = read("render/passes/GlobalSDFPass.h")
+
+        self.assertIn("static constexpr uint32_t kResolution = 256u;", global_sdf)
+        self.assertNotIn("static constexpr uint32_t kResolution = 128u;", global_sdf)
 
     def test_scene_bounds_refresh_tracks_runtime_instance_transforms(self) -> None:
         renderer = read("render/GPUDrivenRenderer.cpp")
@@ -569,7 +648,8 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertIn("if (any(edgeDistances < float3(0,0,0)))", common)
         self.assertIn("saturate(edgeDistance / blendWidth)", common)
         self.assertIn("ddgi.fallbackIrradiance.rgb * remainingWeight", common)
-        self.assertIn("* (2.0f * kFlaxDDGIPi)", common)
+        self.assertIn("* kFlaxDDGIPi", common)
+        self.assertNotIn("* (2.0f * kFlaxDDGIPi)", common)
 
     def test_flax_trace_uses_environment_and_sdf_shadow_visibility(self) -> None:
         trace = read("shaders/ddgi_flax_trace_rays.slang")
@@ -627,20 +707,25 @@ class GpuSmokeRegressionTests(unittest.TestCase):
             common.count("return result * ddgi.indirectLightingIntensity;"), 1
         )
 
-    def test_flax_coverage_center_is_clamped_near_the_camera(self) -> None:
+    def test_flax_coverage_center_preserves_camera_local_cascades(self) -> None:
         renderer = read("render/GPUDrivenRenderer.cpp")
+        coverage = renderer[renderer.index("GPUDrivenRenderer::computeFlaxCoverageCenter") :]
+        coverage = coverage[: coverage.index("GPUDrivenRenderer::updateFlaxCascadeScheduling")]
 
-        self.assertIn("keepInnerCascadeNearCamera", renderer)
-        self.assertIn("minimumCenter = coverageBoundsMax - coverageHalfExtent", renderer)
-        self.assertIn("maximumCenter = coverageBoundsMin + coverageHalfExtent", renderer)
-        compact_scene = renderer[
-            renderer.index("if (compactSceneFits)") :
-            renderer.index("const glm::vec3 closestScenePoint")
+        self.assertIn("cameraInsideCoverageBounds", coverage)
+        self.assertIn("return cameraPosition", coverage)
+        self.assertIn("cameraContainmentHalfExtent", coverage)
+        self.assertIn("minimumCenter = coverageBoundsMax - coverageHalfExtent", coverage)
+        self.assertIn("maximumCenter = coverageBoundsMin + coverageHalfExtent", coverage)
+        compact_scene = coverage[
+            coverage.index("if (compactSceneFits)") :
+            coverage.index("const bool cameraInsideCoverageBounds")
         ]
         self.assertIn("glm::ceil(minimumCenter / config.probeSpacing)", compact_scene)
         self.assertIn("glm::floor(maximumCenter / config.probeSpacing)", compact_scene)
         self.assertIn("glm::round(cameraPosition / config.probeSpacing)", compact_scene)
         self.assertIn("preferredGridCenter, minimumGridCenter", compact_scene)
+        self.assertNotIn("keepInnerCascadeNearCamera", coverage)
 
     def test_flax_debug_snapshot_reports_all_runtime_cascades(self) -> None:
         renderer = read("render/GPUDrivenRenderer.cpp")
