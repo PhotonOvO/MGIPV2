@@ -570,16 +570,6 @@ namespace demo
 				glm::max(glm::vec3(probesPerCascade.front()) - glm::vec3(1.0f), glm::vec3(0.0f));
 			coverageHalfExtent = probeIntervals * config.probeSpacing * 0.5f;
 		}
-		const auto keepInnerCascadeNearCamera =
-			[&](const glm::vec3& target)
-			{
-				const glm::vec3 delta = target - cameraPosition;
-				const float distance = glm::length(delta);
-				const float maximumOffset = coverageRadius * 0.5f;
-				return distance > maximumOffset && distance > 1.0e-5f
-					? cameraPosition + delta * (maximumOffset / distance)
-					: target;
-			};
 
 		const glm::vec3 sceneBoundsCenter =
 			(coverageBoundsMin + coverageBoundsMax) * 0.5f;
@@ -604,17 +594,21 @@ namespace demo
 			return glm::clamp(cameraPosition, minimumCenter, maximumCenter);
 		}
 
-		const glm::vec3 closestScenePoint = glm::clamp(
-			cameraPosition, coverageBoundsMin, coverageBoundsMax);
-		const glm::vec3 towardSceneCenter = sceneBoundsCenter - closestScenePoint;
-		const float towardSceneDistance = glm::length(towardSceneCenter);
-		if (towardSceneDistance <= 1.0e-5f)
+		const bool cameraInsideCoverageBounds =
+			glm::all(glm::greaterThanEqual(cameraPosition, coverageBoundsMin))
+			&& glm::all(glm::lessThanEqual(cameraPosition, coverageBoundsMax));
+		if (cameraInsideCoverageBounds)
 		{
-			return keepInnerCascadeNearCamera(closestScenePoint);
+			return cameraPosition;
 		}
-		return keepInnerCascadeNearCamera(
-			closestScenePoint + towardSceneCenter / towardSceneDistance
-				* std::min(coverageRadius * 0.5f, towardSceneDistance));
+
+		const glm::vec3 cameraContainmentHalfExtent = glm::max(
+			coverageHalfExtent - glm::vec3(config.probeSpacing),
+			glm::vec3(config.probeSpacing));
+		return glm::clamp(
+			sceneBoundsCenter,
+			cameraPosition - cameraContainmentHalfExtent,
+			cameraPosition + cameraContainmentHalfExtent);
 	}
 
 	void GPUDrivenRenderer::updateFlaxCascadeScheduling(const glm::vec3& cameraPos)
@@ -649,11 +643,13 @@ namespace demo
 			m_flaxCascadeFrameCounters[c]++;
 		}
 
-		// Keep compact scenes inside the probe volume even when the camera sits
-		// outside their bounds (Cornell Box is the canonical case).
 		const glm::vec3 coverageCenter = computeFlaxCoverageCenter(cameraPos);
-		FlaxDDGIResources::computeCascades(
+		const bool historyInvalidated = FlaxDDGIResources::computeCascades(
 			getDDGIConfig(), cameraPos, coverageCenter, ppc, m_flaxDDGICascades);
+		if (historyInvalidated && m_flaxDDGIPass != nullptr)
+		{
+			m_flaxDDGIPass->requestRuntimeReset();
+		}
 
 		m_flaxLastCameraPosition = cameraPos;
 	}
@@ -4137,9 +4133,23 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			          static_cast<float>(shaderio::LCascadeCount));
 		const bool disableIBLForFlax = isFlaxStyleDDGIRequested()
 			&& (getDDGIConfig().flaxGIDisableIBL || params.debugOptions.flaxGIDisableIBL);
-		m_cachedIBLEnvironmentEnabled =
-			params.debugOptions.enableIBL && getIBLEnvironmentLoaded();
-		m_cachedIBLEnvironmentIntensity = std::max(params.debugOptions.iblIntensity, 0.0f);
+		const bool flaxIBLEnvironmentEnabled =
+			params.debugOptions.enableIBL && !disableIBLForFlax && getIBLEnvironmentLoaded();
+		const float requestedIBLEnvironmentIntensity =
+			std::max(params.debugOptions.iblIntensity, 0.0f);
+		const bool flaxIBLEnvironmentChanged =
+			flaxIBLEnvironmentEnabled != m_cachedIBLEnvironmentEnabled
+			|| (flaxIBLEnvironmentEnabled
+				&& std::abs(requestedIBLEnvironmentIntensity - m_cachedIBLEnvironmentIntensity) > 1.0e-4f);
+		m_cachedIBLEnvironmentEnabled = flaxIBLEnvironmentEnabled;
+		m_cachedIBLEnvironmentIntensity =
+			flaxIBLEnvironmentEnabled ? requestedIBLEnvironmentIntensity : 0.0f;
+		if (flaxIBLEnvironmentChanged && m_flaxDDGIPass != nullptr)
+		{
+			// Environment miss radiance is accumulated into probe history. Any
+			// effective IBL state/intensity change must discard the old field.
+			m_flaxDDGIPass->requestRuntimeReset();
+		}
 		lightingUniforms.light.iblParams =
 			glm::vec4(params.debugOptions.enableIBL && !disableIBLForFlax ? 1.0f : 0.0f,
 			          params.debugOptions.iblIntensity,

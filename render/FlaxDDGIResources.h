@@ -117,7 +117,7 @@ public:
   void deinit();
 
   // Compute cascade descriptors from config + camera
-  static void computeCascades(const DDGIConfig& config,
+  static bool computeCascades(const DDGIConfig& config,
                               const glm::vec3& cameraPosition,
                               const glm::vec3& coverageCenter,
                               const std::vector<glm::uvec3>& probesPerCascade,

@@ -120,8 +120,8 @@ namespace demo
 		// Reserved Flax GI debug toggles. They do not allocate or dispatch
 		// resources until the matching Surface Atlas / cascaded DDGI stages land.
 		bool ddgiDebugSurfaceAtlasCoverage{false};
-		int ddgiDebugCascadeIndex{-1}; // -1 = all cascades, 0-3 = specific cascade
-		bool ddgiDebugActiveProbes{false};
+		int ddgiDebugCascadeIndex{0}; // -1 = all cascades, 0-3 = specific cascade
+		bool ddgiDebugActiveProbes{true};
 		bool ddgiDebugProbeState{false};
 		int flaxGIDebugMode{0}; // 0=Off, 1=Irradiance, 2=No visibility, 3=Diffuse, 4=Gate, 5=Direct atlas
 		float flaxGIDebugScale{1.0f};

@@ -2,7 +2,7 @@
 
 // Global SDF composition pass (DDGI Wave D1-2).
 //
-// Owns the single-cascade global SDF volume (R16F 128^3 with a min-filtered mip
+// Owns the single-cascade global SDF volume (R16F 256^3 with a min-filtered mip
 // chain on the same texture) and the three compute pipelines that rebuild it
 // each frame: Clear (write max normalized distance) -> Compose (min over the
 // registered mesh SDF list) -> Mipmap (per-level 2x2x2 min downsample).
@@ -51,8 +51,8 @@ namespace demo
 	class GlobalSDFPass final : public ComputePassNode
 	{
 	public:
-		// Plan section 3.1: first version is a single 128^3 cascade.
-		static constexpr uint32_t kResolution = 128u;
+		// Sponza curtains require this density to preserve thin colored surfaces.
+		static constexpr uint32_t kResolution = 256u;
 		// Must match shaderio::LGlobalSDFMipCount (static_assert in the .cpp).
 		static constexpr uint32_t kMipCount = 3u;
 		// Default world bounds until a later wave wires scene-driven bounds in.

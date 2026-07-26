@@ -164,37 +164,40 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
             float3 gradient = float3(sdfXP - sdfXN, sdfYP - sdfYN, sdfZP - sdfZN);
             float3 sdfNormal = length(gradient) > 1e-6f ? normalize(gradient) : float3(0,1,0);
 
-            // A negative SDF means the probe is inside geometry. Move toward
-            // increasing SDF by the full clearance instead of reversing the
-            // gradient when sdf is less than -voxelLimit.
+            // Probe density is independent of SDF resolution. A coarse SDF
+            // cannot provide a reliable full-voxel relocation for a finer
+            // probe grid, so cap both clearance and the representable offset.
             float speed = (stateOld != kDDGIProbeStateActive || sdf <= 0.0f) ? 1.0f : 0.3f;
-            float relocationDistance = max(voxelLimit - sdf, 0.0f);
-            float3 offsetToSet = probeOffset + sdfNormal * (relocationDistance * speed);
-            float relocateLimit = probesSpacing * 0.5f;
-            if (length(offsetToSet) < relocateLimit)
-            {
-                relocationChanged = length(offsetToSet - probeOffset) > voxelSize * 0.01f;
-                probeOffset = offsetToSet;
+            float relocationClearance = min(voxelLimit, probesSpacing * 0.35f);
+            float relocationDistance = max(relocationClearance - sdf, 0.0f);
+            float relocateLimit = probesSpacing * 0.45f;
+            float cappedRelocationDistance =
+                min(relocationDistance * speed, relocateLimit);
+            float3 offsetToSet =
+                probeOffset + sdfNormal * cappedRelocationDistance;
+            float offsetLength = length(offsetToSet);
+            if (offsetLength > relocateLimit && offsetLength > 1e-6f)
+                offsetToSet *= relocateLimit / offsetLength;
 
-                // The finite-difference gradient is approximate. Do not trace
-                // or sample a candidate that still resolves inside geometry.
-                float3 relocatedPosition = probeBasePos + probeOffset;
-                float3 relocatedUvw =
-                    clamp((relocatedPosition - boundsMin) / sdfExtent,
-                          float3(0,0,0), float3(1,1,1));
-                float relocatedEncodedSDF =
-                    globalSDFTex.SampleLevel(linearSampler, relocatedUvw, 0);
-                float relocatedSDF =
-                    (relocatedEncodedSDF * 2.0f - 1.0f) * maxEncodeDistance;
-                if (relocatedSDF <= 0.0f)
-                {
-                    state = kDDGIProbeStateInactive;
-                    attention = 0.0f;
-                }
-            }
-            else
+            relocationChanged = length(offsetToSet - probeOffset)
+                > probesSpacing * 0.01f;
+            probeOffset = offsetToSet;
+
+            // Trilinear sampling of a coarse SDF can remain slightly negative
+            // after a valid sub-cell relocation. Reject only probes that are
+            // still confidently deep inside geometry.
+            float3 relocatedPosition = probeBasePos + probeOffset;
+            float3 relocatedUvw =
+                clamp((relocatedPosition - boundsMin) / sdfExtent,
+                      float3(0,0,0), float3(1,1,1));
+            float relocatedEncodedSDF =
+                globalSDFTex.SampleLevel(linearSampler, relocatedUvw, 0);
+            float relocatedSDF =
+                (relocatedEncodedSDF * 2.0f - 1.0f) * maxEncodeDistance;
+            float deepInsideTolerance =
+                max(probesSpacing * 0.5f, voxelSize * 0.1f);
+            if (relocatedSDF < -deepInsideTolerance)
             {
-                probeOffset = float3(0,0,0);
                 state = kDDGIProbeStateInactive;
                 attention = 0.0f;
             }

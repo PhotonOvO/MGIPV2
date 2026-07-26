@@ -44,6 +44,9 @@ public:
   // Call when FlaxDDGIResources are being deinitialized.
   void shutdownResources();
 
+  // Invalidates probe state and both history atlases after a layout-scale change.
+  void requestRuntimeReset() { m_runtimeResetRequested = true; }
+
   [[nodiscard]] bool isReady() const { return m_device != nullptr && m_flaxResources != nullptr && m_pipelinesCreated; }
   [[nodiscard]] rhi::TextureViewHandle getProbesDataView() const { return m_probesDataView; }
   [[nodiscard]] rhi::TextureViewHandle getProbesDistanceOutputView(uint32_t parity = 0u) const
@@ -116,6 +119,7 @@ private:
 	static constexpr uint32_t kDebugAtlasHeight = 512;
 	static constexpr uint32_t kDebugReadbackUintCount = 11;
 	mutable uint64_t m_consumedResetRequestId{0};
+	mutable bool m_runtimeResetRequested{false};
 	mutable uint64_t m_consumedRunToStageRequestId{0};
 	rhi::SamplerHandle m_fallbackSampler{};
 

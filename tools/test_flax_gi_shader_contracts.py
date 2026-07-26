@@ -112,11 +112,17 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("probeState == kDDGIProbeStateActivated || !historyValid", COMMON_SHADER)
 
     def test_probe_relocation_pushes_negative_sdf_toward_free_space(self) -> None:
-        self.assertIn("float relocationDistance = max(voxelLimit - sdf, 0.0f)", CLASSIFY_SHADER)
-        self.assertIn("sdfNormal * (relocationDistance * speed)", CLASSIFY_SHADER)
+        self.assertIn(
+            "float relocationClearance = min(voxelLimit, probesSpacing * 0.35f)",
+            CLASSIFY_SHADER,
+        )
+        self.assertIn("max(relocationClearance - sdf, 0.0f)", CLASSIFY_SHADER)
+        self.assertIn("float relocateLimit = probesSpacing * 0.45f", CLASSIFY_SHADER)
+        self.assertIn("min(relocationDistance * speed, relocateLimit)", CLASSIFY_SHADER)
+        self.assertIn("sdfNormal * cappedRelocationDistance", CLASSIFY_SHADER)
         self.assertNotIn("sdfNormal * ((sdf + voxelLimit) * speed)", CLASSIFY_SHADER)
         self.assertIn("float relocatedSDF", CLASSIFY_SHADER)
-        self.assertIn("relocatedSDF <= 0.0f", CLASSIFY_SHADER)
+        self.assertIn("relocatedSDF < -deepInsideTolerance", CLASSIFY_SHADER)
         self.assertIn("state = kDDGIProbeStateInactive", CLASSIFY_SHADER)
         self.assertIn("if (sdf <= voxelLimit)", CLASSIFY_SHADER)
         self.assertNotIn("if (sdfDist < voxelLimit)", CLASSIFY_SHADER)

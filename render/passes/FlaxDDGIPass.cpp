@@ -802,9 +802,10 @@ bool FlaxDDGIPass::plansFullOutputUpdate(const DebugPassOptions& debugOptions) c
 
 bool FlaxDDGIPass::hasPendingReset(const DebugPassOptions& debugOptions) const
 {
-  return isReady() && m_renderer->isFlaxStyleDDGIRequested()
-    && isNewFlaxGIDebugRequest(
-      debugOptions.flaxGIResetRequestId, m_consumedResetRequestId);
+  return isReady() && m_renderer->isFlaxStyleDDGIRequested() &&
+    (m_runtimeResetRequested ||
+     isNewFlaxGIDebugRequest(
+       debugOptions.flaxGIResetRequestId, m_consumedResetRequestId));
 }
 
 FlaxGIOutputSelection FlaxDDGIPass::getLightingOutputSelection(
@@ -1011,7 +1012,12 @@ void FlaxDDGIPass::execute(const PassContext& context) const
 
   if (resetRequested)
   {
-    m_consumedResetRequestId = debugOptions.flaxGIResetRequestId;
+    if (isNewFlaxGIDebugRequest(
+          debugOptions.flaxGIResetRequestId, m_consumedResetRequestId))
+    {
+      m_consumedResetRequestId = debugOptions.flaxGIResetRequestId;
+    }
+    m_runtimeResetRequested = false;
     std::fill(m_probeUpdateOffsets.begin(), m_probeUpdateOffsets.end(), 0u);
     std::fill(m_priorityProbeUpdateOffsets.begin(),
               m_priorityProbeUpdateOffsets.end(), 0u);

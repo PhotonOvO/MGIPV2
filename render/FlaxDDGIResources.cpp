@@ -254,49 +254,53 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
   return total;
 }
 
-  void FlaxDDGIResources::computeCascades(const DDGIConfig& config,
-                                         const glm::vec3& cameraPosition,
-                                         const glm::vec3& coverageCenter,
-                                         const std::vector<glm::uvec3>& probesPerCascade,
-                                         std::vector<DDGICascadeDesc>& outCascades)
+bool FlaxDDGIResources::computeCascades(const DDGIConfig& config,
+                                        const glm::vec3& cameraPosition,
+                                        const glm::vec3& coverageCenter,
+                                        const std::vector<glm::uvec3>& probesPerCascade,
+                                        std::vector<DDGICascadeDesc>& outCascades)
 {
   const uint32_t cascadeCount = static_cast<uint32_t>(probesPerCascade.size());
-
   const std::vector<DDGICascadeDesc> previous = outCascades;
-
   outCascades.resize(cascadeCount);
+
+  bool historyInvalidated =
+    !previous.empty() && previous.size() != cascadeCount;
 
   for (uint32_t c = 0; c < cascadeCount; ++c)
   {
     DDGICascadeDesc& cascade = outCascades[c];
     cascade.enabled = true;
-
-    // Each cascade covers a progressively larger area
-    float spacingMultiplier = 1.0f;
-    if (c == 1) spacingMultiplier = 2.0f;
-    if (c == 2) spacingMultiplier = 4.0f;
-    if (c == 3) spacingMultiplier = 8.0f;
-
-    cascade.probeSpacing = config.probeSpacing * spacingMultiplier;
-
-    // Snap origin to probe spacing grid
-    cascade.snappedOrigin = glm::floor(coverageCenter / cascade.probeSpacing) * cascade.probeSpacing;
-    cascade.blendOrigin = cameraPosition;
-
     cascade.probeCountX = probesPerCascade[c].x;
     cascade.probeCountY = probesPerCascade[c].y;
     cascade.probeCountZ = probesPerCascade[c].z;
 
+    const float spacingMultiplier = static_cast<float>(1u << c);
+    cascade.probeSpacing = config.probeSpacing * spacingMultiplier;
+    cascade.snappedOrigin =
+      glm::round(coverageCenter / cascade.probeSpacing) * cascade.probeSpacing;
+    cascade.blendOrigin = cameraPosition;
+
+    const bool hasPrevious = c < previous.size() && previous[c].enabled;
+    const float spacingTolerance =
+      std::max(cascade.probeSpacing, 1.0f) * 1.0e-4f;
+    const bool spacingChanged = hasPrevious
+      && std::abs(previous[c].probeSpacing - cascade.probeSpacing)
+        > spacingTolerance;
+    const glm::vec3 deltaCells = hasPrevious
+      ? (cascade.snappedOrigin - previous[c].snappedOrigin)
+          / cascade.probeSpacing
+      : glm::vec3(0.0f);
+    const glm::vec3 roundedDelta = glm::round(deltaCells);
+    const bool originGridAligned = glm::all(glm::lessThanEqual(
+      glm::abs(deltaCells - roundedDelta), glm::vec3(1.0e-3f)));
+    historyInvalidated |= spacingChanged || (hasPrevious && !originGridAligned);
+
     // The origin is the current logical grid center. Texture scrolling is a
     // separate cumulative ring offset; world positions must never include it.
-    if (c < previous.size() && previous[c].enabled)
+    if (hasPrevious && !spacingChanged && originGridAligned)
     {
-      const glm::vec3 delta =
-        (cascade.snappedOrigin - previous[c].snappedOrigin) / cascade.probeSpacing;
-      cascade.scrollDelta = glm::ivec3(
-        static_cast<int>(glm::round(delta.x)),
-        static_cast<int>(glm::round(delta.y)),
-        static_cast<int>(glm::round(delta.z)));
+      cascade.scrollDelta = glm::ivec3(roundedDelta);
       const glm::ivec3 counts(
         static_cast<int>(cascade.probeCountX),
         static_cast<int>(cascade.probeCountY),
@@ -311,6 +315,7 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
       cascade.scrollDelta = glm::ivec3(0, 0, 0);
     }
   }
+  return historyInvalidated;
 }
 
 glm::uvec3 FlaxDDGIResources::computeProbesPerCascade(const DDGIConfig& config,
