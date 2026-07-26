@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DebugInteropBridge.h"
+#include "ImGuiRhiRenderer.h"
 #include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
@@ -77,15 +77,12 @@ namespace demo
 
 		// Pass execution helpers (wrappers for per-pass commands)
 		void executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
-		void beginPresentPass(rhi::CommandBuffer& cmdBuffer);
-		void endPresentPass(rhi::CommandBuffer& cmdBuffer);
 		[[nodiscard]] rhi::ResourceIndex getSceneBindlessResourceIndex() const { return kSceneBindlessInfoIndex; }
 
 		TextureHandle getViewportTextureHandle() const;
 		ImTextureID getViewportTextureID(TextureHandle handle) const;
-		DebugInteropBridge::TextureID registerDebugTexture(rhi::SamplerHandle sampler,
-		                                                   rhi::TextureViewHandle view);
-		void unregisterDebugTexture(DebugInteropBridge::TextureID textureId);
+		ImGuiRhiRenderer::TextureID registerDebugTexture(rhi::TextureViewHandle view);
+		void unregisterDebugTexture(ImGuiRhiRenderer::TextureID textureId);
 		MaterialHandle getMaterialHandle(uint32_t slot) const;
 
 		// glTF model support
@@ -581,7 +578,7 @@ namespace demo
 			rhi::BufferHandle pointsBuffer;
 			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
 			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
-			// uiDescriptorPool removed: now self-managed by DebugInteropBridge (D-08/D-09).
+			// ImGui descriptors are owned by the backend-neutral ImGui RHI renderer.
 			rhi::TextureFormat iblEnvironmentFormat{rhi::TextureFormat::undefined};
 			rhi::Extent2D iblEnvironmentExtent{};
 			uint32_t iblEnvironmentMipCount{0};
@@ -715,7 +712,6 @@ namespace demo
 			DrawStream drawStream;
 		};
 
-		bool m_presentPassActive{false};
 
 		// glTF support
 		MeshPool m_meshPool;
@@ -1036,8 +1032,6 @@ namespace demo
 		std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;
 		PassGpuProfileState m_passGpuProfile;
 		PassProfilingHooks m_passProfilingHooks{this};
-		// ImGui/Tracy native interop bridge (D-08/D-09): sanctioned native exception.
-		// All Vulkan/ImGui native calls for UI rendering are confined to this bridge.
-		DebugInteropBridge m_debugBridge;
+		ImGuiRhiRenderer m_imguiRenderer;
 	};
 } // namespace demo

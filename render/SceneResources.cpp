@@ -89,7 +89,7 @@ namespace demo
 		ASSERT(m_createInfo.color.empty(), "Missing deinit()");
 		m_rhiDevice = &device;
 		m_createInfo = createInfo;
-		m_debugBridge = createInfo.debugBridge;
+		m_imguiRenderer = createInfo.imguiRenderer;
 		create(cmd);
 	}
 
@@ -529,22 +529,20 @@ namespace demo
 			cmdBuffer.resourceBarrier(&pyramidBarrier, 1, nullptr, 0);
 		}
 
-		if (m_debugBridge != nullptr && m_debugBridge->isInitialized())
+		if (m_imguiRenderer != nullptr && m_imguiRenderer->isInitialized())
 		{
 			for (size_t d = 0; d < m_resources.uiImageViews.size(); ++d)
 			{
-				m_imguiTextureIds[d] = m_debugBridge->registerTexture(
-					*m_rhiDevice, m_createInfo.linearSampler, m_resources.uiImageViews[d],
-					DebugInteropBridge::ImageLayout::General);
+				m_imguiTextureIds[d] = m_imguiRenderer->registerTexture(
+					m_resources.uiImageViews[d], rhi::ArgumentAccessIntent::readWrite);
 			}
 		}
 
 		// Create ImGui descriptor for output texture
-		if (m_debugBridge != nullptr && m_debugBridge->isInitialized())
+		if (m_imguiRenderer != nullptr && m_imguiRenderer->isInitialized())
 		{
-			m_resources.outputTextureImID = m_debugBridge->registerTexture(
-				*m_rhiDevice, m_createInfo.linearSampler, m_resources.outputTextureView,
-				DebugInteropBridge::ImageLayout::General);
+			m_resources.outputTextureImID = m_imguiRenderer->registerTexture(
+				m_resources.outputTextureView, rhi::ArgumentAccessIntent::readWrite);
 		}
 	}
 
@@ -555,9 +553,9 @@ namespace demo
 			return;
 		}
 
-		if (m_resources.outputTextureImID && m_debugBridge != nullptr)
+		if (m_resources.outputTextureImID && m_imguiRenderer != nullptr)
 		{
-			m_debugBridge->unregisterTexture(m_resources.outputTextureImID);
+			m_imguiRenderer->unregisterTexture(m_resources.outputTextureImID);
 		}
 		m_resources.outputTextureImID = {};
 
@@ -596,11 +594,11 @@ namespace demo
 			destroyView(historyView);
 		}
 
-		if (m_debugBridge != nullptr)
+		if (m_imguiRenderer != nullptr)
 		{
 			for (ImTextureID textureId : m_imguiTextureIds)
 			{
-				m_debugBridge->unregisterTexture(textureId);
+				m_imguiRenderer->unregisterTexture(textureId);
 			}
 		}
 		m_imguiTextureIds.clear();

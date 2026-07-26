@@ -40,9 +40,5 @@ namespace demo::rhi
 		// backend; afterAllCommands selects bottom-of-pipe (true) vs top-of-pipe (false).
 		virtual void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) = 0;
 		virtual void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) = 0;
-
-		// Escape hatch for backend-specific profiling/interop only. Returns an opaque backend command object. Not for
-		// recording commands â€” use the encoders/verbs above for that.
-		virtual void* getBackendHandle() const = 0;
 	};
 } // namespace demo::rhi

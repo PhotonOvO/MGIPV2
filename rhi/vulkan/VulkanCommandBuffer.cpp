@@ -324,6 +324,11 @@ namespace demo::rhi::vulkan
 				.baseArrayLayer = desc.baseArrayLayer,
 				.layerCount = desc.layerCount
 			},
+			.imageOffset = {
+				.x = desc.textureOffset.x,
+				.y = desc.textureOffset.y,
+				.z = desc.textureOffset.z,
+			},
 			.imageExtent = {desc.width, desc.height, desc.depth},
 		};
 		vkCmdCopyBufferToImage(m_cmd, asBuffer(m_table->resolveBuffer(desc.buffer)),
@@ -340,6 +345,11 @@ namespace demo::rhi::vulkan
 				.mipLevel = desc.mipLevel,
 				.baseArrayLayer = desc.baseArrayLayer,
 				.layerCount = desc.layerCount
+			},
+			.imageOffset = {
+				.x = desc.textureOffset.x,
+				.y = desc.textureOffset.y,
+				.z = desc.textureOffset.z,
 			},
 			.imageExtent = {desc.width, desc.height, desc.depth},
 		};

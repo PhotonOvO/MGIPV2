@@ -26,7 +26,6 @@ namespace demo
 
 		context.commandBuffer->beginEvent("GPUDrivenImgui");
 		m_renderer->executeImGuiPass(*context.commandBuffer, *context.params);
-		m_renderer->endPresentPass(*context.commandBuffer);
 		context.commandBuffer->endEvent();
 	}
 } // namespace demo

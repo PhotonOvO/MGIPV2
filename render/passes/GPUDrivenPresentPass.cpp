@@ -104,9 +104,6 @@ namespace demo
 		};
 		context.commandBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
 
-		// ImGui UI pass is a native-backend exception: beginPresentPass sets up dynamic
-		// rendering to the swapchain for the ImGui draw path.
-		m_renderer->beginPresentPass(*context.commandBuffer);
 		context.commandBuffer->endEvent();
 	}
 } // namespace demo

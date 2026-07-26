@@ -66,6 +66,7 @@ namespace demo::rhi
 		uint64_t bufferOffset{0};
 		TextureHandle texture{};
 		TextureAspect aspect{TextureAspect::color};
+		Offset3D textureOffset{};
 		uint32_t mipLevel{0};
 		uint32_t baseArrayLayer{0};
 		uint32_t layerCount{1};

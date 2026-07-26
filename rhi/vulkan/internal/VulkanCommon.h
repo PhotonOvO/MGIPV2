@@ -47,7 +47,6 @@
 #else
 #include "backends/imgui_impl_glfw.h"
 #endif
-#include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "stb_image.h"

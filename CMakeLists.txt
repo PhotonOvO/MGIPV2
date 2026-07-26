@@ -147,8 +147,6 @@ add_library(imgui_demo STATIC
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_tables.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.h
 )
 if(ANDROID)
   target_sources(imgui_demo PRIVATE
@@ -165,8 +163,6 @@ target_include_directories(imgui_demo PUBLIC
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
 )
-target_compile_definitions(imgui_demo PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
-target_link_libraries(imgui_demo PUBLIC volk)
 if(ANDROID)
   target_link_libraries(imgui_demo PUBLIC android)
 else()
@@ -277,9 +273,10 @@ add_library(demo_core STATIC
   rhi/vulkan/VulkanSwapchain.cpp
   render/RenderDevice.cpp
   render/RenderDevice.h
+  render/ImGuiRhiTypes.h
+  render/ImGuiRhiRenderer.h
+  render/ImGuiRhiRenderer.cpp
   render/RenderTypes.h
-  render/DebugInteropBridge.h
-  render/DebugInteropBridge.cpp
   render/RendererFacade.h
   render/RendererFacade.cpp
   render/AsyncLoadingCoordinator.h  
@@ -559,6 +556,12 @@ if(BUILD_TESTING AND NOT ANDROID)
   )
   target_link_libraries(scene_import_defaults_tests PRIVATE demo_core)
   add_test(NAME scene_import_defaults COMMAND scene_import_defaults_tests)
+
+  add_executable(imgui_rhi_contract_tests
+    tests/imgui_rhi_contract_tests.cpp
+  )
+  target_include_directories(imgui_rhi_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+  add_test(NAME imgui_rhi_contract COMMAND imgui_rhi_contract_tests)
 endif()
 
 

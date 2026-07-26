@@ -560,7 +560,7 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
 #endif
 
   m_pipelinesCreated = true;
-  m_debugTextureId = m_renderer->registerDebugTexture(m_fallbackSampler, m_debugAtlasView);
+  m_debugTextureId = m_renderer->registerDebugTexture(m_debugAtlasView);
 
   LOGI("FlaxDDGIPass initialized: %u cascades, %u max probes, %u max batches, 8 pipelines + debug atlas",
        m_flaxResources->getCascadeCount(),

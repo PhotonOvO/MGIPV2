@@ -307,12 +307,11 @@ namespace demo
 		void render(const RenderParams& params);
 		void setSceneRenderingSuspended(bool suspended) { m_suspendSceneRendering = suspended; }
 		[[nodiscard]] bool isSceneRenderingSuspended() const { return m_suspendSceneRendering; }
-		DebugInteropBridge::TextureID registerDebugTexture(rhi::SamplerHandle sampler,
-		                                                   rhi::TextureViewHandle view)
+		ImGuiRhiRenderer::TextureID registerDebugTexture(rhi::TextureViewHandle view)
 		{
-			return m_renderer.registerDebugTexture(sampler, view);
+			return m_renderer.registerDebugTexture(view);
 		}
-		void unregisterDebugTexture(DebugInteropBridge::TextureID textureId)
+		void unregisterDebugTexture(ImGuiRhiRenderer::TextureID textureId)
 		{
 			m_renderer.unregisterDebugTexture(textureId);
 		}
@@ -1186,9 +1185,6 @@ namespace demo
 		}
 
 		void executeDepthPyramidPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
-		void beginPresentPass(rhi::CommandBuffer& cmdBuffer) { m_renderer.beginPresentPass(cmdBuffer); }
-		void endPresentPass(rhi::CommandBuffer& cmdBuffer) { m_renderer.endPresentPass(cmdBuffer); }
-
 		void executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params)
 		{
 			m_renderer.executeImGuiPass(cmdBuffer, params);

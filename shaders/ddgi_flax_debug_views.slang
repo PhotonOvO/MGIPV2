@@ -1,5 +1,5 @@
 // FlaxGI diagnostic atlas. Each 256x256 tile visualizes one pipeline contract.
-// The atlas is sampled by ImGui through the backend-neutral DebugInteropBridge.
+// The atlas is sampled by ImGui through the backend-neutral ImGuiRhiRenderer.
 
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"

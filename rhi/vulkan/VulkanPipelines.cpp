@@ -258,6 +258,8 @@ VkFormat toVkVertexFormat(VertexFormat format)
       return VK_FORMAT_R32G32B32_SFLOAT;
     case VertexFormat::r32g32b32a32Sfloat:
       return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case VertexFormat::r8g8b8a8Unorm:
+      return VK_FORMAT_R8G8B8A8_UNORM;
     default:
       return VK_FORMAT_UNDEFINED;
   }

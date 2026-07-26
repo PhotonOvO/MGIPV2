@@ -337,6 +337,7 @@ enum class VertexFormat : uint8_t
   r32g32Sfloat       = 2,
   r32g32b32Sfloat    = 3,
   r32g32b32a32Sfloat = 4,
+  r8g8b8a8Unorm      = 5,
 };
 
 enum class IndexFormat : uint8_t

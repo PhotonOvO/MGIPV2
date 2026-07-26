@@ -43,8 +43,6 @@ public:
   QueueInfo getComputeQueue() const override;
   QueueInfo getTransferQueue() const override;
 
-  bool queryImGuiNativeContext(ImGuiNativeContext& out) const override;
-
   void initSurface(Surface& surface, const WindowHandle& window) override;
   std::unique_ptr<Swapchain> createSwapchain(Surface& surface, bool vSync) override;
   std::unique_ptr<FrameContext> createFrameContext(Swapchain* swapchain, uint32_t frameCount) override;

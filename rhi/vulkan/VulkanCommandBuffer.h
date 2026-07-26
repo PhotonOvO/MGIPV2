@@ -100,7 +100,7 @@ namespace demo::rhi::vulkan
 		void resetQueryPool(QueryPoolHandle pool, uint32_t firstQuery, uint32_t queryCount) override;
 		void writeTimestamp(QueryPoolHandle pool, uint32_t queryIndex, bool afterAllCommands) override;
 
-		void* getBackendHandle() const override { return m_cmd; }
+		[[nodiscard]] VkCommandBuffer nativeHandle() const { return m_cmd; }
 
 	private:
 		enum class EncoderKind : uint8_t

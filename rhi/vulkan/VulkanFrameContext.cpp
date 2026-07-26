@@ -282,7 +282,7 @@ SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandBuffer& commandB
   FrameSlot& frame = m_frames[m_currentFrameIndex];
   assert((frame.commandBuffer != VK_NULL_HANDLE) && "VulkanFrameContext::submitCurrentFrame missing frame command buffer");
 
-  const VkCommandBuffer nativeCommandBuffer = static_cast<VkCommandBuffer>(commandBuffer.getBackendHandle());
+  const VkCommandBuffer nativeCommandBuffer = static_cast<VulkanCommandBuffer&>(commandBuffer).nativeHandle();
   assert((nativeCommandBuffer == frame.commandBuffer)
          && "VulkanFrameContext::submitCurrentFrame command buffer mismatch");
   checkVk(vkEndCommandBuffer(nativeCommandBuffer), "VulkanFrameContext::submitCurrentFrame vkEndCommandBuffer failed");

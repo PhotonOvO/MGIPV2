@@ -782,9 +782,7 @@ namespace demo
 				},
 				.depth = depthFormat,
 				.linearSampler = m_device.sceneLinearSamplerHandle,
-				// Pass the debug bridge so SceneResources can register textures with ImGui
-				// via the sanctioned DebugInteropBridge (RDEV-05 / D-08 / D-09).
-				.debugBridge = &m_debugBridge,
+				.imguiRenderer = &m_imguiRenderer,
 			};
 			LOGI("RenderDevice::init: scene resources begin");
 			m_swapchainDependent.sceneResources.init(*m_device.device, rhiCmd, sceneResourcesInit);
@@ -1048,12 +1046,8 @@ namespace demo
 		m_csmShadowResources.deinit();
 		m_swapchainDependent.sceneResources.deinit();
 
-		// Shutdown ImGui bridge (D-08/D-09) AFTER sceneResources.deinit(): the bridge owns the
-		// ImGui context + uiDescriptorPool, and sceneResources.deinit() calls bridge.unregisterTexture()
-		// (which no-ops once the ImGui context is gone). Shutting the bridge down first would silently
-		// leak every ImGui texture descriptor set registered via SceneResources. Bridge handles the
-		// correct internal order: ImGui_ImplVulkan_Shutdown -> DestroyContext -> vkDestroyDescriptorPool.
-		m_debugBridge.shutdown();
+		// SceneResources releases registered texture IDs before renderer shutdown.
+		m_imguiRenderer.shutdown();
 
 		m_meshPool.deinit();
 		freeRhiStagingBuffers(m_device.device.get(), m_device.rhiStagingBuffers);
@@ -1137,16 +1131,14 @@ namespace demo
 		return ImTextureID{};
 	}
 
-	DebugInteropBridge::TextureID RenderDevice::registerDebugTexture(
-		rhi::SamplerHandle sampler, rhi::TextureViewHandle view)
+	ImGuiRhiRenderer::TextureID RenderDevice::registerDebugTexture(rhi::TextureViewHandle view)
 	{
-		return m_debugBridge.registerTexture(getRHIDevice(), sampler, view,
-		                                     DebugInteropBridge::ImageLayout::General);
+		return m_imguiRenderer.registerTexture(view, rhi::ArgumentAccessIntent::readWrite);
 	}
 
-	void RenderDevice::unregisterDebugTexture(DebugInteropBridge::TextureID textureId)
+	void RenderDevice::unregisterDebugTexture(ImGuiRhiRenderer::TextureID textureId)
 	{
-		m_debugBridge.unregisterTexture(textureId);
+		m_imguiRenderer.unregisterTexture(textureId);
 	}
 
 	MaterialHandle RenderDevice::getMaterialHandle(uint32_t slot) const
@@ -1426,14 +1418,11 @@ namespace demo
 
 	void RenderDevice::beginUiFrame()
 	{
-		// Delegate UI frame begin to the debug bridge (D-08/D-09).
-		m_debugBridge.newFrame();
+		m_imguiRenderer.newFrame();
 	}
 
 	void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
 	{
-		m_presentPassActive = false;
-
 		{
 			demo::profiling::ScopedCpuRange rendererPreRecordRange("RendererPreRecord");
 
@@ -1497,11 +1486,6 @@ namespace demo
 	// Pass execution wrappers (used by PassNode implementations)
 	void RenderDevice::executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params)
 	{
-		if (!m_presentPassActive)
-		{
-			return;
-		}
-
 		if (params.debugOptions.showViewportAxis && params.cameraUniforms != nullptr)
 		{
 			ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);
@@ -1517,101 +1501,24 @@ namespace demo
 			params.recordUi();
 		}
 
-		// Delegate ImGui draw-data rendering to the debug bridge (D-08/D-09).
-		m_debugBridge.renderImGui(cmdBuffer);
-	}
-
-	void RenderDevice::beginPresentPass(rhi::CommandBuffer& cmdBuffer)
-	{
-		m_presentPassActive = false;
-
-		// Move the swapchain image into a color-attachment layout for the UI pass via the
-		// resource-barrier verb. The backend emits a conservative ALL_COMMANDS barrier; the
-		// layout transition (General -> ColorAttachment) matches the previous explicit barrier.
 		const rhi::TextureHandle swapchainHandle = getCurrentSwapchainTextureHandle();
 		if (swapchainHandle.isNull())
 		{
 			return;
 		}
-
-		const rhi::TextureBarrier barrier{
-			.texture = swapchainHandle,
-			.before = rhi::ResourceState::General,
-			.after = rhi::ResourceState::ColorAttachment,
-		};
-		cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
-
-		const uint32_t idx = m_swapchainDependent.currentImageIndex;
-		const rhi::TextureViewHandle viewHandle = getOrRegisterSwapchainViewHandle(idx);
+		const uint32_t imageIndex = m_swapchainDependent.currentImageIndex;
+		const rhi::TextureViewHandle viewHandle = getOrRegisterSwapchainViewHandle(imageIndex);
 		if (viewHandle.isNull())
 		{
 			return;
 		}
-
-		const rhi::RenderTargetDesc colorTarget{
-			.texture  = swapchainHandle,
-			.view     = viewHandle,
-			.state    = rhi::ResourceState::ColorAttachment,
-			.loadOp   = rhi::LoadOp::load,   // matches original VK_ATTACHMENT_LOAD_OP_LOAD
-			.storeOp  = rhi::StoreOp::store, // matches original VK_ATTACHMENT_STORE_OP_STORE
-		};
-		const rhi::RenderPassDesc passDesc{
-			.renderArea       = {.extent = m_swapchainDependent.windowSize},
-			.colorTargets     = &colorTarget,
-			.colorTargetCount = 1,
-		};
-		auto* encoder = cmdBuffer.beginRenderPass(passDesc);
-		if (encoder == nullptr)
-		{
-			return;
-		}
-
-		const rhi::Viewport viewport{
-			.x        = 0.0f,
-			.y        = 0.0f,
-			.width    = static_cast<float>(m_swapchainDependent.windowSize.width),
-			.height   = static_cast<float>(m_swapchainDependent.windowSize.height),
-			.minDepth = 0.0f,
-			.maxDepth = 1.0f,
-		};
-		const rhi::Rect2D scissor{
-			.offset = {0, 0},
-			.extent = m_swapchainDependent.windowSize,
-		};
-		encoder->setViewport(viewport);
-		encoder->setScissor(scissor);
-		m_presentPassActive = true;
+		m_imguiRenderer.render(
+			cmdBuffer,
+			swapchainHandle,
+			viewHandle,
+			m_swapchainDependent.windowSize,
+			m_perFrame.frameContext->getCurrentFrameIndex());
 	}
-
-	void RenderDevice::endPresentPass(rhi::CommandBuffer& cmdBuffer)
-	{
-		if (!m_presentPassActive)
-		{
-			return;
-		}
-
-		m_presentPassActive = false;
-		cmdBuffer.endEncoding();
-
-		// Close the swapchain image layout explicitly at the end of the final UI pass.
-		// This keeps presentation correctness local to the presentation path instead of
-		// relying on PassExecutor's state inference after the pass graph has completed.
-		const rhi::TextureHandle swapchainHandle = getCurrentSwapchainTextureHandle();
-		if (swapchainHandle.isNull())
-		{
-			return;
-		}
-
-		// ColorAttachment -> Present via the resource-barrier verb (layout transition preserved;
-		// backend emits the conservative ALL_COMMANDS sync used across the present path).
-		const rhi::TextureBarrier barrier{
-			.texture = swapchainHandle,
-			.before = rhi::ResourceState::ColorAttachment,
-			.after = rhi::ResourceState::Present,
-		};
-		cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
-	}
-
 	void RenderDevice::createFrameSubmission(uint32_t numFrames)
 	{
 		// Frame context creation/wiring is backend-internal (RDEV-06): native device,
@@ -5163,18 +5070,14 @@ namespace demo
 
 	void RenderDevice::initImGui(void* window)
 	{
-		// Delegate all ImGui native initialisation to the debug bridge (D-08/D-09).
-		// The bridge creates the ImGui-exclusive descriptor pool internally.
-		DebugInteropBridge::InitInfo bridgeInfo{
-			.rhiDevice = m_device.device.get(),
+		ImGuiRhiRenderer::InitInfo rendererInfo{
+			.device = m_device.device.get(),
 			.swapchainFormat = m_swapchainDependent.swapchainImageFormat,
-			.minImageCount = 2,
-			.imageCount = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+			.frameCount = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
 			.window = window,
 		};
-		m_debugBridge.init(bridgeInfo);
+		m_imguiRenderer.init(rendererInfo);
 	}
-
 	// createDescriptorPool() removed (D-05, plan 04-04): VkDescriptorPool was only used for
 	// create/destroy — no direct vkAllocateDescriptorSets consumer. Descriptor set allocation
 	// now goes through VulkanDevice::m_argumentPool (ArgumentTable backend lazy-created pool).
