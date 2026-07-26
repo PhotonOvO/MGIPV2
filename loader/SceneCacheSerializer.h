@@ -10,8 +10,8 @@ namespace demo {
 class SceneCacheSerializer
 {
 public:
-  // Bumped 9->10: imported emissive factors now include KHR emissive strength.
-  static constexpr uint32_t kCurrentVersion = 10;
+  // Bumped 10->11: directional-light intensity is converted from glTF lux.
+  static constexpr uint32_t kCurrentVersion = 11;
 
   [[nodiscard]] static std::filesystem::path buildCachePath(const std::filesystem::path& sourcePath);
 

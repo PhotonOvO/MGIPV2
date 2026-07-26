@@ -42,6 +42,16 @@ constexpr uint64_t kMaxReasonableModelPayloadBytes = 4ull << 30;
 constexpr std::array<uint8_t, 12> kKtx2Identifier{
     0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
 
+constexpr float kGltfDirectionalLuxPerBlenderStrength = 683.0f;
+
+float convertGltfLightIntensity(SceneLightType type, float intensity)
+{
+    // Blender's standard glTF export converts Sun strength to lux using 683 lm/W.
+    return type == SceneLightType::directional
+        ? intensity / kGltfDirectionalLuxPerBlenderStrength
+        : intensity;
+}
+
 bool hasReasonableModelShape(const tinygltf::Model& model)
 {
     return model.nodes.size() <= kMaxReasonableNodes
@@ -565,7 +575,8 @@ void GltfLoader::processLightDefinitions(const tinygltf::Model& model)
                                         static_cast<float>(gltfLight.color[1]),
                                         static_cast<float>(gltfLight.color[2]));
             }
-            light.intensity = static_cast<float>(gltfLight.intensity);
+            light.intensity = convertGltfLightIntensity(
+                light.type, static_cast<float>(gltfLight.intensity));
             light.range = static_cast<float>(gltfLight.range);
             light.innerConeAngle = static_cast<float>(gltfLight.spot.innerConeAngle);
             light.outerConeAngle = static_cast<float>(gltfLight.spot.outerConeAngle);
@@ -614,7 +625,8 @@ void GltfLoader::processLightDefinitions(const tinygltf::Model& model)
         }
 
         light.color = readVec3Value(lightValue, "color", glm::vec3(1.0f));
-        light.intensity = readFloatValue(lightValue, "intensity", 1.0f);
+        light.intensity = convertGltfLightIntensity(
+            light.type, readFloatValue(lightValue, "intensity", 1.0f));
         light.range = readFloatValue(lightValue, "range", 0.0f);
         light.innerConeAngle = 0.0f;
         light.outerConeAngle = glm::quarter_pi<float>();

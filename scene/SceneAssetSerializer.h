@@ -9,8 +9,8 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  // Bumped 6->7: imported emissive factors now include KHR emissive strength.
-  static constexpr uint32_t kCurrentVersion = 7;
+  // Bumped 7->8: directional-light intensity is converted from glTF lux.
+  static constexpr uint32_t kCurrentVersion = 8;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 
