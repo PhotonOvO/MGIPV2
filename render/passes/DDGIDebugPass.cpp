@@ -44,9 +44,22 @@ namespace demo
 		m_device = &device;
 		m_frameCount = std::max(frameCount, 1u);
 		m_usesFlaxResources = flaxReady;
-		m_visualizedProbeCount = flaxReady
-			? flaxResources.getMaxProbesPerCascade()
-			: probeVolume.getTotalProbes();
+		m_visualizedCascadeCount = flaxReady
+			? static_cast<uint32_t>(flaxResources.getProbesPerCascade().size())
+			: 1u;
+		m_visualizedProbeCounts.resize(m_visualizedCascadeCount);
+		if (flaxReady)
+		{
+			for (uint32_t cascadeIndex = 0; cascadeIndex < m_visualizedCascadeCount; ++cascadeIndex)
+			{
+				const glm::uvec3 counts = flaxResources.getProbesPerCascade()[cascadeIndex];
+				m_visualizedProbeCounts[cascadeIndex] = counts.x * counts.y * counts.z;
+			}
+		}
+		else
+		{
+			m_visualizedProbeCounts[0] = probeVolume.getTotalProbes();
+		}
 
 		// Sampled views over BOTH irradiance atlases (D4-1 ping-pong): index =
 		// frame parity, view = that parity's WRITE atlas — the one the probe
@@ -117,49 +130,51 @@ namespace demo
 			.debugName = "ddgi-debug",
 		});
 
-		// Two prebuilt tables per frame in flight (index = frameIndex * 2 +
-		// parity): static descriptors, parity selected at execute time.
-		m_tables.resize(m_frameCount * 2u);
-		m_uniformBuffers.resize(m_frameCount);
-		for (uint32_t i = 0; i < m_frameCount; ++i)
+		const uint32_t uniformCount = m_frameCount * m_visualizedCascadeCount;
+		m_tables.resize(uniformCount * 2u);
+		m_uniformBuffers.resize(uniformCount);
+		for (uint32_t frameIndex = 0; frameIndex < m_frameCount; ++frameIndex)
 		{
-			m_uniformBuffers[i] = device.createBuffer(rhi::BufferDesc{
-				.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
-				.usage = rhi::BufferUsageFlags::uniform,
-				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
-				.debugName = "ddgi-debug-uniforms",
-			});
-
-			for (uint32_t parity = 0; parity < 2u; ++parity)
+			for (uint32_t cascadeIndex = 0; cascadeIndex < m_visualizedCascadeCount; ++cascadeIndex)
 			{
-				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
-				table = device.createArgumentTable(m_layout);
-				const std::array<rhi::ArgumentWrite, 3> writes{
-					{
-						// The atlas stays in the General layout (the probe update
-						// pass writes it as a storage image and never transitions
-						// it), so the sampled descriptor uses the readWrite intent
-						// -> General layout, same as the lighting-pass binding.
-						rhi::ArgumentWrite{
-							.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
-							.textureView = m_irradianceViews[parity],
-							.sampler = m_sampler,
-							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
-						},
-						rhi::ArgumentWrite{
-							.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
-							.buffer = m_uniformBuffers[i],
-							.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
-						},
-						rhi::ArgumentWrite{
-							.binding = 2, .type = rhi::ArgumentType::sampledTexture,
-							.textureView = m_usesFlaxResources
-								? m_probeDataView : m_irradianceViews[parity],
-							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
-						},
-					}
-				};
-				device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
+				const uint32_t uniformIndex =
+					frameIndex * m_visualizedCascadeCount + cascadeIndex;
+				m_uniformBuffers[uniformIndex] = device.createBuffer(rhi::BufferDesc{
+					.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
+					.usage = rhi::BufferUsageFlags::uniform,
+					.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+					.debugName = "ddgi-debug-uniforms",
+				});
+
+				for (uint32_t parity = 0; parity < 2u; ++parity)
+				{
+					rhi::ArgumentTableHandle& table =
+						m_tables[uniformIndex * 2u + parity];
+					table = device.createArgumentTable(m_layout);
+					const std::array<rhi::ArgumentWrite, 3> writes{
+						{
+							rhi::ArgumentWrite{
+								.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
+								.textureView = m_irradianceViews[parity],
+								.sampler = m_sampler,
+								.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+							},
+							rhi::ArgumentWrite{
+								.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
+								.buffer = m_uniformBuffers[uniformIndex],
+								.size = sizeof(shaderio::DDGIProbeVisualizationUniforms),
+							},
+							rhi::ArgumentWrite{
+								.binding = 2, .type = rhi::ArgumentType::sampledTexture,
+								.textureView = m_usesFlaxResources
+									? m_probeDataView : m_irradianceViews[parity],
+								.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+							},
+						}
+					};
+					device.updateArgumentTable(
+						table, static_cast<uint32_t>(writes.size()), writes.data());
+				}
 			}
 		}
 
@@ -265,7 +280,8 @@ namespace demo
 
 		m_frameCount = 0;
 		m_usesFlaxResources = false;
-		m_visualizedProbeCount = 0;
+		m_visualizedCascadeCount = 0;
+		m_visualizedProbeCounts.clear();
 		m_device = nullptr;
 	}
 
@@ -286,7 +302,9 @@ namespace demo
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
 
-	void DDGIDebugPass::writeUniforms(uint32_t frameIndex, const PassContext& context) const
+	void DDGIDebugPass::writeUniforms(uint32_t frameIndex,
+	                                  uint32_t cascadeIndex,
+	                                  const PassContext& context) const
 	{
 		const DDGIProbeVolume& probeVolume = m_renderer->getDDGIProbeVolume();
 		const FlaxDDGIResources& flaxResources = m_renderer->getFlaxDDGIResources();
@@ -296,7 +314,7 @@ namespace demo
 		// Jittered VP: the spheres must match the jittered scene depth buffer
 		// they are tested against (TAA resolves the jitter afterwards).
 		uniforms.viewProjection = context.params->cameraUniforms->viewProjection;
-		uniforms.totalProbes = m_visualizedProbeCount;
+		uniforms.totalProbes = m_visualizedProbeCounts[cascadeIndex];
 		uniforms.probeRadius = kProbeRadius;
 		uniforms.ddgiGamma = config.ddgiGamma;
 		uniforms.debugScale = std::max(
@@ -304,24 +322,26 @@ namespace demo
 		if (m_usesFlaxResources)
 		{
 			const rhi::Extent2D atlasExtent = flaxResources.getIrradianceAtlasExtent();
-			const glm::uvec3 counts = flaxResources.getProbesPerCascade().empty()
-				? glm::uvec3(0u) : flaxResources.getProbesPerCascade()[0];
+			const glm::uvec3 counts =
+				flaxResources.getProbesPerCascade()[cascadeIndex];
 			uniforms.probePositionAddress = 0u;
 			uniforms.irradianceAtlasWidth = atlasExtent.width;
 			uniforms.irradianceAtlasHeight = atlasExtent.height;
 			uniforms.irradianceSideLength = FlaxDDGIResources::kProbeResolutionIrradiance;
+			const uint32_t mode = 1u
+				| (context.params->debugOptions.ddgiDebugActiveProbes ? 2u : 0u);
 			uniforms.flaxProbeCountsAndMode =
-				shaderio::uvec4{counts.x, counts.y, counts.z, 1u};
+				shaderio::uvec4{counts.x, counts.y, counts.z, mode};
 			const auto& cascades = m_renderer->getFlaxDDGICascadeDescs();
-			if (!cascades.empty())
+			if (cascadeIndex < cascades.size())
 			{
-				const DDGICascadeDesc& cascade = cascades[0];
+				const DDGICascadeDesc& cascade = cascades[cascadeIndex];
 				uniforms.flaxProbeOriginAndSpacing = shaderio::vec4{
 					cascade.snappedOrigin.x, cascade.snappedOrigin.y,
 					cascade.snappedOrigin.z, cascade.probeSpacing};
 				uniforms.flaxProbeScrollAndCascade = shaderio::ivec4{
 					cascade.scrollOffset.x, cascade.scrollOffset.y,
-					cascade.scrollOffset.z, 0};
+					cascade.scrollOffset.z, static_cast<int32_t>(cascadeIndex)};
 			}
 		}
 		else
@@ -335,7 +355,9 @@ namespace demo
 
 		// cpuToGpu memory is host-coherent on desktop; no explicit flush needed
 		// (same contract as DDGIRayTracePass's uniform upload).
-		void* dst = m_device->mapBuffer(m_uniformBuffers[frameIndex]);
+		const uint32_t uniformIndex =
+			frameIndex * m_visualizedCascadeCount + cascadeIndex;
+		void* dst = m_device->mapBuffer(m_uniformBuffers[uniformIndex]);
 		std::memcpy(dst, &uniforms, sizeof(uniforms));
 	}
 
@@ -360,7 +382,8 @@ namespace demo
 			&& probeVolume.getProbePositionAddress().isValid();
 		if (m_device == nullptr || m_pipeline.isNull()
 			|| m_irradianceViews[0].isNull() || m_irradianceViews[1].isNull()
-			|| m_visualizedProbeCount == 0u
+			|| m_visualizedCascadeCount == 0u
+			|| m_visualizedProbeCounts.size() != m_visualizedCascadeCount
 			|| (!flaxReady && !currentReady)
 			|| context.params->cameraUniforms == nullptr)
 		{
@@ -375,11 +398,25 @@ namespace demo
 			parity = output.parity;
 		}
 		const uint32_t frameIndex = context.frameIndex;
-		const uint32_t tableIndex = frameIndex * 2u + parity;
-		if (tableIndex >= m_tables.size() || frameIndex >= m_uniformBuffers.size())
+		if (frameIndex >= m_frameCount)
 		{
 			return;
 		}
+
+		const uint32_t availableCascadeCount = m_usesFlaxResources
+			? std::min(
+				m_visualizedCascadeCount,
+				static_cast<uint32_t>(m_renderer->getFlaxDDGICascadeDescs().size()))
+			: 1u;
+		if (availableCascadeCount == 0u)
+		{
+			return;
+		}
+		const int requestedCascade =
+			context.params->debugOptions.ddgiDebugCascadeIndex;
+		const uint32_t selectedCascade = requestedCascade >= 0
+			? std::min(static_cast<uint32_t>(requestedCascade), availableCascadeCount - 1u)
+			: 0u;
 
 		const GPUDrivenRenderer::ScreenPassTargets targets = m_renderer->getScreenColorDepthTargets();
 		if (!targets.valid)
@@ -387,7 +424,15 @@ namespace demo
 			return;
 		}
 
-		writeUniforms(frameIndex, context);
+		if (requestedCascade >= 0)
+		{
+			writeUniforms(frameIndex, selectedCascade, context);
+		}
+		else
+		{
+			for (uint32_t cascadeIndex = 0; cascadeIndex < availableCascadeCount; ++cascadeIndex)
+				writeUniforms(frameIndex, cascadeIndex, context);
+		}
 
 		context.commandBuffer->beginEvent("DDGIDebugPass");
 
@@ -420,18 +465,34 @@ namespace demo
 		enc->setScissor(rhi::Rect2D{{0, 0}, targets.extent});
 
 		enc->setPipeline(m_pipeline);
-		enc->setArgumentTable(rhi::ShaderStage::allGraphics, 0, m_tables[tableIndex]);
 
 		// Procedural UV sphere: stacks * slices * 6 vertices per instance,
 		// one instance per probe (instance id == probe index in the shader).
 		constexpr uint32_t kSphereVertexCount =
 			static_cast<uint32_t>(shaderio::LDDGIProbeVisStacks * shaderio::LDDGIProbeVisSlices * 6);
-		enc->draw(rhi::DrawDesc{
-			.vertexCount = kSphereVertexCount,
-			.instanceCount = m_visualizedProbeCount,
-			.firstVertex = 0,
-			.firstInstance = 0
-		});
+		const auto drawCascade = [&](uint32_t cascadeIndex)
+		{
+			const uint32_t uniformIndex =
+				frameIndex * m_visualizedCascadeCount + cascadeIndex;
+			const uint32_t tableIndex = uniformIndex * 2u + parity;
+			enc->setArgumentTable(rhi::ShaderStage::allGraphics, 0, m_tables[tableIndex]);
+			enc->draw(rhi::DrawDesc{
+				.vertexCount = kSphereVertexCount,
+				.instanceCount = m_visualizedProbeCounts[cascadeIndex],
+				.firstVertex = 0,
+				.firstInstance = 0
+			});
+		};
+		if (requestedCascade >= 0)
+		{
+			drawCascade(selectedCascade);
+		}
+		else
+		{
+			// Draw coarse cascades first so the inner cascade remains legible.
+			for (uint32_t cascadeIndex = availableCascadeCount; cascadeIndex > 0u; --cascadeIndex)
+				drawCascade(cascadeIndex - 1u);
+		}
 
 		context.commandBuffer->endEncoding();
 		context.commandBuffer->endEvent();

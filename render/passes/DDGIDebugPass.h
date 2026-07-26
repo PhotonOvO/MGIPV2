@@ -42,7 +42,9 @@ namespace demo
 		void execute(const PassContext& context) const override;
 
 	private:
-		void writeUniforms(uint32_t frameIndex, const PassContext& context) const;
+		void writeUniforms(uint32_t frameIndex,
+		                   uint32_t cascadeIndex,
+		                   const PassContext& context) const;
 
 		GPUDrivenRenderer* m_renderer{nullptr};
 		rhi::Device* m_device{nullptr};
@@ -55,14 +57,16 @@ namespace demo
 		rhi::TextureViewHandle m_probeDataView{};
 		rhi::SamplerHandle m_sampler{};
 		bool m_usesFlaxResources{false};
-		uint32_t m_visualizedProbeCount{0};
+		uint32_t m_visualizedCascadeCount{0};
+		std::vector<uint32_t> m_visualizedProbeCounts;
 
 		rhi::ArgumentLayoutHandle m_layout{};
 		rhi::PipelineHandle m_pipeline{};
-		// Two tables per frame in flight (index = frameIndex * 2 + parity).
-		// Current DDGI uses temporal parity; FlaxGI uses its published output
-		// parity. Views are static, uniform contents change per frame. Both
-		// parity tables of a frame share that frame's uniform buffer.
+		// Two tables per frame/cascade
+		// (index = ((frameIndex * cascadeCount + cascadeIndex) * 2 + parity)).
+		// Current DDGI has one cascade and uses temporal parity; FlaxGI uses its
+		// published output parity. Both parity tables for a frame/cascade pair
+		// share that pair's uniform buffer.
 		std::vector<rhi::ArgumentTableHandle> m_tables;
 		std::vector<rhi::BufferHandle> m_uniformBuffers;
 	};

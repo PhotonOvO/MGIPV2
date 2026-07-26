@@ -31,11 +31,27 @@ struct ProbeVisVertexOutput
     float4 position : SV_Position;
     float3 normalWS : NORMAL0;
     nointerpolation uint probeIndex : TEXCOORD0;
+    nointerpolation uint probeState : TEXCOORD1;
 };
+
+static const uint kFlaxProbeVisualizationMode = 1u;
+static const uint kFlaxProbeVisualizationActiveOnly = 2u;
 
 bool usesFlaxProbeResources()
 {
-    return probeVisUniforms.flaxProbeCountsAndMode.w != 0u;
+    return (probeVisUniforms.flaxProbeCountsAndMode.w
+        & kFlaxProbeVisualizationMode) != 0u;
+}
+
+bool onlyActiveFlaxProbes()
+{
+    return (probeVisUniforms.flaxProbeCountsAndMode.w
+        & kFlaxProbeVisualizationActiveOnly) != 0u;
+}
+
+uint flaxProbeCascadeIndex()
+{
+    return uint(max(probeVisUniforms.flaxProbeScrollAndCascade.w, 0));
 }
 
 uint3 flaxProbeCoordsFromIndex(uint probeIndex)
@@ -66,7 +82,9 @@ uint2 flaxProbeTexelCoords(uint physicalProbeIndex)
 {
     const uint3 counts = probeVisUniforms.flaxProbeCountsAndMode.xyz;
     const uint3 coords = flaxProbeCoordsFromIndex(physicalProbeIndex);
-    return uint2(coords.x + coords.y * counts.x, coords.z);
+    return uint2(
+        coords.x + coords.y * counts.x,
+        coords.z + flaxProbeCascadeIndex() * counts.z);
 }
 
 float2 flaxProbeTextureCoordFromDirection(float3 dir, uint physicalProbeIndex)
@@ -145,6 +163,7 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
 {
     ProbeVisVertexOutput output;
     output.probeIndex = instanceId;
+    output.probeState = 1u;
     output.normalWS = float3(0.0, 1.0, 0.0);
     output.position = float4(0.0, 0.0, 0.0, 1.0); // degenerate (zero area)
     if (instanceId >= probeVisUniforms.totalProbes)
@@ -161,7 +180,9 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
         const uint physicalProbeIndex = flaxScrollingProbeIndex(logicalCoords);
         const uint2 dataTexel = flaxProbeTexelCoords(physicalProbeIndex);
         const float4 probeData = flaxProbeData.Load(int3(dataTexel, 0));
-        if (probeData.w <= -1.0f)
+        const bool inactive = probeData.w <= -1.0f;
+        output.probeState = inactive ? 0u : 1u;
+        if (probeData.w <= -1.0f && onlyActiveFlaxProbes())
         {
             return output;
         }
@@ -171,7 +192,7 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
             spacing * (float3(probeVisUniforms.flaxProbeCountsAndMode.xyz) - 1.0) * 0.5;
         probeCenter = probeVisUniforms.flaxProbeOriginAndSpacing.xyz
             + float3(logicalCoords) * spacing - gridOffset
-            + probeData.xyz * spacing;
+            + (inactive ? float3(0.0, 0.0, 0.0) : probeData.xyz * spacing);
         output.probeIndex = physicalProbeIndex;
     }
     else
@@ -195,6 +216,10 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
 [shader("fragment")]
 float4 fragmentProbeVisMain(ProbeVisVertexOutput input) : SV_Target
 {
+    if (usesFlaxProbeResources() && input.probeState == 0u)
+    {
+        return float4(0.08, 0.10, 0.14, 1.0);
+    }
     const float3 n = normalize(input.normalWS);
     const float3 averageIrradiance = sampleProbeVisAverage(input.probeIndex);
     const float3 directionalIrradiance = sampleProbeVisDirection(input.probeIndex, n);

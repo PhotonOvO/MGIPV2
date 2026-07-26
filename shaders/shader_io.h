@@ -347,7 +347,7 @@ struct DDGIProbeVisualizationUniforms
   uint32_t irradianceSideLength;  // irradiance texels per probe (no border)
   float probeRadius;              // debug sphere world-space radius (0.1)
   float ddgiGamma;                // decode: pow(x, gamma*0.5) then square
-  uvec4 flaxProbeCountsAndMode;   // xyz = cascade-0 counts, w = 1 for Flax resources
+  uvec4 flaxProbeCountsAndMode;   // xyz = selected counts, w bits: Flax=1, active-only=2
   vec4 flaxProbeOriginAndSpacing; // xyz = snapped origin, w = probe spacing
   ivec4 flaxProbeScrollAndCascade;// xyz = scroll offset, w = selected cascade
   float debugScale;               // visualization-only radiance multiplier

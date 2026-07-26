@@ -163,6 +163,29 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("probeData.w <= -1.0f", PROBE_VIS_SHADER)
         self.assertIn("probeVisUniforms.debugScale", PROBE_VIS_SHADER)
 
+    def test_flax_probe_visualization_honors_cascade_selector(self) -> None:
+        self.assertIn("ddgiDebugCascadeIndex", PROBE_DEBUG_PASS)
+        self.assertIn("writeUniforms(frameIndex, cascadeIndex, context)", PROBE_DEBUG_PASS)
+        self.assertIn("cascades[cascadeIndex]", PROBE_DEBUG_PASS)
+        self.assertIn("static_cast<int32_t>(cascadeIndex)", PROBE_DEBUG_PASS)
+        self.assertIn("drawCascade", PROBE_DEBUG_PASS)
+
+    def test_flax_probe_visualization_offsets_cascade_atlas_rows(self) -> None:
+        self.assertIn("flaxProbeCascadeIndex()", PROBE_VIS_SHADER)
+        self.assertIn(
+            "coords.z + flaxProbeCascadeIndex() * counts.z",
+            PROBE_VIS_SHADER,
+        )
+
+    def test_flax_probe_visualization_can_show_inactive_grid_coverage(self) -> None:
+        self.assertIn("onlyActiveFlaxProbes()", PROBE_VIS_SHADER)
+        self.assertIn(
+            "if (probeData.w <= -1.0f && onlyActiveFlaxProbes())",
+            PROBE_VIS_SHADER,
+        )
+        self.assertIn("output.probeState", PROBE_VIS_SHADER)
+        self.assertIn("Only Active Probes", APP_HEADER)
+
     def test_inactive_probe_sanitation_is_deterministic(self) -> None:
         self.assertIn("Deterministic inactive-probe sanitation", INACTIVE_SHADER)
         self.assertIn("probesData[texel] = float4(0.0f, 0.0f, 0.0f, -1.0f)", INACTIVE_SHADER)

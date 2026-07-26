@@ -180,7 +180,7 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     desc.size = (static_cast<uint64_t>(cascadeCount) * passCount * 3u + 1u)
               * sizeof(uint32_t);
     desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
-               | rhi::BufferUsageFlags::transferSrc;
+               | rhi::BufferUsageFlags::transferSrc | rhi::BufferUsageFlags::transferDst;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
     desc.allowIndirectArgument = true;
     desc.debugName = "FlaxDDGI.UpdateProbesInitArgs";

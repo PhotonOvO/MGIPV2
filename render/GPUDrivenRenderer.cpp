@@ -541,16 +541,18 @@ namespace demo
 		glm::vec3 coverageBoundsMin{};
 		glm::vec3 coverageBoundsMax{};
 		bool coverageBoundsValid = false;
-		if (m_globalSDFPass != nullptr && m_globalSDFPass->getVolume().resolution > 0u)
-		{
-			coverageBoundsMin = m_globalSDFPass->getVolume().worldBoundsMin;
-			coverageBoundsMax = m_globalSDFPass->getVolume().worldBoundsMax;
-			coverageBoundsValid = true;
-		}
-		else if (m_sceneView.sceneBoundsValid)
+		// Runtime scene bounds include the current glTF node hierarchy transforms.
+		// Baked SDF bounds are static and are only a fallback when no scene is active.
+		if (m_sceneView.sceneBoundsValid)
 		{
 			coverageBoundsMin = m_sceneView.sceneBoundsMin;
 			coverageBoundsMax = m_sceneView.sceneBoundsMax;
+			coverageBoundsValid = true;
+		}
+		else if (m_globalSDFPass != nullptr && m_globalSDFPass->getVolume().resolution > 0u)
+		{
+			coverageBoundsMin = m_globalSDFPass->getVolume().worldBoundsMin;
+			coverageBoundsMax = m_globalSDFPass->getVolume().worldBoundsMax;
 			coverageBoundsValid = true;
 		}
 		if (!coverageBoundsValid)
@@ -558,8 +560,16 @@ namespace demo
 			return cameraPosition;
 		}
 
-		const float coverageRadius =
-			std::max(getDDGIConfig().giDistance, getDDGIConfig().probeSpacing);
+		const DDGIConfig& config = getDDGIConfig();
+		const float coverageRadius = std::max(config.giDistance, config.probeSpacing);
+		const auto& probesPerCascade = m_flaxDDGIResources.getProbesPerCascade();
+		glm::vec3 coverageHalfExtent(coverageRadius);
+		if (!probesPerCascade.empty())
+		{
+			const glm::vec3 probeIntervals =
+				glm::max(glm::vec3(probesPerCascade.front()) - glm::vec3(1.0f), glm::vec3(0.0f));
+			coverageHalfExtent = probeIntervals * config.probeSpacing * 0.5f;
+		}
 		const auto keepInnerCascadeNearCamera =
 			[&](const glm::vec3& target)
 			{
@@ -575,10 +585,23 @@ namespace demo
 			(coverageBoundsMin + coverageBoundsMax) * 0.5f;
 		const glm::vec3 sceneHalfExtent =
 			(coverageBoundsMax - coverageBoundsMin) * 0.5f;
-		const float largestSceneHalfExtent = std::max({sceneHalfExtent.x, sceneHalfExtent.y, sceneHalfExtent.z});
-		if (largestSceneHalfExtent <= coverageRadius)
+		const bool compactSceneFits = glm::all(glm::lessThanEqual(sceneHalfExtent, coverageHalfExtent));
+		if (compactSceneFits)
 		{
-			return keepInnerCascadeNearCamera(sceneBoundsCenter);
+			const glm::vec3 minimumCenter = coverageBoundsMax - coverageHalfExtent;
+			const glm::vec3 maximumCenter = coverageBoundsMin + coverageHalfExtent;
+			const glm::vec3 minimumGridCenter =
+				glm::ceil(minimumCenter / config.probeSpacing) * config.probeSpacing;
+			const glm::vec3 maximumGridCenter =
+				glm::floor(maximumCenter / config.probeSpacing) * config.probeSpacing;
+			if (glm::all(glm::lessThanEqual(minimumGridCenter, maximumGridCenter)))
+			{
+				const glm::vec3 preferredGridCenter =
+					glm::round(cameraPosition / config.probeSpacing) * config.probeSpacing;
+				return glm::clamp(
+					preferredGridCenter, minimumGridCenter, maximumGridCenter);
+			}
+			return glm::clamp(cameraPosition, minimumCenter, maximumCenter);
 		}
 
 		const glm::vec3 closestScenePoint = glm::clamp(
@@ -1044,7 +1067,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		         readiness.flaxResourcesReady ? std::string_view{}
 		                                      : std::string_view{"Flax-owned probe resources are unavailable"});
 		snapshot.cascadeCount = readiness.flaxCascadeCount;
-		snapshot.implementedCascadeCount = readiness.flaxResourcesReady ? 1u : 0u;
+		snapshot.implementedCascadeCount = readiness.flaxResourcesReady
+			? readiness.flaxCascadeCount : 0u;
 		snapshot.totalProbes = readiness.flaxResourcesReady
 			? readiness.flaxProbesPerCascade.x * readiness.flaxProbesPerCascade.y
 			  * readiness.flaxProbesPerCascade.z
@@ -1810,6 +1834,15 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		}
 
 		const glm::vec4 boundsSphere(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
+		for (SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
+		{
+			if (packMeshHandleKey(drawRecord.meshHandle) != meshKey)
+			{
+				continue;
+			}
+			drawRecord.worldTransform = transform;
+			drawRecord.boundsSphere = boundsSphere;
+		}
 		if (objectIdsIt != m_objectIdsByMeshHandle.end())
 		{
 			for (const uint32_t objectId : objectIdsIt->second)
@@ -1887,6 +1920,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		const glm::mat4 previousTransform = drawRecord.worldTransform;
 		drawRecord.worldTransform = transform;
 		const glm::vec4 boundsSphere = computeTransformedBoundsSphere(*meshRecord, transform);
+		drawRecord.boundsSphere = boundsSphere;
 
 		const uint32_t objectId =
 			drawRecordIndex < m_objectIdByDrawRecord.size() ? m_objectIdByDrawRecord[drawRecordIndex] : UINT32_MAX;
@@ -2879,19 +2913,19 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
 			bool boundsValid = false;
 
-			if (!m_activeUploadResult->shadowPackedMeshes.empty())
-			{
-				for (const ShadowPackedMesh& packedMesh : m_activeUploadResult->shadowPackedMeshes)
-				{
-					includeBoundsSphere(boundsMin, boundsMax, boundsValid, packedMesh.boundsSphere);
-				}
-			}
-
-			if (!boundsValid && !m_sceneDrawRecords.empty())
+			if (!m_sceneDrawRecords.empty())
 			{
 				for (const SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
 				{
 					includeBoundsSphere(boundsMin, boundsMax, boundsValid, drawRecord.boundsSphere);
+				}
+			}
+
+			if (!boundsValid && !m_activeUploadResult->shadowPackedMeshes.empty())
+			{
+				for (const ShadowPackedMesh& packedMesh : m_activeUploadResult->shadowPackedMeshes)
+				{
+					includeBoundsSphere(boundsMin, boundsMax, boundsValid, packedMesh.boundsSphere);
 				}
 			}
 

@@ -6794,8 +6794,6 @@ namespace demo
 			.allowGpuAddress = true,
 			.debugName = debugName,
 		});
-		const rhi::vulkan::BufferRecord* record = m_device.resourceTable.tryGetBuffer(buffer);
-		ASSERT(record != nullptr, "RHI shadow packed buffer must be registered in the resource table");
 
 		BatchUploadContext upload;
 		upload.init(*m_device.device, static_cast<uint64_t>(data.size_bytes()));
@@ -6810,6 +6808,8 @@ namespace demo
 			m_device.rhiStagingBuffers.push_back(staging);
 		}
 
+		const rhi::vulkan::BufferRecord* record = m_device.resourceTable.tryGetBuffer(buffer);
+		ASSERT(record != nullptr, "RHI shadow packed buffer must be registered in the resource table");
 		return toUploadBufferRecord(*record, buffer);
 	}
 

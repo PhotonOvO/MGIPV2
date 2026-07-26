@@ -257,6 +257,14 @@ class GpuSmokeRegressionTests(unittest.TestCase):
             resource_desc = source[max(0, name_index - 700) : name_index]
             self.assertIn("TextureUsageFlags::transferDst", resource_desc, debug_name)
 
+    def test_flax_clearable_indirect_args_have_transfer_dst_usage(self) -> None:
+        source = read("render/FlaxDDGIResources.cpp")
+        debug_name = '"FlaxDDGI.UpdateProbesInitArgs"'
+        name_index = source.index(debug_name)
+        resource_desc = source[max(0, name_index - 700) : name_index]
+
+        self.assertIn("BufferUsageFlags::transferDst", resource_desc, debug_name)
+
     def test_flax_textures_transition_and_clear_before_first_compute(self) -> None:
         source = read("render/passes/FlaxDDGIPass.cpp")
         header = read("render/passes/FlaxDDGIPass.h")
@@ -341,6 +349,53 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertIn("sceneBoundsCenter", renderer)
         self.assertIn("coverageCenter", resources)
         self.assertNotIn("floor(cameraPosition / cascade.probeSpacing)", resources)
+
+    def test_flax_coverage_prefers_transformed_scene_bounds_over_baked_sdf(self) -> None:
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        coverage = renderer[renderer.index("GPUDrivenRenderer::computeFlaxCoverageCenter") :]
+        coverage = coverage[: coverage.index("GPUDrivenRenderer::updateFlaxCascadeScheduling")]
+
+        scene_bounds = coverage.index("if (m_sceneView.sceneBoundsValid)")
+        global_sdf_bounds = coverage.index("m_globalSDFPass->getVolume().worldBoundsMin")
+
+        self.assertLess(scene_bounds, global_sdf_bounds)
+
+    def test_flax_compact_scene_center_contains_scene_and_stays_near_camera(self) -> None:
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        coverage = renderer[renderer.index("GPUDrivenRenderer::computeFlaxCoverageCenter") :]
+        coverage = coverage[: coverage.index("GPUDrivenRenderer::updateFlaxCascadeScheduling")]
+
+        compact_scene = coverage[coverage.index("if (compactSceneFits)") :]
+        compact_scene = compact_scene[: compact_scene.index("const glm::vec3 closestScenePoint")]
+
+        self.assertIn("minimumCenter = coverageBoundsMax - coverageHalfExtent", compact_scene)
+        self.assertIn("maximumCenter = coverageBoundsMin + coverageHalfExtent", compact_scene)
+        self.assertIn("glm::clamp(cameraPosition, minimumCenter, maximumCenter)", compact_scene)
+        self.assertNotIn("keepInnerCascadeNearCamera(sceneBoundsCenter)", compact_scene)
+
+    def test_scene_bounds_refresh_tracks_runtime_instance_transforms(self) -> None:
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        refresh = renderer[renderer.index("GPUDrivenRenderer::refreshSceneView") :]
+        refresh = refresh[: refresh.index("GPUDrivenRenderer::recordDepthPrepassVisibilitySource")]
+        update = renderer[renderer.index("GPUDrivenRenderer::updateSceneInstanceTransform") :]
+        update = update[: update.index("GPUDrivenRenderer::tryGetMeshDrawIndex")]
+
+        bounds = refresh[refresh.index("glm::vec3 boundsMin(std::numeric_limits<float>::max())") :]
+        runtime_draw_bounds = bounds.index("m_sceneDrawRecords.empty()")
+        static_shadow_bounds = bounds.index("m_activeUploadResult->shadowPackedMeshes.empty()")
+
+        self.assertLess(runtime_draw_bounds, static_shadow_bounds)
+        self.assertIn("drawRecord.boundsSphere = boundsSphere;", update)
+
+    def test_shadow_upload_reacquires_registry_record_after_staging_allocation(self) -> None:
+        render_device = read("render/RenderDevice.cpp")
+        upload = render_device[render_device.index("RenderDevice::createShadowPackedUploadBuffer") :]
+        upload = upload[: upload.index("RenderDevice::rebuildShadowPackedBuffers")]
+
+        staging_allocation = upload.index("upload.init(")
+        record_lookup = upload.index("tryGetBuffer(buffer)")
+
+        self.assertGreater(record_lookup, staging_allocation)
 
     def test_flax_partial_updates_mirror_both_history_atlases(self) -> None:
         pass_source = read("render/passes/FlaxDDGIPass.cpp")
@@ -576,8 +631,25 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         renderer = read("render/GPUDrivenRenderer.cpp")
 
         self.assertIn("keepInnerCascadeNearCamera", renderer)
-        self.assertIn("maximumOffset = coverageRadius * 0.5f", renderer)
-        self.assertIn("keepInnerCascadeNearCamera(sceneBoundsCenter)", renderer)
+        self.assertIn("minimumCenter = coverageBoundsMax - coverageHalfExtent", renderer)
+        self.assertIn("maximumCenter = coverageBoundsMin + coverageHalfExtent", renderer)
+        compact_scene = renderer[
+            renderer.index("if (compactSceneFits)") :
+            renderer.index("const glm::vec3 closestScenePoint")
+        ]
+        self.assertIn("glm::ceil(minimumCenter / config.probeSpacing)", compact_scene)
+        self.assertIn("glm::floor(maximumCenter / config.probeSpacing)", compact_scene)
+        self.assertIn("glm::round(cameraPosition / config.probeSpacing)", compact_scene)
+        self.assertIn("preferredGridCenter, minimumGridCenter", compact_scene)
+
+    def test_flax_debug_snapshot_reports_all_runtime_cascades(self) -> None:
+        renderer = read("render/GPUDrivenRenderer.cpp")
+
+        self.assertIn(
+            "snapshot.implementedCascadeCount = readiness.flaxResourcesReady\n"
+            "\t\t\t? readiness.flaxCascadeCount : 0u;",
+            renderer,
+        )
 
 
 if __name__ == "__main__":

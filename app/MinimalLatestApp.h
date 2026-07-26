@@ -997,7 +997,7 @@ private:
     {"Bistro", "resources/GLTF_Bistro/bistro.gltf"},
     {"NVBistro", "resources/NV_Bistro/bistro_ktx.gltf"},
     {"SponzaNew", "resources/Sponza/sponza.gltf"},
-    {"CornellBox", "resources/CornellBox/CornellBox1.gltf"},
+    {"CornellBox", "resources/CornellBox/CornellBox.gltf"},
     {"test", "resources/test/test.gltf"}
   };
   int m_selectedPreset = 0;
@@ -1997,11 +1997,7 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
     config.maxUpdatedProbesPerFrame = static_cast<uint32_t>(std::max(maxProbes, 0));
     configChanged = true;
   }
-  ImGui::BeginDisabled();
-  int implementedCascades = 1;
-  ImGui::SliderInt("Implemented Cascades", &implementedCascades, 1, 1);
-  ImGui::EndDisabled();
-  ImGui::TextDisabled("Requested cascade count is retained, but runtime execution currently implements cascade 0 only.");
+  ImGui::TextDisabled("All allocated cascades execute; DDGI Cascade selects their debug draw.");
 
   configChanged |= ImGui::Checkbox("Request Surface Atlas", &config.enableGlobalSurfaceAtlas);
   ImGui::SameLine();
@@ -2021,8 +2017,11 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
     ImGui::SliderFloat("Probe Visualize Scale", &m_debugOptions.flaxGIProbeVisualizationScale,
                        0.1f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
   }
-  ImGui::SliderInt("DDGI Cascade", &m_debugOptions.ddgiDebugCascadeIndex, -1, 3);
-  ImGui::Checkbox("DDGI Active Probes", &m_debugOptions.ddgiDebugActiveProbes);
+  const int maximumDebugCascade =
+    std::max(static_cast<int>(config.maxCascades) - 1, 0);
+  ImGui::SliderInt("DDGI Cascade (-1 = All)",
+                   &m_debugOptions.ddgiDebugCascadeIndex, -1, maximumDebugCascade);
+  ImGui::Checkbox("Only Active Probes", &m_debugOptions.ddgiDebugActiveProbes);
   ImGui::Checkbox("DDGI Probe State", &m_debugOptions.ddgiDebugProbeState);
   ImGui::Checkbox("Surface Atlas Coverage", &m_debugOptions.ddgiDebugSurfaceAtlasCoverage);
 
