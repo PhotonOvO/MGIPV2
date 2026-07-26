@@ -62,8 +62,8 @@ public:
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
 
-    // Load CornellBox by default for FlaxGI smoke testing
-    std::string path = "resources/CornellBox/CornellBox.gltf";
+    // Load Sponza by default for FlaxGI smoke testing
+    std::string path = "resources/GLTF_Sponza/sponza.gltf";
     std::strncpy(m_modelPathBuffer, path.c_str(), sizeof(m_modelPathBuffer) - 1);
     m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
     setMeshSDFPathFromModelPath(path);
