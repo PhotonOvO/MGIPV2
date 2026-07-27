@@ -46,6 +46,19 @@ static const uint kBatchSize = 256;
 // contains real draws and lighting data.
 static const bool kUseSurfaceAtlas = false;
 
+float3 loadGlobalAlbedoNearest(float3 uvw)
+{
+    uint width, height, depth;
+    globalAlbedoTex.GetDimensions(width, height, depth);
+    const int3 dimensions = max(int3(width, height, depth), int3(1, 1, 1));
+    const float3 clampedUvw = clamp(uvw, float3(0, 0, 0), float3(1, 1, 1));
+    // Keep the conversion signed until after floor. In particular uvw == 1
+    // first maps to dimensions and is then clamped to dimensions - 1.
+    int3 texel = int3(floor(clampedUvw * float3(dimensions)));
+    texel = clamp(texel, int3(0, 0, 0), dimensions - int3(1, 1, 1));
+    return max(globalAlbedoTex.Load(int4(texel, 0)).rgb, float3(0, 0, 0));
+}
+
 float2 flaxDirectionToEquirectUV(float3 direction)
 {
     float3 d = normalize(direction);
@@ -248,8 +261,7 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
                 else
                 {
                     // Textured SDF fallback with explicit SDF visibility.
-                    float3 albedoSample =
-                        globalAlbedoTex.SampleLevel(linearSampler, uvw, 0).rgb;
+                    float3 albedoSample = loadGlobalAlbedoNearest(uvw);
                     float3 sunDir = normalize(ddgi.sceneLightDirection.xyz);
                     float3 sunColor = ddgi.sceneLightColor.rgb;
                     float NdotL = saturate(dot(hitNormal, sunDir));

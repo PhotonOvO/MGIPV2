@@ -2012,6 +2012,8 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
 
   ImGui::SeparatorText("Probe Visualization");
   ImGui::Checkbox("Visualize FlaxGI Probes", &m_debugOptions.ddgiDebugVisualize);
+  ImGui::SliderFloat("Bounce Debug Chroma Boost", &m_debugOptions.flaxGIDebugChromaBoost,
+                     1.0f, 2.0f, "%.2f");
   if(m_debugOptions.ddgiDebugVisualize)
   {
     ImGui::SliderFloat("Probe Visualize Scale", &m_debugOptions.flaxGIProbeVisualizationScale,
@@ -2030,6 +2032,12 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
   ImGui::SliderFloat("SDF Z Slice", &m_debugOptions.flaxGIDebugSDFSlice, 0.0f, 1.0f, "%.3f");
   ImGui::SliderFloat("Debug Exposure", &m_debugOptions.flaxGIDebugExposure, 0.05f, 8.0f, "%.2f",
                      ImGuiSliderFlags_Logarithmic);
+  ImGui::InputInt("Probe Irradiance Page", &m_debugOptions.flaxGIProbeOverviewPage, 1, 4);
+  m_debugOptions.flaxGIProbeOverviewPage =
+    std::max(m_debugOptions.flaxGIProbeOverviewPage, 0);
+  ImGui::TextDisabled(
+    "Green Distance/State tiles are semantic state colors; bounce RGB is shown in "
+    "Trace Radiance / Probe Irradiance.");
   for(uint32_t index = 0; index < static_cast<uint32_t>(demo::FlaxGIDebugView::count); ++index)
   {
     bool visible = (m_debugOptions.flaxGIDebugViewMask & (1u << index)) != 0u;

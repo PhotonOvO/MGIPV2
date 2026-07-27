@@ -17,6 +17,9 @@ SHADER_IO = (REPO_ROOT / "shaders" / "shader_io.h").read_text(encoding="utf-8")
 APP_HEADER = (REPO_ROOT / "app" / "MinimalLatestApp.h").read_text(encoding="utf-8")
 PROBE_DEBUG_PASS = (REPO_ROOT / "render" / "passes" / "DDGIDebugPass.cpp").read_text(encoding="utf-8")
 PROBE_VIS_SHADER = (REPO_ROOT / "shaders" / "ddgi_probe_visualization.slang").read_text(encoding="utf-8")
+DEBUG_VIEW_SHADER = (REPO_ROOT / "shaders" / "ddgi_flax_debug_views.slang").read_text(encoding="utf-8")
+FLAX_PASS = (REPO_ROOT / "render" / "passes" / "FlaxDDGIPass.cpp").read_text(encoding="utf-8")
+RENDER_TYPES = (REPO_ROOT / "render" / "RenderTypes.h").read_text(encoding="utf-8")
 RENDERER_CPP = (REPO_ROOT / "render" / "GPUDrivenRenderer.cpp").read_text(encoding="utf-8")
 
 
@@ -65,6 +68,15 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("config.voxelSize * 0.25f", SDF_COMMON_SHADER)
         self.assertIn("stepDistance - voxelHalf", SDF_COMMON_SHADER)
         self.assertIn("sdfConfig.maxSteps = 128", TRACE_SHADER)
+
+    def test_global_sdf_albedo_uses_clamped_nearest_texel_load(self) -> None:
+        self.assertIn("float3 loadGlobalAlbedoNearest", TRACE_SHADER)
+        self.assertIn("globalAlbedoTex.GetDimensions(width, height, depth)", TRACE_SHADER)
+        self.assertIn("int3(floor(clampedUvw * float3(dimensions)))", TRACE_SHADER)
+        self.assertIn("dimensions - int3(1, 1, 1)", TRACE_SHADER)
+        self.assertIn("globalAlbedoTex.Load(int4(texel, 0))", TRACE_SHADER)
+        self.assertIn("float3 albedoSample = loadGlobalAlbedoNearest(uvw)", TRACE_SHADER)
+        self.assertNotIn("globalAlbedoTex.SampleLevel(linearSampler, uvw", TRACE_SHADER)
 
     def test_sampling_preserves_a_continuous_low_backface_weight(self) -> None:
         self.assertIn("float normalAlignment", COMMON_SHADER)
@@ -154,6 +166,13 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertNotIn("DDGI Probe Visualize", before_flax_ui)
         self.assertIn("Visualize FlaxGI Probes", flax_ui)
         self.assertIn("Probe Visualize Scale", flax_ui)
+        self.assertIn("Bounce Debug Chroma Boost", flax_ui)
+        self.assertIn("1.0f, 2.0f", flax_ui)
+        self.assertIn("Probe Irradiance Page", flax_ui)
+        self.assertIn(
+            "Green Distance/State tiles are semantic state colors", flax_ui
+        )
+        self.assertIn("Trace Radiance / Probe Irradiance", flax_ui)
 
     def test_probe_visualization_binds_flax_owned_resources(self) -> None:
         self.assertIn("getFlaxDDGIResources()", PROBE_DEBUG_PASS)
@@ -168,6 +187,50 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("flaxProbeCountsAndMode", PROBE_VIS_SHADER)
         self.assertIn("probeData.w <= -1.0f", PROBE_VIS_SHADER)
         self.assertIn("probeVisUniforms.debugScale", PROBE_VIS_SHADER)
+        self.assertIn("probeVisUniforms.debugChromaBoost", PROBE_VIS_SHADER)
+        self.assertIn("boostProbeVisChroma", PROBE_VIS_SHADER)
+
+    def test_probe_irradiance_debug_tile_uses_logical_scrolled_probe_overview(self) -> None:
+        self.assertIn("float3 sampleProbeIrradianceOverview", DEBUG_VIEW_SHADER)
+        self.assertIn("getProbeCoords(ddgi, cascadeProbeIndex)", DEBUG_VIEW_SHADER)
+        self.assertIn(
+            "getScrollingProbeIndex(ddgi, cascadeIndex, logicalProbeCoords)",
+            DEBUG_VIEW_SHADER,
+        )
+        self.assertIn("getProbeUV(", DEBUG_VIEW_SHADER)
+        self.assertIn("flaxOctahedralEncode(normalize(direction))", DEBUG_VIEW_SHADER)
+        self.assertIn(
+            "probesIrradiance.SampleLevel(linearSampler, probeUV, 0)",
+            DEBUG_VIEW_SHADER,
+        )
+        self.assertGreaterEqual(
+            DEBUG_VIEW_SHADER.count("sampleProbeIrradianceDirection("), 7
+        )
+        self.assertNotIn("probesIrradiance.GetDimensions", DEBUG_VIEW_SHADER)
+
+    def test_probe_irradiance_overview_pages_without_exceeding_tile_capacity(self) -> None:
+        self.assertIn("const uint probesPerPage = kTileSize * kTileSize", DEBUG_VIEW_SHADER)
+        self.assertIn("min(debugPush.probeOverviewPage, pageCount - 1u)", DEBUG_VIEW_SHADER)
+        self.assertIn("logicalProbeSlot >= totalProbeCount", DEBUG_VIEW_SHADER)
+        self.assertIn("uint probeOverviewPage;", DEBUG_VIEW_SHADER)
+        self.assertIn("flaxGIProbeOverviewPage{0}", RENDER_TYPES)
+        self.assertIn(".probeOverviewPage =", FLAX_PASS)
+
+    def test_debug_chroma_boost_is_authoritative_by_default_and_gamut_safe(self) -> None:
+        self.assertIn("float flaxGIDebugChromaBoost{1.0f}", RENDER_TYPES)
+        self.assertIn("float debugChromaBoost", SHADER_IO)
+        self.assertIn("uniforms.debugChromaBoost", PROBE_DEBUG_PASS)
+        self.assertIn("float chromaBoost{1.0f}", FLAX_PASS)
+        self.assertIn(".chromaBoost =", FLAX_PASS)
+        self.assertIn("float chromaBoost;", DEBUG_VIEW_SHADER)
+        self.assertIn("boostDebugChroma(toneMapDebug(trace.rgb))", DEBUG_VIEW_SHADER)
+        self.assertIn(
+            "boostDebugChroma(toneMapDebug(linearIrradiance))",
+            DEBUG_VIEW_SHADER,
+        )
+        self.assertIn("kRec709Luminance", DEBUG_VIEW_SHADER)
+        self.assertIn("return saturate(neutral + chroma", DEBUG_VIEW_SHADER)
+        self.assertIn("return saturate(neutral + chroma", PROBE_VIS_SHADER)
 
     def test_flax_probe_visualization_honors_cascade_selector(self) -> None:
         self.assertIn("ddgiDebugCascadeIndex", PROBE_DEBUG_PASS)

@@ -186,7 +186,9 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         shader = read("shaders/ddgi_flax_trace_rays.slang")
 
         self.assertIn("kUseSurfaceAtlas = false", shader)
-        self.assertIn("globalAlbedoTex.SampleLevel", shader)
+        self.assertIn("loadGlobalAlbedoNearest(uvw)", shader)
+        self.assertIn("globalAlbedoTex.Load", shader)
+        self.assertNotIn("globalAlbedoTex.SampleLevel", shader)
 
     def test_flax_emissive_meshes_feed_probe_and_direct_area_lighting(self) -> None:
         shader_io = read("shaders/shader_io.h")

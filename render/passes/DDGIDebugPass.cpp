@@ -319,6 +319,8 @@ namespace demo
 		uniforms.ddgiGamma = config.ddgiGamma;
 		uniforms.debugScale = std::max(
 			context.params->debugOptions.flaxGIProbeVisualizationScale, 0.0f);
+		uniforms.debugChromaBoost = glm::clamp(
+			context.params->debugOptions.flaxGIDebugChromaBoost, 1.0f, 2.0f);
 		if (m_usesFlaxResources)
 		{
 			const rhi::Extent2D atlasExtent = flaxResources.getIrradianceAtlasExtent();

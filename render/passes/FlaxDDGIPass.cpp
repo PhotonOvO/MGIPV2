@@ -77,10 +77,14 @@ struct FlaxGIDebugViewPush
 {
   float sdfSlice{0.5f};
   float exposure{1.0f};
+  float chromaBoost{1.0f};
   uint32_t viewMask{0xffu};
   uint32_t surfaceAtlasAvailable{0};
+  uint32_t probeOverviewPage{0};
+  uint32_t padding0{0};
+  uint32_t padding1{0};
 };
-static_assert(sizeof(FlaxGIDebugViewPush) == 4 * sizeof(uint32_t));
+static_assert(sizeof(FlaxGIDebugViewPush) == 8 * sizeof(uint32_t));
 } // namespace
 
 FlaxDDGIPass::FlaxDDGIPass(GPUDrivenRenderer* renderer)
@@ -909,8 +913,11 @@ void FlaxDDGIPass::executeDebugViews(rhi::CommandBuffer& cmd, const PassContext&
   const FlaxGIDebugViewPush push{
     .sdfSlice = glm::clamp(context.params->debugOptions.flaxGIDebugSDFSlice, 0.0f, 1.0f),
     .exposure = std::max(context.params->debugOptions.flaxGIDebugExposure, 0.001f),
+    .chromaBoost = glm::clamp(context.params->debugOptions.flaxGIDebugChromaBoost, 1.0f, 2.0f),
     .viewMask = context.params->debugOptions.flaxGIDebugViewMask,
     .surfaceAtlasAvailable = 0u, // Surface Atlas raster path is not implemented yet.
+    .probeOverviewPage =
+      static_cast<uint32_t>(std::max(context.params->debugOptions.flaxGIProbeOverviewPage, 0)),
   };
 
   cmd.beginEvent("DDGI.DebugViews");

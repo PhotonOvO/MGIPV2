@@ -116,7 +116,11 @@ namespace demo
 		// effect when DDGIConfig::enabled is also true; default rendering is
 		// unchanged.
 		bool ddgiDebugVisualize{false};
-		float flaxGIProbeVisualizationScale{5.0f};
+		// Keep the debug spheres below the HDR shoulder so tone mapping does
+		// not wash low-frequency probe chroma toward white.
+		float flaxGIProbeVisualizationScale{2.0f};
+		float flaxGIDebugChromaBoost{1.0f}; // 1 = authoritative debug RGB
+		int flaxGIProbeOverviewPage{0}; // 65,536 logical probe slots per page
 		// Reserved Flax GI debug toggles. They do not allocate or dispatch
 		// resources until the matching Surface Atlas / cascaded DDGI stages land.
 		bool ddgiDebugSurfaceAtlasCoverage{false};

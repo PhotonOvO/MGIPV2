@@ -19,8 +19,12 @@ struct FlaxGIDebugViewPush
 {
     float sdfSlice;
     float exposure;
+    float chromaBoost;
     uint viewMask;
     uint surfaceAtlasAvailable;
+    uint probeOverviewPage;
+    uint padding0;
+    uint padding1;
 };
 
 [[vk::push_constant]] ConstantBuffer<FlaxGIDebugViewPush> debugPush;
@@ -35,9 +39,59 @@ float3 toneMapDebug(float3 value)
     return value / (value + 1.0f);
 }
 
+float3 boostDebugChroma(float3 toneMappedValue)
+{
+    static const float3 kRec709Luminance = float3(0.2126f, 0.7152f, 0.0722f);
+    const float3 value = saturate(toneMappedValue);
+    const float luminance = dot(value, kRec709Luminance);
+    const float3 neutral = float3(luminance, luminance, luminance);
+    const float3 chroma = value - neutral;
+    float safeBoost = clamp(debugPush.chromaBoost, 1.0f, 2.0f);
+    [unroll]
+    for (uint channel = 0u; channel < 3u; ++channel)
+    {
+        if (chroma[channel] > 1e-5f)
+            safeBoost = min(safeBoost, (1.0f - luminance) / chroma[channel]);
+        else if (chroma[channel] < -1e-5f)
+            safeBoost = min(safeBoost, luminance / -chroma[channel]);
+    }
+    return saturate(neutral + chroma * max(safeBoost, 0.0f));
+}
+
 uint2 sourceCoord(float2 uv, uint2 dimensions)
 {
     return min(uint2(uv * float2(dimensions)), dimensions - 1u);
+}
+
+float3 sampleProbeIrradianceDirection(
+    FlaxDDGIData ddgi, uint cascadeIndex, uint physicalProbeIndex, float3 direction)
+{
+    const float2 probeUV = getProbeUV(
+        ddgi, cascadeIndex, physicalProbeIndex,
+        flaxOctahedralEncode(normalize(direction)),
+        kDDGIProbeIrradianceResolution);
+    const float3 encoded =
+        probesIrradiance.SampleLevel(linearSampler, probeUV, 0).rgb;
+    return pow(max(encoded, float3(0, 0, 0)), ddgi.irradianceGamma);
+}
+
+float3 sampleProbeIrradianceOverview(
+    FlaxDDGIData ddgi, uint cascadeIndex, uint physicalProbeIndex)
+{
+    float3 irradiance = float3(0, 0, 0);
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(1, 0, 0));
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(-1, 0, 0));
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(0, 1, 0));
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(0, -1, 0));
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(0, 0, 1));
+    irradiance += sampleProbeIrradianceDirection(
+        ddgi, cascadeIndex, physicalProbeIndex, float3(0, 0, -1));
+    return irradiance * (1.0f / 6.0f);
 }
 
 [numthreads(8, 8, 1)]
@@ -90,7 +144,7 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float4 trace = probesTrace.Load(int3(sourceCoord(uv, uint2(width, height)), 0));
         if (tileIndex == 3u)
         {
-            color = toneMapDebug(trace.rgb);
+            color = boostDebugChroma(toneMapDebug(trace.rgb));
         }
         else
         {
@@ -115,11 +169,35 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     else if (tileIndex == 6u)
     {
-        uint width, height;
-        probesIrradiance.GetDimensions(width, height);
-        const float4 irradiance = probesIrradiance.Load(int3(sourceCoord(uv, uint2(width, height)), 0));
-        const float3 linearIrradiance = pow(max(irradiance.rgb, float3(0, 0, 0)), ddgiData[0].irradianceGamma);
-        color = toneMapDebug(linearIrradiance);
+        const FlaxDDGIData ddgi = ddgiData[0];
+        const uint cascadeCount = max(ddgi.cascadesCount, 1u);
+        const uint probesPerCascade =
+            ddgi.probesCounts.x * ddgi.probesCounts.y * ddgi.probesCounts.z;
+        const uint totalProbeCount = probesPerCascade * cascadeCount;
+        const uint probesPerPage = kTileSize * kTileSize;
+        const uint pageCount = max(
+            (totalProbeCount + probesPerPage - 1u) / probesPerPage, 1u);
+        const uint pageIndex = min(debugPush.probeOverviewPage, pageCount - 1u);
+        const uint2 tilePixel = pixel % kTileSize;
+        const uint pageProbeIndex = tilePixel.y * kTileSize + tilePixel.x;
+        const uint logicalProbeSlot = pageIndex * probesPerPage + pageProbeIndex;
+
+        if (logicalProbeSlot >= totalProbeCount)
+        {
+            color = float3(0.005f, 0.005f, 0.005f);
+        }
+        else
+        {
+            const uint cascadeIndex = logicalProbeSlot / probesPerCascade;
+            const uint cascadeProbeIndex = logicalProbeSlot % probesPerCascade;
+            const uint3 logicalProbeCoords =
+                getProbeCoords(ddgi, cascadeProbeIndex);
+            const uint physicalProbeIndex =
+                getScrollingProbeIndex(ddgi, cascadeIndex, logicalProbeCoords);
+            const float3 linearIrradiance = sampleProbeIrradianceOverview(
+                ddgi, cascadeIndex, physicalProbeIndex);
+            color = boostDebugChroma(toneMapDebug(linearIrradiance));
+        }
     }
     else
     {

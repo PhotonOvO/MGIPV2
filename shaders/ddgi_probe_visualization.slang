@@ -137,6 +137,27 @@ float3 sampleProbeVisAverage(uint probeIndex)
     return sum * (1.0 / 6.0);
 }
 
+float3 boostProbeVisChroma(float3 value)
+{
+    static const float3 kRec709Luminance = float3(0.2126f, 0.7152f, 0.0722f);
+    value = max(value, float3(0.0, 0.0, 0.0));
+    const float peak = max(max(value.x, max(value.y, value.z)), 1e-5f);
+    const float3 normalizedValue = saturate(value / peak);
+    const float luminance = dot(normalizedValue, kRec709Luminance);
+    const float3 neutral = float3(luminance, luminance, luminance);
+    const float3 chroma = normalizedValue - neutral;
+    float safeBoost = clamp(probeVisUniforms.debugChromaBoost, 1.0f, 2.0f);
+    [unroll]
+    for (uint channel = 0u; channel < 3u; ++channel)
+    {
+        if (chroma[channel] > 1e-5f)
+            safeBoost = min(safeBoost, (1.0f - luminance) / chroma[channel]);
+        else if (chroma[channel] < -1e-5f)
+            safeBoost = min(safeBoost, luminance / -chroma[channel]);
+    }
+    return saturate(neutral + chroma * max(safeBoost, 0.0f)) * peak;
+}
+
 // Unit-sphere direction of one UV-sphere triangle-list vertex. Quad corner
 // order (two CCW triangles): (0,0) (1,0) (1,1) / (0,0) (1,1) (0,1) — encoded
 // as bit masks over the 6 in-quad vertex ids. Pole quads degenerate to zero
@@ -223,7 +244,8 @@ float4 fragmentProbeVisMain(ProbeVisVertexOutput input) : SV_Target
     const float3 n = normalize(input.normalWS);
     const float3 averageIrradiance = sampleProbeVisAverage(input.probeIndex);
     const float3 directionalIrradiance = sampleProbeVisDirection(input.probeIndex, n);
-    const float3 irradiance = lerp(averageIrradiance, directionalIrradiance, 0.75)
-        * probeVisUniforms.debugScale;
+    const float3 irradiance = boostProbeVisChroma(
+        lerp(averageIrradiance, directionalIrradiance, 0.75)
+            * probeVisUniforms.debugScale);
     return float4(irradiance, 1.0);
 }

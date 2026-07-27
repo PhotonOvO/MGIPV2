@@ -335,8 +335,8 @@ struct DDGIProbeUpdatePush
 STATIC_CONST int LDDGIProbeVisStacks = 12;
 STATIC_CONST int LDDGIProbeVisSlices = 24;
 
-// 96 bytes (mat4 64 + uint64 8 + 4x uint32 + 2x float = 96, 16B multiple);
-// C++ natural alignment matches std140 scalar offsets (uint64 at offset 64).
+// 160 bytes. C++ natural alignment matches the shader scalar/vector offsets
+// (uint64 at offset 64); the final scalar block remains a 16-byte multiple.
 struct DDGIProbeVisualizationUniforms
 {
   mat4 viewProjection;            // jittered VP (matches the depth buffer)
@@ -351,7 +351,7 @@ struct DDGIProbeVisualizationUniforms
   vec4 flaxProbeOriginAndSpacing; // xyz = snapped origin, w = probe spacing
   ivec4 flaxProbeScrollAndCascade;// xyz = scroll offset, w = selected cascade
   float debugScale;               // visualization-only radiance multiplier
-  float _probeVisPadding0;
+  float debugChromaBoost;         // debug-only, luminance-preserving color separation
   float _probeVisPadding1;
   float _probeVisPadding2;
 };
