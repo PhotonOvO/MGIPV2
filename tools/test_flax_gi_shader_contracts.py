@@ -191,7 +191,7 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("boostProbeVisChroma", PROBE_VIS_SHADER)
 
     def test_probe_irradiance_debug_tile_uses_logical_scrolled_probe_overview(self) -> None:
-        self.assertIn("float3 sampleProbeIrradianceOverview", DEBUG_VIEW_SHADER)
+        self.assertIn("float4 sampleProbeIrradianceOverview", DEBUG_VIEW_SHADER)
         self.assertIn("getProbeCoords(ddgi, cascadeProbeIndex)", DEBUG_VIEW_SHADER)
         self.assertIn(
             "getScrollingProbeIndex(ddgi, cascadeIndex, logicalProbeCoords)",
@@ -207,6 +207,27 @@ class FlaxGIShaderContractTests(unittest.TestCase):
             DEBUG_VIEW_SHADER.count("sampleProbeIrradianceDirection("), 7
         )
         self.assertNotIn("probesIrradiance.GetDimensions", DEBUG_VIEW_SHADER)
+
+    def test_probe_irradiance_overview_requires_active_state_and_valid_alpha(self) -> None:
+        self.assertIn("float4 sampleProbeIrradianceDirection", DEBUG_VIEW_SHADER)
+        self.assertIn("float4 sampleProbeIrradianceOverview", DEBUG_VIEW_SHADER)
+        self.assertIn("probeDataTexel", DEBUG_VIEW_SHADER)
+        self.assertIn(
+            "getProbeTexelCoords(ddgi, cascadeIndex, physicalProbeIndex)",
+            DEBUG_VIEW_SHADER,
+        )
+        self.assertIn("probesData.Load(int3(probeDataTexel, 0))", DEBUG_VIEW_SHADER)
+        self.assertIn("decodeProbeState(probeData)", DEBUG_VIEW_SHADER)
+        self.assertIn("probeState == kDDGIProbeStateInactive", DEBUG_VIEW_SHADER)
+        self.assertIn("probeState == kDDGIProbeStateActivated", DEBUG_VIEW_SHADER)
+        self.assertIn(
+            "probeState == kDDGIProbeStateActive && probeIrradiance.a > 0.0f",
+            DEBUG_VIEW_SHADER,
+        )
+        self.assertIn("toneMapDebug(probeIrradiance.rgb)", DEBUG_VIEW_SHADER)
+        self.assertIn("kProbeOverviewInactiveColor", DEBUG_VIEW_SHADER)
+        self.assertIn("kProbeOverviewActivatedColor", DEBUG_VIEW_SHADER)
+        self.assertIn("kProbeOverviewInvalidIrradianceColor", DEBUG_VIEW_SHADER)
 
     def test_probe_irradiance_overview_pages_without_exceeding_tile_capacity(self) -> None:
         self.assertIn("const uint probesPerPage = kTileSize * kTileSize", DEBUG_VIEW_SHADER)
@@ -225,7 +246,7 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("float chromaBoost;", DEBUG_VIEW_SHADER)
         self.assertIn("boostDebugChroma(toneMapDebug(trace.rgb))", DEBUG_VIEW_SHADER)
         self.assertIn(
-            "boostDebugChroma(toneMapDebug(linearIrradiance))",
+            "boostDebugChroma(toneMapDebug(probeIrradiance.rgb))",
             DEBUG_VIEW_SHADER,
         )
         self.assertIn("kRec709Luminance", DEBUG_VIEW_SHADER)

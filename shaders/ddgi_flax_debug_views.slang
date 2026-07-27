@@ -63,22 +63,23 @@ uint2 sourceCoord(float2 uv, uint2 dimensions)
     return min(uint2(uv * float2(dimensions)), dimensions - 1u);
 }
 
-float3 sampleProbeIrradianceDirection(
+float4 sampleProbeIrradianceDirection(
     FlaxDDGIData ddgi, uint cascadeIndex, uint physicalProbeIndex, float3 direction)
 {
     const float2 probeUV = getProbeUV(
         ddgi, cascadeIndex, physicalProbeIndex,
         flaxOctahedralEncode(normalize(direction)),
         kDDGIProbeIrradianceResolution);
-    const float3 encoded =
-        probesIrradiance.SampleLevel(linearSampler, probeUV, 0).rgb;
-    return pow(max(encoded, float3(0, 0, 0)), ddgi.irradianceGamma);
+    const float4 encoded =
+        probesIrradiance.SampleLevel(linearSampler, probeUV, 0);
+    return float4(
+        pow(max(encoded.rgb, float3(0, 0, 0)), ddgi.irradianceGamma), encoded.a);
 }
 
-float3 sampleProbeIrradianceOverview(
+float4 sampleProbeIrradianceOverview(
     FlaxDDGIData ddgi, uint cascadeIndex, uint physicalProbeIndex)
 {
-    float3 irradiance = float3(0, 0, 0);
+    float4 irradiance = float4(0, 0, 0, 0);
     irradiance += sampleProbeIrradianceDirection(
         ddgi, cascadeIndex, physicalProbeIndex, float3(1, 0, 0));
     irradiance += sampleProbeIrradianceDirection(
@@ -93,6 +94,10 @@ float3 sampleProbeIrradianceOverview(
         ddgi, cascadeIndex, physicalProbeIndex, float3(0, 0, -1));
     return irradiance * (1.0f / 6.0f);
 }
+
+static const float3 kProbeOverviewInactiveColor = float3(0.0f, 0.0f, 0.0f);
+static const float3 kProbeOverviewActivatedColor = float3(0.14f, 0.14f, 0.14f);
+static const float3 kProbeOverviewInvalidIrradianceColor = float3(0.035f, 0.035f, 0.035f);
 
 [numthreads(8, 8, 1)]
 void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -194,9 +199,28 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
                 getProbeCoords(ddgi, cascadeProbeIndex);
             const uint physicalProbeIndex =
                 getScrollingProbeIndex(ddgi, cascadeIndex, logicalProbeCoords);
-            const float3 linearIrradiance = sampleProbeIrradianceOverview(
-                ddgi, cascadeIndex, physicalProbeIndex);
-            color = boostDebugChroma(toneMapDebug(linearIrradiance));
+            const uint2 probeDataTexel =
+                getProbeTexelCoords(ddgi, cascadeIndex, physicalProbeIndex);
+            const float4 probeData =
+                probesData.Load(int3(probeDataTexel, 0));
+            const uint probeState = decodeProbeState(probeData);
+
+            if (probeState == kDDGIProbeStateInactive)
+            {
+                color = kProbeOverviewInactiveColor;
+            }
+            else if (probeState == kDDGIProbeStateActivated)
+            {
+                color = kProbeOverviewActivatedColor;
+            }
+            else
+            {
+                const float4 probeIrradiance = sampleProbeIrradianceOverview(
+                    ddgi, cascadeIndex, physicalProbeIndex);
+                color = probeState == kDDGIProbeStateActive && probeIrradiance.a > 0.0f
+                    ? boostDebugChroma(toneMapDebug(probeIrradiance.rgb))
+                    : kProbeOverviewInvalidIrradianceColor;
+            }
         }
     }
     else
