@@ -125,13 +125,15 @@ namespace demo
 					                     && context.params->debugOptions.enableColorGrading)
 					                     ? std::clamp(context.params->debugOptions.colorLutStrength, 0.0f, 1.0f)
 					                     : 0.0f,
-				                     0.0f),
+					                     std::clamp(context.params->debugOptions.agxHighlightCompression,
+					                                0.0f, 0.5f)),
 				.params5 = glm::vec4((context.params->debugOptions.enablePostProcessing
 					                     && context.params->debugOptions.enableTAA
 					                     && !m_renderer->getTAAResolvePipelineHandle().isNull())
 					                     ? 1.0f
 					                     : 0.0f,
-				                     0.0f,
+					                     std::clamp(context.params->debugOptions.agxShadowCompression,
+					                                0.0f, 0.8f),
 				                     context.params->debugOptions.taaBlendWeight,
 				                     context.params->debugOptions.showVelocity ? 1.0f : 0.0f),
 			};

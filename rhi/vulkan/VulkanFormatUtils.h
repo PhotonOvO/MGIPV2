@@ -21,6 +21,7 @@ namespace demo::rhi::vulkan
     switch (vkFmt)
     {
     case VK_FORMAT_R8G8B8A8_UNORM:           return rhi::TextureFormat::rgba8Unorm;
+    case VK_FORMAT_R8G8B8A8_SRGB:            return rhi::TextureFormat::rgba8Srgb;
     case VK_FORMAT_B8G8R8A8_UNORM:           return rhi::TextureFormat::bgra8Unorm;
     case VK_FORMAT_R16G16B16A16_SFLOAT:      return rhi::TextureFormat::rgba16Sfloat;
     case VK_FORMAT_R16G16_SFLOAT:            return rhi::TextureFormat::rg16Sfloat;
@@ -49,6 +50,7 @@ namespace demo::rhi::vulkan
     switch (fmt)
     {
     case rhi::TextureFormat::rgba8Unorm:      return VK_FORMAT_R8G8B8A8_UNORM;
+    case rhi::TextureFormat::rgba8Srgb:       return VK_FORMAT_R8G8B8A8_SRGB;
     case rhi::TextureFormat::bgra8Unorm:      return VK_FORMAT_B8G8R8A8_UNORM;
     case rhi::TextureFormat::rgba16Sfloat:    return VK_FORMAT_R16G16B16A16_SFLOAT;
     case rhi::TextureFormat::rg16Sfloat:      return VK_FORMAT_R16G16_SFLOAT;

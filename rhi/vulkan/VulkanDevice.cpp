@@ -1140,6 +1140,8 @@ namespace demo::rhi::vulkan
 			{
 			case TextureFormat::rgba8Unorm:
 				return VK_FORMAT_R8G8B8A8_UNORM;
+			case TextureFormat::rgba8Srgb:
+				return VK_FORMAT_R8G8B8A8_SRGB;
 			case TextureFormat::bgra8Unorm:
 				return VK_FORMAT_B8G8R8A8_UNORM;
 			case TextureFormat::rgba16Sfloat:

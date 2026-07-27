@@ -45,7 +45,7 @@ namespace demo
 		glm::vec3 direction{glm::normalize(glm::vec3(-0.45f, -0.8f, -0.25f))};
 		float shadowDistance{100.0f};
 		glm::vec3 color{glm::vec3(1.0f, 0.95f, 0.85f) * 3.0f};
-		float shadowStrength{0.9f};
+		float shadowStrength{1.0f};
 		glm::vec3 ambient{0.1f, 0.12f, 0.15f};
 		float normalBias{0.0025f};
 		float depthBias{0.0015f};
@@ -85,6 +85,8 @@ namespace demo
 		bool showVelocity{false};
 		int upscalingMode{1}; // 0=Off, 1=TAA, 2=Spatial fallback
 		float postExposure{1.0f};
+		float agxHighlightCompression{0.22f};
+		float agxShadowCompression{0.45f};
 		float bloomIntensity{0.35f};
 		float bloomThreshold{0.8f};
 		float taaJitterScale{1.0f};

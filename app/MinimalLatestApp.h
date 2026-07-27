@@ -58,6 +58,10 @@ public:
     m_camera.update();
     resetSceneCameraNavigation();
     syncLightAnglesFromDirection();
+    m_debugOptions.enableGPUFrustumCulling = false;
+    m_debugOptions.enableGPUOcclusionCulling = false;
+    m_debugOptions.enableGPUMeshletOcclusionCulling = false;
+    m_debugOptions.enableIBL = false;
 
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
@@ -372,6 +376,10 @@ public:
         ImGui::Separator();
         ImGui::Text("Post Process");
         ImGui::Checkbox("Post Effects", &m_debugOptions.enablePostProcessing);
+        ImGui::SliderFloat("AgX Highlight Compression",
+                           &m_debugOptions.agxHighlightCompression, 0.0f, 0.4f, "%.2f");
+        ImGui::SliderFloat("AgX Shadow Compression",
+                           &m_debugOptions.agxShadowCompression, 0.0f, 0.8f, "%.2f");
         if(m_debugOptions.enablePostProcessing && ImGui::TreeNode("Exposure"))
         {
           ImGui::Checkbox("Adaptive", &m_debugOptions.enableAdaptiveExposure);

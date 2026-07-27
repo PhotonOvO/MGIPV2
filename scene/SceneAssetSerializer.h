@@ -9,8 +9,8 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  // Bumped 7->8: directional-light intensity is converted from glTF lux.
-  static constexpr uint32_t kCurrentVersion = 8;
+  // Bumped 8->9: raw color textures use an sRGB GPU format.
+  static constexpr uint32_t kCurrentVersion = 9;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 

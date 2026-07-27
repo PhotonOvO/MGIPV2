@@ -143,6 +143,7 @@ namespace demo
 			{
 			case rhi::TextureFormat::bgra8Unorm:   return "B8G8R8A8_UNORM";
 			case rhi::TextureFormat::rgba8Unorm:   return "R8G8B8A8_UNORM";
+			case rhi::TextureFormat::rgba8Srgb:    return "R8G8B8A8_SRGB";
 			case rhi::TextureFormat::rgba16Sfloat: return "R16G16B16A16_SFLOAT";
 			case rhi::TextureFormat::rg16Sfloat:   return "R16G16_SFLOAT";
 			case rhi::TextureFormat::r16Sfloat:    return "R16_SFLOAT";
@@ -6490,7 +6491,9 @@ namespace demo
 
 			const rhi::TextureFormat rhiFormat = hasSupportedKtx2Sidecar
 				                                     ? ktxTexture.format
-				                                     : rhi::TextureFormat::rgba8Unorm;
+                                                     : (imageData.isSrgb
+					                                     ? rhi::TextureFormat::rgba8Srgb
+					                                     : rhi::TextureFormat::rgba8Unorm);
 			const uint32_t width = hasSupportedKtx2Sidecar
 				                       ? ktxTexture.width
 				                       : static_cast<uint32_t>(rawImageData->width);

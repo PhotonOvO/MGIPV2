@@ -345,6 +345,7 @@ void writeImage(std::ostream& stream, const GltfImageData& image)
   writeString(stream, image.mimeType);
   writePod(stream, image.fallbackImage);
   writePod(stream, image.isKtx2);
+  writePod(stream, image.isSrgb);
 }
 
 bool readImage(std::istream& stream, GltfImageData& image)
@@ -357,7 +358,8 @@ bool readImage(std::istream& stream, GltfImageData& image)
          && readString(stream, image.uri)
          && readString(stream, image.mimeType)
          && readPod(stream, image.fallbackImage)
-         && readPod(stream, image.isKtx2);
+         && readPod(stream, image.isKtx2)
+         && readPod(stream, image.isSrgb);
 }
 
 void writeDependency(std::ostream& stream, const GltfDependencyData& dependency)

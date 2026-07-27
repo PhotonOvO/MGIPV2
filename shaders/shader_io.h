@@ -112,8 +112,8 @@ struct PostProcessUniforms
   vec4 params1;  // source texel size x/y, output texel size x/y
   vec4 params2;  // adaptive enabled, target luminance, min exposure, max exposure
   vec4 params3;  // saturation, contrast, gamma, vignette intensity
-  vec4 params4;  // lens effects enabled, lens dirt intensity, color LUT strength, reserved
-  vec4 params5;  // TAA enabled, history valid, blend weight, show velocity
+  vec4 params4;  // lens enabled, lens dirt, color LUT strength, AgX highlight compression
+  vec4 params5;  // TAA enabled, AgX shadow compression, blend weight, show velocity
 };
 
 struct GPUDrivenAOPushConstants
@@ -270,6 +270,7 @@ struct GlobalSDFComposeUniforms
   uint32_t _padding1;
   vec4 meshBoundsMin[LGlobalSDFMaxMeshSDFs];  // xyz = padded mesh AABB min, w unused
   vec4 meshBoundsMax[LGlobalSDFMaxMeshSDFs];  // xyz = padded mesh AABB max, w = mesh max encode distance
+  vec4 meshTextureDimensions[LGlobalSDFMaxMeshSDFs]; // xyz = source voxel dimensions
 };
 
 // DDGI SDF ray trace (Wave D2-2). Per-frame uniform buffer instead of root

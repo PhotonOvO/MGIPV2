@@ -1357,6 +1357,7 @@ namespace demo
 	bool m_flaxCascadesNeedUpdate{true};
 	glm::vec3 m_cachedLightDirection{0.4f, 0.7f, 0.3f};
 	glm::vec3 m_cachedLightColor{0.7f, 0.55f, 0.35f};
+	bool m_cachedFlaxLightValid{false};
 	[[nodiscard]] glm::vec3 computeFlaxCoverageCenter(const glm::vec3& cameraPosition) const;
 	void rebuildFlaxRadianceSources();
 	void updateFlaxCascadeScheduling(const glm::vec3& cameraPos);

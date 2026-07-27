@@ -71,6 +71,7 @@ struct GltfImageData {
     std::string mimeType;
     int fallbackImage = -1;
     bool isKtx2 = false;
+    bool isSrgb = false;
 };
 
 struct GltfDependencyData {

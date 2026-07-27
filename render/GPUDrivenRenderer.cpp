@@ -79,6 +79,7 @@ namespace demo
 			{
 			case rhi::TextureFormat::bgra8Unorm:
 			case rhi::TextureFormat::rgba8Unorm:
+			case rhi::TextureFormat::rgba8Srgb:
 				return 4u;
 			case rhi::TextureFormat::rg16Sfloat:
 				return 4u;
@@ -112,6 +113,8 @@ namespace demo
 				return "B8G8R8A8_UNORM";
 			case rhi::TextureFormat::rgba8Unorm:
 				return "R8G8B8A8_UNORM";
+			case rhi::TextureFormat::rgba8Srgb:
+				return "R8G8B8A8_SRGB";
 			case rhi::TextureFormat::rgba16Sfloat:
 				return "R16G16B16A16_SFLOAT";
 			case rhi::TextureFormat::rg16Sfloat:
@@ -1154,6 +1157,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_ddgiMeshSDFEntry = GlobalSDFMeshEntry{
 			.boundsMin = loadResult.asset.worldBoundsMin,
 			.boundsMax = loadResult.asset.worldBoundsMax,
+			.resolution = loadResult.asset.resolution,
 			.sdfTexture = loadResult.asset.normalizedSDFHandle,
 			.albedoTexture = loadResult.asset.albedoHandle,
 		};
@@ -4153,9 +4157,22 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
 	lightingUniforms.light.lightColorAndNormalBias =
 		glm::vec4(params.lightSettings.color, params.lightSettings.normalBias);
-	// Cache for FlaxDDGI trace shader (R5: use real scene light, not hardcoded)
-	m_cachedLightDirection = glm::normalize(-params.lightSettings.direction);
-	m_cachedLightColor = params.lightSettings.color;
+	const glm::vec3 effectiveLightDirection = glm::normalize(-params.lightSettings.direction);
+	const glm::vec3 effectiveLightColor = params.lightSettings.color;
+	const glm::vec3 lightDirectionDelta = effectiveLightDirection - m_cachedLightDirection;
+	const glm::vec3 lightColorDelta = effectiveLightColor - m_cachedLightColor;
+	const bool flaxLightChanged = m_cachedFlaxLightValid
+		&& (glm::dot(lightDirectionDelta, lightDirectionDelta) > 1.0e-8f
+			|| glm::dot(lightColorDelta, lightColorDelta) > 1.0e-8f);
+	// Cache for FlaxDDGI trace shader (R5: use real scene light, not hardcoded).
+	m_cachedLightDirection = effectiveLightDirection;
+	m_cachedLightColor = effectiveLightColor;
+	m_cachedFlaxLightValid = true;
+	if (flaxLightChanged && m_flaxDDGIPass != nullptr)
+	{
+		// Probe history stores direct-sun injection and must not survive a light edit.
+		m_flaxDDGIPass->requestRuntimeReset();
+	}
 		lightingUniforms.light.ambientColorAndTexelSize =
 			glm::vec4(params.lightSettings.ambient,
 			          1.0f / static_cast<float>(std::max(1u, getCSMShadowResources().getCascadeResolution())));

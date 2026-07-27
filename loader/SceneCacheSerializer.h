@@ -10,8 +10,8 @@ namespace demo {
 class SceneCacheSerializer
 {
 public:
-  // Bumped 10->11: directional-light intensity is converted from glTF lux.
-  static constexpr uint32_t kCurrentVersion = 11;
+  // Bumped 11->12: material image color-space semantics are serialized.
+  static constexpr uint32_t kCurrentVersion = 12;
 
   [[nodiscard]] static std::filesystem::path buildCachePath(const std::filesystem::path& sourcePath);
 

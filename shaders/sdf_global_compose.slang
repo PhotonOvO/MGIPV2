@@ -71,18 +71,27 @@ void kernelGlobalSDFCompose(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             const float3 extent = max(boundsMax - boundsMin, float3(1e-4, 1e-4, 1e-4));
             const float3 uvw = (worldPos - boundsMin) / extent;
-            const float encoded = meshSDFTextures[i].SampleLevel(uvw, 0.0);
+            const float3 textureDimensions = max(
+                composeUniforms.meshTextureDimensions[i].xyz, float3(1.0, 1.0, 1.0));
+            const float3 centeredUVW =
+                (uvw * max(textureDimensions - 1.0, 0.0) + 0.5) / textureDimensions;
+            const float encoded = meshSDFTextures[i].SampleLevel(centeredUVW, 0.0);
             meshDistance = (encoded * 2.0 - 1.0) * meshMaxDistance;
             if (meshDistance < minDistance)
             {
-                nearestAlbedo = meshAlbedoTextures[i].SampleLevel(uvw, 0.0);
+                nearestAlbedo = meshAlbedoTextures[i].SampleLevel(centeredUVW, 0.0);
             }
         }
         if (aabbDistance > 0.0 && meshDistance < minDistance)
         {
-            nearestAlbedo = meshAlbedoTextures[i].SampleLevel(
-                clamp((worldPos - boundsMin) / max(boundsMax - boundsMin, float3(1e-4, 1e-4, 1e-4)),
-                      float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)), 0.0);
+            const float3 textureDimensions = max(
+                composeUniforms.meshTextureDimensions[i].xyz, float3(1.0, 1.0, 1.0));
+            const float3 clampedUVW = clamp(
+                (worldPos - boundsMin) / max(boundsMax - boundsMin, float3(1e-4, 1e-4, 1e-4)),
+                float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+            const float3 centeredUVW =
+                (clampedUVW * max(textureDimensions - 1.0, 0.0) + 0.5) / textureDimensions;
+            nearestAlbedo = meshAlbedoTextures[i].SampleLevel(centeredUVW, 0.0);
         }
         minDistance = min(minDistance, meshDistance);
     }

@@ -1244,6 +1244,18 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
     float3 lensBloom = bloom * lensDirt;
     float3 color = (hdrColor + (bloom + lensBloom) * postProcess.params0.y * bloomEnabled) * exposure;
     color = toneMapAgX(max(color, 0.0));
+    // Blender-reference display shoulder: compress only the upper midtones and
+    // highlights while preserving the AgX toe and the calibrated shadow median.
+    const float displayPeak = max(color.r, max(color.g, color.b));
+    const float shoulderWeight = smoothstep(0.08, 0.30, displayPeak);
+    const float highlightCompression = saturate(postProcess.params4.w);
+    const float highlightRecovery = 0.20 * smoothstep(0.50, 0.90, displayPeak);
+    color *= 1.0 - highlightCompression * shoulderWeight * (1.0 - highlightRecovery);
+
+    const float displayLuminance = luminance(color);
+    const float toeWeight = 1.0 - smoothstep(0.01, 0.08, displayLuminance);
+    const float shadowCompression = saturate(postProcess.params5.y);
+    color *= 1.0 - shadowCompression * toeWeight;
     color = applyColorGrade(color, input.uv);
     return float4(saturate(color), 1.0);
 }

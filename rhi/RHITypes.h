@@ -162,6 +162,7 @@ enum class TextureFormat : uint8_t
 {
   undefined   = 0,
   rgba8Unorm  = 1,
+  rgba8Srgb   = 13,
   bgra8Unorm  = 2,
   rgba16Sfloat = 3,
   d16Unorm    = 4,

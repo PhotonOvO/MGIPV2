@@ -29,6 +29,7 @@ namespace demo
 	{
 		glm::vec3 boundsMin{0.0f};
 		glm::vec3 boundsMax{0.0f};
+		glm::uvec3 resolution{0u};
 		rhi::TextureHandle sdfTexture{};
 		rhi::TextureHandle albedoTexture{};
 	};
@@ -90,6 +91,7 @@ namespace demo
 		GlobalSDFVolume m_volume{};
 
 		rhi::SamplerHandle m_meshSDFSampler{};
+		rhi::SamplerHandle m_meshAlbedoSampler{};
 		rhi::ArgumentLayoutHandle m_clearLayout{};
 		rhi::ArgumentLayoutHandle m_composeLayout{};
 		rhi::ArgumentLayoutHandle m_mipmapLayout{};

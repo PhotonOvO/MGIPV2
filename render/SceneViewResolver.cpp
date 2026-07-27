@@ -113,7 +113,35 @@ bool populatePrimarySceneCameraUniforms(
     return false;
   }
 
-  populateCameraUniforms(view, flightCameraProjection, position, uniforms);
+  const clipspace::ProjectionConvention convention =
+      clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+  const float fallbackAspect =
+      std::abs(flightCameraProjection[0][0]) > 1.0e-6f
+          ? std::abs(flightCameraProjection[1][1] / flightCameraProjection[0][0])
+          : 1.0f;
+  const float nearPlane = std::max(camera.nearPlane, 1.0e-3f);
+  const float fallbackFar = std::max(
+      std::abs(clipspace::extractFarPlane(flightCameraProjection, convention)),
+      nearPlane + 1.0f);
+  const float farPlane =
+      camera.farPlane > nearPlane ? camera.farPlane : fallbackFar;
+  glm::mat4 projection = flightCameraProjection;
+  if(camera.type == SceneCameraType::orthographic) {
+    const float halfWidth = std::max(camera.horizontalMagnification, 1.0e-3f);
+    const float halfHeight = std::max(camera.verticalMagnification, 1.0e-3f);
+    projection = clipspace::makeOrthographicProjection(
+        -halfWidth, halfWidth, -halfHeight, halfHeight,
+        nearPlane, farPlane, convention);
+  } else {
+    const float aspect =
+        camera.aspectRatio > 1.0e-3f ? camera.aspectRatio : std::max(fallbackAspect, 1.0e-3f);
+    const float verticalFov =
+        std::clamp(camera.verticalFieldOfViewRadians, glm::radians(1.0f), glm::radians(179.0f));
+    projection = clipspace::makePerspectiveProjection(
+        verticalFov, aspect, nearPlane, farPlane, convention);
+  }
+
+  populateCameraUniforms(view, projection, position, uniforms);
   return true;
 }
 

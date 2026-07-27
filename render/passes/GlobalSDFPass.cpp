@@ -114,6 +114,15 @@ namespace demo
 			.addressModeW = rhi::AddressMode::clampToEdge,
 			.debugName = "global-sdf-mesh-sampler",
 		});
+		m_meshAlbedoSampler = device.createSampler(rhi::SamplerDesc{
+			.magFilter = rhi::Filter::nearest,
+			.minFilter = rhi::Filter::nearest,
+			.mipmapMode = rhi::MipmapMode::nearest,
+			.addressModeU = rhi::AddressMode::clampToEdge,
+			.addressModeV = rhi::AddressMode::clampToEdge,
+			.addressModeW = rhi::AddressMode::clampToEdge,
+			.debugName = "global-sdf-mesh-albedo-sampler",
+		});
 
 		// --- Argument layouts ---
 		const std::array<rhi::ArgumentBinding, 2> clearBindings{
@@ -327,6 +336,8 @@ namespace demo
 
 		if (!m_meshSDFSampler.isNull()) m_device->destroySampler(m_meshSDFSampler);
 		m_meshSDFSampler = {};
+		if (!m_meshAlbedoSampler.isNull()) m_device->destroySampler(m_meshAlbedoSampler);
+		m_meshAlbedoSampler = {};
 
 		for (rhi::TextureViewHandle& view : m_volume.mipViews)
 		{
@@ -461,6 +472,7 @@ namespace demo
 			const float meshMaxDistance = std::max(maxComponent(entry.boundsMax - entry.boundsMin), 1e-4f);
 			uniforms.meshBoundsMin[i] = glm::vec4(entry.boundsMin, 0.0f);
 			uniforms.meshBoundsMax[i] = glm::vec4(entry.boundsMax, meshMaxDistance);
+			uniforms.meshTextureDimensions[i] = glm::vec4(glm::vec3(entry.resolution), 0.0f);
 		}
 
 		// cpuToGpu memory is host-coherent on desktop; no explicit flush needed
@@ -510,7 +522,7 @@ namespace demo
 				.binding = 4, .arrayElement = i,
 				.type = rhi::ArgumentType::combinedImageSampler,
 				.textureView = m_meshAlbedoViews[sourceIndex],
-				.sampler = m_meshSDFSampler,
+				.sampler = m_meshAlbedoSampler,
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
 		}

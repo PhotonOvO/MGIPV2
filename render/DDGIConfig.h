@@ -39,14 +39,14 @@ namespace demo
 		// Depth update weight exponent: pow(dot(rayDir, texelDir), depthSharpness).
 		float depthSharpness{50.0f};
 		// Surface offset along normal when sampling probes (leak reduction).
-		float normalBias{0.3f};
+		float normalBias{0.15f};
 		// Max ray-hit distance. Must cover full cascade extent so empty-area probes
-		// can trace into the SDF. 96 = 1.5 * 32 * 2 (probeSpacing * probesPerAxis * 2).
-		float maxDistance{96.0f};
+		// can trace across the compact Sponza bounds without pulling in distant misses.
+		float maxDistance{48.0f};
 		// Staggered update stride: each frame updates 1/updateStride of the probes.
 		uint32_t updateStride{4u};
 		// Blend weight between IBL and DDGI irradiance in the lighting pass.
-		float ddgiWeight{0.65f};
+		float ddgiWeight{1.0f};
 
 		// --- Flax-style settings (FGI-040, gated by runtimeMode == flaxStyle) ---
 		// Maximum world-space distance from camera to extend GI coverage.
@@ -56,16 +56,16 @@ namespace demo
 		uint32_t maxCascades{2u};
 		// Temporal response weight for irradiance/distance history blend.
 		// Lower = faster response, higher = more stable. Flax default ~0.98.
-		float probeHistoryWeight{0.98f};
+		float probeHistoryWeight{0.95f};
 		// Surface-to-camera bias used with normalBias during FlaxGI sampling.
 		// A separate view term reduces visibility discontinuities at silhouettes.
-		float viewBias{0.1f};
+		float viewBias{0.05f};
 		// Indirect lighting multiplier applied when sampling DDGI in the light pass.
-		float indirectLightingIntensity{1.0f};
+		float indirectLightingIntensity{1.5f};
 		// Fallback irradiance color when no valid probe data is available.
-		glm::vec4 fallbackIrradiance{0.02f, 0.02f, 0.02f, 1.0f};
+		glm::vec4 fallbackIrradiance{0.0f, 0.0f, 0.0f, 1.0f};
 		// Maximum probes updated per frame (budget cap). 0 = unlimited.
-		uint32_t maxUpdatedProbesPerFrame{2048u};
+		uint32_t maxUpdatedProbesPerFrame{4096u};
 		// Inner cascade update frequency (1 = every frame, 2 = every other, etc.).
 		uint32_t cascadeUpdateFrequency{1u};
 		// Debug override: force a specific cascade for visualization (-1 = off).

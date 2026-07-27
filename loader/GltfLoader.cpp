@@ -52,6 +52,65 @@ float convertGltfLightIntensity(SceneLightType type, float intensity)
         : intensity;
 }
 
+void assignImageColorSpaces(GltfModel& model)
+{
+    constexpr uint8_t kColorUsage = 1u << 0u;
+    constexpr uint8_t kLinearUsage = 1u << 1u;
+    std::vector<uint8_t> usage(model.images.size(), 0u);
+
+    const auto markUsage = [&](int textureIndex, uint8_t usageBit)
+    {
+        if(textureIndex >= 0 && static_cast<size_t>(textureIndex) < usage.size())
+        {
+            usage[static_cast<size_t>(textureIndex)] |= usageBit;
+        }
+    };
+
+    for(const GltfMaterialData& material : model.materials)
+    {
+        markUsage(material.baseColorTexture, kColorUsage);
+        markUsage(material.emissiveTexture, kColorUsage);
+        markUsage(material.normalTexture, kLinearUsage);
+        markUsage(material.metallicRoughnessTexture, kLinearUsage);
+        markUsage(material.occlusionTexture, kLinearUsage);
+    }
+
+    const size_t originalImageCount = model.images.size();
+    std::vector<int> colorDuplicates(originalImageCount, -1);
+    for(size_t imageIndex = 0; imageIndex < originalImageCount; ++imageIndex)
+    {
+        const bool color = (usage[imageIndex] & kColorUsage) != 0u;
+        const bool linear = (usage[imageIndex] & kLinearUsage) != 0u;
+        if(color && !linear)
+        {
+            model.images[imageIndex].isSrgb = true;
+        }
+        else if(color && linear)
+        {
+            GltfImageData colorImage = model.images[imageIndex];
+            colorImage.isSrgb = true;
+            colorDuplicates[imageIndex] = static_cast<int>(model.images.size());
+            model.images.push_back(std::move(colorImage));
+            model.images[imageIndex].isSrgb = false;
+        }
+    }
+
+    for(GltfMaterialData& material : model.materials)
+    {
+        const auto selectColorDuplicate = [&](int& textureIndex)
+        {
+            if(textureIndex >= 0
+                && static_cast<size_t>(textureIndex) < colorDuplicates.size()
+                && colorDuplicates[static_cast<size_t>(textureIndex)] >= 0)
+            {
+                textureIndex = colorDuplicates[static_cast<size_t>(textureIndex)];
+            }
+        };
+        selectColorDuplicate(material.baseColorTexture);
+        selectColorDuplicate(material.emissiveTexture);
+    }
+}
+
 bool hasReasonableModelShape(const tinygltf::Model& model)
 {
     return model.nodes.size() <= kMaxReasonableNodes
@@ -498,6 +557,7 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
     processMaterials(model, outModel);
     processImages(model, std::filesystem::path(filepath), outModel);
     recordBasisuFallbackImages(model, outModel);
+    assignImageColorSpaces(outModel);
     processLightDefinitions(model);
 
     // Set model name from file
