@@ -1,6 +1,7 @@
 #include "GPUDrivenRenderer.h"
 #include "ArgumentTables.h"
 #include "BatchUploadContext.h"
+#include "MeshSDFQuality.h"
 #include "UploadUtils.h"
 #include "RHIFormatBridge.h"
 #include "../loader/Ktx2Loader.h"
@@ -1160,6 +1161,38 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_ddgiMeshSDFPath = path.string();
 		m_renderer.getDDGIConfig().enabled = true;
 		resetDDGIHistory();
+		if (m_globalSDFPass->getMeshSDFCount() > 0u)
+		{
+			const GlobalSDFVolume& globalVolume = m_globalSDFPass->getVolume();
+			const MeshSDFPhysicalResolutionQuality quality = evaluateMeshSDFPhysicalResolution(
+				loadResult.asset.worldBoundsMin,
+				loadResult.asset.worldBoundsMax,
+				loadResult.asset.resolution,
+				globalVolume.worldBoundsMin,
+				globalVolume.worldBoundsMax,
+				globalVolume.resolution);
+			if (quality.valid && quality.warningLevel != MeshSDFQualityWarningLevel::none)
+			{
+				const char* severity = quality.warningLevel == MeshSDFQualityWarningLevel::severe
+					? "SEVERE "
+					: "";
+				LOGW("%sMesh SDF physical resolution warning for %s: thin surfaces and material colors may alias. "
+				     "sourceResolution=%ux%ux%u sourceSpacing=(%.3f %.3f %.3f) "
+				     "globalVoxel=%.3f ratio=(%.2f %.2f %.2f)",
+				     severity,
+				     m_ddgiMeshSDFPath.c_str(),
+				     loadResult.asset.resolution.x,
+				     loadResult.asset.resolution.y,
+				     loadResult.asset.resolution.z,
+				     quality.sourceSpacing.x,
+				     quality.sourceSpacing.y,
+				     quality.sourceSpacing.z,
+				     quality.globalVoxelSize,
+				     quality.ratio.x,
+				     quality.ratio.y,
+				     quality.ratio.z);
+			}
+		}
 		LOGI("Loaded DDGI mesh SDF: %s (%ux%ux%u, v%u, albedo=%s)",
 		     m_ddgiMeshSDFPath.c_str(),
 		     loadResult.asset.resolution.x,

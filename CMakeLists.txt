@@ -283,6 +283,7 @@ add_library(demo_core STATIC
   render/AsyncLoadingCoordinator.cpp
   render/GPUDrivenRenderer.h
   render/GPUDrivenRenderer.cpp
+  render/MeshSDFQuality.h
   render/GPUDrivenLightResources.h
   render/GPUDrivenLightResources.cpp
   render/GPUSceneRegistry.h
@@ -562,6 +563,13 @@ if(BUILD_TESTING AND NOT ANDROID)
   )
   target_include_directories(imgui_rhi_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
   add_test(NAME imgui_rhi_contract COMMAND imgui_rhi_contract_tests)
+
+  add_executable(mesh_sdf_quality_tests
+    tests/mesh_sdf_quality_tests.cpp
+  )
+  target_link_libraries(mesh_sdf_quality_tests PRIVATE glm)
+  target_include_directories(mesh_sdf_quality_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+  add_test(NAME mesh_sdf_quality COMMAND mesh_sdf_quality_tests)
 endif()
 
 
