@@ -65,6 +65,7 @@ public:
 
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;
+    resetUIAppearanceStyle();
 
     // Load Sponza by default for FlaxGI smoke testing
     std::string path = "resources/GLTF_Sponza/sponza.gltf";
@@ -212,18 +213,24 @@ public:
         }
       }
 
+      ImGuiID mainDockspaceID = 0;
       {
         demo::profiling::ScopedCpuRange dockspaceRange("AppPreRecord.ImGuiDockspace");
         const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
-        ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
-        if(!ImGui::DockBuilderGetNode(dockID)->IsSplitNode() && !ImGui::FindWindowByName("Viewport"))
+        ImGuiID dockID = mainDockspaceID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
+        ImGuiDockNode* rootDockNode = ImGui::DockBuilderGetNode(dockID);
+        if(rootDockNode != nullptr && !rootDockNode->IsSplitNode())
         {
-          ImGui::DockBuilderDockWindow("Viewport", dockID);
-          ImGui::DockBuilderGetCentralNode(dockID)->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
           ImGuiID leftID = ImGui::DockBuilderSplitNode(dockID, ImGuiDir_Left, 0.2f, nullptr, &dockID);
           ImGui::DockBuilderDockWindow("Settings", leftID);
+          ImGui::DockBuilderDockWindow("Model Loader", leftID);
+          ImGui::DockBuilderDockWindow("Scene Graph", leftID);
           ImGuiID rightID = ImGui::DockBuilderSplitNode(dockID, ImGuiDir_Right, 0.28f, nullptr, &dockID);
           ImGui::DockBuilderDockWindow("FlaxDebugUI", rightID);
+          if(ImGuiDockNode* centralNode = ImGui::DockBuilderGetNode(dockID))
+          {
+            centralNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
+          }
         }
       }
 
@@ -242,17 +249,22 @@ public:
               glfwSetWindowShouldClose(m_window, true);
             ImGui::EndMenu();
           }
+          ImGui::Separator();
+          ImGui::Text("FPS %.1f", ImGui::GetIO().Framerate);
           ImGui::EndMainMenuBar();
         }
       }
 
       glm::vec4 viewportImageRect{0.0f};
       {
-        demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.ViewportPanel");
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-        ImGui::Begin("Viewport");
-        ImVec2              viewportContentSize = ImGui::GetContentRegionAvail();
-        demo::rhi::Extent2D requestedViewportSize{uint32_t(viewportContentSize.x), uint32_t(viewportContentSize.y)};
+        demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.FullWindowViewport");
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+        const demo::rhi::Extent2D requestedViewportSize{
+          static_cast<uint32_t>(std::max(framebufferWidth, 0)),
+          static_cast<uint32_t>(std::max(framebufferHeight, 0))
+        };
         if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
            && (requestedViewportSize.width != m_viewportSize.width || requestedViewportSize.height != m_viewportSize.height))
         {
@@ -261,19 +273,22 @@ public:
           m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
         }
 
-        const demo::TextureHandle viewportTextureHandle = m_renderer.getViewportTextureHandle();
-        ImGui::Image(m_renderer.getViewportTextureID(viewportTextureHandle), viewportContentSize);
-        const ImVec2 viewportImageMin = ImGui::GetItemRectMin();
-        const ImVec2 viewportImageMax = ImGui::GetItemRectMax();
+        const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+        ImVec2 viewportImageMin = mainViewport->WorkPos;
+        ImVec2 viewportImageMax(mainViewport->WorkPos.x + mainViewport->WorkSize.x,
+                                mainViewport->WorkPos.y + mainViewport->WorkSize.y);
+        if(const ImGuiDockNode* centralNode = ImGui::DockBuilderGetCentralNode(mainDockspaceID);
+           centralNode != nullptr && centralNode->Size.x > 0.0f && centralNode->Size.y > 0.0f)
+        {
+          viewportImageMin = centralNode->Pos;
+          viewportImageMax = ImVec2(centralNode->Pos.x + centralNode->Size.x,
+                                    centralNode->Pos.y + centralNode->Size.y);
+        }
         viewportImageRect = glm::vec4(viewportImageMin.x,
                                       viewportImageMin.y,
                                       viewportImageMax.x - viewportImageMin.x,
                                       viewportImageMax.y - viewportImageMin.y);
         drawFlaxDebugViewportOverlay(viewportImageMin, viewportImageMax);
-        ImGui::SetCursorPos(ImVec2(0, 0));
-        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-        ImGui::End();
-        ImGui::PopStyleVar();
       }
 
       if(ImGui::Begin("Settings"))
@@ -814,15 +829,6 @@ public:
       ImGui::End();
 
       {
-        // Existing ImGui layouts predate this window. Dock it beside Settings once,
-        // while fresh layouts still use the dedicated right-side node above.
-        ImGuiWindow* settingsWindow = ImGui::FindWindowByName("Settings");
-        ImGuiWindow* flaxWindow = ImGui::FindWindowByName("FlaxDebugUI");
-        if(settingsWindow != nullptr && settingsWindow->DockId != 0
-           && (flaxWindow == nullptr || flaxWindow->DockId == 0))
-        {
-          ImGui::DockBuilderDockWindow("FlaxDebugUI", settingsWindow->DockId);
-        }
         demo::profiling::ScopedCpuRange flaxDebugUiRange("AppPreRecord.FlaxDebugUI");
         drawFlaxDebugUI();
       }
@@ -1077,9 +1083,102 @@ private:
   demo::DirectionalLightSettings resolveSceneLightSettings() const;
   void drawSceneLightsUI();
   void drawCSMDebugPanel();
+  void resetUIAppearanceStyle();
   void updateRuntimeProfiler();
   void drawRuntimeProfilerPanel();
 };
+
+inline void MinimalLatestApp::resetUIAppearanceStyle()
+{
+  ImGuiStyle& uiStyle = ImGui::GetStyle();
+  ImGui::StyleColorsDark(&uiStyle);
+
+  uiStyle.Alpha = 1.0f;
+  uiStyle.DisabledAlpha = 0.65f;
+  uiStyle.WindowPadding = ImVec2(10.0f, 8.0f);
+  uiStyle.FramePadding = ImVec2(5.0f, 3.0f);
+  uiStyle.ItemSpacing = ImVec2(8.0f, 5.0f);
+  uiStyle.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+  uiStyle.IndentSpacing = 20.0f;
+  uiStyle.ScrollbarSize = 11.0f;
+  uiStyle.GrabMinSize = 9.0f;
+  uiStyle.WindowRounding = 2.0f;
+  uiStyle.ChildRounding = 2.0f;
+  uiStyle.PopupRounding = 2.0f;
+  uiStyle.FrameRounding = 2.0f;
+  uiStyle.ScrollbarRounding = 2.0f;
+  uiStyle.GrabRounding = 1.0f;
+  uiStyle.TabRounding = 2.0f;
+  uiStyle.WindowBorderSize = 1.0f;
+  uiStyle.ChildBorderSize = 0.0f;
+  uiStyle.PopupBorderSize = 1.0f;
+  uiStyle.FrameBorderSize = 0.0f;
+  uiStyle.TabBorderSize = 0.0f;
+
+  ImVec4* colors = uiStyle.Colors;
+  colors[ImGuiCol_Text] = ImVec4(0.94f, 0.95f, 0.98f, 1.00f);
+  colors[ImGuiCol_TextDisabled] = ImVec4(0.61f, 0.64f, 0.70f, 0.88f);
+
+  // Low-opacity glass backing so the scene remains visible behind the panels.
+  colors[ImGuiCol_WindowBg] = ImVec4(0.018f, 0.022f, 0.030f, 0.24f);
+  colors[ImGuiCol_ChildBg] = ImVec4(0.018f, 0.022f, 0.030f, 0.08f);
+  colors[ImGuiCol_PopupBg] = ImVec4(0.020f, 0.026f, 0.038f, 0.94f);
+  colors[ImGuiCol_Border] = ImVec4(0.52f, 0.57f, 0.66f, 0.28f);
+  colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+  // Widgets stay substantially more opaque than their parent window.
+  colors[ImGuiCol_FrameBg] = ImVec4(0.040f, 0.052f, 0.072f, 0.56f);
+  colors[ImGuiCol_FrameBgHovered] = ImVec4(0.060f, 0.130f, 0.220f, 0.78f);
+  colors[ImGuiCol_FrameBgActive] = ImVec4(0.070f, 0.180f, 0.310f, 0.92f);
+  colors[ImGuiCol_TitleBg] = ImVec4(0.018f, 0.024f, 0.034f, 0.30f);
+  colors[ImGuiCol_TitleBgActive] = ImVec4(0.026f, 0.050f, 0.080f, 0.48f);
+  colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.018f, 0.024f, 0.034f, 0.20f);
+  colors[ImGuiCol_MenuBarBg] = ImVec4(0.018f, 0.024f, 0.034f, 0.34f);
+  colors[ImGuiCol_ScrollbarBg] = ImVec4(0.010f, 0.014f, 0.020f, 0.12f);
+  colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.19f, 0.23f, 0.30f, 0.58f);
+  colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.22f, 0.34f, 0.48f, 0.78f);
+  colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.16f, 0.42f, 0.70f, 0.92f);
+
+  const ImVec4 accent = ImVec4(0.11f, 0.48f, 0.88f, 1.00f);
+  colors[ImGuiCol_CheckMark] = accent;
+  colors[ImGuiCol_CheckboxSelectedBg] = ImVec4(0.05f, 0.27f, 0.52f, 0.88f);
+  colors[ImGuiCol_SliderGrab] = ImVec4(0.10f, 0.43f, 0.80f, 0.94f);
+  colors[ImGuiCol_SliderGrabActive] = ImVec4(0.16f, 0.62f, 1.00f, 1.00f);
+  colors[ImGuiCol_Button] = ImVec4(0.05f, 0.19f, 0.34f, 0.62f);
+  colors[ImGuiCol_ButtonHovered] = ImVec4(0.06f, 0.32f, 0.58f, 0.84f);
+  colors[ImGuiCol_ButtonActive] = ImVec4(0.08f, 0.43f, 0.76f, 0.96f);
+  colors[ImGuiCol_Header] = ImVec4(0.040f, 0.075f, 0.110f, 0.34f);
+  colors[ImGuiCol_HeaderHovered] = ImVec4(0.060f, 0.240f, 0.420f, 0.68f);
+  colors[ImGuiCol_HeaderActive] = ImVec4(0.070f, 0.340f, 0.610f, 0.88f);
+
+  colors[ImGuiCol_Separator] = ImVec4(0.48f, 0.54f, 0.64f, 0.25f);
+  colors[ImGuiCol_SeparatorHovered] = ImVec4(0.10f, 0.46f, 0.82f, 0.76f);
+  colors[ImGuiCol_SeparatorActive] = accent;
+  colors[ImGuiCol_ResizeGrip] = ImVec4(0.10f, 0.42f, 0.76f, 0.18f);
+  colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.10f, 0.48f, 0.88f, 0.58f);
+  colors[ImGuiCol_ResizeGripActive] = accent;
+  colors[ImGuiCol_InputTextCursor] = ImVec4(0.90f, 0.94f, 1.00f, 1.00f);
+
+  colors[ImGuiCol_Tab] = ImVec4(0.025f, 0.060f, 0.100f, 0.46f);
+  colors[ImGuiCol_TabHovered] = ImVec4(0.060f, 0.280f, 0.500f, 0.82f);
+  colors[ImGuiCol_TabSelected] = ImVec4(0.045f, 0.190f, 0.340f, 0.72f);
+  colors[ImGuiCol_TabSelectedOverline] = accent;
+  colors[ImGuiCol_TabDimmed] = ImVec4(0.018f, 0.030f, 0.046f, 0.32f);
+  colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.030f, 0.100f, 0.170f, 0.50f);
+  colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.10f, 0.40f, 0.72f, 0.68f);
+
+  colors[ImGuiCol_DockingPreview] = ImVec4(0.10f, 0.48f, 0.88f, 0.64f);
+  colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+  colors[ImGuiCol_TableHeaderBg] = ImVec4(0.035f, 0.070f, 0.110f, 0.58f);
+  colors[ImGuiCol_TableBorderStrong] = ImVec4(0.40f, 0.46f, 0.56f, 0.34f);
+  colors[ImGuiCol_TableBorderLight] = ImVec4(0.32f, 0.38f, 0.46f, 0.22f);
+  colors[ImGuiCol_TableRowBg] = ImVec4(0.02f, 0.03f, 0.04f, 0.03f);
+  colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.05f, 0.08f, 0.11f, 0.08f);
+  colors[ImGuiCol_TextSelectedBg] = ImVec4(0.10f, 0.42f, 0.76f, 0.48f);
+  colors[ImGuiCol_TreeLines] = ImVec4(0.48f, 0.54f, 0.64f, 0.30f);
+  colors[ImGuiCol_NavCursor] = accent;
+  colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.36f);
+}
 
 inline void MinimalLatestApp::resetSceneCameraNavigation()
 {
@@ -1886,7 +1985,7 @@ inline void MinimalLatestApp::drawFlaxDebugViewportOverlay(const ImVec2& viewpor
     return;
   }
 
-  ImDrawList* drawList = ImGui::GetWindowDrawList();
+  ImDrawList* drawList = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
   drawList->PushClipRect(viewportMin, viewportMax, true);
   const float viewportWidth = viewportMax.x - viewportMin.x;
   const float tileSize = glm::clamp(viewportWidth * 0.14f, 72.0f, 144.0f);
