@@ -1,5 +1,6 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-cd /d G:\vk_minimal_latest\Demo
-cmake -B out/build/x64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-ninja -C out/build/x64-debug
+setlocal
+
+if not defined MGIF_TOOLCHAIN_SETUP set "MGIF_TOOLCHAIN_SETUP=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+call "%~dp0build_debug_with_vsdevcmd.cmd" %*
+exit /b %errorlevel%

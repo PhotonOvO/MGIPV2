@@ -1,0 +1,14 @@
+{
+  "version": "0.2.1",
+  "defaults": {},
+  "configurations": [
+    {
+      "type": "default",
+      "name": "Demo Debug (current build)",
+      "project": "CMakeLists.txt",
+      "projectTarget": "Demo.exe",
+      "program": "${workspaceRoot}\\out\\build\\x64-debug\\Debug\\Demo.exe",
+      "currentDir": "${workspaceRoot}"
+    }
+  ]
+}
