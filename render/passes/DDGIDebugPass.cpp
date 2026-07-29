@@ -294,7 +294,7 @@ namespace demo
 		// compute -> compute|fragment barrier (Wave D3-1).
 		static const std::array<PassResourceDependency, 2> dependencies = {
 			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::readWrite,
-			                                rhi::ShaderStage::fragment,
+			                                rhi::StageFlags::rasterColorOut, rhi::HazardFlags::textureWrites,
 			                                rhi::ResourceState::ColorAttachment),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::DepthStencilReadOnly),

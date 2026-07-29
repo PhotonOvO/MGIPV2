@@ -46,13 +46,14 @@ constexpr bool any(StageFlags f)
 
 enum class HazardFlags : uint32_t
 {
-  none          = 0,
-  descriptors   = 1u << 0u,
-  drawArguments = 1u << 1u,
-  depthStencil  = 1u << 2u,
-  textureWrites = 1u << 3u,
-  bufferWrites  = 1u << 4u,
-  readBeforeWrite = 1u << 5u,
+  none                   = 0,
+  descriptors            = 1u << 0u,
+  drawArguments          = 1u << 1u,
+  depthStencil           = 1u << 2u,
+  textureWrites          = 1u << 3u,
+  bufferWrites           = 1u << 4u,
+  readBeforeWrite        = 1u << 5u,
+  storageBufferReadWrite = 1u << 6u,
 };
 
 constexpr HazardFlags operator|(HazardFlags a, HazardFlags b)

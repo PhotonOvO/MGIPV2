@@ -22,6 +22,9 @@ namespace demo
 			float splitNear{0.0f};
 			float splitFar{0.0f};
 			float texelSize{0.0f};
+			float cullingGuardWorld{0.0f};
+			float depthRange{0.0f};
+			float invDepthRange{0.0f};
 			float receiverRadius{0.0f};
 			float nearPlane{0.0f};
 			float farPlane{0.0f};
@@ -47,6 +50,7 @@ namespace demo
 			glm::vec4 splitDistances{0.0f};
 			glm::vec3 lightDirection{0.0f, -1.0f, 0.0f};
 			float maxShadowDistance{0.0f};
+			float normalBiasWorld{0.0f};
 			glm::vec3 casterBoundsMin{0.0f};
 			glm::vec3 casterBoundsMax{0.0f};
 			bool casterBoundsValid{false};
@@ -65,6 +69,19 @@ namespace demo
 		CSMShadowResources() = default;
 		~CSMShadowResources() { assert((std::uncaught_exceptions() > 0 || m_device == nullptr) && "Missing deinit()"); }
 
+		[[nodiscard]] static constexpr uint32_t getMinimumCascadeResolution()
+		{
+			static_assert(shaderio::LCascadePcfGuardTexels >= 0, "Cascade PCF guard must be non-negative");
+			return static_cast<uint32_t>(2 * shaderio::LCascadePcfGuardTexels + 1);
+		}
+
+		[[nodiscard]] static constexpr uint32_t clampCascadeResolution(uint32_t requestedResolution)
+		{
+			return requestedResolution < getMinimumCascadeResolution()
+				       ? getMinimumCascadeResolution()
+				       : requestedResolution;
+		}
+
 		void init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo);
 		void deinit();
 
@@ -77,7 +94,8 @@ namespace demo
 		                           float maxShadowDistance,
 		                           const glm::vec3& casterBoundsMin,
 		                           const glm::vec3& casterBoundsMax,
-		                           bool casterBoundsValid);
+		                           bool casterBoundsValid,
+		                           float normalBiasWorld = 0.0f);
 
 		// Texture2DArray image access (all cascades). The sampling array view + per-cascade
 		// render-target views are owned by the RHI texture-view registry (RenderDevice), not here.
@@ -95,8 +113,7 @@ namespace demo
 			return {m_cascadeResolution, m_cascadeResolution};
 		}
 
-		// Uniform buffer access
-		[[nodiscard]] rhi::BufferHandle getShadowUniformBuffer() const { return m_shadowUniformBuffer; }
+
 		[[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData() { return &m_shadowUniformsData; }
 		[[nodiscard]] const shaderio::ShadowUniforms* getShadowUniformsData() const { return &m_shadowUniformsData; }
 		[[nodiscard]] const FrameData& getFrameData() const { return m_frameData; }
@@ -108,6 +125,9 @@ namespace demo
 		}
 
 	private:
+		void resetLightBasisHistory() noexcept;
+		[[nodiscard]] glm::vec3 resolveStableLightUp(const glm::vec3& normalizedDirection) noexcept;
+
 		rhi::Device* m_device{nullptr};
 		clipspace::ProjectionConvention m_projectionConvention{
 			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan)
@@ -115,10 +135,12 @@ namespace demo
 
 		rhi::TextureHandle m_cascadeArray{}; // Texture2DArray (arrayLayers = cascadeCount)
 
-		rhi::BufferHandle m_shadowUniformBuffer{};
-		shaderio::ShadowUniforms m_shadowUniformsData{};
+		shaderio::ShadowUniforms m_shadowUniformsData{}; // Pure CPU snapshot copied into active LightParams.
 		FrameData m_frameData{};
-		void* m_shadowUniformMapped{nullptr};
+		glm::vec3 m_previousLightDirection{0.0f, -1.0f, 0.0f};
+		glm::vec3 m_previousLightUp{1.0f, 0.0f, 0.0f};
+		bool m_previousLightBasisValid{false};
+		bool m_lightBasisProjectionChartSelected{false};
 
 		uint32_t m_cascadeCount{4};
 		uint32_t m_cascadeResolution{1024};

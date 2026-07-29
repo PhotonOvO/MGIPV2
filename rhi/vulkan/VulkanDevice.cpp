@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #if defined(_MSC_VER)
@@ -36,6 +37,8 @@ namespace demo::rhi::vulkan
 			evaluateCapabilityRequirements(kDeterminismProbeReport, kDeterminismProbeRequirements) ==
 			RHICapabilityError::MissingCoreGraphics,
 			"Mandatory capability failures must be deterministic");
+
+		constexpr uint32_t kDefaultCombinedImageSamplerPoolCapacity = 16384u;
 
 		uint64_t asNativeU64(const void* handle)
 		{
@@ -192,11 +195,14 @@ namespace demo::rhi::vulkan
 		{
 			vkDeviceWaitIdle(m_device);
 			drainRetirements();
-			if (m_argumentPool != VK_NULL_HANDLE)
+			for (VkDescriptorPool pool : m_argumentPools)
 			{
-				vkDestroyDescriptorPool(m_device, m_argumentPool, nullptr);
-				m_argumentPool = VK_NULL_HANDLE;
+				vkDestroyDescriptorPool(m_device, pool, nullptr);
 			}
+			m_argumentPools.clear();
+			m_argumentSetPools.clear();
+			m_argumentPool = VK_NULL_HANDLE;
+			m_combinedImageSamplerPoolCapacity = kDefaultCombinedImageSamplerPoolCapacity;
 			// Upload cmd pool — destroy before logical device (UPL-02)
 			if (m_uploadCmdPool != VK_NULL_HANDLE)
 			{
@@ -511,11 +517,16 @@ namespace demo::rhi::vulkan
 			}
 			break;
 		case ResourceKind::ArgumentTable:
-			if (retirement.owned && retirement.nativeObject != 0 && m_argumentPool != VK_NULL_HANDLE)
+			if (retirement.owned && retirement.nativeObject != 0)
 			{
-				VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(retirement.
-					nativeObject));
-				vkFreeDescriptorSets(m_device, m_argumentPool, 1, &set);
+				const auto poolIt = m_argumentSetPools.find(retirement.nativeObject);
+				if (poolIt != m_argumentSetPools.end())
+				{
+					VkDescriptorSet set = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(retirement.
+						nativeObject));
+					vkFreeDescriptorSets(m_device, poolIt->second, 1, &set);
+					m_argumentSetPools.erase(poolIt);
+				}
 			}
 			break;
 		case ResourceKind::Pipeline:
@@ -712,6 +723,9 @@ namespace demo::rhi::vulkan
 		m_deviceFeatures = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		m_features11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
 		m_features12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+		VkPhysicalDeviceVulkan12Features supportedFeatures12{
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+		};
 		m_features13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
 		m_features14 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
@@ -738,7 +752,7 @@ namespace demo::rhi::vulkan
 		}
 #endif
 		appendFeatureNode(featureChain, &m_features13);
-		appendFeatureNode(featureChain, &m_features12);
+		appendFeatureNode(featureChain, &supportedFeatures12);
 		appendFeatureNode(featureChain, &m_features11);
 
 		for (const ExtensionRequest& request : m_createInfo.deviceExtensions)
@@ -755,21 +769,38 @@ namespace demo::rhi::vulkan
 			}
 		}
 
-		m_featuresChainHead = featureChain;
-		m_deviceFeatures.pNext = m_featuresChainHead;
+		m_deviceFeatures.pNext = featureChain;
 		vkGetPhysicalDeviceFeatures2(m_physicalDevice, &m_deviceFeatures);
 
-		// Explicitly enable bindless descriptor indexing features required for
-		// UPDATE_AFTER_BIND_BIT (needed for per-frame descriptor writes without
-		// double-buffering descriptor sets). Without these, argument layouts with
-		// sampler + UBO bindings silently degrade to smaller layouts.
-		if (m_features12.descriptorIndexing == VK_TRUE)
+		// Keep queried support separate from the feature struct passed to
+		// vkCreateDevice. Unsupported descriptor-indexing bits remain VK_FALSE.
+		m_features12 = supportedFeatures12;
+
+		featureChain = nullptr;
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
+		appendFeatureNode(featureChain, &m_features14);
+#else
+		if (extensionAvailable(VK_KHR_MAINTENANCE_5_EXTENSION_NAME, m_availableDeviceExtensions))
 		{
-			m_features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
-			m_features12.descriptorBindingPartiallyBound = VK_TRUE;
-			m_features12.runtimeDescriptorArray = VK_TRUE;
-			m_features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+			appendFeatureNode(featureChain, &m_maintenance5Features);
 		}
+		if (extensionAvailable(VK_KHR_MAINTENANCE_6_EXTENSION_NAME, m_availableDeviceExtensions))
+		{
+			appendFeatureNode(featureChain, &m_maintenance6Features);
+		}
+#endif
+		appendFeatureNode(featureChain, &m_features13);
+		appendFeatureNode(featureChain, &m_features12);
+		appendFeatureNode(featureChain, &m_features11);
+		for (const ExtensionRequest& request : m_createInfo.deviceExtensions)
+		{
+			if (extensionAvailable(request.name, m_availableDeviceExtensions))
+			{
+				appendFeatureNode(featureChain, request.featuresStruct);
+			}
+		}
+		m_featuresChainHead = featureChain;
+		m_deviceFeatures.pNext = m_featuresChainHead;
 
 		m_featureInfo.timelineSemaphore = m_features12.timelineSemaphore == VK_TRUE;
 		m_featureInfo.synchronization2 = m_features13.synchronization2 == VK_TRUE;
@@ -958,13 +989,12 @@ namespace demo::rhi::vulkan
 
 		const bool bindlessDescriptorIndexing = m_features12.descriptorIndexing == VK_TRUE;
 		const bool bindlessRuntimeArray = m_features12.runtimeDescriptorArray == VK_TRUE;
-		const bool bindlessVariableCount = m_features12.descriptorBindingVariableDescriptorCount == VK_TRUE;
 		const bool bindlessPartiallyBound = m_features12.descriptorBindingPartiallyBound == VK_TRUE;
 		const bool bindlessNonUniformSampling = m_features12.shaderSampledImageArrayNonUniformIndexing == VK_TRUE;
 		const bool coreFrameFeatures = m_featureInfo.timelineSemaphore && m_featureInfo.synchronization2 &&
 			m_featureInfo.dynamicRendering
 			&& m_featureInfo.maintenance5 && m_featureInfo.maintenance6;
-		m_capabilities.coreBindless = bindlessDescriptorIndexing && bindlessRuntimeArray && bindlessVariableCount
+		m_capabilities.coreBindless = bindlessDescriptorIndexing && bindlessRuntimeArray
 			&& bindlessPartiallyBound && bindlessNonUniformSampling && coreFrameFeatures;
 
 		m_capabilities.extensionAsyncCompute =
@@ -1688,9 +1718,9 @@ namespace demo::rhi::vulkan
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentLayout");
 		std::vector<VkDescriptorSetLayoutBinding> bindings(desc.bindingCount);
-		std::vector<VkDescriptorBindingFlags> bindingFlags;
+		std::vector<VkDescriptorBindingFlags> bindingFlags(desc.bindingCount, 0);
 		std::vector<uint32_t> dynamicBindings;
-		bool hasDynamicBinding = false;
+		bool hasBindingFlags = false;
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
 			const ArgumentBinding& b = desc.bindings[i];
@@ -1703,33 +1733,38 @@ namespace demo::rhi::vulkan
 			if (b.dynamicOffset)
 			{
 				dynamicBindings.push_back(b.binding);
-				hasDynamicBinding = true;
+			}
+			if (b.bindless)
+			{
+				ensure(b.arrayCount > 1, "Bindless argument binding requires an array");
+				ensure(
+					m_features12.descriptorBindingPartiallyBound == VK_TRUE,
+					"Bindless argument arrays require descriptorBindingPartiallyBound to be enabled");
+				bindingFlags[i] |= VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+				hasBindingFlags = true;
 			}
 		}
-		// UPDATE_AFTER_BIND_BIT: only allowed when NO binding in the set is dynamic
-		// (VUID-03001: dynamic UBO/SSBO + UPDATE_AFTER_BIND on same set is illegal).
-		if (!hasDynamicBinding)
-		{
-			bindingFlags.assign(desc.bindingCount, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
-		}
 		VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
-		VkDescriptorSetLayoutCreateFlags layoutCreateFlags = 0;
-		if (!bindingFlags.empty())
+		if (hasBindingFlags)
 		{
 			flagsInfo = {
 				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
 				.bindingCount = static_cast<uint32_t>(bindingFlags.size()),
 				.pBindingFlags = bindingFlags.data(),
 			};
-			layoutCreateFlags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 		}
 		const VkDescriptorSetLayoutCreateInfo info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-			.pNext = bindingFlags.empty() ? nullptr : &flagsInfo,
-			.flags = layoutCreateFlags,
+			.pNext = hasBindingFlags ? &flagsInfo : nullptr,
+			.flags = 0,
 			.bindingCount = static_cast<uint32_t>(bindings.size()),
 			.pBindings = bindings.empty() ? nullptr : bindings.data(),
 		};
+		VkDescriptorSetLayoutSupport layoutSupport{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT
+		};
+		vkGetDescriptorSetLayoutSupport(m_device, &info, &layoutSupport);
+		ensure(layoutSupport.supported == VK_TRUE, "Argument layout exceeds Vulkan descriptor limits");
 		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
 		VK_CHECK(vkCreateDescriptorSetLayout(m_device, &info, nullptr, &layout));
 		return m_resourceTable->registerArgumentLayout(reinterpret_cast<uint64_t>(layout), std::move(dynamicBindings));
@@ -1752,46 +1787,77 @@ namespace demo::rhi::vulkan
 		}
 	}
 
+	void VulkanDevice::configureArgumentPoolCapacity(
+		uint32_t bindlessCombinedImageSamplersPerFrameSlot,
+		uint32_t frameSlotCount)
+	{
+		ensure(m_argumentPools.empty(),
+		       "Argument pool capacity must be configured before creating argument tables");
+		ensure(bindlessCombinedImageSamplersPerFrameSlot > 0,
+		       "Bindless combined-image-sampler capacity per frame slot must be non-zero");
+		ensure(frameSlotCount > 0, "Argument pool frame-slot count must be non-zero");
+
+		const uint64_t requiredCombinedImageSamplers =
+			static_cast<uint64_t>(bindlessCombinedImageSamplersPerFrameSlot) * frameSlotCount;
+		ensure(requiredCombinedImageSamplers <= (std::numeric_limits<uint32_t>::max)(),
+		       "Combined-image-sampler pool capacity exceeds uint32_t");
+		m_combinedImageSamplerPoolCapacity = (std::max)(
+			kDefaultCombinedImageSamplerPoolCapacity,
+			static_cast<uint32_t>(requiredCombinedImageSamplers));
+	}
+
 	ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layout)
 	{
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentTable");
-		if (m_argumentPool == VK_NULL_HANDLE)
-		{
-			const std::array<VkDescriptorPoolSize, 8> sizes{
-				{
-					{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
-					{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1024},
-					{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
-					{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024},
-					{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
-					{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
-					{VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
-					{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384},
-				}
-			};
+		const std::array<VkDescriptorPoolSize, 8> sizes{
+			{
+				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
+				{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1024},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+				{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024},
+				{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
+				{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
+				{VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+				{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_combinedImageSamplerPoolCapacity},
+			}
+		};
 		const VkDescriptorPoolCreateInfo poolInfo{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-			.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
-			       | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+			.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
 			.maxSets = 4096,
 			.poolSizeCount = static_cast<uint32_t>(sizes.size()),
 			.pPoolSizes = sizes.data(),
 		};
-		VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_argumentPool));
+
+		if (m_argumentPool == VK_NULL_HANDLE)
+		{
+			VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_argumentPool));
+			m_argumentPools.push_back(m_argumentPool);
 		}
 
 		const uint64_t nativeLayout = m_resourceTable->resolveArgumentLayout(layout);
 		assert(nativeLayout != 0 && "createArgumentTable requires a valid argument layout");
 		VkDescriptorSetLayout setLayout = reinterpret_cast<VkDescriptorSetLayout>(static_cast<uintptr_t>(nativeLayout));
-		const VkDescriptorSetAllocateInfo allocInfo{
+		VkDescriptorSetAllocateInfo allocInfo{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 			.descriptorPool = m_argumentPool,
 			.descriptorSetCount = 1,
 			.pSetLayouts = &setLayout,
 		};
 		VkDescriptorSet set = VK_NULL_HANDLE;
-		VK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &set));
+		VkResult allocationResult = vkAllocateDescriptorSets(m_device, &allocInfo, &set);
+		if (allocationResult == VK_ERROR_OUT_OF_POOL_MEMORY || allocationResult == VK_ERROR_FRAGMENTED_POOL)
+		{
+			VkDescriptorPool retryPool = VK_NULL_HANDLE;
+			VK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &retryPool));
+			m_argumentPools.push_back(retryPool);
+			m_argumentPool = retryPool;
+			allocInfo.descriptorPool = retryPool;
+			allocationResult = vkAllocateDescriptorSets(m_device, &allocInfo, &set);
+		}
+		checkVk(allocationResult, "Failed to allocate argument descriptor set");
+		m_argumentSetPools.emplace(asNativeU64(set), m_argumentPool);
 		return m_resourceTable->registerArgumentTable(reinterpret_cast<uint64_t>(set), layout);
 	}
 
@@ -1802,7 +1868,7 @@ namespace demo::rhi::vulkan
 			return;
 		}
 		const ArgumentTableRecord record = m_resourceTable->removeArgumentTable(handle);
-		if (record.owned && record.nativeSet != 0 && m_argumentPool != VK_NULL_HANDLE)
+		if (record.owned && record.nativeSet != 0)
 		{
 			enqueueRetirement(NativeRetirement{
 				.resource = ResourceHandle{ResourceKind::ArgumentTable, handle.index, handle.generation},

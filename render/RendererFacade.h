@@ -46,6 +46,7 @@ namespace demo
 		void destroyGltfResources(const GltfUploadResult& result);
 		void updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
 		void updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
+		void syncActiveSceneRuntimeState(SceneUploadResult& ioResult) const;
 		void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn);
 		void waitForIdle();
 		[[nodiscard]] bool loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError);

@@ -57,11 +57,18 @@ public:
   {
     return (parity & 1u) == 0u ? m_probesIrradianceViewA : m_probesIrradianceViewB;
   }
+  [[nodiscard]] FlaxGIOutputSnapshot getLightingOutputSnapshot(
+    const DebugPassOptions& debugOptions) const;
+  [[nodiscard]] FlaxGIOutputSnapshot getPublishedOutputSnapshot() const
+  {
+    return m_outputState.publishedSnapshot();
+  }
   [[nodiscard]] FlaxGIOutputSelection getLightingOutputSelection(
     const DebugPassOptions& debugOptions) const;
   [[nodiscard]] FlaxGIOutputSelection getPublishedOutputSelection() const
   {
-    return m_outputState.published();
+    const FlaxGIOutputSnapshot output = getPublishedOutputSnapshot();
+    return {output.atlas.parity, output.isValid()};
   }
   [[nodiscard]] FlaxGIDebugSnapshot getDebugSnapshot() const { return m_debugSnapshot; }
   [[nodiscard]] FlaxGIDebugViewSet getDebugViewSet() const;
@@ -136,7 +143,9 @@ private:
 	mutable std::vector<uint32_t> m_probeUpdateOffsets;
 	mutable std::vector<uint32_t> m_priorityProbeUpdateOffsets;
 
-	void writeFlaxDDGIDataToBuffer(uint32_t frameIndex) const;
+	[[nodiscard]] FlaxGISpatialSnapshot captureSpatialSnapshot() const;
+	void writeFlaxDDGIDataToBuffer(
+		uint32_t frameIndex, const FlaxGISpatialSnapshot& spatialSnapshot) const;
 	[[nodiscard]] bool plansFullOutputUpdate(const DebugPassOptions& debugOptions) const;
 	[[nodiscard]] bool hasPendingReset(const DebugPassOptions& debugOptions) const;
 	[[nodiscard]] uint32_t frameCascadeTableIndex(

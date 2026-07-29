@@ -61,6 +61,7 @@ namespace demo
 		}
 
 		CSMShadowResources& csm = m_renderer->getCSMShadowResources();
+		const CSMShadowResources::FrameData& csmFrameData = csm.getFrameData();
 		const rhi::Extent2D atlasFullExtent = m_renderer->getShadowAtlasExtent();
 		const uint32_t tileSize = std::max(1u, m_renderer->getShadowAtlasTileSize());
 		const uint32_t tilesX = atlasFullExtent.width / tileSize;
@@ -147,14 +148,10 @@ namespace demo
 			cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
 			cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
 			cascadeCamera.cameraPosition = glm::vec3(0.0f);
-			const float baseConstantBias = context.params->lightSettings.depthBias;
-			const float baseSlopeBias = context.params->lightSettings.normalBias;
-			const float biasScale = shadowData->cascadeBiasScale.z;
-			const float cascadeBiasScale = 1.0f + static_cast<float>(cascadeIndex) * biasScale;
-			const glm::vec3 lightTravelDir = glm::normalize(context.params->lightSettings.direction);
-			const glm::vec3 dirToLight = -lightTravelDir;
-			cascadeCamera.shadowConstantBias = baseConstantBias * cascadeBiasScale;
-			cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, baseSlopeBias * cascadeBiasScale);
+			const float casterNormalBias = std::max(context.params->lightSettings.normalBias, 0.0f);
+			const glm::vec3 dirToLight = -csmFrameData.lightDirection;
+			cascadeCamera.shadowConstantBias = 0.0f; // Receiver depth bias is applied once in LightPass.
+			cascadeCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, casterNormalBias);
 			std::memcpy(cameraAlloc.cpuPtr, &cascadeCamera, sizeof(cascadeCamera));
 			context.transientAllocator->flushAllocation(cameraAlloc, sizeof(cascadeCamera));
 

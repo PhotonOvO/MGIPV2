@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <limits>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -14,16 +13,26 @@ namespace demo
 	{
 		// Shadow parameters (consistent with single shadow system)
 		constexpr float kDefaultMaxShadowDistance = 100.0f;
-		constexpr float kReceiverBias = 0.0015f;
-		constexpr float kDepthBiasConstant = 1.25f;
-		constexpr float kDepthBiasSlope = 1.75f;
 		constexpr float kShadowIntensity = 1.0f;
-		constexpr float kShadowKernelRadius = 1.0f; // 1 => 3x3 PCF
-		constexpr float kCascadeBiasScaleFactor = 0.5f; // Bias decreases for farther cascades
-		constexpr float kCascadeNearPlanePadding = 25.0f; // Padding for near plane in ortho projection
-		constexpr float kCascadeCasterDepthPaddingScale = 0.02f;
-		constexpr float kCascadeCasterExtrusionPaddingScale = 0.25f;
+		constexpr float kCascadeStableNearPlane = 0.1f;
+		constexpr float kCascadeDepthPadding = 25.0f; // Fixed world-space padding on both light-depth sides
 		constexpr float kCascadeCasterMinGuardTexels = 8.0f;
+		constexpr float kCascadeCasterMinGuardWorld = 0.05f;
+		constexpr float kLightBasisVectorEpsilon = 1.0e-8f;
+		// Keep the original 16-epsilon numerical pole core, but replace its hard
+		// output edge with a C2 annulus. The 1024-epsilon outer chord is 2^-13:
+		// still a tiny angular neighborhood, while the selected chart's O(1/chord)
+		// sensitivity to an epsilon-scale direction perturbation has fallen to about
+		// 2^-10 radians. Both bounds are exact power-of-two precision multiples,
+		// rather than scene-tuned thresholds.
+		constexpr double kLightBasisRegularizationInnerChord =
+			16.0 * static_cast<double>(std::numeric_limits<float>::epsilon());
+		constexpr double kLightBasisRegularizationInnerChordSq =
+			kLightBasisRegularizationInnerChord * kLightBasisRegularizationInnerChord;
+		constexpr double kLightBasisRegularizationOuterChord =
+			1024.0 * static_cast<double>(std::numeric_limits<float>::epsilon());
+		constexpr double kLightBasisRegularizationOuterChordSq =
+			kLightBasisRegularizationOuterChord * kLightBasisRegularizationOuterChord;
 
 		[[nodiscard]] float extractCameraNearPlane(const glm::mat4& projection,
 		                                           const clipspace::ProjectionConvention& convention)
@@ -37,18 +46,102 @@ namespace demo
 			return clipspace::extractFarPlane(projection, convention);
 		}
 
-		[[nodiscard]] glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+		[[nodiscard]] bool isFiniteVector(const glm::vec3& value)
 		{
-			const float lengthSq = glm::dot(value, value);
-			return lengthSq > 1e-6f ? value * glm::inversesqrt(lengthSq) : fallback;
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 		}
 
-		[[nodiscard]] glm::mat4 resolveCascadeCameraViewProjection(const shaderio::CameraUniforms& camera)
+		[[nodiscard]] bool isFiniteVector(const glm::dvec3& value)
 		{
-			const glm::mat4& unjittered = camera.unjitteredViewProjection;
-			const float determinant = glm::determinant(unjittered);
-			return std::abs(determinant) > 1.0e-6f ? unjittered : camera.viewProjection;
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 		}
+
+		[[nodiscard]] bool tryScaleSafeNormalize(const glm::dvec3& value, glm::dvec3& normalized)
+		{
+			if (!isFiniteVector(value))
+			{
+				return false;
+			}
+
+			const glm::dvec3 absoluteValue = glm::abs(value);
+			const double largestComponent =
+				std::max({absoluteValue.x, absoluteValue.y, absoluteValue.z});
+			if (!(largestComponent > 0.0) || !std::isfinite(largestComponent))
+			{
+				return false;
+			}
+
+			const glm::dvec3 scaledValue = value / largestComponent;
+			const double scaledLengthSq = glm::dot(scaledValue, scaledValue);
+			if (!(scaledLengthSq > 0.0) || !std::isfinite(scaledLengthSq))
+			{
+				return false;
+			}
+
+			normalized = scaledValue / std::sqrt(scaledLengthSq);
+			return isFiniteVector(normalized);
+		}
+
+		[[nodiscard]] bool isFiniteNonZeroVector(const glm::vec3& value)
+		{
+			if (!isFiniteVector(value))
+			{
+				return false;
+			}
+
+			const glm::vec3 absoluteValue = glm::abs(value);
+			return std::max({absoluteValue.x, absoluteValue.y, absoluteValue.z}) > 0.0f;
+		}
+
+		[[nodiscard]] glm::vec3 safeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+		{
+			if (!isFiniteNonZeroVector(value))
+			{
+				return fallback;
+			}
+
+			const glm::vec3 absoluteValue = glm::abs(value);
+			const float largestComponent =
+				std::max({absoluteValue.x, absoluteValue.y, absoluteValue.z});
+
+			// Scale before taking the squared length so every finite, non-zero vector
+			// is normalized without introducing an absolute-magnitude branch.
+			const glm::vec3 scaledValue = value / largestComponent;
+			const float scaledLengthSq = glm::dot(scaledValue, scaledValue);
+			if (!std::isfinite(scaledLengthSq) || scaledLengthSq <= 0.0f)
+			{
+				return fallback;
+			}
+
+			const glm::vec3 normalized = scaledValue * glm::inversesqrt(scaledLengthSq);
+			return isFiniteVector(normalized) ? normalized : fallback;
+		}
+
+		[[nodiscard]] double smootherStep01(double value)
+		{
+			const double t = std::clamp(value, 0.0, 1.0);
+			return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+		}
+
+		[[nodiscard]] glm::vec3 makeFallbackLightUp(const glm::vec3& normalizedDirection)
+		{
+			const glm::vec3 absoluteDirection = glm::abs(normalizedDirection);
+			const glm::vec3 fallbackAxis =
+				absoluteDirection.x <= absoluteDirection.y && absoluteDirection.x <= absoluteDirection.z
+					? glm::vec3(1.0f, 0.0f, 0.0f)
+					: absoluteDirection.y <= absoluteDirection.z
+						? glm::vec3(0.0f, 1.0f, 0.0f)
+						: glm::vec3(0.0f, 0.0f, 1.0f);
+			glm::vec3 up = fallbackAxis;
+			up -= normalizedDirection * glm::dot(up, normalizedDirection);
+			const float upLengthSq = glm::dot(up, up);
+			if (!isFiniteVector(up) || !std::isfinite(upLengthSq) || upLengthSq <= kLightBasisVectorEpsilon)
+			{
+				return glm::vec3(1.0f, 0.0f, 0.0f);
+			}
+			return safeNormalize(up, glm::vec3(1.0f, 0.0f, 0.0f));
+		}
+
 
 		// Compute cascade split distances using practical split scheme
 		// Lambda blends logarithmic (better for perspective) and uniform (better for uniform distribution)
@@ -63,110 +156,145 @@ namespace demo
 			}
 		}
 
-		// Compute frustum corners for a slice between sliceNear and sliceFar distances
-		[[nodiscard]] std::array<glm::vec3, 8> computeFrustumSliceCornersWorld(
-			const shaderio::CameraUniforms& camera,
-			const clipspace::ProjectionConvention& projectionConvention,
-			float sliceNear,
-			float sliceFar)
-		{
-			const glm::mat4 invViewProjection = glm::inverse(resolveCascadeCameraViewProjection(camera));
-			const float cameraNear = std::max(0.01f, extractCameraNearPlane(camera.projection, projectionConvention));
-			const float cameraFar = std::max(cameraNear + 0.01f,
-			                                 extractCameraFarPlane(camera.projection, projectionConvention));
-
-			// Clamp slice distances to valid range
-			sliceNear = glm::clamp(sliceNear, cameraNear, cameraFar);
-			sliceFar = glm::clamp(sliceFar, sliceNear + 0.01f, cameraFar);
-
-			// Compute lerp factors for near and far planes of the slice
-			const float nearLerp = (sliceNear - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
-			const float farLerp = (sliceFar - cameraNear) / std::max(0.01f, cameraFar - cameraNear);
-
-			const std::array<glm::vec2, 4> ndcCorners = {
-				glm::vec2(-1.0f, -1.0f),
-				glm::vec2(1.0f, -1.0f),
-				glm::vec2(1.0f, 1.0f),
-				glm::vec2(-1.0f, 1.0f),
-			};
-
-			std::array<glm::vec3, 4> cameraNearCorners{};
-			std::array<glm::vec3, 4> cameraFarCorners{};
-
-			// Transform NDC corners to world space
-			for (size_t i = 0; i < ndcCorners.size(); ++i)
-			{
-				glm::vec4 nearCorner = invViewProjection *
-					glm::vec4(ndcCorners[i], projectionConvention.ndcNearZ, 1.0f);
-				glm::vec4 farCorner = invViewProjection * glm::vec4(ndcCorners[i], projectionConvention.ndcFarZ, 1.0f);
-				nearCorner /= nearCorner.w;
-				farCorner /= farCorner.w;
-				cameraNearCorners[i] = glm::vec3(nearCorner);
-				cameraFarCorners[i] = glm::vec3(farCorner);
-			}
-
-			// Interpolate corners to slice boundaries
-			std::array<glm::vec3, 8> sliceCorners{};
-			for (size_t i = 0; i < ndcCorners.size(); ++i)
-			{
-				const glm::vec3 ray = cameraFarCorners[i] - cameraNearCorners[i];
-				sliceCorners[i] = cameraNearCorners[i] + ray * nearLerp; // Near corners of slice
-				sliceCorners[i + 4] = cameraNearCorners[i] + ray * farLerp; // Far corners of slice
-			}
-
-			return sliceCorners;
-		}
-
-		// Compute bounding sphere from frustum corners (rotation-stable)
 		struct BoundingSphere
 		{
 			glm::vec3 center;
 			float radius;
 		};
 
-		[[nodiscard]] BoundingSphere computeBoundingSphere(const std::array<glm::vec3, 8>& corners)
+		struct FrustumSlice
 		{
-			// Compute center as average of corners
-			glm::vec3 center(0.0f);
-			for (const glm::vec3& corner : corners)
-			{
-				center += corner;
-			}
-			center /= static_cast<float>(corners.size());
+			std::array<glm::vec3, 8> corners{};
+			BoundingSphere boundingSphere{};
+		};
 
-			// Compute radius as maximum distance from center
-			float radius = 0.0f;
-			for (const glm::vec3& corner : corners)
+		// Build the slice in view space from projection rays at the requested split depths.
+		// This supports off-center projections without unprojecting the camera's distant far
+		// plane and interpolating back toward the near plane, which amplified floating-point
+		// error when imported cameras used a very large far distance.
+		[[nodiscard]] FrustumSlice computeFrustumSlice(
+			const shaderio::CameraUniforms& camera,
+			const clipspace::ProjectionConvention& projectionConvention,
+			float sliceNear,
+			float sliceFar)
+		{
+			const glm::mat4 inverseView = glm::inverse(camera.view);
+			// CSM fitting intentionally consumes the exact projection supplied by the caller.
+			// GPUDrivenRenderer prepares cascades before applying temporal jitter and marks the
+			// snapshot as ready so RenderDevice does not recompute it from the jittered camera.
+			const glm::mat4& cascadeProjection = camera.projection;
+			const float cameraNear = std::max(
+				0.01f, std::abs(extractCameraNearPlane(cascadeProjection, projectionConvention)));
+			const float cameraFar = std::max(cameraNear + 0.01f,
+			                                 std::abs(extractCameraFarPlane(cascadeProjection, projectionConvention)));
+
+			sliceNear = glm::clamp(sliceNear, cameraNear, cameraFar);
+			sliceFar = glm::clamp(sliceFar, sliceNear + 0.01f, cameraFar);
+
+			const glm::mat4 inverseProjection = glm::inverse(cascadeProjection);
+			const bool orthographic = clipspace::isOrthographicProjection(cascadeProjection);
+			const std::array<glm::vec2, 4> ndcCorners{
+				glm::vec2(-1.0f, -1.0f),
+				glm::vec2(1.0f, -1.0f),
+				glm::vec2(1.0f, 1.0f),
+				glm::vec2(-1.0f, 1.0f),
+			};
+
+			std::array<glm::vec3, 8> viewCorners{};
+			for (size_t cornerIndex = 0; cornerIndex < ndcCorners.size(); ++cornerIndex)
 			{
-				radius = std::max(radius, glm::length(corner - center));
+				glm::vec4 viewNear = inverseProjection *
+					glm::vec4(ndcCorners[cornerIndex], projectionConvention.ndcNearZ, 1.0f);
+				viewNear /= viewNear.w;
+
+				if (orthographic)
+				{
+					viewCorners[cornerIndex] = glm::vec3(viewNear.x, viewNear.y, -sliceNear);
+					viewCorners[cornerIndex + 4] = glm::vec3(viewNear.x, viewNear.y, -sliceFar);
+				}
+				else
+				{
+					const float rayDepth = std::max(-viewNear.z, 1.0e-6f);
+					viewCorners[cornerIndex] = glm::vec3(viewNear) * (sliceNear / rayDepth);
+					viewCorners[cornerIndex + 4] = glm::vec3(viewNear) * (sliceFar / rayDepth);
+				}
 			}
 
-			return {center, radius};
+			glm::dvec3 centerView(0.0);
+			for (const glm::vec3& corner : viewCorners)
+			{
+				centerView += glm::dvec3(corner);
+			}
+			centerView /= static_cast<double>(viewCorners.size());
+
+			double radius = 0.0;
+			for (const glm::vec3& corner : viewCorners)
+			{
+				radius = std::max(radius, glm::length(glm::dvec3(corner) - centerView));
+			}
+
+			FrustumSlice result{};
+			for (size_t cornerIndex = 0; cornerIndex < viewCorners.size(); ++cornerIndex)
+			{
+				result.corners[cornerIndex] = glm::vec3(
+					inverseView * glm::vec4(viewCorners[cornerIndex], 1.0f));
+			}
+			const glm::vec3 centerWorld = glm::vec3(
+				inverseView * glm::vec4(glm::vec3(centerView), 1.0f));
+			result.boundingSphere = BoundingSphere{
+				centerWorld,
+				std::max(static_cast<float>(radius), 0.01f),
+			};
+			return result;
 		}
 
-		// Snap projection bounds to texel grid for shadow stability
-		void snapToTexelGrid(float& left, float& right, float& bottom, float& top, uint32_t resolution)
+		[[nodiscard]] float computeCascadeBlendWidth(float cascadeNear, float cascadeFar)
 		{
-			const float diameter = std::max(right - left, top - bottom);
-			const float texelSize = diameter / static_cast<float>(resolution);
-
-			if (texelSize > 0.0f)
+			if (shaderio::LCascadeBlendRegion <= 0.0f)
 			{
-				left = std::floor(left / texelSize) * texelSize;
-				right = std::ceil(right / texelSize) * texelSize;
-				bottom = std::floor(bottom / texelSize) * texelSize;
-				top = std::ceil(top / texelSize) * texelSize;
+				return 0.0f;
 			}
+			return std::max(
+				(cascadeFar - cascadeNear) * shaderio::LCascadeBlendRegion,
+				shaderio::LCascadeBlendMinDistance);
 		}
 
-		[[nodiscard]] glm::vec2 snapCenterToTexelGrid(const glm::vec2& center, float diameter, uint32_t resolution)
+		struct StableProjectionGrid
 		{
-			const float texelSize = diameter / static_cast<float>(std::max(resolution, 1u));
+			float texelSize{0.0f};
+			float halfExtent{0.0f};
+		};
+
+		[[nodiscard]] StableProjectionGrid makeStableProjectionGrid(float receiverDiameter, uint32_t resolution)
+		{
+			const uint32_t safeResolution = std::max(resolution, 1u);
+			const uint32_t maxGuardTexels = (safeResolution - 1u) / 2u;
+			const uint32_t requestedGuardTexels = static_cast<uint32_t>(std::max(shaderio::LCascadePcfGuardTexels, 0));
+			const uint32_t guardTexels = std::min(requestedGuardTexels, maxGuardTexels);
+			const uint32_t receiverTexels = std::max(safeResolution - guardTexels * 2u, 1u);
+			const float texelSize = receiverDiameter / static_cast<float>(receiverTexels);
+			return StableProjectionGrid{
+				.texelSize = texelSize,
+				.halfExtent = texelSize * static_cast<float>(safeResolution) * 0.5f,
+			};
+		}
+
+		[[nodiscard]] float snapCoordinateToTexelGrid(float coordinate, float texelSize)
+		{
 			if (texelSize <= 0.0f)
 			{
-				return center;
+				return coordinate;
 			}
-			return glm::floor(center / texelSize + glm::vec2(0.5f)) * texelSize;
+
+			const double texel = static_cast<double>(texelSize);
+			return static_cast<float>(std::round(static_cast<double>(coordinate) / texel) * texel);
+		}
+
+		[[nodiscard]] glm::vec2 snapCenterToTexelGrid(const glm::vec2& center, float texelSize)
+		{
+			return glm::vec2(
+				snapCoordinateToTexelGrid(center.x, texelSize),
+				snapCoordinateToTexelGrid(center.y, texelSize));
 		}
 
 		[[nodiscard]] bool isValidBounds(const glm::vec3& boundsMin, const glm::vec3& boundsMax)
@@ -224,15 +352,212 @@ namespace demo
 		}
 	} // namespace
 
+	void CSMShadowResources::resetLightBasisHistory() noexcept
+	{
+		m_previousLightDirection = glm::vec3(0.0f, -1.0f, 0.0f);
+		m_previousLightUp = glm::vec3(1.0f, 0.0f, 0.0f);
+		m_previousLightBasisValid = false;
+		m_lightBasisProjectionChartSelected = false;
+	}
+
+	glm::vec3 CSMShadowResources::resolveStableLightUp(const glm::vec3& normalizedDirection) noexcept
+	{
+		glm::vec3 resolvedUp = makeFallbackLightUp(normalizedDirection);
+		const bool previousBasisValid =
+			m_previousLightBasisValid
+			&& isFiniteVector(m_previousLightDirection)
+			&& isFiniteVector(m_previousLightUp)
+			&& glm::dot(m_previousLightDirection, m_previousLightDirection) > kLightBasisVectorEpsilon
+			&& glm::dot(m_previousLightUp, m_previousLightUp) > kLightBasisVectorEpsilon;
+
+		if (previousBasisValid)
+		{
+			glm::dvec3 previousDirection;
+			glm::dvec3 previousUp;
+			glm::dvec3 direction;
+			if (!tryScaleSafeNormalize(glm::dvec3(m_previousLightDirection), previousDirection)
+				|| !tryScaleSafeNormalize(glm::dvec3(m_previousLightUp), previousUp)
+				|| !tryScaleSafeNormalize(glm::dvec3(normalizedDirection), direction))
+			{
+				resetLightBasisHistory();
+				return resolvedUp;
+			}
+
+			previousUp -= previousDirection * glm::dot(previousUp, previousDirection);
+			if (!tryScaleSafeNormalize(previousUp, previousUp))
+			{
+				resetLightBasisHistory();
+				return resolvedUp;
+			}
+
+			// Complementary quaternion transport charts, written without a quaternion
+			// division. Squared-distance scales avoid cancellation in 1 +/- dot.
+			// The forward chart is singular only at the antipode. The antipodal chart
+			// first rotates pi around previousUp and is singular only at no direction
+			// change.
+			//
+			// Near its pole the selected raw vector is quadratic in the direction chord,
+			// so normalizing it amplifies float direction noise as O(1 / chord). A C2
+			// annulus blends its relative roll toward the well-conditioned projection
+			// of previousUp. The blend is performed in sign-aligned half-angle quaternion
+			// coordinates: q and -q represent the same analytic rotation, so hemisphere
+			// alignment avoids the 180-degree cancellation of a direct up-vector lerp.
+			// The analytic chart is recovered exactly at the outer boundary. The inner
+			// common orientation bounds float-representation ambiguity at the pole. The
+			// analytic chart has non-zero roll winding around that pole while commonUp
+			// has zero winding, so no non-vanishing tangent basis can join them over the
+			// complete disk. The principal quaternion hemisphere confines the required
+			// gauge cut to the open numerical annulus; smootherstep makes its amplitude
+			// collapse continuously at both boundaries. The contract is therefore local
+			// numerical continuity outside that bounded topological neighborhood, not an
+			// impossible path-independent global pole map.
+			const glm::dvec3 forwardDifference = previousDirection + direction;
+			const glm::dvec3 antipodalDifference = direction - previousDirection;
+			const double forwardScale = 0.5 * glm::dot(forwardDifference, forwardDifference);
+			const double antipodalScale = 0.5 * glm::dot(antipodalDifference, antipodalDifference);
+			const double previousUpDotDirection = glm::dot(previousUp, direction);
+			const glm::dvec3 forwardTransportRaw =
+				previousUp * forwardScale - forwardDifference * previousUpDotDirection;
+			const glm::dvec3 antipodalTransportRaw =
+				previousUp * antipodalScale - antipodalDifference * previousUpDotDirection;
+
+			const bool selectedAntipodalChart = m_lightBasisProjectionChartSelected;
+			const glm::dvec3& selectedRaw =
+				selectedAntipodalChart ? antipodalTransportRaw : forwardTransportRaw;
+			const glm::dvec3& alternateRaw =
+				selectedAntipodalChart ? forwardTransportRaw : antipodalTransportRaw;
+			const glm::dvec3& selectedPoleDifference =
+				selectedAntipodalChart ? antipodalDifference : forwardDifference;
+			const double selectedPoleChordLengthSq =
+				glm::dot(selectedPoleDifference, selectedPoleDifference);
+
+			glm::dvec3 analyticUp;
+			bool analyticUpValid = tryScaleSafeNormalize(selectedRaw, analyticUp);
+			if (analyticUpValid)
+			{
+				analyticUp -= direction * glm::dot(analyticUp, direction);
+				analyticUpValid = tryScaleSafeNormalize(analyticUp, analyticUp);
+			}
+
+			glm::dvec3 transportedUp;
+			if (selectedPoleChordLengthSq <= kLightBasisRegularizationInnerChordSq)
+			{
+				glm::dvec3 commonUp = previousUp - direction * glm::dot(previousUp, direction);
+				if (tryScaleSafeNormalize(commonUp, commonUp))
+				{
+					transportedUp = commonUp;
+				}
+				else if (analyticUpValid)
+				{
+					transportedUp = analyticUp;
+				}
+				else if (!tryScaleSafeNormalize(alternateRaw, transportedUp))
+				{
+					resetLightBasisHistory();
+					return resolvedUp;
+				}
+				m_lightBasisProjectionChartSelected = !selectedAntipodalChart;
+			}
+			else if (analyticUpValid
+			         && selectedPoleChordLengthSq < kLightBasisRegularizationOuterChordSq)
+			{
+				glm::dvec3 commonUp = previousUp - direction * glm::dot(previousUp, direction);
+				if (!tryScaleSafeNormalize(commonUp, commonUp))
+				{
+					commonUp = analyticUp;
+				}
+
+				glm::dvec3 commonRight = glm::cross(direction, commonUp);
+				if (!tryScaleSafeNormalize(commonRight, commonRight))
+				{
+					resetLightBasisHistory();
+					return resolvedUp;
+				}
+
+				const double innerChord = kLightBasisRegularizationInnerChord;
+				const double outerChord = kLightBasisRegularizationOuterChord;
+				const double selectedPoleChord = std::sqrt(selectedPoleChordLengthSq);
+				const double analyticWeight = smootherStep01(
+					(selectedPoleChord - innerChord) / (outerChord - innerChord));
+
+				const double rollCosine = std::clamp(glm::dot(commonUp, analyticUp), -1.0, 1.0);
+				const double rollSine = std::clamp(glm::dot(commonRight, analyticUp), -1.0, 1.0);
+				const double analyticHalfCosine =
+					std::sqrt(std::max(0.0, 0.5 * (1.0 + rollCosine)));
+				const double analyticHalfSineMagnitude =
+					std::sqrt(std::max(0.0, 0.5 * (1.0 - rollCosine)));
+				const double analyticHalfSine =
+					std::copysign(analyticHalfSineMagnitude, rollSine);
+
+				// Nlerp the identity roll quaternion toward the analytic roll quaternion.
+				// analyticHalfCosine is non-negative, so both endpoints share a hemisphere
+				// and their weighted sum cannot suffer antipodal cancellation.
+				double blendedHalfCosine =
+					(1.0 - analyticWeight) + analyticWeight * analyticHalfCosine;
+				double blendedHalfSine = analyticWeight * analyticHalfSine;
+				const double blendedHalfLength =
+					std::hypot(blendedHalfCosine, blendedHalfSine);
+				if (!(blendedHalfLength > 0.0) || !std::isfinite(blendedHalfLength))
+				{
+					resetLightBasisHistory();
+					return resolvedUp;
+				}
+				blendedHalfCosine /= blendedHalfLength;
+				blendedHalfSine /= blendedHalfLength;
+
+				const double blendedRollCosine =
+					blendedHalfCosine * blendedHalfCosine
+					- blendedHalfSine * blendedHalfSine;
+				const double blendedRollSine =
+					2.0 * blendedHalfCosine * blendedHalfSine;
+				transportedUp =
+					commonUp * blendedRollCosine + commonRight * blendedRollSine;
+			}
+			else if (analyticUpValid)
+			{
+				transportedUp = analyticUp;
+			}
+			else
+			{
+				if (!tryScaleSafeNormalize(alternateRaw, transportedUp))
+				{
+					resetLightBasisHistory();
+					return resolvedUp;
+				}
+				m_lightBasisProjectionChartSelected = !selectedAntipodalChart;
+			}
+
+			transportedUp -= direction * glm::dot(transportedUp, direction);
+			if (!tryScaleSafeNormalize(transportedUp, transportedUp))
+			{
+				resetLightBasisHistory();
+				return resolvedUp;
+			}
+			resolvedUp = glm::vec3(transportedUp);
+		}
+
+		resolvedUp -= normalizedDirection * glm::dot(resolvedUp, normalizedDirection);
+		resolvedUp = safeNormalize(resolvedUp, makeFallbackLightUp(normalizedDirection));
+		m_previousLightDirection = normalizedDirection;
+		m_previousLightUp = resolvedUp;
+		m_previousLightBasisValid = true;
+		return resolvedUp;
+	}
+
 	void CSMShadowResources::init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo)
 	{
+		resetLightBasisHistory();
+		m_frameData = FrameData{};
 		m_device = &device;
-		m_cascadeCount = createInfo.cascadeCount;
-		m_cascadeResolution = createInfo.cascadeResolution;
+		assert(createInfo.cascadeCount > 0 && createInfo.cascadeCount <= shaderio::LCascadeCount
+			&& "Cascade count must be within the shader contract");
+		m_cascadeCount = std::clamp(
+			createInfo.cascadeCount, 1u, static_cast<uint32_t>(shaderio::LCascadeCount));
+		m_cascadeResolution = clampCascadeResolution(createInfo.cascadeResolution);
+		assert(m_cascadeResolution >= getMinimumCascadeResolution()
+			&& "Cascade resolution must preserve the full PCF guard");
 		m_shadowFormat = createInfo.shadowFormat;
 		m_projectionConvention = createInfo.projectionConvention;
-
-		assert(m_cascadeCount <= shaderio::LCascadeCount && "Cascade count exceeds maximum");
 
 		m_cascadeArray = device.createTexture(rhi::TextureDesc{
 			.dimension = rhi::TextureDimension::e2DArray,
@@ -246,14 +571,6 @@ namespace demo
 			.debugName = "CSM_CascadeArray",
 		});
 
-		m_shadowUniformBuffer = device.createBuffer(rhi::BufferDesc{
-			.size = sizeof(shaderio::ShadowUniforms),
-			.usage = rhi::BufferUsageFlags::uniform,
-			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
-			.debugName = "CSM_ShadowUniformBuffer",
-		});
-		m_shadowUniformMapped = device.mapBuffer(m_shadowUniformBuffer);
-
 		// Initialize shadow uniforms with defaults
 		m_shadowUniformsData.lightDirectionAndIntensity = glm::vec4(0.0f, -1.0f, 0.0f, kShadowIntensity);
 		m_shadowUniformsData.shadowMapMetrics = glm::vec4(
@@ -261,13 +578,9 @@ namespace demo
 			kDefaultMaxShadowDistance,
 			0.0f,
 			static_cast<float>(m_cascadeCount));
-		m_shadowUniformsData.cascadeBiasScale = glm::vec4(
-			kDepthBiasConstant,
-			kDepthBiasSlope,
-			kCascadeBiasScaleFactor,
-			0.0f); // normal bias placeholder
+		m_shadowUniformsData.cascadeSplitDistances.invDepthRange = glm::vec4(0.0f);
+		m_shadowUniformsData.cascadeSplitDistances.worldTexelSize = glm::vec4(0.0f);
 
-		std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
 		const rhi::TextureBarrier initBarrier{
 			.texture = m_cascadeArray,
 			.before = rhi::ResourceState::Undefined,
@@ -279,12 +592,7 @@ namespace demo
 
 	void CSMShadowResources::deinit()
 	{
-		if (m_device != nullptr && !m_shadowUniformBuffer.isNull())
-		{
-			m_device->unmapBuffer(m_shadowUniformBuffer);
-			m_device->destroyBuffer(m_shadowUniformBuffer);
-		}
-
+		resetLightBasisHistory();
 		if (m_device != nullptr && !m_cascadeArray.isNull())
 		{
 			m_device->destroyTexture(m_cascadeArray);
@@ -310,7 +618,8 @@ namespace demo
 	                                               float requestedMaxShadowDistance,
 	                                               const glm::vec3& casterBoundsMin,
 	                                               const glm::vec3& casterBoundsMax,
-	                                               bool casterBoundsValid)
+	                                               bool casterBoundsValid,
+	                                               float requestedNormalBiasWorld)
 	{
 		const float cameraFar = std::max(1.0f, extractCameraFarPlane(camera.projection, m_projectionConvention));
 		const float cameraNear = std::max(0.01f, extractCameraNearPlane(camera.projection, m_projectionConvention));
@@ -318,20 +627,25 @@ namespace demo
 			                                      ? requestedMaxShadowDistance
 			                                      : kDefaultMaxShadowDistance;
 		const float maxShadowDistance = glm::clamp(requestedShadowDistance, cameraNear + 0.01f, cameraFar);
-		const glm::vec3 lightDirection = safeNormalize(lightDir, glm::vec3(0.0f, -1.0f, 0.0f));
+		const bool lightDirectionInputValid = isFiniteNonZeroVector(lightDir);
+		if (!lightDirectionInputValid)
+		{
+			resetLightBasisHistory();
+		}
+		const glm::vec3 lightDirection = lightDirectionInputValid
+			                                 ? safeNormalize(lightDir, glm::vec3(0.0f, -1.0f, 0.0f))
+			                                 : glm::vec3(0.0f, -1.0f, 0.0f);
+		const float normalBiasWorld =
+			std::isfinite(requestedNormalBiasWorld) ? std::max(requestedNormalBiasWorld, 0.0f) : 0.0f;
 		const bool useCasterBounds = casterBoundsValid && isValidBounds(casterBoundsMin, casterBoundsMax);
 		const std::array<glm::vec3, 8> casterCorners =
 			useCasterBounds ? computeAabbCorners(casterBoundsMin, casterBoundsMax) : std::array<glm::vec3, 8>{};
-		const float casterDepthPadding = useCasterBounds
-			                                 ? std::max(
-				                                 1.0f, glm::length(casterBoundsMax - casterBoundsMin) *
-				                                 kCascadeCasterDepthPaddingScale)
-			                                 : 0.0f;
 
 		m_frameData = FrameData{};
 		m_frameData.cascadeCount = m_cascadeCount;
 		m_frameData.lightDirection = lightDirection;
 		m_frameData.maxShadowDistance = maxShadowDistance;
+		m_frameData.normalBiasWorld = normalBiasWorld;
 		m_frameData.casterBoundsMin = casterBoundsMin;
 		m_frameData.casterBoundsMax = casterBoundsMax;
 		m_frameData.casterBoundsValid = useCasterBounds;
@@ -347,12 +661,23 @@ namespace demo
 			m_cascadeCount > 1 ? cascadeSplits[1] : 0.0f,
 			m_cascadeCount > 2 ? cascadeSplits[2] : 0.0f,
 			m_cascadeCount > 3 ? cascadeSplits[3] : 0.0f);
+		m_shadowUniformsData.cascadeSplitDistances.invDepthRange = glm::vec4(0.0f);
+		m_shadowUniformsData.cascadeSplitDistances.worldTexelSize = glm::vec4(0.0f);
 		m_frameData.splitDistances = m_shadowUniformsData.cascadeSplitDistances;
 
-		// Choose world-up vector for light view matrix (avoid near-parallel with light direction)
-		const glm::vec3 worldUp = std::abs(lightDirection.y) > 0.95f
-			                          ? glm::vec3(0.0f, 0.0f, 1.0f)
-			                          : glm::vec3(0.0f, 1.0f, 0.0f);
+		const glm::vec3 lightUp = resolveStableLightUp(lightDirection);
+		const glm::mat4 lightRotationView = glm::lookAt(glm::vec3(0.0f), lightDirection, lightUp);
+		float stableCasterMinZ = std::numeric_limits<float>::max();
+		float stableCasterMaxZ = std::numeric_limits<float>::lowest();
+		if (useCasterBounds)
+		{
+			for (const glm::vec3& corner : casterCorners)
+			{
+				const glm::vec3 lightSpaceCorner = glm::vec3(lightRotationView * glm::vec4(corner, 1.0f));
+				stableCasterMinZ = std::min(stableCasterMinZ, lightSpaceCorner.z);
+				stableCasterMaxZ = std::max(stableCasterMaxZ, lightSpaceCorner.z);
+			}
+		}
 
 		// Compute each cascade's view-projection matrix
 		float prevSplitDistance = cameraNear;
@@ -363,30 +688,53 @@ namespace demo
 			cascadeData.splitNear = prevSplitDistance;
 			cascadeData.splitFar = splitDistance;
 
-			// Get frustum corners for this cascade slice
-			const std::array<glm::vec3, 8> sliceCorners =
-				computeFrustumSliceCornersWorld(camera, m_projectionConvention, prevSplitDistance, splitDistance);
+			// Get frustum corners and a rotation-independent bounding sphere for this slice.
+			float receiverSliceNear = prevSplitDistance;
+			if (cascadeIndex > 0)
+			{
+				const float previousCascadeNear = cascadeIndex > 1 ? cascadeSplits[cascadeIndex - 2] : 0.0f;
+				const float blendWidth = computeCascadeBlendWidth(previousCascadeNear, prevSplitDistance);
+				receiverSliceNear = std::max(cameraNear, prevSplitDistance - blendWidth);
+			}
+			const FrustumSlice frustumSlice =
+				computeFrustumSlice(camera, m_projectionConvention, receiverSliceNear, splitDistance);
+			const std::array<glm::vec3, 8>& sliceCorners = frustumSlice.corners;
 			cascadeData.receiverCornersWorld = sliceCorners;
 
-			// Compute bounding sphere (rotation-stable)
-			const BoundingSphere boundingSphere = computeBoundingSphere(sliceCorners);
+			const BoundingSphere& boundingSphere = frustumSlice.boundingSphere;
 			cascadeData.receiverCenter = boundingSphere.center;
 			cascadeData.receiverRadius = boundingSphere.radius;
 
 			const float diameter = boundingSphere.radius * 2.0f;
+			const StableProjectionGrid projectionGrid =
+				makeStableProjectionGrid(diameter, m_cascadeResolution);
 
 			// Position the cascade on a stable light-space texel grid. This keeps static shadows
 			// from swimming when the camera moves by sub-texel amounts.
-			const glm::mat4 stableLightView = glm::lookAt(glm::vec3(0.0f), lightDirection, worldUp);
-			glm::vec3 stableCenterLightSpace = glm::vec3(stableLightView * glm::vec4(boundingSphere.center, 1.0f));
+			glm::vec3 stableCenterLightSpace = glm::vec3(lightRotationView * glm::vec4(boundingSphere.center, 1.0f));
 			const glm::vec2 snappedCenterXY =
-				snapCenterToTexelGrid(glm::vec2(stableCenterLightSpace), diameter, m_cascadeResolution);
+				snapCenterToTexelGrid(glm::vec2(stableCenterLightSpace), projectionGrid.texelSize);
 			stableCenterLightSpace.x = snappedCenterXY.x;
 			stableCenterLightSpace.y = snappedCenterXY.y;
-			const glm::vec3 stableCenterWorld =
-				glm::vec3(glm::inverse(stableLightView) * glm::vec4(stableCenterLightSpace, 1.0f));
-			glm::vec3 lightPosition = stableCenterWorld - lightDirection * boundingSphere.radius;
-			glm::mat4 lightView = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
+			const float nearPlane = kCascadeStableNearPlane;
+			const float stableDepthSpan = useCasterBounds
+				                              ? std::max(0.0f, stableCasterMaxZ - stableCasterMinZ)
+				                              : boundingSphere.radius * 2.0f;
+			const float depthRange = std::max(1.0f, stableDepthSpan + kCascadeDepthPadding * 2.0f);
+			const float farPlane = nearPlane + depthRange;
+			const float depthAnchorMax = useCasterBounds
+				                             ? stableCasterMaxZ
+				                             : stableCenterLightSpace.z + boundingSphere.radius;
+			const float lightViewZ = -(nearPlane + kCascadeDepthPadding) - depthAnchorMax;
+			// Compose the light-view translation in light space so the snapped center maps
+			// exactly to (0, 0), while Z is anchored only to static caster bounds (or the
+			// receiver sphere fallback). Camera motion therefore cannot change depth span.
+			glm::mat4 lightView = glm::translate(
+				glm::mat4(1.0f),
+				glm::vec3(
+					-stableCenterLightSpace.x,
+					-stableCenterLightSpace.y,
+					lightViewZ)) * lightRotationView;
 
 			// Transform corners to light space to find ortho bounds
 			glm::vec3 minLightSpace(std::numeric_limits<float>::max());
@@ -422,18 +770,7 @@ namespace demo
 
 			updateLightSpaceBounds();
 
-			if (useCasterBounds)
-			{
-				const float nearCasterGuard = std::max(kCascadeNearPlanePadding, casterDepthPadding);
-				const float lightCameraShift = std::max(0.0f, casterMaxLightSpace.z + nearCasterGuard);
-				if (lightCameraShift > 0.0f)
-				{
-					lightPosition -= lightDirection * lightCameraShift;
-					lightView = glm::lookAt(lightPosition, stableCenterWorld, worldUp);
-					updateLightSpaceBounds();
-				}
-			}
-
+			const glm::vec3 lightPosition = glm::vec3(glm::inverse(lightView)[3]);
 			cascadeData.lightPosition = lightPosition;
 			cascadeData.lightView = lightView;
 			cascadeData.receiverMinLightSpace = minLightSpace;
@@ -441,37 +778,39 @@ namespace demo
 			cascadeData.casterMinLightSpace = casterMinLightSpace;
 			cascadeData.casterMaxLightSpace = casterMaxLightSpace;
 
-			// Use a square projection for rotation stability, then snap the bounds to the texel grid.
-			const float projectionDiameter = diameter;
-			const float texelSize = projectionDiameter / static_cast<float>(std::max(m_cascadeResolution, 1u));
-			const float halfSize = projectionDiameter * 0.5f + texelSize;
-			const glm::vec2 centerXY = glm::vec2(lightView * glm::vec4(stableCenterWorld, 1.0f));
+			// The PCF guard and the receiver fit were resolved before snapping, so these
+			// bounds use one exact texel size on both axes. There is deliberately no second
+			// floor/ceil pass here: that was the source of the 1024/1025-texel projection jump.
+			const float texelSize = projectionGrid.texelSize;
+			const float halfSize = projectionGrid.halfExtent;
+			const float left = -halfSize;
+			const float right = halfSize;
+			const float bottom = -halfSize;
+			const float top = halfSize;
 
-			float left = centerXY.x - halfSize;
-			float right = centerXY.x + halfSize;
-			float bottom = centerXY.y - halfSize;
-			float top = centerXY.y + halfSize;
+			// Extruding a directional-light caster toward the light changes only light-space Z.
+			// Keep XY culling tied to this cascade's stable receiver projection instead of
+			// expanding every cascade to the full-scene caster AABB.
+			const float cullingGuard = std::max({
+				texelSize * kCascadeCasterMinGuardTexels,
+				kCascadeCasterMinGuardWorld,
+				normalBiasWorld,
+			});
+			const float cullLeft = left - cullingGuard;
+			const float cullRight = right + cullingGuard;
+			const float cullBottom = bottom - cullingGuard;
+			const float cullTop = top + cullingGuard;
 
-			// Snap bounds to texel grid for stability
-			snapToTexelGrid(left, right, bottom, top, m_cascadeResolution);
-
-			const float casterDepthRange = std::max(0.0f, casterMaxLightSpace.z - casterMinLightSpace.z);
-			const float casterGuard = std::max(texelSize * kCascadeCasterMinGuardTexels,
-			                                   casterDepthRange * kCascadeCasterExtrusionPaddingScale);
-			const float cullLeft = useCasterBounds ? std::min(left, casterMinLightSpace.x - casterGuard) : left;
-			const float cullRight = useCasterBounds ? std::max(right, casterMaxLightSpace.x + casterGuard) : right;
-			const float cullBottom = useCasterBounds ? std::min(bottom, casterMinLightSpace.y - casterGuard) : bottom;
-			const float cullTop = useCasterBounds ? std::max(top, casterMaxLightSpace.y + casterGuard) : top;
-
-			// Compute near/far planes with padding
-			const float depthPadding = useCasterBounds
-				                           ? std::max(kCascadeNearPlanePadding, casterDepthPadding)
-				                           : std::max(kCascadeNearPlanePadding, boundingSphere.radius);
-			const float nearPlane = std::max(0.1f, -casterMaxLightSpace.z - depthPadding);
-			const float farPlane = std::max(nearPlane + 1.0f, -casterMinLightSpace.z + depthPadding);
+			// near/far use a fixed world-space span: static caster bounds when available,
+			// otherwise the rotation-stable receiver sphere. Receiver motion cannot rescale Z.
 			cascadeData.nearPlane = nearPlane;
 			cascadeData.farPlane = farPlane;
+			cascadeData.depthRange = depthRange;
+			cascadeData.invDepthRange = 1.0f / depthRange;
 			cascadeData.texelSize = texelSize;
+			cascadeData.cullingGuardWorld = cullingGuard;
+			m_shadowUniformsData.cascadeSplitDistances.invDepthRange[cascadeIndex] = cascadeData.invDepthRange;
+			m_shadowUniformsData.cascadeSplitDistances.worldTexelSize[cascadeIndex] = texelSize;
 
 			// Create orthographic projection
 			const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
@@ -506,7 +845,6 @@ namespace demo
 			0.0f,
 			static_cast<float>(m_cascadeCount));
 
-		// Upload to GPU
-		std::memcpy(m_shadowUniformMapped, &m_shadowUniformsData, sizeof(m_shadowUniformsData));
+		// ShadowUniforms remains a pure CPU snapshot for the active LightParams path.
 	}
 } // namespace demo

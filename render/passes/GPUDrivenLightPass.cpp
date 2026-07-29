@@ -18,9 +18,12 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 9> dependencies = {
-			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
-			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
-			PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
+			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassCSMShadowHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
@@ -31,7 +34,8 @@ namespace demo
 			                               rhi::ShaderStage::fragment),
 			PassResourceDependency::buffer(kPassLightCoarseCullingUniformHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::fragment),
-			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
+			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::write,
+			                                rhi::StageFlags::rasterColorOut, rhi::HazardFlags::textureWrites,
 			                                rhi::ResourceState::ColorAttachment),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};

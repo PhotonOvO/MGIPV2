@@ -606,9 +606,11 @@ float3 sampleFlaxDDGIIrradiance(
     for (uint c = 0; c < ddgi.cascadesCount; c++)
     {
         float spacing = ddgi.probesOriginAndSpacing[c].w;
-        float3 origin = ddgi.probesOriginAndSpacing[c].xyz;
+        // Coverage and cross-cascade blending follow the continuous camera
+        // origin. Probe lookup below remains anchored to the snapped grid.
+        float3 blendOrigin = ddgi.blendOrigin[c].xyz;
         float3 extent = spacing * float3(ddgi.probesCounts - 1) * 0.5f;
-        float3 edgeDistances = extent - abs(biasedPos - origin);
+        float3 edgeDistances = extent - abs(biasedPos - blendOrigin);
         if (any(edgeDistances < float3(0,0,0)))
             continue;
 

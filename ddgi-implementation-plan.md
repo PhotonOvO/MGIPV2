@@ -318,7 +318,7 @@ SDFLoadResult 包含：asset（MeshSDFAsset）、errorMessage（std::string）�
 - **归一化与存储**：d / maxDistance（padded AABB 最大边长）clamp 到 [-1,1]，存 (d+1)/2，自包含 float→half（RNE 舍入）。分辨率 per-axis ceil(extent × targetTexelPerMeter=3.0) clamp 32–64（注：LuxGI 原码此处为除法，语义与参数名不符，本实现按"每米体素数"取乘法，clamp 后实际差异很小）。Z 切片多线程并行烘焙。
 - **网格加载**：自包含最简 OBJ 解析器（v/f 记录、扇形三角化、支持 v//vn 等索引形式与负索引），未引入 tinygltf——离线工具保持零依赖（仅链 glm）。
 - **.bin 格式**：magic "MSDF" + version(1) + resolution uvec3 + worldBounds min/max float3×2 + R16F payload（x-major），格式常量在 SDFBaker.h 与 SDFLoader.h 双侧注释强制同步。
-- **3D 纹理无阻塞点**：rhi::TextureDesc 已支持 TextureDimension::e3D + Extent3D.depth，rhi::TextureFormat::r16Sfloat 已存在，VulkanDevice::createTexture 已正确处理 VK_IMAGE_TYPE_3D——SDFLoader 直接经 rhi::Device 创建 R16F Texture3D 并经 staging buffer + copyBufferToTexture 上传（Undefined→TransferDst→General 屏障链，复用 loadAndCreateImage 的 staging 退役契约），未改动任何 rhi/ 接口。
+- **3D 纹理无阻塞点**：rhi::TextureDesc 已支持 TextureDimension::e3D + Extent3D.depth，rhi::TextureFormat::r16Sfloat 已存在，VulkanDevice::createTexture 已正确处理 VK_IMAGE_TYPE_3D——SDFLoader 直接经 rhi::Device 创建 R16F Texture3D 并经 staging buffer + copyBufferToTexture 上传（Undefined→TransferDst→General 屏障链，遵循与 uploadRawRgba8Image 一致的通用 RHI staging 退役契约），未改动任何 rhi/ 接口。
 
 ---
 

@@ -11,6 +11,11 @@ ConstantBuffer<DepthPyramidUniforms> depthPyramidUniforms;
 
 static const uint kGroupSizeX = 16;
 static const uint kGroupSizeY = 16;
+// A single dispatch can only synchronize reductions inside one 16x16
+// workgroup. That produces mip0..mip4 reliably. Coarser mips would require
+// another dispatch (or device-wide synchronization), so keep them at the
+// reverse-Z far value and never use them for occlusion.
+static const uint kGeneratedMipCount = 5;
 
 // 用于在组内保存“当前正在被继续 reduce 的那一层”。
 // 初始先存 mip0 的 16x16。
@@ -31,16 +36,24 @@ uint2 getMipSize(uint mipLevel)
         uint2(depthPyramidUniforms.pyramidWidth, depthPyramidUniforms.pyramidHeight) >> mipLevel);
 }
 
-float loadSourceDepthClamped(uint2 coord)
+float loadSourceDepthOrFar(uint2 coord)
 {
     uint2 sourceSize = getSourceSize();
-    coord = min(coord, sourceSize - uint2(1u, 1u));
+    if(sourceSize.x == 0u || sourceSize.y == 0u
+       || coord.x >= sourceSize.x || coord.y >= sourceSize.y)
+    {
+        // Reverse-Z clear/far. Treating an incomplete edge block as empty is
+        // deliberately conservative: it can reduce culling, never hide geometry.
+        return 0.0;
+    }
     return depthTexture.Load(int3(coord, 0));
 }
 
-float max4(float a, float b, float c, float d)
+float min4(float a, float b, float c, float d)
 {
-    return max(max(a, b), max(c, d));
+    // Reverse-Z stores larger values closer to the camera. The conservative
+    // occlusion bound for a region is therefore its farthest (minimum) depth.
+    return min(min(a, b), min(c, d));
 }
 
 [numthreads(kGroupSizeX, kGroupSizeY, 1)]
@@ -66,12 +79,12 @@ void depthPyramid(uint3 groupId: SV_GroupID,
         // mip0 的每个像素对应 source 的 2x2
         uint2 srcBase = mip0Coord * 2u;
 
-        float d0 = loadSourceDepthClamped(srcBase + uint2(0, 0));
-        float d1 = loadSourceDepthClamped(srcBase + uint2(1, 0));
-        float d2 = loadSourceDepthClamped(srcBase + uint2(0, 1));
-        float d3 = loadSourceDepthClamped(srcBase + uint2(1, 1));
+        float d0 = loadSourceDepthOrFar(srcBase + uint2(0, 0));
+        float d1 = loadSourceDepthOrFar(srcBase + uint2(1, 0));
+        float d2 = loadSourceDepthOrFar(srcBase + uint2(0, 1));
+        float d3 = loadSourceDepthOrFar(srcBase + uint2(1, 1));
 
-        v = max4(d0, d1, d2, d3);
+        v = min4(d0, d1, d2, d3);
 
         if (mipCount > 0)
         {
@@ -92,7 +105,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip1Coord = groupId.xy * uint2(8, 8) + localXY;
             uint2 mip1Size = getMipSize(1);
 
-            float r = max4(
+            float r = min4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -119,7 +132,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip2Coord = groupId.xy * uint2(4, 4) + localXY;
             uint2 mip2Size = getMipSize(2);
 
-            float r = max4(
+            float r = min4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -146,7 +159,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip3Coord = groupId.xy * uint2(2, 2) + localXY;
             uint2 mip3Size = getMipSize(3);
 
-            float r = max4(
+            float r = min4(
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 0],
                 gsMip[localXY.y * 2 + 0][localXY.x * 2 + 1],
                            gsMip[localXY.y * 2 + 1][localXY.x * 2 + 0],
@@ -173,7 +186,7 @@ void depthPyramid(uint3 groupId: SV_GroupID,
             uint2 mip4Coord = groupId.xy;
             uint2 mip4Size = getMipSize(4);
 
-            float r = max4(
+            float r = min4(
                 gsMip[0][0],
                 gsMip[0][1],
                 gsMip[1][0],
@@ -189,4 +202,50 @@ void depthPyramid(uint3 groupId: SV_GroupID,
 
         GroupMemoryBarrierWithGroupSync();
     }
+
+    // Do not leave descriptor-visible higher mips undefined. They are not a
+    // valid hierarchical reduction in this one-dispatch implementation, so
+    // publish reverse-Z far/empty instead. Consumers that accidentally reach
+    // them will conservatively keep objects visible.
+#define CLEAR_UNUSED_MIP(MIP_LEVEL)                                      \
+    if(mipCount > MIP_LEVEL)                                             \
+    {                                                                    \
+        const uint2 clearMipSize = getMipSize(MIP_LEVEL);                \
+        if(dispatchThreadId.x < clearMipSize.x                            \
+           && dispatchThreadId.y < clearMipSize.y)                       \
+        {                                                                \
+            depthPyramidTexture[MIP_LEVEL][dispatchThreadId.xy] = 0.0;   \
+        }                                                                \
+    }
+
+    // Fixed expansion keeps every storage-image descriptor index constant and
+    // avoids requiring StorageImageArrayDynamicIndexing.
+    CLEAR_UNUSED_MIP(5u)
+    CLEAR_UNUSED_MIP(6u)
+    CLEAR_UNUSED_MIP(7u)
+    CLEAR_UNUSED_MIP(8u)
+    CLEAR_UNUSED_MIP(9u)
+    CLEAR_UNUSED_MIP(10u)
+    CLEAR_UNUSED_MIP(11u)
+    CLEAR_UNUSED_MIP(12u)
+    CLEAR_UNUSED_MIP(13u)
+    CLEAR_UNUSED_MIP(14u)
+    CLEAR_UNUSED_MIP(15u)
+    CLEAR_UNUSED_MIP(16u)
+    CLEAR_UNUSED_MIP(17u)
+    CLEAR_UNUSED_MIP(18u)
+    CLEAR_UNUSED_MIP(19u)
+    CLEAR_UNUSED_MIP(20u)
+    CLEAR_UNUSED_MIP(21u)
+    CLEAR_UNUSED_MIP(22u)
+    CLEAR_UNUSED_MIP(23u)
+    CLEAR_UNUSED_MIP(24u)
+    CLEAR_UNUSED_MIP(25u)
+    CLEAR_UNUSED_MIP(26u)
+    CLEAR_UNUSED_MIP(27u)
+    CLEAR_UNUSED_MIP(28u)
+    CLEAR_UNUSED_MIP(29u)
+    CLEAR_UNUSED_MIP(30u)
+    CLEAR_UNUSED_MIP(31u)
+#undef CLEAR_UNUSED_MIP
 }

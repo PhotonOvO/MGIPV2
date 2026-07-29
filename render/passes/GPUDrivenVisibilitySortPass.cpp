@@ -21,9 +21,8 @@ namespace demo
 			return;
 		}
 
-		if (sort.pipelineHandle.isNull() || sort.argumentTable.isNull() || sort.uploadKeyBufferHandle.isNull()
-			|| sort.uploadValueBufferHandle.isNull() || sort.keyBufferHandle.isNull() || sort.valueBufferHandle.
-			isNull())
+		if (sort.uploadKeyBufferHandle.isNull() || sort.uploadValueBufferHandle.isNull()
+			|| sort.keyBufferHandle.isNull() || sort.valueBufferHandle.isNull())
 		{
 			return;
 		}
@@ -34,10 +33,16 @@ namespace demo
 		copyEnc->copyBuffer(sort.uploadValueBufferHandle, 0, sort.valueBufferHandle, 0, copySize);
 		context.commandBuffer->endEncoding();
 
-		// Same-pass barrier: copyBuffer uploads sort keys/values, then the bitonic
-		// compute shader reads and rewrites them in place below.
+		// Same-pass barrier: copyBuffer uploads sort keys/values. For one element
+		// there is no bitonic dispatch, but the visibility patch still consumes the
+		// copied key/value buffers from compute, so transfer visibility is required.
 		context.commandBuffer->barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
 		                               rhi::HazardFlags::bufferWrites);
+
+		if (sort.paddedElementCount <= 1u)
+		{
+			return;
+		}
 
 		for (uint32_t level = 2u; level <= sort.paddedElementCount; level <<= 1u)
 		{

@@ -30,8 +30,8 @@ namespace demo
 			                                rhi::ResourceState::ColorAttachment),
 			PassResourceDependency::texture(kPassGBuffer2Handle, ResourceAccess::write, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ColorAttachment),
-			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
-			                                rhi::ResourceState::DepthStencilReadOnly),
+			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::DepthStencilAttachment),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
@@ -67,11 +67,16 @@ namespace demo
 			};
 		}
 
+		// The previous-visible depth prepass is only a bootstrap for the Hi-Z/culling
+		// passes that have already completed. Rebuild the final scene depth from the
+		// authoritative current-visible stream so GBuffer and lighting consume the same
+		// pose/visibility set. Clearing to 0 is the reverse-Z far value and prevents stale
+		// bootstrap depth from rejecting newly exposed current-visible surfaces.
 		const rhi::DepthTargetDesc depthTarget{
 			.texture = {},
 			.view = sceneView->sceneDepthView,
-			.state = rhi::ResourceState::DepthStencilReadOnly,
-			.loadOp = rhi::LoadOp::load,
+			.state = rhi::ResourceState::DepthStencilAttachment,
+			.loadOp = rhi::LoadOp::clear,
 			.storeOp = rhi::StoreOp::store,
 			.clearValue = {0.0f, 0},
 		};
@@ -80,10 +85,29 @@ namespace demo
 		uint64_t sortedCountBufferHandle = 0;
 		uint32_t sortedOpaqueCapacity = 0;
 		uint32_t sortedAlphaCapacity = 0;
-		m_renderer->invalidateSortedBootstrapStateForFrame(context.frameIndex);
-		if (context.drawStream != nullptr)
+		const uint32_t currentIndirectObjectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
+		const uint64_t currentRawIndirectBufferHandle =
+			m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
+		const uint64_t currentRawCountBufferHandle =
+			m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
+		// Keep this predicate aligned with GPUDrivenCullingPass::execute. Publishing
+		// is CPU metadata for the next frame, so it is valid only when this command
+		// buffer actually records the current topology's culling dispatch.
+		const bool currentRawCullingProduced =
+			context.params->cameraUniforms != nullptr
+			&& !m_renderer->getGPUCullingPipelineHandle().isNull()
+			&& !m_renderer->getGPUCullingArgumentTable(context.frameIndex).isNull()
+			&& currentIndirectObjectCount > 0u
+			&& currentRawIndirectBufferHandle != 0u
+			&& currentRawCountBufferHandle != 0u;
+		if (currentRawCullingProduced)
 		{
-			sortedCountBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
+			m_renderer->publishRawCullingBootstrapStateForFrame(context.frameIndex, currentIndirectObjectCount);
+		}
+
+		if (context.drawStream != nullptr && currentRawCullingProduced)
+		{
+			sortedCountBufferHandle = currentRawCountBufferHandle;
 			sortedOpaqueCapacity = static_cast<uint32_t>(m_renderer->getOpaqueDrawIndices().size());
 			sortedAlphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
 			const uint32_t transparentCapacity = static_cast<uint32_t>(m_renderer->getTransparentDrawIndices().size());
@@ -137,12 +161,14 @@ namespace demo
 			MeshPool& meshPool = m_renderer->getMeshPool();
 			const uint64_t indirectBufferHandle = sortedIndirectBufferHandle != 0
 				                                      ? sortedIndirectBufferHandle
-				                                      : m_renderer->getGPUCullingIndirectBufferOpaque(
-					                                      context.frameIndex);
+				                                      : (currentRawCullingProduced
+					                                      ? currentRawIndirectBufferHandle
+					                                      : 0u);
 			const uint64_t countBufferHandle = sortedCountBufferHandle != 0
 				                                   ? sortedCountBufferHandle
-				                                   : m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
-			const uint32_t currentIndirectObjectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
+				                                   : (currentRawCullingProduced
+					                                   ? currentRawCountBufferHandle
+					                                   : 0u);
 			const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
 
 			if (!context.cameraAllocValid)
@@ -235,9 +261,13 @@ namespace demo
 					const rhi::BufferHandle indirectBufferRHI =
 						sortedIndirectBufferHandle != 0
 							? m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex)
-							: m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex);
-					const rhi::BufferHandle countBufferRHI = m_renderer->getGPUCullingDrawCountBufferRHIHandle(
-						context.frameIndex);
+							: (currentRawCullingProduced
+								? m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex)
+								: rhi::BufferHandle{});
+					const rhi::BufferHandle countBufferRHI =
+						currentRawCullingProduced
+							? m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex)
+							: rhi::BufferHandle{};
 
 					enc->setPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle());
 					const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();

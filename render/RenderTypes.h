@@ -15,6 +15,7 @@
 #include "Pass.h"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -165,12 +166,75 @@ namespace demo
 	struct ShadowPackedMesh
 	{
 		size_t meshIndex{0};
+		uint32_t drawRecordIndex{UINT32_MAX};
 		uint32_t indexCount{0};
 		uint32_t firstIndex{0};
 		int32_t vertexOffset{0};
 		glm::vec4 boundsSphere{0.0f};
 		shaderio::DrawUniforms drawData{};
 	};
+
+	struct SubmittedTransformHistory
+	{
+		glm::mat4 previousWorldTransform{1.0f};
+		glm::mat4 currentWorldTransform{1.0f};
+		bool updatedSinceLastSubmit{false};
+	};
+
+	inline SubmittedTransformHistory makeSubmittedTransformHistory(const glm::mat4& worldTransform) noexcept
+	{
+		return SubmittedTransformHistory{
+			.previousWorldTransform = worldTransform,
+			.currentWorldTransform = worldTransform,
+			.updatedSinceLastSubmit = false,
+		};
+	}
+
+	inline void updateSubmittedTransformHistory(
+		SubmittedTransformHistory& history,
+		const glm::mat4& worldTransform) noexcept
+	{
+		if (!history.updatedSinceLastSubmit)
+		{
+			history.previousWorldTransform = history.currentWorldTransform;
+			history.updatedSinceLastSubmit = true;
+		}
+		history.currentWorldTransform = worldTransform;
+	}
+
+	inline void commitSubmittedTransformHistory(SubmittedTransformHistory& history) noexcept
+	{
+		history.previousWorldTransform = history.currentWorldTransform;
+		history.updatedSinceLastSubmit = false;
+	}
+
+	inline void updateShadowPackedMeshRuntimeState(
+		ShadowPackedMesh& packedMesh,
+		const glm::mat4& worldTransform,
+		const glm::mat4& previousWorldTransform,
+		const glm::vec4& boundsSphere) noexcept
+	{
+		packedMesh.boundsSphere = boundsSphere;
+		packedMesh.drawData.prevModelMatrix = previousWorldTransform;
+		packedMesh.drawData.modelMatrix = worldTransform;
+	}
+
+	inline void updateShadowPackedMeshRuntimeState(
+		ShadowPackedMesh& packedMesh,
+		const glm::mat4& worldTransform,
+		const glm::vec4& boundsSphere) noexcept
+	{
+		updateShadowPackedMeshRuntimeState(
+			packedMesh,
+			worldTransform,
+			packedMesh.drawData.modelMatrix,
+			boundsSphere);
+	}
+
+	inline void commitShadowPackedMeshSubmittedState(ShadowPackedMesh& packedMesh) noexcept
+	{
+		packedMesh.drawData.prevModelMatrix = packedMesh.drawData.modelMatrix;
+	}
 
 	struct GPUDrivenSceneView
 	{
@@ -268,13 +332,107 @@ namespace demo
 		const SceneUploadResult* gltfModel{nullptr};
 		// Camera data (pointer to App-owned CameraUniforms)
 		const shaderio::CameraUniforms* cameraUniforms{nullptr};
+		// True when the caller has already prepared the CSM matrices for this frame.
+		bool csmCascadeMatricesPrepared{false};
 		DirectionalLightSettings lightSettings{};
 		std::span<const SceneLight> sceneLights{};
 		std::span<const SceneNode> sceneLightSceneNodes{};
 		std::span<const GltfNodeData> sceneLightGltfNodes{};
 		DebugPassOptions debugOptions{};
+		// Optional app-authored label recorded inside a stable renderer pass marker.
+		// This stays backend-agnostic and does not require RenderDoc headers.
+		std::string automationDebugMarker{};
 		const GPUDrivenSceneView* gpuDrivenSceneView{nullptr};
 	};
+
+	[[nodiscard]] constexpr bool shouldUpdateCSMCascadeMatrices(const RenderParams& params) noexcept
+	{
+		return params.cameraUniforms != nullptr && !params.csmCascadeMatricesPrepared;
+	}
+
+	// Builds the camera contract consumed by CPU shadow fitting. Temporal rendering may
+	// overwrite projection/viewProjection with jittered matrices while preserving the
+	// physical camera projection in unjitteredViewProjection. Reconstruct projection
+	// from that stable VP and inverse(view); if the optional temporal field is absent or
+	// invalid, retain the coherent legacy projection * view pair.
+	[[nodiscard]] inline shaderio::CameraUniforms makeUnjitteredShadowFitCamera(
+		const shaderio::CameraUniforms& camera) noexcept
+	{
+		const auto matrixIsFinite = [](const glm::mat4& matrix) noexcept
+		{
+			for (uint32_t column = 0; column < 4; ++column)
+			{
+				for (uint32_t row = 0; row < 4; ++row)
+				{
+					if (!std::isfinite(matrix[column][row]))
+					{
+						return false;
+					}
+				}
+			}
+			return true;
+		};
+		const auto matrixIsInvertible = [&](const glm::mat4& matrix) noexcept
+		{
+			if (!matrixIsFinite(matrix))
+			{
+				return false;
+			}
+			const float determinant = glm::determinant(matrix);
+			return std::isfinite(determinant) && determinant != 0.0f;
+		};
+		const auto matrixIsIdentity = [](const glm::mat4& matrix) noexcept
+		{
+			constexpr float epsilon = 1.0e-6f;
+			for (uint32_t column = 0; column < 4; ++column)
+			{
+				for (uint32_t row = 0; row < 4; ++row)
+				{
+					const float expected = column == row ? 1.0f : 0.0f;
+					if (std::abs(matrix[column][row] - expected) > epsilon)
+					{
+						return false;
+					}
+				}
+			}
+			return true;
+		};
+
+		shaderio::CameraUniforms shadowFitCamera = camera;
+		if (!matrixIsInvertible(camera.view))
+		{
+			return shadowFitCamera;
+		}
+
+		const glm::mat4 inverseView = glm::inverse(camera.view);
+		const glm::mat4 fallbackViewProjection = camera.projection * camera.view;
+		const bool identityTemporalSentinel =
+			matrixIsIdentity(camera.unjitteredViewProjection)
+			&& !matrixIsIdentity(fallbackViewProjection);
+		const bool hasValidUnjitteredViewProjection =
+			matrixIsInvertible(camera.unjitteredViewProjection)
+			&& !identityTemporalSentinel;
+		const glm::mat4 selectedViewProjection = hasValidUnjitteredViewProjection
+			? camera.unjitteredViewProjection
+			: fallbackViewProjection;
+		if (!matrixIsInvertible(selectedViewProjection))
+		{
+			return shadowFitCamera;
+		}
+
+		const glm::mat4 shadowFitProjection = selectedViewProjection * inverseView;
+		if (!matrixIsFinite(shadowFitProjection))
+		{
+			return shadowFitCamera;
+		}
+
+		shadowFitCamera.projection = shadowFitProjection;
+		shadowFitCamera.viewProjection = selectedViewProjection;
+		shadowFitCamera.inverseViewProjection = glm::inverse(selectedViewProjection);
+		shadowFitCamera.unjitteredViewProjection = selectedViewProjection;
+		shadowFitCamera.unjitteredInverseViewProjection = shadowFitCamera.inverseViewProjection;
+		return shadowFitCamera;
+	}
 
 	struct SceneUploadResult
 	{

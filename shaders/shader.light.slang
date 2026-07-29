@@ -256,73 +256,122 @@ float computeViewDepth(vec3 worldPos)
     return abs(viewPos.z);
 }
 
-int selectCascadeIndex(float viewDepth)
+// xy = shadow UV, z = reverse-Z receiver depth, w = valid projection.
+// The PCF footprint must remain inside the texture; invalid projections fall
+// through to a coarser cascade instead of relying on sampler address behavior.
+float4 projectCSMShadowCascade(vec3 worldPos, int cascadeIdx)
 {
-    int cascadeIndex = 0;
-    float splits[4] = {
-        lighting.light.cascadeSplitDistances.x,
-        lighting.light.cascadeSplitDistances.y,
-        lighting.light.cascadeSplitDistances.z,
-        lighting.light.cascadeSplitDistances.w
-    };
-
-    [unroll]
-    for(int i = 0; i < LCascadeCount - 1; ++i)
-    {
-        if(viewDepth > splits[i])
-            cascadeIndex = i + 1;
-    }
-    return cascadeIndex;
-}
-
-float sampleCSMShadow(vec3 worldPos, vec3 worldNormal, float viewDepth)
-{
-    const float maxShadowDistance = lighting.light.cascadeSplitDistances.w;
-    const float fadeWidth = max(maxShadowDistance * 0.08, 2.0);
-    const float distanceFade = saturate((maxShadowDistance - viewDepth) / fadeWidth);
-    if(distanceFade <= 0.0)
-        return 1.0;
-
-    int cascadeIdx = selectCascadeIndex(viewDepth);
-
     float4 shadowClip = mul(lighting.light.worldToShadow[cascadeIdx], float4(worldPos, 1.0));
+    if(!(abs(shadowClip.w) > 1.0e-6))
+        return float4(0.0);
+
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
     float2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
+    const float texelSize = max(lighting.light.shadowMetrics.x, 1.0e-7);
+    const float pcfSafeMarginUv = (float(LCascadePcfRadius) + 0.5) * texelSize;
+    const float edgeDistanceUv = min(
+        min(shadowUv.x, 1.0 - shadowUv.x),
+        min(shadowUv.y, 1.0 - shadowUv.y));
+    const bool validProjection =
+        shadowNdc.z > 0.0 && shadowNdc.z < 1.0
+        && edgeDistanceUv >= pcfSafeMarginUv;
 
-    if(shadowUv.x < 0.0 || shadowUv.x > 1.0 || shadowUv.y < 0.0 || shadowUv.y > 1.0)
-        return 1.0;
-    if(shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
-        return 1.0;
+    return float4(shadowUv, shadowNdc.z, validProjection ? 1.0 : 0.0);
+}
 
-    float3 lightDir = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
-    float cosTheta = saturate(abs(dot(worldNormal, lightDir)));
-    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
-    float slope = sinTheta / max(cosTheta, 0.01);
+// Blend only inside a small, texel-quantized texture-edge protection band.
+// CSM fitting snaps cascade centers to the same texel grid, so a fixed world
+// point cannot acquire a continuously changing blend weight from camera yaw.
+float cascadeCoverageBlendWeight(float2 shadowUv)
+{
+    const float texelSize = max(lighting.light.shadowMetrics.x, 1.0e-7);
+    const float edgeDistanceUv = min(
+        min(shadowUv.x, 1.0 - shadowUv.x),
+        min(shadowUv.y, 1.0 - shadowUv.y));
+    const float edgeDistanceTexels = floor(max(edgeDistanceUv / texelSize, 0.0));
+    const float blendStartTexels =
+        float(LCascadePcfGuardTexels - LCascadeCoverageBlendTexels);
+    const float blendEndTexels = float(LCascadePcfGuardTexels);
+    return 1.0 - smoothstep(blendStartTexels, blendEndTexels, edgeDistanceTexels);
+}
 
-    float baseBias = lighting.light.shadowMetrics.y;
-    float slopeBias = lighting.light.shadowMetrics.z;
-    float cascadeScale = 0.5;
-
-    float cascadeBias = baseBias * (1.0 + float(cascadeIdx) * cascadeScale);
-    float bias = cascadeBias + slopeBias * (1.0 + float(cascadeIdx) * cascadeScale) * slope;
+// The shadow sampler is nearest-filtered; each tap performs its own depth
+// comparison, which is true manual PCF.
+float sampleCSMShadowCascade(int cascadeIdx, float4 projection)
+{
+    // depthBias is a receiver-only world-space light-depth offset. Orthographic
+    // reverse-Z is linear, so multiplying by 1/(far-near) converts it to NDC.
+    // There is deliberately no cascade-index scale: every cascade uses the same
+    // physical bias and only its projection range changes the NDC magnitude.
+    const float receiverBiasWorld = max(lighting.light.shadowMetrics.y, 0.0);
+    const float invDepthRange = max(lighting.light.cascadeSplitDistances.invDepthRange[cascadeIdx], 0.0);
+    const float bias = receiverBiasWorld * invDepthRange;
 
     float texelSize = lighting.light.shadowMetrics.x;
     float visibility = 0.0;
 
     [unroll]
-    for(int y = -1; y <= 1; ++y)
+    for(int y = -LCascadePcfRadius; y <= LCascadePcfRadius; ++y)
     {
         [unroll]
-        for(int x = -1; x <= 1; ++x)
+        for(int x = -LCascadePcfRadius; x <= LCascadePcfRadius; ++x)
         {
             float2 offset = float2(x, y) * texelSize;
-            float3 sampleCoord = float3(shadowUv + offset, float(cascadeIdx));
-            float shadowDepth = shadowMap.Sample(sampleCoord).r;
-            visibility += (shadowNdc.z + bias >= shadowDepth) ? 1.0 : 0.0;
+            float3 sampleCoord = float3(projection.xy + offset, float(cascadeIdx));
+            float shadowDepth = shadowMap.SampleLevel(sampleCoord, 0.0).r;
+            visibility += (projection.z + bias >= shadowDepth) ? 1.0 : 0.0;
         }
     }
 
-    return lerp(1.0, visibility / 9.0, distanceFade);
+    const float pcfDiameter = float(LCascadePcfRadius * 2 + 1);
+    return visibility / (pcfDiameter * pcfDiameter);
+}
+
+float sampleCSMShadow(vec3 worldPos)
+{
+    const int cascadeCount = clamp(int(lighting.light.shadowMetrics.w + 0.5), 1, LCascadeCount);
+    int selectedCascade = -1;
+    float4 selectedProjection = float4(0.0);
+    [unroll]
+    for(int cascadeIdx = 0; cascadeIdx < LCascadeCount; ++cascadeIdx)
+    {
+        if(cascadeIdx < cascadeCount && selectedCascade < 0)
+        {
+            const float4 projection = projectCSMShadowCascade(worldPos, cascadeIdx);
+            if(projection.w > 0.5)
+            {
+                selectedCascade = cascadeIdx;
+                selectedProjection = projection;
+            }
+        }
+    }
+
+    // No cascade covers this receiver: return the neutral unshadowed signal.
+    if(selectedCascade < 0)
+        return 1.0;
+
+    float visibility = sampleCSMShadowCascade(selectedCascade, selectedProjection);
+    const float coverageBlend = cascadeCoverageBlendWeight(selectedProjection.xy);
+    if(coverageBlend > 0.0)
+    {
+        // Neutral is the strict outer-coverage fallback. Only the adjacent scale
+        // may replace it, and only when that projection is independently valid.
+        float fallbackVisibility = 1.0;
+        if(selectedCascade < cascadeCount - 1)
+        {
+            const int fallbackCascade = selectedCascade + 1;
+            const float4 fallbackProjection =
+                projectCSMShadowCascade(worldPos, fallbackCascade);
+            if(fallbackProjection.w > 0.5)
+            {
+                fallbackVisibility =
+                    sampleCSMShadowCascade(fallbackCascade, fallbackProjection);
+            }
+        }
+        visibility = lerp(visibility, fallbackVisibility, coverageBlend);
+    }
+
+    return visibility;
 }
 
 vec3 evaluateDirectBRDF(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 baseColor, float metallic, float roughness)
@@ -355,16 +404,31 @@ vec3 evaluateDirectBRDF(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 baseColor, f
     return (diffuse + specular) * radiance * NdotL;
 }
 
-vec3 evaluateDirectionalLight(vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness, float viewDepth)
+struct DirectionalLightEvaluation
+{
+    vec3 color;
+    float shadowSignal;
+};
+
+DirectionalLightEvaluation evaluateDirectionalLight(
+    vec3 N,
+    vec3 V,
+    vec3 worldPos,
+    vec3 baseColor,
+    float metallic,
+    float roughness)
 {
     vec3 L = normalize(lighting.light.lightDirectionAndShadowStrength.xyz);
     vec3 radiance = lighting.light.lightColorAndNormalBias.rgb;
     vec3 direct = evaluateDirectBRDF(N, V, L, radiance, baseColor, metallic, roughness);
 
-    float shadowVisibility = sampleCSMShadow(worldPos, N, viewDepth);
-    float shadowStrength = lighting.light.lightDirectionAndShadowStrength.w;
+    const float shadowStrength = saturate(lighting.light.lightDirectionAndShadowStrength.w);
+    const float shadowVisibility = shadowStrength > 0.0 ? sampleCSMShadow(worldPos) : 1.0;
     float directVisibility = lerp(1.0, shadowVisibility, shadowStrength);
-    return direct * directVisibility;
+    DirectionalLightEvaluation result;
+    result.color = direct * directVisibility;
+    result.shadowSignal = directVisibility;
+    return result;
 }
 
 vec3 evaluateLocalLight(LightData light, vec3 N, vec3 V, vec3 worldPos, vec3 baseColor, float metallic, float roughness)
@@ -1005,12 +1069,13 @@ float4 fragmentMain(VSOutput input) : SV_Target
     // double-count that results from adding SSR on top of full IBL specular.
     float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
     vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
-    vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
+    DirectionalLightEvaluation directional =
+        evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
     vec3 emissiveAreaLights = evaluateFlaxEmissiveAreaLights(N, V, worldPos, baseColor, metallic, roughness);
 
-    vec3 color = ambient + directional + pointLights + emissiveAreaLights + emissiveSample.rgb;
-    return float4(toneMapACES(color), 1.0);
+    vec3 color = ambient + directional.color + pointLights + emissiveAreaLights + emissiveSample.rgb;
+    return float4(toneMapACES(color), directional.shadowSignal);
 }
 
 [shader("fragment")]
@@ -1047,11 +1112,14 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     // Evaluate SSR first so its confidence can drive IBL specular blending.
     float4 ssr = evaluateSSR(input.uv, N, V, baseColor, metallic, roughness);
     vec3 ambient = evaluateEnvironmentIBL(worldPos, N, V, baseColor, metallic, roughness, ao, ssr);
-    vec3 directional = evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness, viewDepth);
+    DirectionalLightEvaluation directional =
+        evaluateDirectionalLight(N, V, worldPos, baseColor, metallic, roughness);
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
     vec3 emissiveAreaLights = evaluateFlaxEmissiveAreaLights(N, V, worldPos, baseColor, metallic, roughness);
 
-    return float4(max(ambient + directional + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0), 1.0);
+    return float4(
+        max(ambient + directional.color + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0),
+        directional.shadowSignal);
 }
 
 [shader("fragment")]
@@ -1373,11 +1441,19 @@ float3 taaClipToBox(float3 boxMin, float3 boxMax, float3 filtered, float3 histor
 [shader("fragment")]
 float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
 {
-    float3 currentColor = inTexture[kSceneColorHdrIndex].Sample(input.uv).rgb;
+    const float4 currentSceneColor =
+        inTexture[kSceneColorHdrIndex].SampleLevel(input.uv, 0.0);
+    float3 currentColor = currentSceneColor.rgb;
+    // The producer writes [0,1]. Treat malformed/uninitialized alpha as neutral
+    // so the reactive path fails safe instead of rejecting history everywhere.
+    const float currentShadowSignal =
+        currentSceneColor.a >= 0.0 && currentSceneColor.a <= 1.0
+            ? currentSceneColor.a
+            : 1.0;
     // TAA 关闭早退（行为不变）
     if(postProcess.params5.x <= 0.5 || postProcess.params5.y <= 0.5)
     {
-        return float4(max(currentColor, 0.0), 1.0);
+        return float4(max(currentColor, 0.0), currentShadowSignal);
     }
 
     // 调试开关（params4 = filterInput / varianceBox / lottes / catmullRom）与当前帧 jitter（params2.xy，像素单位）
@@ -1386,19 +1462,38 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     const bool useLottes      = postProcess.params4.z > 0.5;
     const bool useCatmullRom  = postProcess.params4.w > 0.5;
     const float2 jitterPx     = postProcess.params2.xy;
+    const float2 texel        = postProcess.params1.zw;
+    const float2 jitterUv     = jitterPx * texel;
 
-    // --- 1. velocity 重投影（天空像素 velocity=(0,0)，historyUv 自动回退到 input.uv）---
-    float2 velocity  = inTexture[kVelocityIndex].Sample(input.uv).xy;
-    float2 historyUv = input.uv - velocity;
+    // --- 1. velocity 重投影 ---
+    // filterInput=true 时 resolve 重建未抖动像素中心，velocity 需在当前抖动覆盖位置采样；
+    // filterInput=false 时当前样本代表 input.uv + jitterUv，对应 velocity 直接采 input.uv。
+    const float2 targetCurrentUv  = useFilterInput ? input.uv : input.uv + jitterUv;
+    float2 velocity  = inTexture[kVelocityIndex].SampleLevel(targetCurrentUv - jitterUv, 0.0).xy;
+    float2 historyUv = targetCurrentUv - velocity;
 
     // --- 2. 历史采样（Catmull-Rom 5-tap 或双线性）---
-    float2 texSize = 1.0 / postProcess.params1.zw;  // params1.zw = texelSize → 1/texelSize = 像素分辨率
+    float2 texSize = 1.0 / texel;
     float3 historyRgb = useCatmullRom
         ? sampleCatmullRom5Tap(kSceneColorHistoryReadIndex, historyUv, texSize)
         : inTexture[kSceneColorHistoryReadIndex].SampleLevel(historyUv, 0).rgb;
+    const float historyAlpha =
+        inTexture[kSceneColorHistoryReadIndex].SampleLevel(historyUv, 0.0).a;
+    const float historyShadowSignal =
+        historyAlpha >= 0.0 && historyAlpha <= 1.0 ? historyAlpha : 1.0;
+    const float shadowSignalDelta = abs(currentShadowSignal - historyShadowSignal);
+    // A single 3x3 PCF tap changes visibility by 1/9. Reject well before that
+    // while retaining temporal accumulation for sub-percent quantization noise.
+    const float shadowReactiveFactor = smoothstep(0.01, 0.05, shadowSignalDelta);
+
+    // --- 2.5 运动感知门控：velocity 转像素单位，用于降低运动像素的历史权重并禁用静态假设启发式 ---
+    // 相机/物体运动使像素覆盖不同表面，此时 (a) 防火花上限不应以旧表面亮度为基准，
+    // (b) Lottes 不应在亮度差时锁死历史，(c) 应降低 blendWeight 加速收敛到当前帧。
+    const float2 velocityPixels = velocity * texSize;
+    const float  motionPixels   = length(velocityPixels);
+    const float  motionFactor   = smoothstep(0.25, 2.0, motionPixels);
 
     // --- 3. 3x3 邻域采样（保留 RGB，供输入滤波与 clamp 盒共用）---
-    const float2 texel = postProcess.params1.zw;
     // 顺序：[-1,-1][0,-1][1,-1][-1,0][0,0][1,0][-1,1][0,1][1,1]
     float3 rgbS[9];
     rgbS[0] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x, -texel.y), 0).rgb;
@@ -1484,21 +1579,28 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     const bool historyOutOfBounds = historyUv.x < 0.0 || historyUv.y < 0.0
                                  || historyUv.x > 1.0 || historyUv.y > 1.0;
     float blendWeight = historyOutOfBounds ? 0.0 : saturate(postProcess.params5.z);
+    // 运动感知：像素移动超过 0.25 px 时平滑降低历史权重，加速收敛到当前帧阴影
+    blendWeight = lerp(blendWeight, 0.0, motionFactor);
 
     // --- 7.5 历史引导防火花：限制当前帧相对历史的单帧亮度增长率 ---
     // 亚像素细几何（布幔轮廓）随 jitter 相位翻转产生 1px 竖线状单帧镜面尖峰
     //（200~500× 背景亮度），该列 3x3 邻域自身含亮样本，clamp 盒无法拦截。
     // 以裁剪后历史亮度为基准设上限：尖峰被压制；真实变亮区域按每帧 ~4 倍
     // 几何收敛（全黑→满幅约 4 帧），静态场景下无副作用。
-    if(!historyOutOfBounds)
+    // 仅对静止、shadow signal 未变化的像素生效。旧阴影历史不得限制
+    // 新亮帧，否则 history=0.05 会把 current=1.0 压到约 0.25。
+    if(!historyOutOfBounds && motionPixels < 0.5)
     {
-        const float kFireflyRatio  = 4.0;
-        const float kFireflyOffset = 0.05;
-        const float lumaFiltered = luminance(filteredRgb);
-        const float lumaCap = luminance(clampedHistory) * kFireflyRatio + kFireflyOffset;
-        if(lumaFiltered > lumaCap)
+        if(shadowReactiveFactor <= 0.0)
         {
-            filteredRgb *= lumaCap / max(lumaFiltered, 1.0e-5);
+            const float kFireflyRatio  = 4.0;
+            const float kFireflyOffset = 0.05;
+            const float lumaFiltered = luminance(filteredRgb);
+            const float lumaCap = luminance(clampedHistory) * kFireflyRatio + kFireflyOffset;
+            if(lumaFiltered > lumaCap)
+            {
+                filteredRgb *= lumaCap / max(lumaFiltered, 1.0e-5);
+            }
         }
     }
 
@@ -1510,7 +1612,7 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     // --- 9. Lottes 抗闪烁（可选，默认关闭对齐 Filament preventFlickering=false）---
     // Filament 中 alpha 是当前帧权重，亮度差越大 alpha 越小 → 越倒向稳定的历史。
     // 此处 blendWeight 是历史权重，等价变换：historyWeight = 1 - currentWeight * diff²。
-    if(useLottes && !historyOutOfBounds)
+    if(useLottes && !historyOutOfBounds && motionPixels < 0.5)
     {
         float lumaC = tonemappedCurrent.x + tonemappedCurrent.y * 2.0 + tonemappedCurrent.z;
         float lumaH = tonemappedHistory.x + tonemappedHistory.y * 2.0 + tonemappedHistory.z;
@@ -1518,9 +1620,16 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
         blendWeight = 1.0 - (1.0 - blendWeight) * lumaDiff * lumaDiff;
     }
 
+    // This is deliberately the final history-weight mutation. Shadow visibility
+    // is not transported by receiver velocity, and no later heuristic may restore
+    // rejected history. shadowReactiveFactor==1 therefore guarantees weight==0.
+    blendWeight *= 1.0 - shadowReactiveFactor;
+
     // --- 10. 混合 + untonemap ---
     float3 mixed    = lerp(tonemappedCurrent, tonemappedHistory, blendWeight);
     float3 resolved = taaUntonemapRgb(mixed);
 
-    return float4(max(resolved, 0.0), 1.0);
+    // Preserve the current frame's shadow signal in history alpha. Post/Bloom
+    // consume RGB only, so RGBA16F layout and no-post color behavior are unchanged.
+    return float4(max(resolved, 0.0), currentShadowSignal);
 }

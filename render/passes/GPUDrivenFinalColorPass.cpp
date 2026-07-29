@@ -19,9 +19,19 @@ namespace demo
 
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenFinalColorPass::getDependencies() const
 	{
-		static const std::array<PassResourceDependency, 3> dependencies = {
-			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
-			PassResourceDependency::texture(kPassBloomOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
+		static const std::array<PassResourceDependency, 7> dependencies = {
+			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassSceneColorHistoryWriteHandle, ResourceAccess::read,
+			                                rhi::ShaderStage::fragment, rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassBloomOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassBloomHalfHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassBloomQuarterHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassVelocityHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ColorAttachment),
 		};

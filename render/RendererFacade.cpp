@@ -124,6 +124,11 @@ namespace demo
 		gpuDriven().updateSceneInstanceTransform(instanceIndex, transform);
 	}
 
+	void RendererFacade::syncActiveSceneRuntimeState(SceneUploadResult& ioResult) const
+	{
+		gpuDriven().syncActiveSceneRuntimeState(ioResult);
+	}
+
 	void RendererFacade::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{
 		gpuDriven().executeUploadCommand(std::move(uploadFn));

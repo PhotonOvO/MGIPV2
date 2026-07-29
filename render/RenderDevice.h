@@ -26,6 +26,7 @@
 #include "../rhi/RHIPipeline.h"
 #include "../rhi/RHISwapchain.h"
 #include "../rhi/RHISurface.h"
+#include <array>
 #include <functional>
 #include <cstdint>
 #include <optional>
@@ -60,6 +61,20 @@ namespace demo
 	class RenderDevice
 	{
 	public:
+		struct StaticPassTextureStates
+		{
+			std::array<rhi::ResourceState, 3> gbuffer{
+				rhi::ResourceState::General,
+				rhi::ResourceState::General,
+				rhi::ResourceState::General,
+			};
+			rhi::ResourceState sceneColorHdr{rhi::ResourceState::General};
+			rhi::ResourceState velocity{rhi::ResourceState::General};
+		};
+
+		using FrameSlotReadyCallback = std::function<void(uint32_t)>;
+
+		// Bindless slots 0/1 are renderer-owned defaults; glTF textures start at slot 2.
 		static constexpr uint32_t kDemoMaterialSlotCount = 2;
 
 		RenderDevice() = default;
@@ -73,7 +88,12 @@ namespace demo
 		[[nodiscard]] const char* getSwapchainPresentModeName() const;
 		void resize(rhi::Extent2D size);
 		void beginUiFrame();
-		void renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor);
+		// Invokes onFrameSlotReady synchronously after prepareFrameResources has waited/
+		// begun the authoritative slot and before beginCommandRecording()/drawFrame().
+		[[nodiscard]] bool renderWithPassExecutor(
+			const RenderParams& params,
+			PassExecutor& passExecutor,
+			const FrameSlotReadyCallback& onFrameSlotReady = {});
 
 		// Pass execution helpers (wrappers for per-pass commands)
 		void executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params);
@@ -111,7 +131,8 @@ namespace demo
 		}
 
 		SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
-		void bindStaticPassResources(PassExecutor& passExecutor) const;
+		void bindStaticPassResources(PassExecutor& passExecutor,
+		                             const StaticPassTextureStates& textureStates) const;
 		void waitForIdle();
 		[[nodiscard]] rhi::Extent2D getSceneExtent() const { return m_swapchainDependent.sceneResources.getSize(); }
 
@@ -939,15 +960,19 @@ namespace demo
 		void createIBLResources(rhi::CommandBuffer& cmd);
 		void destroyIBLResources();
 		void destroyArgumentTablesAndLayouts();
-		// Owning RHI handle pair produced by loadAndCreateImage (replaces utils::ImageResource).
-		struct LoadedImageHandles
+		// Owning RHI handle pair produced by uploadRawRgba8Image.
+		struct UploadedImageHandles
 		{
 			rhi::TextureHandle texture{};
 			rhi::TextureViewHandle view{};
 			uint32_t width{0};
 			uint32_t height{0};
 		};
-		LoadedImageHandles loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename);
+		UploadedImageHandles uploadRawRgba8Image(rhi::CommandBuffer& cmd,
+		                                        std::span<const uint8_t> rgba8Pixels,
+		                                        uint32_t width,
+		                                        uint32_t height,
+		                                        const char* debugName);
 		const MaterialResources::MaterialRecord* tryGetMaterial(MaterialHandle handle) const;
 		const MaterialResources::TextureHotData* tryGetTextureHot(TextureHandle handle) const;
 		const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;

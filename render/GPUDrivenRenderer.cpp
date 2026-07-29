@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -65,6 +66,35 @@ namespace demo
 		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
+
+		// Visibility-patch synchronization contract:
+		// 1. Every prefix producer is followed by compute-write -> compute-read
+		//    visibility before the next scan/final dispatch consumes its output.
+		//    The compute execution dependency also orders the alternating
+		//    write-after-read side of the ping-pong pair.
+		// 2. Reusing the pair for another category requires an explicit
+		//    compute-read -> compute-write dependency before mode 0 overwrites A.
+		// 3. Final indirect/count output remains compute-write -> draw-indirect-read.
+		void recordVisibilityPatchScanReadAfterWriteBarrier(rhi::CommandBuffer& cmdBuffer)
+		{
+			cmdBuffer.barrier(rhi::StageFlags::compute,
+			                  rhi::StageFlags::compute,
+			                  rhi::HazardFlags::bufferWrites);
+		}
+
+		void recordVisibilityPatchPrefixReuseWriteAfterReadBarrier(rhi::CommandBuffer& cmdBuffer)
+		{
+			cmdBuffer.barrier(rhi::StageFlags::compute,
+			                  rhi::StageFlags::compute,
+			                  rhi::HazardFlags::readBeforeWrite);
+		}
+
+		void recordVisibilityPatchIndirectReadBarrier(rhi::CommandBuffer& cmdBuffer)
+		{
+			cmdBuffer.barrier(rhi::StageFlags::compute,
+			                  rhi::StageFlags::commandInput,
+			                  rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
+		}
 
 		uint64_t estimateImageBytes(rhi::Extent2D extent, uint32_t bytesPerPixel)
 		{
@@ -333,6 +363,9 @@ namespace demo
 	void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 	{
 		m_renderer.init(window, surface, vSync);
+		resetTemporalAndPersistentTextureStates();
+		const uint32_t frameSlotCount = getFrameSlotCount();
+		ASSERT(frameSlotCount > 0u, "GPU-driven renderer requires at least one frame resource slot");
 		m_sceneRegistry.init(&m_renderer.getRHIDevice());
 		initLightingResources();
 		initIBLResources();
@@ -341,7 +374,7 @@ namespace demo
 		{
 			m_meshletBuffer.init(&m_renderer.getRHIDevice());
 		}
-		m_hiZDepthPyramid.init(getRHIDevice(), getSwapchainImageCount(), getSceneExtent());
+		m_hiZDepthPyramid.init(getRHIDevice(), frameSlotCount, getSceneExtent());
 
 		m_depthPrepass = std::make_unique<GPUDrivenDepthPrepass>(this);
 		m_depthPyramidPass = std::make_unique<GPUDrivenDepthPyramidPass>(this);
@@ -426,9 +459,10 @@ namespace demo
 		initTransparentVisibilityPatchResources();
 		initPhase7Resources();
 		bindPhase7PassResources();
-		m_globalSDFPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		m_globalSDFPass->initResources(getRHIDevice(), frameSlotCount);
 		initDDGIResources();
-		m_sortedBootstrapFrames.assign(std::max(1u, getSwapchainImageCount()), SortedBootstrapFrameState{});
+		m_sortedBootstrapFrames.assign(frameSlotCount, SortedBootstrapFrameState{});
+		m_rawCullingBootstrapFrames.assign(frameSlotCount, RawCullingBootstrapFrameState{});
 		if (kEnableShippingVisibilitySort)
 		{
 			initVisibilitySortResources();
@@ -454,6 +488,9 @@ namespace demo
 			m_globalSDFPass->shutdownResources();
 		}
 		m_sortedBootstrapFrames.clear();
+		m_rawCullingBootstrapFrames.clear();
+		m_passExecutor.clearResourceBindings();
+		m_passExecutor.setResourceTable(nullptr);
 		m_passExecutor.clear();
 		m_imguiPass.reset();
 		m_presentPass.reset();
@@ -490,6 +527,64 @@ namespace demo
 		shutdownLightingResources();
 		m_sceneRegistry.deinit();
 		m_renderer.shutdown(surface);
+		resetTemporalAndPersistentTextureStates();
+	}
+
+	void GPUDrivenRenderer::resetTemporalAndPersistentTextureStates()
+	{
+		m_taaHistoryValid = false;
+		m_taaHistoryWrittenThisFrame = false;
+		m_taaHistoryWriteIndex = 0u;
+		m_sceneColorHistoryStates.fill(rhi::ResourceState::General);
+		m_bloomResourceStates.fill(rhi::ResourceState::General);
+		m_gbufferResourceStates.fill(PersistentTextureState{});
+		m_sceneColorHdrResourceState = {};
+		m_velocityResourceState = {};
+	}
+
+	void GPUDrivenRenderer::trackPersistentTextureIdentity(PersistentTextureState& textureState,
+	                                                       rhi::TextureHandle texture)
+	{
+		if (!texture.isNull() && textureState.texture != texture)
+		{
+			// SceneResources initializes newly created persistent color textures to
+			// General. A physical-image generation change must not inherit the old
+			// image's terminal ShaderRead layout, even if Vulkan reuses a native handle.
+			textureState.texture = texture;
+			textureState.state = rhi::ResourceState::General;
+		}
+	}
+
+	void GPUDrivenRenderer::commitPersistentTextureState(PersistentTextureState& textureState,
+	                                                      rhi::TextureHandle texture,
+	                                                      rhi::ResourceState terminalState)
+	{
+		if (!texture.isNull() && textureState.texture == texture)
+		{
+			textureState.state = terminalState;
+		}
+	}
+
+	void GPUDrivenRenderer::bindStaticPassResources()
+	{
+		RenderDevice::StaticPassTextureStates textureStates{};
+		static_assert(std::tuple_size_v<decltype(textureStates.gbuffer)>
+			== std::tuple_size_v<decltype(m_gbufferResourceStates)>);
+		for (size_t gbufferIndex = 0; gbufferIndex < m_gbufferResourceStates.size(); ++gbufferIndex)
+		{
+			trackPersistentTextureIdentity(
+				m_gbufferResourceStates[gbufferIndex],
+				getSceneGBufferImage(static_cast<uint32_t>(gbufferIndex)));
+			textureStates.gbuffer[gbufferIndex] = m_gbufferResourceStates[gbufferIndex].state;
+		}
+
+		trackPersistentTextureIdentity(m_sceneColorHdrResourceState, getSceneColorHdrImage());
+		textureStates.sceneColorHdr = m_sceneColorHdrResourceState.state;
+		trackPersistentTextureIdentity(m_velocityResourceState, getVelocityImage());
+		textureStates.velocity = m_velocityResourceState.state;
+
+		m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
+		m_renderer.bindStaticPassResources(m_passExecutor, textureStates);
 	}
 
 	void GPUDrivenRenderer::initFlaxDDGIResources()
@@ -525,9 +620,9 @@ namespace demo
 			                              &m_renderer.getSceneResources());
 		}
 		m_flaxDDGIPass->initResources(
-			getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+			getRHIDevice(), getFrameSlotCount());
 		m_ddgiDebugPass->initResources(
-			getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+			getRHIDevice(), getFrameSlotCount());
 
 		m_flaxDDGICascades.clear();
 		m_flaxCascadeFrameCounters.assign(cascadeCount, 0u);
@@ -673,7 +768,7 @@ void GPUDrivenRenderer::rebuildSurfaceAtlasObjects()
 	{
 		// First registration: iterate all scene objects
 		const auto& meshPool = m_renderer.getMeshPool();
-		for (const auto& [meshKey, objectId] : m_objectIdByMeshHandle)
+		for (const auto& [meshKey, objectHandle] : m_objectHandleByMeshHandle)
 		{
 			// Unpack mesh key: generation in high 32, index in low 32
 			const MeshHandle meshHandle{static_cast<uint32_t>(meshKey & 0xFFFFFFFFu), static_cast<uint32_t>(meshKey >> 32u)};
@@ -684,7 +779,7 @@ void GPUDrivenRenderer::rebuildSurfaceAtlasObjects()
 			if (meshRecord->alphaMode != shaderio::LAlphaOpaque) continue;
 
 			GlobalSurfaceAtlasObject obj{};
-			obj.key = makeSurfaceAtlasObjectKey(objectId, static_cast<uint32_t>(meshKey & 0xFFFFFFFFu));
+			obj.key = makeSurfaceAtlasObjectKey(objectHandle.index, static_cast<uint32_t>(meshKey & 0xFFFFFFFFu));
 			obj.meshIndex = static_cast<uint32_t>(meshKey & 0xFFFFFFFFu);
 			obj.materialIndex = meshRecord->materialIndex >= 0
 				? static_cast<uint32_t>(meshRecord->materialIndex) : 0u;
@@ -778,7 +873,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		                                                 probeBoundsMin,
 		                                                 probeBoundsMax));
 		m_renderer.getDDGIConfig().gridDims = m_ddgiProbeVolume.getGridDims();
-		m_ddgiRayTracePass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		m_ddgiRayTracePass->initResources(getRHIDevice(), getFrameSlotCount());
 		m_ddgiProbeUpdatePass->initResources(getRHIDevice());
 
 		if (m_ddgiProbeVolume.isInitialized())
@@ -810,7 +905,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 		}
 
-		m_ddgiDebugPass->initResources(getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+		m_ddgiDebugPass->initResources(getRHIDevice(), getFrameSlotCount());
 		if (m_ddgiMeshSDFLoaded)
 		{
 			m_globalSDFPass->setMeshSDFList(&m_ddgiMeshSDFEntry, 1u);
@@ -937,7 +1032,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			if (willCurrentPathBeEnabled)
 			{
 				m_ddgiDebugPass->initResources(
-					getRHIDevice(), std::max(1u, getSwapchainImageCount()));
+					getRHIDevice(), getFrameSlotCount());
 			}
 		}
 		else if (!wasFlaxPathEnabled && willFlaxPathBeEnabled)
@@ -1214,7 +1309,15 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::resize(rhi::Extent2D size)
 	{
+		const rhi::Extent2D previousSceneExtent = getSceneExtent();
 		m_renderer.resize(size);
+		const bool sceneResourcesRecreated =
+			getSceneExtent().width != previousSceneExtent.width
+			|| getSceneExtent().height != previousSceneExtent.height;
+		if (sceneResourcesRecreated)
+		{
+			resetTemporalAndPersistentTextureStates();
+		}
 		m_hiZDepthPyramid.resize(getSceneExtent());
 		resizePhase7Resources();
 		m_passExecutor.clearResourceBindings();
@@ -1227,22 +1330,46 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			.isSwapchain = false,
 		});
 		bindPhase7PassResources();
+		// Size-dependent temporal images were recreated; their contents and the
+		// previous Hi-Z camera relation are no longer valid across the resize.
+		if (sceneResourcesRecreated)
+		{
+			m_hiZCameraHistoryValid = false;
+		}
+	}
+
+	void GPUDrivenRenderer::waitForIdle()
+	{
+		m_renderer.waitForIdle();
+		uploadPendingMeshletsAfterIdle();
 	}
 
 	void GPUDrivenRenderer::render(const RenderParams& params)
 	{
+		// GPUDrivenRenderer owns all extent-dependent resources layered over
+		// RenderDevice. Consume viewport changes before refreshing scene handles or
+		// preparing temporal state, leaving RenderDevice's internal resize check as a
+		// compatibility no-op for this path.
+		const rhi::Extent2D currentSceneExtent = getSceneExtent();
+		if (params.viewportSize.width > 0u && params.viewportSize.height > 0u
+			&& (params.viewportSize.width != currentSceneExtent.width
+				|| params.viewportSize.height != currentSceneExtent.height))
+		{
+			resize(params.viewportSize);
+		}
 		const bool sceneRenderingSuspended = m_suspendSceneRendering;
+		m_taaHistoryWrittenThisFrame = false;
 		{
 			m_hiZDepthPyramid.resize(getSceneExtent());
+		}
+		{
+			flushPendingMeshletUpload();
 		}
 		{
 			flushPendingSceneUploads();
 		}
 		{
 			refreshSceneView();
-		}
-		{
-			uploadPersistentDrawData();
 		}
 		const uint32_t safeObjectCount = getSafePersistentObjectCount();
 		const shaderio::GPUCullDrawCounts cachedDrawCounts = getLastGPUCullingDrawCounts();
@@ -1253,42 +1380,34 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				+ (cachedDrawCounts.alphaTestCount > 0u ? 1u : 0u)
 				+ (cachedDrawCounts.transparentCount > 0u ? 1u : 0u));
 		m_runtimeStats.batchStats.sortPassCount = 0u;
-		const uint32_t frameIndex = getCurrentFrameIndexHint();
-		// history ping-pong 视图必须在 updateGPUDrivenLights（内部经
-		// updateLightingArgumentTable 写入 historyRead/Write 描述符）之前赋值，
-		// 否则描述符滞后一帧——TAA resolve 会采样本帧正在写入的 render target
-		// （读写同图，未定义行为，表现为噪点状闪烁）。
-		// 奇偶性用单调递增的 m_temporalFrameCounter：frameIndex 是飞行帧环索引，
-		// 交换链 ≥3 镜像时按 0,1,2 循环，&1 会让每第 3 帧读到 2 帧前的旧历史。
-		{
-			const uint32_t historyReadIndex = static_cast<uint32_t>((m_temporalFrameCounter + 1u) & 1u);
-			const uint32_t historyWriteIndex = static_cast<uint32_t>(m_temporalFrameCounter & 1u);
-			m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
-			m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
-			m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
-			m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
-		}
+		// history ping-pong 视图在 frame-slot-ready callback 中 refreshSceneView
+		// 之后、lighting descriptor update 之前选择，确保 RenderDevice 内部的
+		// resize/rebuild 不会留下 stale views。
+		// TAA 奇偶性由 m_taaHistoryWriteIndex 独立维护，并且只在真正写 history 后推进；
+		// 全局 m_temporalFrameCounter 继续服务 jitter/DDGI。飞行帧 ring index 不能代替
+		// 任何时间奇偶性，否则交换链 ≥3 镜像时会周期性读到旧历史。
+		bool csmCascadeMatricesPrepared = false;
 		if (params.cameraUniforms != nullptr)
 		{
-			getCSMShadowResources().updateCascadeMatrices(*params.cameraUniforms,
+			// This pre-wait call prepares the CPU cascade snapshot. GPU-driven per-frame
+			// lighting data is copied only by the slot-ready callback below; the legacy
+			// single CSM UBO mirror is not used as a frame-slot synchronization mechanism.
+			const shaderio::CameraUniforms shadowFitCamera =
+				makeUnjitteredShadowFitCamera(*params.cameraUniforms);
+			getCSMShadowResources().updateCascadeMatrices(shadowFitCamera,
 			                                              params.lightSettings.direction,
 			                                              params.lightSettings.shadowDistance,
 			                                              m_sceneView.sceneBoundsMin,
 			                                              m_sceneView.sceneBoundsMax,
-			                                              m_sceneView.sceneBoundsValid);
+			                                              m_sceneView.sceneBoundsValid,
+			                                              params.lightSettings.normalBias);
+			csmCascadeMatricesPrepared = true;
 		}
-		// Flax cascade scheduling (R3): update per-frame before uniforms
-		if (isFlaxStyleDDGIRequested() && params.cameraUniforms != nullptr)
-		{
-			updateFlaxCascadeScheduling(params.cameraUniforms->cameraPosition);
-		}
-
-		updateGPUDrivenLights(params, frameIndex);
 		m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
 		m_runtimeStats.visibilityDiagnostics = GPUDrivenVisibilityDiagnostics{
 			.safeObjectCount = safeObjectCount,
-			.currentGPUCullingObjectCount = getGPUCullingObjectCount(frameIndex),
-			.previousGPUCullingObjectCount = getPreviousGPUCullingObjectCount(frameIndex),
+			.currentGPUCullingObjectCount = 0u,
+			.previousGPUCullingObjectCount = 0u,
 			.opaqueCapacity = static_cast<uint32_t>(m_opaqueDrawIndices.size()),
 			.alphaCapacity = static_cast<uint32_t>(m_alphaTestDrawIndices.size()),
 			.transparentCapacity = static_cast<uint32_t>(m_transparentDrawIndices.size()),
@@ -1297,7 +1416,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			.materialSortKeysCpuSeeded = true,
 			.transparentCapacityOverflow = m_transparentDrawIndices.size() > kMobileMaxTransparentDraws,
 		};
-		if (kEnableShippingVisibilitySort && !sceneRenderingSuspended)
+		const bool visibilitySortEnabled = kEnableShippingVisibilitySort && !sceneRenderingSuspended;
+		if (visibilitySortEnabled)
 		{
 			{
 				if (m_cachedStaticVisibilitySortTopologyVersion != m_sceneTopologyVersion)
@@ -1385,40 +1505,44 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						? 0u
 						: nextPowerOfTwo(static_cast<uint32_t>(m_visibilitySortInputObjects.size()));
 			}
-			{
-				prepareVisibilitySortInputs(frameIndex);
-			}
-			if (frameIndex < m_visibilitySortFrames.size())
-			{
-				const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
-				rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
-				m_passExecutor.bindBuffer({
-					.handle = kPassGPUDrivenSortKeyBufferHandle,
-					.backendBufferToken =
-						resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.keyBuffer) : 0,
-				});
-				m_passExecutor.bindBuffer({
-					.handle = kPassGPUDrivenSortValueBufferHandle,
-					.backendBufferToken =
-						resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.valueBuffer) : 0,
-				});
-			}
 		}
 		else
 		{
 			m_visibilitySortInputObjects.clear();
 			m_visibilitySortInputKeys.clear();
-			m_passExecutor.bindBuffer({
-				.handle = kPassGPUDrivenSortKeyBufferHandle,
-				.backendBufferToken = 0,
-			});
-			m_passExecutor.bindBuffer({
-				.handle = kPassGPUDrivenSortValueBufferHandle,
-				.backendBufferToken = 0,
-			});
 		}
 
+		// A failed prepare path must not consume temporal history. CPU scene caches and
+		// pending upload ranges remain retryable, while these frame-to-frame values are
+		// restored below if RenderDevice reports that no frame was submitted.
+		struct TemporalStateSnapshot
+		{
+			shaderio::CameraUniforms temporalCamera;
+			shaderio::CameraUniforms previousCamera;
+			glm::mat4 previousJitteredViewProjection;
+			glm::vec3 lastHiZCameraPosition;
+			glm::vec2 currentTAAJitterUv;
+			glm::vec2 previousTAAJitterUv;
+			float lastHiZCameraDeltaDistance;
+			bool previousCameraValid;
+			bool hiZCameraHistoryValid;
+			bool lastHiZFastCameraFallbackTriggered;
+		};
+		const TemporalStateSnapshot temporalStateBeforeFrame{
+			.temporalCamera = m_temporalCameraUniforms,
+			.previousCamera = m_previousCameraUniforms,
+			.previousJitteredViewProjection = m_previousJitteredViewProjection,
+			.lastHiZCameraPosition = m_lastHiZCameraPosition,
+			.currentTAAJitterUv = m_currentTAAJitterUv,
+			.previousTAAJitterUv = m_previousTAAJitterUv,
+			.lastHiZCameraDeltaDistance = m_lastHiZCameraDeltaDistance,
+			.previousCameraValid = m_previousCameraValid,
+			.hiZCameraHistoryValid = m_hiZCameraHistoryValid,
+			.lastHiZFastCameraFallbackTriggered = m_lastHiZFastCameraFallbackTriggered,
+		};
+
 		RenderParams gpuParams = params;
+		gpuParams.csmCascadeMatricesPrepared = csmCascadeMatricesPrepared;
 		m_previousTAAJitterUv = m_currentTAAJitterUv;
 		m_currentTAAJitterUv = glm::vec2(0.0f);
 		if (params.cameraUniforms != nullptr)
@@ -1493,34 +1617,236 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			{
 				gpuParams.gltfModel = nullptr;
 			}
-			// history ping-pong 视图已在 render() 开头（updateGPUDrivenLights 之前）赋值，
-			// 此处只做 pass 图绑定。
-			updatePhase7Descriptors(frameIndex);
-			m_passExecutor.bindTexture({
-				.handle = kPassVelocityHandle,
-				.backendImageToken = resolveNativeTexture(getRHIDevice(), m_sceneView.velocityImage),
-				.aspect = rhi::TextureAspect::color,
-				.initialState = rhi::ResourceState::General,
-				.isSwapchain = false,
-			});
-			m_passExecutor.bindTexture({
-				.handle = kPassSceneColorHistoryReadHandle,
-				.backendImageToken = resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryReadImage),
-				.aspect = rhi::TextureAspect::color,
-				.initialState = rhi::ResourceState::General,
-				.isSwapchain = false,
-			});
-			m_passExecutor.bindTexture({
-				.handle = kPassSceneColorHistoryWriteHandle,
-				.backendImageToken = resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryWriteImage),
-				.aspect = rhi::TextureAspect::color,
-				.initialState = rhi::ResourceState::General,
-				.isSwapchain = false,
-			});
 		}
+
+		uint32_t preparedFrameIndex = std::numeric_limits<uint32_t>::max();
+		uint32_t preparedHistoryReadIndex = std::numeric_limits<uint32_t>::max();
+		uint32_t preparedHistoryWriteIndex = std::numeric_limits<uint32_t>::max();
+		bool preparedHistoryReadBound = false;
+		bool preparedHistoryWriteBound = false;
+		std::array<bool, 9> preparedBloomResourcesBound{};
+		std::array<rhi::TextureHandle, 3> preparedGBufferImages{};
+		rhi::TextureHandle preparedSceneColorHdrImage{};
+		rhi::TextureHandle preparedVelocityImage{};
+		const bool frameSubmitted = submitPassGraph(
+			gpuParams,
+			[&](uint32_t frameIndex)
+			{
+				ASSERT(preparedFrameIndex == std::numeric_limits<uint32_t>::max(),
+				       "GPU-driven frame-slot callback must run exactly once");
+				ASSERT(frameIndex == getCurrentFrameIndexHint(),
+				       "GPU-driven frame-slot callback must use RenderDevice's current frame index");
+				const uint32_t frameSlotCount = getFrameSlotCount();
+				ASSERT(frameSlotCount > 0u && frameIndex < frameSlotCount,
+				       "GPU-driven callback frame index must map to the authoritative frame ring");
+				ASSERT(frameSlotCount == m_lightResources.getFrameCount(),
+				       "GPU-driven light resources must exactly match the RenderDevice frame ring");
+
+				// The slot has retired and is about to record a new producer frame.
+				// Clear temporal publication metadata before any pass can early-out;
+				// GBuffer republishes only after the current raw culling dispatch is
+				// known to have been recorded for this topology generation.
+				invalidateSortedBootstrapState(frameIndex);
+				invalidateRawCullingBootstrapState(frameIndex);
+				if (frameIndex < m_transparentVisibilityPatchFrames.size())
+				{
+					m_transparentVisibilityPatchFrames[frameIndex].prefixReuseBarrierPending = false;
+				}
+
+				// RenderDevice has completed any internal resize/rebuild before invoking this
+				// callback. Refresh every scene handle and then rewrite all pass bindings so no
+				// descriptor or PassExecutor entry can retain a destroyed pre-resize view.
+				refreshSceneView();
+				for (size_t gbufferIndex = 0; gbufferIndex < preparedGBufferImages.size(); ++gbufferIndex)
+				{
+					preparedGBufferImages[gbufferIndex] = m_sceneView.gbufferImages[gbufferIndex];
+				}
+				preparedSceneColorHdrImage = m_sceneView.sceneColorHdrImage;
+				preparedVelocityImage = m_sceneView.velocityImage;
+				const uint32_t historyWriteIndex = m_taaHistoryWriteIndex;
+				const uint32_t historyReadIndex = historyWriteIndex ^ 1u;
+				preparedHistoryReadIndex = historyReadIndex;
+				preparedHistoryWriteIndex = historyWriteIndex;
+				m_sceneView.sceneColorHistoryReadImage = getSceneColorHistoryImage(historyReadIndex);
+				m_sceneView.sceneColorHistoryReadView = getSceneColorHistoryView(historyReadIndex);
+				m_sceneView.sceneColorHistoryWriteImage = getSceneColorHistoryImage(historyWriteIndex);
+				m_sceneView.sceneColorHistoryWriteView = getSceneColorHistoryView(historyWriteIndex);
+				bindStaticPassResources();
+				m_passExecutor.bindTexture({
+					.handle = kPassDepthPyramidHandle,
+					.backendImageToken = resolveNativeTexture(getRHIDevice(), m_hiZDepthPyramid.getImageHandle()),
+					.aspect = rhi::TextureAspect::color,
+					.initialState = rhi::ResourceState::Undefined,
+					.isSwapchain = false,
+				});
+				bindPhase7PassResources();
+				const std::array<rhi::TextureHandle, 9> bloomResources{
+					getBloomHalfImage(),
+					getBloomQuarterImage(),
+					getBloomEighthImage(),
+					getBloomSixteenthImage(),
+					getBloomThirtySecondImage(),
+					getBloomUpsampleSixteenthImage(),
+					getBloomUpsampleEighthImage(),
+					getBloomUpsampleQuarterImage(),
+					getBloomOutputImage(),
+				};
+				for (size_t bloomIndex = 0; bloomIndex < bloomResources.size(); ++bloomIndex)
+				{
+					preparedBloomResourcesBound[bloomIndex] =
+						resolveNativeTexture(getRHIDevice(), bloomResources[bloomIndex]) != 0u;
+				}
+
+				if (isFlaxStyleDDGIRequested() && params.cameraUniforms != nullptr)
+				{
+					// Scheduling advances only for a frame whose slot preparation succeeded.
+					updateFlaxCascadeScheduling(params.cameraUniforms->cameraPosition);
+				}
+
+				// RenderDevice invokes this only after prepareFrameResources has waited/
+				// begun frameIndex and before beginCommandRecording()/drawFrame(). Keep every
+				// GPU-driven per-slot mapped write, descriptor update, and indexed pass binding here.
+				preparePersistentDrawData();
+				uploadPersistentDrawData(frameIndex);
+				updateGPUDrivenLights(params, frameIndex);
+				m_runtimeStats.visibilityDiagnostics.currentGPUCullingObjectCount =
+					getGPUCullingObjectCount(frameIndex);
+				m_runtimeStats.visibilityDiagnostics.previousGPUCullingObjectCount =
+					getPreviousGPUCullingObjectCount(frameIndex);
+				m_passExecutor.bindTexture({
+					.handle = kPassVelocityHandle,
+					.backendImageToken = resolveNativeTexture(getRHIDevice(), m_sceneView.velocityImage),
+					.aspect = rhi::TextureAspect::color,
+					.initialState = m_velocityResourceState.state,
+					.isSwapchain = false,
+				});
+				const uint64_t historyReadToken =
+					resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryReadImage);
+				const uint64_t historyWriteToken =
+					resolveNativeTexture(getRHIDevice(), m_sceneView.sceneColorHistoryWriteImage);
+				preparedHistoryReadBound = historyReadToken != 0u;
+				preparedHistoryWriteBound = historyWriteToken != 0u;
+				m_passExecutor.bindTexture({
+					.handle = kPassSceneColorHistoryReadHandle,
+					.backendImageToken = historyReadToken,
+					.aspect = rhi::TextureAspect::color,
+					.initialState = m_sceneColorHistoryStates[historyReadIndex],
+					.isSwapchain = false,
+				});
+				m_passExecutor.bindTexture({
+					.handle = kPassSceneColorHistoryWriteHandle,
+					.backendImageToken = historyWriteToken,
+					.aspect = rhi::TextureAspect::color,
+					.initialState = m_sceneColorHistoryStates[historyWriteIndex],
+					.isSwapchain = false,
+				});
+
+				if (visibilitySortEnabled)
+				{
+					ASSERT(frameIndex < m_visibilitySortFrames.size(),
+					       "Visibility-sort resources must match the RenderDevice frame ring");
+					prepareVisibilitySortInputs(frameIndex);
+					if (frameIndex < m_visibilitySortFrames.size())
+					{
+						const VisibilitySortFrameResources& sortResources = m_visibilitySortFrames[frameIndex];
+						rhi::vulkan::VulkanResourceTable* resourceTable = m_renderer.getResourceTable();
+						m_passExecutor.bindBuffer({
+							.handle = kPassGPUDrivenSortKeyBufferHandle,
+							.backendBufferToken =
+								resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.keyBuffer) : 0,
+						});
+						m_passExecutor.bindBuffer({
+							.handle = kPassGPUDrivenSortValueBufferHandle,
+							.backendBufferToken =
+								resourceTable != nullptr ? resourceTable->resolveBuffer(sortResources.valueBuffer) : 0,
+						});
+					}
+				}
+				else
+				{
+					m_passExecutor.bindBuffer({
+						.handle = kPassGPUDrivenSortKeyBufferHandle,
+						.backendBufferToken = 0,
+					});
+					m_passExecutor.bindBuffer({
+						.handle = kPassGPUDrivenSortValueBufferHandle,
+						.backendBufferToken = 0,
+					});
+				}
+
+				updatePhase7Descriptors(frameIndex);
+				preparedFrameIndex = frameIndex;
+			});
+		if (!frameSubmitted)
 		{
-			submitPassGraph(gpuParams);
+			ASSERT(preparedFrameIndex == std::numeric_limits<uint32_t>::max(),
+			       "A failed frame preparation must not invoke the slot-ready callback");
+			m_temporalCameraUniforms = temporalStateBeforeFrame.temporalCamera;
+			m_previousCameraUniforms = temporalStateBeforeFrame.previousCamera;
+			m_previousJitteredViewProjection = temporalStateBeforeFrame.previousJitteredViewProjection;
+			m_lastHiZCameraPosition = temporalStateBeforeFrame.lastHiZCameraPosition;
+			m_currentTAAJitterUv = temporalStateBeforeFrame.currentTAAJitterUv;
+			m_previousTAAJitterUv = temporalStateBeforeFrame.previousTAAJitterUv;
+			m_lastHiZCameraDeltaDistance = temporalStateBeforeFrame.lastHiZCameraDeltaDistance;
+			m_previousCameraValid = temporalStateBeforeFrame.previousCameraValid;
+			m_hiZCameraHistoryValid = temporalStateBeforeFrame.hiZCameraHistoryValid;
+			m_lastHiZFastCameraFallbackTriggered =
+				temporalStateBeforeFrame.lastHiZFastCameraFallbackTriggered;
+			return;
 		}
+		ASSERT(preparedFrameIndex != std::numeric_limits<uint32_t>::max(),
+		       "Submitted GPU-driven frame must retain its prepared frame index");
+		ASSERT(preparedHistoryReadIndex < m_sceneColorHistoryStates.size()
+			&& preparedHistoryWriteIndex < m_sceneColorHistoryStates.size(),
+		       "Submitted GPU-driven frame must retain its physical TAA history parity");
+		commitSubmittedSceneTransformHistory();
+		// PassExecutor evaluates dependencies before each pass executes, including
+		// passes that early-out for scene suspension or disabled TAA/post options.
+		// Therefore every submitted graph has these physical terminal layouts:
+		// Light leaves GBuffer0-2 sampled, and FinalColor leaves SceneColorHDR and
+		// Velocity sampled. A prepare/acquire no-op returns above and publishes none.
+		for (size_t gbufferIndex = 0; gbufferIndex < preparedGBufferImages.size(); ++gbufferIndex)
+		{
+			commitPersistentTextureState(
+				m_gbufferResourceStates[gbufferIndex],
+				preparedGBufferImages[gbufferIndex],
+				rhi::ResourceState::ShaderRead);
+		}
+		commitPersistentTextureState(m_sceneColorHdrResourceState,
+		                             preparedSceneColorHdrImage,
+		                             rhi::ResourceState::ShaderRead);
+		commitPersistentTextureState(m_velocityResourceState,
+		                             preparedVelocityImage,
+		                             rhi::ResourceState::ShaderRead);
+		// Pass dependencies still establish the physical ShaderRead terminal layout
+		// for every bound history image even when TAA itself no-ops. Track layout and
+		// content validity separately: only an actual resolve draw publishes history
+		// content and advances the logical ping-pong parity.
+		if (preparedHistoryReadBound)
+		{
+			m_sceneColorHistoryStates[preparedHistoryReadIndex] = rhi::ResourceState::ShaderRead;
+		}
+		if (preparedHistoryWriteBound)
+		{
+			m_sceneColorHistoryStates[preparedHistoryWriteIndex] = rhi::ResourceState::ShaderRead;
+		}
+		for (size_t bloomIndex = 0; bloomIndex < preparedBloomResourcesBound.size(); ++bloomIndex)
+		{
+			if (preparedBloomResourcesBound[bloomIndex])
+			{
+				m_bloomResourceStates[bloomIndex] = rhi::ResourceState::ShaderRead;
+			}
+		}
+		if (m_taaHistoryWrittenThisFrame)
+		{
+			m_taaHistoryValid = true;
+			m_taaHistoryWriteIndex ^= 1u;
+		}
+		else
+		{
+			m_taaHistoryValid = false;
+		}
+		const uint32_t frameIndex = preparedFrameIndex;
 		const rhi::ArgumentTableHandle gpuCullingArgumentTable = getGPUCullingArgumentTable(frameIndex);
 		{
 			m_sceneView.depthPyramidImage = m_hiZDepthPyramid.getImageHandle();
@@ -1788,6 +2114,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	GltfUploadResult GPUDrivenRenderer::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)
 	{
+		beginSceneReplacement();
 		GltfUploadResult result = m_renderer.uploadGltfModel(model, cmd);
 		m_activeUploadResultStorage = result;
 		rebuildGPUDrivenScene(model, m_activeUploadResultStorage, cmd);
@@ -1798,6 +2125,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	                                                           const SceneUploadPlan& plan,
 	                                                           rhi::CommandBuffer& cmd)
 	{
+		beginSceneReplacement();
 		SceneUploadResult result = m_renderer.commitSceneUploadPlan(asset, plan, cmd);
 		m_activeUploadResultStorage = result;
 		rebuildGPUDrivenScene(asset, plan, m_activeUploadResultStorage, cmd);
@@ -1814,6 +2142,16 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_renderer.uploadGltfModelBatch(model, textureIndices, materialIndices, meshIndices, ioResult, cmd);
 		m_activeUploadResultStorage = ioResult;
 		rebuildGPUDrivenScene(model, m_activeUploadResultStorage, cmd);
+	}
+
+	void GPUDrivenRenderer::beginSceneReplacement()
+	{
+		// The meshlet and registry buffers are shared by every in-flight frame slot.
+		// A replace upload must retire all readers before clearGPUDrivenScene destroys
+		// or reuses those allocations. Explicit uploadGltfModelBatch remains append-only.
+		m_renderer.waitForIdle();
+		clearGPUDrivenScene();
+		m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
 	}
 
 	void GPUDrivenRenderer::destroyGltfResources(const GltfUploadResult& result)
@@ -1847,18 +2185,14 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		const uint64_t meshKey = packMeshHandleKey(handle);
 		if (const MeshRecord* previousMeshRecord = m_renderer.getMeshPool().tryGet(handle))
 		{
-			m_previousTransformByMeshHandle[meshKey] = previousMeshRecord->transform;
+			m_previousTransformByMeshHandle.try_emplace(meshKey, previousMeshRecord->transform);
 		}
 		m_renderer.updateMeshTransform(handle, transform);
 
 		uint32_t drawIndex = 0;
 		const bool hasDrawIndex = tryGetMeshDrawIndex(handle, drawIndex);
-		const auto objectIdsIt = m_objectIdsByMeshHandle.find(meshKey);
-		const auto objectIdIt = m_objectIdByMeshHandle.find(meshKey);
-		if (objectIdsIt == m_objectIdsByMeshHandle.end() && objectIdIt == m_objectIdByMeshHandle.end())
-		{
-			return;
-		}
+		const auto objectHandlesIt = m_objectHandlesByMeshHandle.find(meshKey);
+		const auto objectHandleIt = m_objectHandleByMeshHandle.find(meshKey);
 
 		const MeshRecord* meshRecord = m_renderer.getMeshPool().tryGet(handle);
 		if (meshRecord == nullptr)
@@ -1876,16 +2210,41 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			drawRecord.worldTransform = transform;
 			drawRecord.boundsSphere = boundsSphere;
 		}
-		if (objectIdsIt != m_objectIdsByMeshHandle.end())
+		if (m_activeUploadResult == &m_activeUploadResultStorage)
 		{
-			for (const uint32_t objectId : objectIdsIt->second)
+			for (SceneUploadResult::SceneDrawRecord& drawRecord : m_activeUploadResultStorage.drawRecords)
 			{
-				m_sceneRegistry.updateTransform(objectId, transform, boundsSphere);
+				if (packMeshHandleKey(drawRecord.meshHandle) == meshKey)
+				{
+					drawRecord.worldTransform = transform;
+					drawRecord.boundsSphere = boundsSphere;
+				}
+			}
+			for (ShadowPackedMesh& packedMesh : m_activeUploadResultStorage.shadowPackedMeshes)
+			{
+				if (packedMesh.meshIndex >= m_activeUploadResultStorage.meshes.size()
+					|| m_activeUploadResultStorage.meshes[packedMesh.meshIndex] != handle)
+				{
+					continue;
+				}
+				updateShadowPackedMeshRuntimeState(packedMesh, transform, boundsSphere);
+			}
+		}
+		if (objectHandlesIt == m_objectHandlesByMeshHandle.end() && objectHandleIt == m_objectHandleByMeshHandle.end())
+		{
+			refreshSceneView();
+			return;
+		}
+		if (objectHandlesIt != m_objectHandlesByMeshHandle.end())
+		{
+			for (const GPUSceneObjectHandle objectHandle : objectHandlesIt->second)
+			{
+				m_sceneRegistry.updateTransform(objectHandle, transform, boundsSphere);
 			}
 		}
 		else
 		{
-			m_sceneRegistry.updateTransform(objectIdIt->second, transform, boundsSphere);
+			m_sceneRegistry.updateTransform(objectHandleIt->second, transform, boundsSphere);
 		}
 		// [GPU-CULL-SPHERE] meshlet 模式下包围球变换已移至 GPU shader（shader.gpu_culling.slang
 		// transformMeshletLocalBoundsSphere）。sceneRegistry.updateTransform 已更新
@@ -1926,18 +2285,20 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform)
 	{
-		if (m_activeUploadResult == nullptr || instanceIndex >= m_activeUploadResult->instanceToDrawRecord.size())
+		if (m_activeUploadResult != &m_activeUploadResultStorage
+			|| instanceIndex >= m_activeUploadResultStorage.instanceToDrawRecord.size())
 		{
 			return;
 		}
 
-		const uint32_t drawRecordIndex = m_activeUploadResult->instanceToDrawRecord[instanceIndex];
-		if (drawRecordIndex == UINT32_MAX || drawRecordIndex >= m_sceneDrawRecords.size())
+		const uint32_t drawRecordIndex = m_activeUploadResultStorage.instanceToDrawRecord[instanceIndex];
+		if (drawRecordIndex == UINT32_MAX || drawRecordIndex >= m_activeUploadResultStorage.drawRecords.size())
 		{
 			return;
 		}
 
-		SceneUploadResult::SceneDrawRecord& drawRecord = m_sceneDrawRecords[drawRecordIndex];
+		SceneUploadResult::SceneDrawRecord& drawRecord =
+			m_activeUploadResultStorage.drawRecords[drawRecordIndex];
 		const MeshHandle meshHandle = drawRecord.meshHandle;
 		if (meshHandle.isNull())
 		{
@@ -1950,27 +2311,293 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			return;
 		}
 
-		const glm::mat4 previousTransform = drawRecord.worldTransform;
-		drawRecord.worldTransform = transform;
-		const glm::vec4 boundsSphere = computeTransformedBoundsSphere(*meshRecord, transform);
-		drawRecord.boundsSphere = boundsSphere;
+		if (drawRecordIndex >= m_transformHistoryByDrawRecord.size())
+		{
+			m_transformHistoryByDrawRecord.resize(drawRecordIndex + 1u);
+			m_transformHistoryByDrawRecord[drawRecordIndex] =
+				makeSubmittedTransformHistory(drawRecord.worldTransform);
+		}
+		SubmittedTransformHistory& transformHistory = m_transformHistoryByDrawRecord[drawRecordIndex];
+		updateSubmittedTransformHistory(transformHistory, transform);
 
-		const uint32_t objectId =
-			drawRecordIndex < m_objectIdByDrawRecord.size() ? m_objectIdByDrawRecord[drawRecordIndex] : UINT32_MAX;
-		const uint32_t drawIndex =
-			drawRecordIndex < m_drawIndexByDrawRecord.size() ? m_drawIndexByDrawRecord[drawRecordIndex] : UINT32_MAX;
-		if (objectId != UINT32_MAX)
+		const glm::vec4 boundsSphere = computeTransformedBoundsSphere(*meshRecord, transform);
+		drawRecord.worldTransform = transformHistory.currentWorldTransform;
+		drawRecord.boundsSphere = boundsSphere;
+		if (drawRecordIndex < m_sceneDrawRecords.size())
 		{
-			m_sceneRegistry.updateTransform(objectId, transform, boundsSphere);
+			m_sceneDrawRecords[drawRecordIndex].worldTransform = transformHistory.currentWorldTransform;
+			m_sceneDrawRecords[drawRecordIndex].boundsSphere = boundsSphere;
 		}
-		if (drawIndex != UINT32_MAX)
+		for (ShadowPackedMesh& packedMesh : m_activeUploadResultStorage.shadowPackedMeshes)
 		{
-			m_previousTransformByDrawIndex[drawIndex] = previousTransform;
-			markPersistentDrawDirty(drawIndex);
+			if (packedMesh.drawRecordIndex == drawRecordIndex)
+			{
+				updateShadowPackedMeshRuntimeState(
+					packedMesh,
+					transformHistory.currentWorldTransform,
+					transformHistory.previousWorldTransform,
+					boundsSphere);
+			}
 		}
-		m_sceneUploadPending = true;
-		m_runtimeStats.pendingSceneUpdates = 1;
+
+		const GPUSceneObjectHandle objectHandle =
+			drawRecordIndex < m_objectHandleByDrawRecord.size()
+				? m_objectHandleByDrawRecord[drawRecordIndex]
+				: kNullGPUSceneObjectHandle;
+		const bool registryUpdated = !objectHandle.isNull()
+			&& m_sceneRegistry.updateTransform(
+				objectHandle, transformHistory.currentWorldTransform, boundsSphere);
+
+		bool markedDraws = false;
+		if (drawRecordIndex < m_drawIndicesByDrawRecord.size())
+		{
+			for (const uint32_t drawIndex : m_drawIndicesByDrawRecord[drawRecordIndex])
+			{
+				markPersistentDrawDirty(drawIndex);
+				markedDraws = true;
+			}
+		}
+		if (!markedDraws && drawRecordIndex < m_drawIndexByDrawRecord.size()
+			&& m_drawIndexByDrawRecord[drawRecordIndex] != UINT32_MAX)
+		{
+			markPersistentDrawDirty(m_drawIndexByDrawRecord[drawRecordIndex]);
+		}
+		m_sceneUploadPending = registryUpdated;
+		m_runtimeStats.pendingSceneUpdates = m_sceneUploadPending ? 1u : 0u;
 		refreshSceneView();
+	}
+
+	bool GPUDrivenRenderer::removeSceneInstance(uint32_t instanceIndex)
+	{
+		if (m_activeUploadResult != &m_activeUploadResultStorage
+			|| instanceIndex >= m_activeUploadResultStorage.instanceToDrawRecord.size())
+		{
+			return false;
+		}
+
+		const uint32_t drawRecordIndex = m_activeUploadResultStorage.instanceToDrawRecord[instanceIndex];
+		if (drawRecordIndex == UINT32_MAX
+			|| drawRecordIndex >= m_activeUploadResultStorage.drawRecords.size()
+			|| drawRecordIndex >= m_objectHandleByDrawRecord.size()
+			|| drawRecordIndex >= m_drawIndicesByDrawRecord.size())
+		{
+			return false;
+		}
+
+		const GPUSceneObjectHandle objectHandle = m_objectHandleByDrawRecord[drawRecordIndex];
+		const std::vector<uint32_t>& drawIndices = m_drawIndicesByDrawRecord[drawRecordIndex];
+		// Single-object removal currently has an exact topology-preserving implementation
+		// only for the per-instance meshlet stream. Refuse before mutating the registry on
+		// object-level/mixed streams; callers can replace the scene to rebuild topology.
+		if (objectHandle.isNull() || !m_enableExperimentalMeshletPath || drawIndices.empty())
+		{
+			return false;
+		}
+		for (const uint32_t drawIndex : drawIndices)
+		{
+			if (drawIndex >= m_meshletDataCpu.size()
+				|| drawIndex >= m_meshletCullObjectsCpu.size()
+				|| drawIndex >= m_drawIdentityByDrawIndex.size())
+			{
+				return false;
+			}
+		}
+
+		const MeshHandle removedMeshHandle =
+			m_activeUploadResultStorage.drawRecords[drawRecordIndex].meshHandle;
+		const uint64_t removedMeshKey = packMeshHandleKey(removedMeshHandle);
+		const GPUSceneRemoveResult removeResult = m_sceneRegistry.removeObject(objectHandle);
+		if (!removeResult.removed)
+		{
+			return false;
+		}
+		if (!applySceneObjectDenseRemap(removeResult))
+		{
+			// Registry compaction already happened, but the raster identity graph could not
+			// prove a complete remap. Retire the shared buffers and fail closed rather than
+			// submit a stale dense index.
+			m_renderer.waitForIdle();
+			clearGPUDrivenScene();
+			m_activeUploadResultStorage = {};
+			return false;
+		}
+
+		const auto eraseDrawIndex = [](std::vector<uint32_t>& indices, uint32_t drawIndex)
+		{
+			indices.erase(std::remove(indices.begin(), indices.end(), drawIndex), indices.end());
+		};
+		for (const uint32_t drawIndex : drawIndices)
+		{
+			m_meshletDataCpu[drawIndex].objectIndex = UINT32_MAX;
+			m_meshletCullObjectsCpu[drawIndex] = {};
+			m_drawIdentityByDrawIndex[drawIndex] = {};
+			if (drawIndex < m_meshHandleByDrawIndex.size())
+			{
+				m_meshHandleByDrawIndex[drawIndex] = kNullMeshHandle;
+			}
+			if (drawIndex < m_persistentDrawData.size())
+			{
+				m_persistentDrawData[drawIndex] = {};
+				markPersistentDrawDirty(drawIndex);
+			}
+			m_previousTransformByDrawIndex.erase(drawIndex);
+			eraseDrawIndex(m_opaqueDrawIndices, drawIndex);
+			eraseDrawIndex(m_alphaTestDrawIndices, drawIndex);
+			eraseDrawIndex(m_transparentDrawIndices, drawIndex);
+		}
+
+		m_drawIndicesByDrawRecord[drawRecordIndex].clear();
+		if (drawRecordIndex < m_drawIndexByDrawRecord.size())
+		{
+			m_drawIndexByDrawRecord[drawRecordIndex] = UINT32_MAX;
+		}
+		m_objectHandleByDrawRecord[drawRecordIndex] = kNullGPUSceneObjectHandle;
+		if (drawRecordIndex < m_transformHistoryByDrawRecord.size())
+		{
+			m_transformHistoryByDrawRecord[drawRecordIndex] = {};
+		}
+		if (drawRecordIndex < m_sceneDrawRecords.size())
+		{
+			m_sceneDrawRecords[drawRecordIndex] = {};
+		}
+		m_activeUploadResultStorage.drawRecords[drawRecordIndex] = {};
+		for (uint32_t& mappedDrawRecord : m_activeUploadResultStorage.instanceToDrawRecord)
+		{
+			if (mappedDrawRecord == drawRecordIndex)
+			{
+				mappedDrawRecord = UINT32_MAX;
+			}
+		}
+		for (uint32_t& mappedDrawRecord : m_activeUploadResultStorage.drawCommandToDrawRecord)
+		{
+			if (mappedDrawRecord == drawRecordIndex)
+			{
+				mappedDrawRecord = UINT32_MAX;
+			}
+		}
+
+		const auto eraseDrawRecordIndex = [drawRecordIndex](std::vector<size_t>& indices)
+		{
+			indices.erase(
+				std::remove(indices.begin(), indices.end(), static_cast<size_t>(drawRecordIndex)),
+				indices.end());
+		};
+		eraseDrawRecordIndex(m_activeUploadResultStorage.opaqueDrawIndices);
+		eraseDrawRecordIndex(m_activeUploadResultStorage.alphaTestDrawIndices);
+		eraseDrawRecordIndex(m_activeUploadResultStorage.shadowCasterDrawIndices);
+		for (size_t transparentIndex = 0;
+		     transparentIndex < m_activeUploadResultStorage.transparentDrawIndices.size();)
+		{
+			if (m_activeUploadResultStorage.transparentDrawIndices[transparentIndex] != drawRecordIndex)
+			{
+				++transparentIndex;
+				continue;
+			}
+			m_activeUploadResultStorage.transparentDrawIndices.erase(
+				m_activeUploadResultStorage.transparentDrawIndices.begin()
+				+ static_cast<std::ptrdiff_t>(transparentIndex));
+			if (transparentIndex < m_activeUploadResultStorage.transparentDrawDistances.size())
+			{
+				m_activeUploadResultStorage.transparentDrawDistances.erase(
+					m_activeUploadResultStorage.transparentDrawDistances.begin()
+					+ static_cast<std::ptrdiff_t>(transparentIndex));
+			}
+		}
+		m_activeUploadResultStorage.shadowPackedMeshes.erase(
+			std::remove_if(
+				m_activeUploadResultStorage.shadowPackedMeshes.begin(),
+				m_activeUploadResultStorage.shadowPackedMeshes.end(),
+				[drawRecordIndex](const ShadowPackedMesh& packedMesh)
+				{
+					return packedMesh.drawRecordIndex == drawRecordIndex;
+				}),
+			m_activeUploadResultStorage.shadowPackedMeshes.end());
+
+		auto objectHandlesIt = m_objectHandlesByMeshHandle.find(removedMeshKey);
+		if (objectHandlesIt != m_objectHandlesByMeshHandle.end())
+		{
+			auto& objectHandles = objectHandlesIt->second;
+			objectHandles.erase(
+				std::remove(objectHandles.begin(), objectHandles.end(), objectHandle),
+				objectHandles.end());
+			if (objectHandles.empty())
+			{
+				m_objectHandlesByMeshHandle.erase(objectHandlesIt);
+			}
+		}
+		auto primaryObjectIt = m_objectHandleByMeshHandle.find(removedMeshKey);
+		if (primaryObjectIt != m_objectHandleByMeshHandle.end() && primaryObjectIt->second == objectHandle)
+		{
+			const auto remainingHandlesIt = m_objectHandlesByMeshHandle.find(removedMeshKey);
+			if (remainingHandlesIt != m_objectHandlesByMeshHandle.end() && !remainingHandlesIt->second.empty())
+			{
+				primaryObjectIt->second = remainingHandlesIt->second.front();
+			}
+			else
+			{
+				m_objectHandleByMeshHandle.erase(primaryObjectIt);
+			}
+		}
+
+		uint32_t replacementDrawIndex = UINT32_MAX;
+		for (uint32_t candidateDrawIndex = 0;
+		     candidateDrawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size());
+		     ++candidateDrawIndex)
+		{
+			if (!m_meshHandleByDrawIndex[candidateDrawIndex].isNull()
+				&& packMeshHandleKey(m_meshHandleByDrawIndex[candidateDrawIndex]) == removedMeshKey)
+			{
+				replacementDrawIndex = candidateDrawIndex;
+				break;
+			}
+		}
+		if (replacementDrawIndex == UINT32_MAX)
+		{
+			m_drawIndexByMeshHandle.erase(removedMeshKey);
+			m_previousTransformByMeshHandle.erase(removedMeshKey);
+		}
+		else
+		{
+			m_drawIndexByMeshHandle[removedMeshKey] = replacementDrawIndex;
+		}
+
+		markMeshletMetadataForFullRewrite();
+		m_sceneUploadPending = m_sceneRegistry.isDirty();
+		m_persistentDrawDataDirty = true;
+		advanceSceneTopologyVersion();
+		m_runtimeStats.pendingSceneUpdates = m_sceneUploadPending ? 1u : 0u;
+		refreshSceneView();
+		return true;
+	}
+
+	void GPUDrivenRenderer::syncActiveSceneRuntimeState(SceneUploadResult& ioResult) const
+	{
+		if (m_activeUploadResult != &m_activeUploadResultStorage
+			|| ioResult.meshes.size() != m_activeUploadResultStorage.meshes.size())
+		{
+			return;
+		}
+
+		for (size_t meshIndex = 0; meshIndex < ioResult.meshes.size(); ++meshIndex)
+		{
+			if (ioResult.meshes[meshIndex] != m_activeUploadResultStorage.meshes[meshIndex])
+			{
+				return;
+			}
+		}
+
+		// CPU metadata only. The GPU-driven scene view already points at the active
+		// storage; RenderDevice copies this snapshot into the current shadow frame-slot
+		// buffers only after that slot's fence has been waited.
+		ioResult.drawRecords = m_activeUploadResultStorage.drawRecords;
+		ioResult.instanceToDrawRecord = m_activeUploadResultStorage.instanceToDrawRecord;
+		ioResult.drawCommandToDrawRecord = m_activeUploadResultStorage.drawCommandToDrawRecord;
+		ioResult.opaqueDrawIndices = m_activeUploadResultStorage.opaqueDrawIndices;
+		ioResult.alphaTestDrawIndices = m_activeUploadResultStorage.alphaTestDrawIndices;
+		ioResult.transparentDrawIndices = m_activeUploadResultStorage.transparentDrawIndices;
+		ioResult.shadowCasterDrawIndices = m_activeUploadResultStorage.shadowCasterDrawIndices;
+		ioResult.transparentDrawDistances = m_activeUploadResultStorage.transparentDrawDistances;
+		ioResult.shadowPackedMeshes = m_activeUploadResultStorage.shadowPackedMeshes;
 	}
 
 	bool GPUDrivenRenderer::tryGetMeshDrawIndex(MeshHandle handle, uint32_t& outDrawIndex) const
@@ -2002,12 +2629,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult,
 	                                              rhi::CommandBuffer& cmd)
 	{
-		const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
-		if (firstSceneBuild)
-		{
-			clearGPUDrivenScene();
-			m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
-		}
 		m_activeUploadResult = &uploadResult;
 
 		bool appendedObjects = false;
@@ -2018,7 +2639,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			const MeshHandle meshHandle = uploadResult.meshes[meshIndex];
 			const uint64_t meshKey = packMeshHandleKey(meshHandle);
-			if (m_objectIdByMeshHandle.find(meshKey) != m_objectIdByMeshHandle.end())
+			if (m_objectHandleByMeshHandle.find(meshKey) != m_objectHandleByMeshHandle.end())
 			{
 				continue;
 			}
@@ -2043,8 +2664,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			desc.vertexOffset = meshRecord->vertexOffset;
 
 			const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
-			const uint32_t objectId = m_sceneRegistry.registerObject(desc);
-			m_objectIdByMeshHandle[meshKey] = objectId;
+			const GPUSceneObjectHandle objectHandle = m_sceneRegistry.registerObject(desc);
+			m_objectHandleByMeshHandle[meshKey] = objectHandle;
 			appendedObjects = true;
 
 			if (m_enableExperimentalMeshletPath)
@@ -2059,7 +2680,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				{
 					shaderio::Meshlet& meshlet = meshlets.meshlets[localMeshletIndex];
 					meshlet.materialIndex = desc.materialIndex;
-					meshlet.objectIndex = objectId;
+					meshlet.objectIndex = objectDrawIndex;
 					meshlet.flags = flags;
 					meshlet.localIndex = localMeshletIndex;
 					meshlet.indexOffset += baseIndexOffset;
@@ -2080,6 +2701,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						const shaderio::Meshlet& meshlet = meshlets.meshlets[localMeshletIndex];
 						const uint32_t drawIndex = baseMeshletIndex + localMeshletIndex;
 						m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+						bindPersistentDrawIdentity(drawIndex, UINT32_MAX, objectHandle, objectDrawIndex);
 						if (meshRecord->alphaMode == shaderio::LAlphaBlend)
 						{
 							m_transparentDrawIndices.push_back(drawIndex);
@@ -2120,6 +2742,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				m_meshHandleByDrawIndex.resize(objectDrawIndex + 1u, kNullMeshHandle);
 			}
 			m_meshHandleByDrawIndex[objectDrawIndex] = meshHandle;
+			bindPersistentDrawIdentity(objectDrawIndex, UINT32_MAX, objectHandle, objectDrawIndex);
 			if (meshRecord->alphaMode == shaderio::LAlphaBlend)
 			{
 				m_transparentDrawIndices.push_back(objectDrawIndex);
@@ -2134,15 +2757,14 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 		}
 
-		if (appendedObjects || firstSceneBuild)
+		if (appendedObjects)
 		{
-			++m_sceneTopologyVersion;
-			invalidateSortedBootstrapStates();
+			advanceSceneTopologyVersion();
 			m_sceneRegistry.syncToGpu(cmd);
 		}
-		if (m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
+		if (m_enableExperimentalMeshletPath && appendedMeshlets)
 		{
-			m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+			m_meshletUploadDirty = true;
 		}
 		m_sceneUploadPending = false;
 		m_persistentDrawDataDirty = true;
@@ -2179,17 +2801,123 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		}
 	}
 
+	void GPUDrivenRenderer::bindPersistentDrawIdentity(
+		uint32_t drawIndex,
+		uint32_t drawRecordIndex,
+		GPUSceneObjectHandle registryObjectHandle,
+		uint32_t sceneObjectIndex)
+	{
+		if (drawIndex >= m_drawIdentityByDrawIndex.size())
+		{
+			m_drawIdentityByDrawIndex.resize(drawIndex + 1u);
+		}
+		m_drawIdentityByDrawIndex[drawIndex] = PersistentDrawIdentity{
+			.drawRecordIndex = drawRecordIndex,
+			.registryObjectHandle = registryObjectHandle,
+			.sceneObjectIndex = sceneObjectIndex,
+		};
+
+		if (drawRecordIndex == UINT32_MAX)
+		{
+			return;
+		}
+		if (drawRecordIndex >= m_drawIndicesByDrawRecord.size())
+		{
+			m_drawIndicesByDrawRecord.resize(drawRecordIndex + 1u);
+		}
+		m_drawIndicesByDrawRecord[drawRecordIndex].push_back(drawIndex);
+		if (drawRecordIndex >= m_drawIndexByDrawRecord.size())
+		{
+			m_drawIndexByDrawRecord.resize(drawRecordIndex + 1u, UINT32_MAX);
+		}
+		if (m_drawIndexByDrawRecord[drawRecordIndex] == UINT32_MAX)
+		{
+			m_drawIndexByDrawRecord[drawRecordIndex] = drawIndex;
+		}
+	}
+
+	void GPUDrivenRenderer::markMeshletMetadataForFullRewrite()
+	{
+		m_meshletUploadDirty = true;
+		m_meshletMetadataFullRewriteDirty = true;
+	}
+
+	bool GPUDrivenRenderer::applySceneObjectDenseRemap(const GPUSceneRemoveResult& removeResult)
+	{
+		if (!removeResult.hasDenseRemap())
+		{
+			return true;
+		}
+
+		bool remappedAnyDraw = false;
+		for (uint32_t drawIndex = 0;
+		     drawIndex < static_cast<uint32_t>(m_drawIdentityByDrawIndex.size());
+		     ++drawIndex)
+		{
+			PersistentDrawIdentity& identity = m_drawIdentityByDrawIndex[drawIndex];
+			if (identity.registryObjectHandle != removeResult.movedObject)
+			{
+				continue;
+			}
+			if (drawIndex >= m_meshletDataCpu.size()
+				|| (identity.sceneObjectIndex != removeResult.movedFromDenseIndex
+					&& identity.sceneObjectIndex != removeResult.movedToDenseIndex)
+				|| (m_meshletDataCpu[drawIndex].objectIndex != removeResult.movedFromDenseIndex
+					&& m_meshletDataCpu[drawIndex].objectIndex != removeResult.movedToDenseIndex))
+			{
+				return false;
+			}
+
+			identity.sceneObjectIndex = removeResult.movedToDenseIndex;
+			m_meshletDataCpu[drawIndex].objectIndex = removeResult.movedToDenseIndex;
+			remappedAnyDraw = true;
+		}
+		if (remappedAnyDraw)
+		{
+			markMeshletMetadataForFullRewrite();
+		}
+		return remappedAnyDraw;
+	}
+
+	void GPUDrivenRenderer::commitSubmittedSceneTransformHistory()
+	{
+		bool committedTransformHistory = false;
+		for (SubmittedTransformHistory& history : m_transformHistoryByDrawRecord)
+		{
+			if (!history.updatedSinceLastSubmit)
+			{
+				continue;
+			}
+			commitSubmittedTransformHistory(history);
+			committedTransformHistory = true;
+		}
+		for (ShadowPackedMesh& packedMesh : m_activeUploadResultStorage.shadowPackedMeshes)
+		{
+			commitShadowPackedMeshSubmittedState(packedMesh);
+		}
+		if (committedTransformHistory)
+		{
+			for (shaderio::DrawUniforms& drawData : m_persistentDrawData)
+			{
+				drawData.prevModelMatrix = drawData.modelMatrix;
+			}
+		}
+
+		const bool committedLegacyTransformHistory =
+			!m_previousTransformByMeshHandle.empty() || !m_previousTransformByDrawIndex.empty();
+		if (committedTransformHistory || committedLegacyTransformHistory)
+		{
+			m_previousTransformByMeshHandle.clear();
+			m_previousTransformByDrawIndex.clear();
+			m_previousTransformResetPending = true;
+		}
+	}
+
 	void GPUDrivenRenderer::rebuildGPUDrivenScene(const SceneAsset& asset,
 	                                              const SceneUploadPlan& plan,
 	                                              const SceneUploadResult& uploadResult,
 	                                              rhi::CommandBuffer& cmd)
 	{
-		const bool firstSceneBuild = m_objectIdByMeshHandle.empty();
-		if (firstSceneBuild)
-		{
-			clearGPUDrivenScene();
-			m_hiZDepthPyramid.resize(m_renderer.getSceneExtent());
-		}
 		m_activeUploadResult = &uploadResult;
 
 		bool appendedObjects = false;
@@ -2218,12 +2946,40 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 		}
 
-		if (!m_enableExperimentalMeshletPath && !uploadResult.drawRecords.empty())
+		m_sceneDrawRecords = uploadResult.drawRecords;
+		m_objectHandleByDrawRecord.assign(m_sceneDrawRecords.size(), kNullGPUSceneObjectHandle);
+		m_drawIndexByDrawRecord.assign(m_sceneDrawRecords.size(), UINT32_MAX);
+		m_drawIndicesByDrawRecord.assign(m_sceneDrawRecords.size(), {});
+		m_transformHistoryByDrawRecord.clear();
+		m_transformHistoryByDrawRecord.reserve(m_sceneDrawRecords.size());
+		for (const SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
 		{
-			m_sceneDrawRecords = uploadResult.drawRecords;
-			m_objectIdByDrawRecord.assign(m_sceneDrawRecords.size(), UINT32_MAX);
-			m_drawIndexByDrawRecord.assign(m_sceneDrawRecords.size(), UINT32_MAX);
+			m_transformHistoryByDrawRecord.push_back(makeSubmittedTransformHistory(drawRecord.worldTransform));
+		}
 
+		bool hasCompleteInstanceMeshletPayload =
+			m_enableExperimentalMeshletPath && !uploadResult.drawRecords.empty();
+		for (const SceneUploadResult::SceneDrawRecord& drawRecord : uploadResult.drawRecords)
+		{
+			if (!hasCompleteInstanceMeshletPayload)
+			{
+				break;
+			}
+			if (drawRecord.meshIndex >= uploadResult.meshes.size()
+				|| drawRecord.meshIndex >= asset.meshes.size()
+				|| drawRecord.meshIndex >= asset.meshletPayloads.size())
+			{
+				hasCompleteInstanceMeshletPayload = false;
+				break;
+			}
+			const SceneAsset::MeshletPayload& payload = asset.meshletPayloads[drawRecord.meshIndex];
+			hasCompleteInstanceMeshletPayload =
+				!payload.meshletData.empty()
+				&& payload.meshletData.size() % sizeof(shaderio::Meshlet) == 0u;
+		}
+
+		if (!hasCompleteInstanceMeshletPayload && !uploadResult.drawRecords.empty())
+		{
 			for (uint32_t drawRecordIndex = 0; drawRecordIndex < static_cast<uint32_t>(uploadResult.drawRecords.size());
 			     ++drawRecordIndex)
 			{
@@ -2257,20 +3013,20 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				}
 
 				const uint32_t objectDrawIndex = m_sceneRegistry.getObjectCount();
-				const uint32_t objectId = m_sceneRegistry.registerObject(desc);
-				if (m_objectIdByMeshHandle.find(meshKey) == m_objectIdByMeshHandle.end())
+				const GPUSceneObjectHandle objectHandle = m_sceneRegistry.registerObject(desc);
+				if (m_objectHandleByMeshHandle.find(meshKey) == m_objectHandleByMeshHandle.end())
 				{
-					m_objectIdByMeshHandle[meshKey] = objectId;
+					m_objectHandleByMeshHandle[meshKey] = objectHandle;
 				}
-				if (drawRecordIndex < m_objectIdByDrawRecord.size())
+				if (drawRecordIndex < m_objectHandleByDrawRecord.size())
 				{
-					m_objectIdByDrawRecord[drawRecordIndex] = objectId;
+					m_objectHandleByDrawRecord[drawRecordIndex] = objectHandle;
 				}
 				if (drawRecordIndex < m_drawIndexByDrawRecord.size())
 				{
 					m_drawIndexByDrawRecord[drawRecordIndex] = objectDrawIndex;
 				}
-				m_objectIdsByMeshHandle[meshKey].push_back(objectId);
+				m_objectHandlesByMeshHandle[meshKey].push_back(objectHandle);
 
 				SceneDrawBucket bucket = SceneDrawBucket::Opaque;
 				if (drawRecord.alphaMode == shaderio::LAlphaBlend)
@@ -2282,13 +3038,13 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					bucket = SceneDrawBucket::AlphaMask;
 				}
 				appendSceneObjectDraw(meshKey, meshHandle, objectDrawIndex, bucket);
+				bindPersistentDrawIdentity(objectDrawIndex, drawRecordIndex, objectHandle, objectDrawIndex);
 				appendedObjects = true;
 			}
 
-			if (appendedObjects || firstSceneBuild)
+			if (appendedObjects)
 			{
-				++m_sceneTopologyVersion;
-				invalidateSortedBootstrapStates();
+				advanceSceneTopologyVersion();
 				m_sceneRegistry.syncToGpu(cmd);
 			}
 			m_sceneUploadPending = false;
@@ -2302,12 +3058,152 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			return;
 		}
 
+		if (hasCompleteInstanceMeshletPayload)
+		{
+			std::vector<uint32_t> packedIndexBaseByMesh(asset.meshletPayloads.size(), UINT32_MAX);
+			for (uint32_t drawRecordIndex = 0;
+			     drawRecordIndex < static_cast<uint32_t>(uploadResult.drawRecords.size());
+			     ++drawRecordIndex)
+			{
+				const SceneUploadResult::SceneDrawRecord& drawRecord = uploadResult.drawRecords[drawRecordIndex];
+				if (drawRecord.meshIndex >= uploadResult.meshes.size()
+					|| drawRecord.meshIndex >= asset.meshes.size()
+					|| drawRecord.meshIndex >= asset.meshletPayloads.size())
+				{
+					continue;
+				}
+
+				const MeshHandle meshHandle = drawRecord.meshHandle;
+				const MeshRecord* meshRecord = m_renderer.getMeshPool().tryGet(meshHandle);
+				if (meshRecord == nullptr)
+				{
+					continue;
+				}
+				const uint64_t meshKey = packMeshHandleKey(meshHandle);
+				const SceneAsset::MeshletPayload& meshletPayload = asset.meshletPayloads[drawRecord.meshIndex];
+				const uint32_t meshletCount = static_cast<uint32_t>(
+					meshletPayload.meshletData.size() / sizeof(shaderio::Meshlet));
+				const shaderio::Meshlet* sourceMeshlets =
+					reinterpret_cast<const shaderio::Meshlet*>(meshletPayload.meshletData.data());
+				const uint32_t* sourcePackedIndices =
+					reinterpret_cast<const uint32_t*>(meshletPayload.indexData.data());
+				const uint32_t packedIndexCount = static_cast<uint32_t>(
+					meshletPayload.indexData.size() / sizeof(uint32_t));
+
+				uint32_t flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagOcclusionCulling;
+				SceneDrawBucket bucket = SceneDrawBucket::Opaque;
+				if (drawRecord.alphaMode == shaderio::LAlphaBlend)
+				{
+					flags = shaderio::LGPUCullFlagFrustumCulling | shaderio::LGPUCullFlagTransparent;
+					bucket = SceneDrawBucket::Transparent;
+				}
+				else if (drawRecord.alphaMode == shaderio::LAlphaMask)
+				{
+					flags |= shaderio::LGPUCullFlagAlphaMask;
+					bucket = SceneDrawBucket::AlphaMask;
+				}
+
+				GPUSceneRegistrationDesc desc{};
+				desc.meshHandle = meshHandle;
+				desc.meshIndex = drawRecord.meshIndex;
+				desc.materialIndex = drawRecord.materialIndex;
+				desc.transform = drawRecord.worldTransform;
+				desc.boundsSphere = drawRecord.boundsSphere.w > 0.0f
+					                    ? drawRecord.boundsSphere
+					                    : computeTransformedBoundsSphere(*meshRecord, drawRecord.worldTransform);
+				desc.flags = flags;
+				desc.indexCount = meshRecord->indexCount;
+				desc.firstIndex = meshRecord->firstIndex;
+				desc.vertexOffset = meshRecord->vertexOffset;
+
+				const uint32_t sceneObjectIndex = m_sceneRegistry.getObjectCount();
+				const GPUSceneObjectHandle objectHandle = m_sceneRegistry.registerObject(desc);
+				m_objectHandleByMeshHandle.emplace(meshKey, objectHandle);
+				m_objectHandlesByMeshHandle[meshKey].push_back(objectHandle);
+				m_objectHandleByDrawRecord[drawRecordIndex] = objectHandle;
+				appendedObjects = true;
+
+				uint32_t& packedIndexBase = packedIndexBaseByMesh[drawRecord.meshIndex];
+				if (packedIndexBase == UINT32_MAX)
+				{
+					packedIndexBase = static_cast<uint32_t>(m_meshletIndicesCpu.size());
+					if (sourcePackedIndices != nullptr && packedIndexCount > 0u)
+					{
+						m_meshletIndicesCpu.insert(
+							m_meshletIndicesCpu.end(), sourcePackedIndices, sourcePackedIndices + packedIndexCount);
+					}
+					m_runtimeStats.meshletTriangleCount += packedIndexCount / 3u;
+				}
+
+				const uint32_t baseMeshletDrawIndex = static_cast<uint32_t>(m_meshletDataCpu.size());
+				m_drawIndexByMeshHandle.emplace(meshKey, baseMeshletDrawIndex);
+				if (m_meshHandleByDrawIndex.size() < baseMeshletDrawIndex + meshletCount)
+				{
+					m_meshHandleByDrawIndex.resize(baseMeshletDrawIndex + meshletCount, kNullMeshHandle);
+				}
+				for (uint32_t localMeshletIndex = 0; localMeshletIndex < meshletCount; ++localMeshletIndex)
+				{
+					shaderio::Meshlet meshlet = sourceMeshlets[localMeshletIndex];
+					meshlet.materialIndex = drawRecord.materialIndex;
+					meshlet.objectIndex = sceneObjectIndex;
+					meshlet.flags = flags;
+					meshlet.localIndex = localMeshletIndex;
+					meshlet.indexOffset += packedIndexBase;
+
+					const uint32_t drawIndex = static_cast<uint32_t>(m_meshletDataCpu.size());
+					m_meshletDataCpu.push_back(meshlet);
+					m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+					bindPersistentDrawIdentity(drawIndex, drawRecordIndex, objectHandle, sceneObjectIndex);
+					switch (bucket)
+					{
+					case SceneDrawBucket::Transparent:
+						m_transparentDrawIndices.push_back(drawIndex);
+						break;
+					case SceneDrawBucket::AlphaMask:
+						m_alphaTestDrawIndices.push_back(drawIndex);
+						break;
+					case SceneDrawBucket::Opaque:
+					default:
+						m_opaqueDrawIndices.push_back(drawIndex);
+						break;
+					}
+					m_meshletCullObjectsCpu.push_back(shaderio::GPUCullObject{
+						.sphereCenterRadius = transformBoundsSphere(drawRecord.worldTransform, meshlet.boundsSphere),
+						.indexCount = meshlet.indexCount,
+						.firstIndex = meshlet.indexOffset,
+						.vertexOffset = meshRecord->vertexOffset,
+						.flags = flags,
+					});
+				}
+				appendedMeshlets = appendedMeshlets || meshletCount > 0u;
+			}
+
+			if (appendedObjects)
+			{
+				advanceSceneTopologyVersion();
+				m_sceneRegistry.syncToGpu(cmd);
+			}
+			if (appendedMeshlets)
+			{
+				m_meshletUploadDirty = true;
+			}
+			m_sceneUploadPending = false;
+			m_persistentDrawDataDirty = true;
+			m_dirtyPersistentDrawIndices.clear();
+			m_runtimeStats.sceneUploadCount += 1;
+			m_runtimeStats.pendingSceneUpdates = 0;
+			m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
+			m_runtimeStats.meshletCount = m_meshletBuffer.getMeshletCount();
+			refreshSceneView();
+			return;
+		}
+
 		for (size_t meshIndex = 0; meshIndex < uploadResult.meshes.size() && meshIndex < asset.meshes.size(); ++
 		     meshIndex)
 		{
 			const MeshHandle meshHandle = uploadResult.meshes[meshIndex];
 			const uint64_t meshKey = packMeshHandleKey(meshHandle);
-			if (m_objectIdByMeshHandle.find(meshKey) != m_objectIdByMeshHandle.end())
+			if (m_objectHandleByMeshHandle.find(meshKey) != m_objectHandleByMeshHandle.end())
 			{
 				continue;
 			}
@@ -2343,8 +3239,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				desc.boundsSphere = primaryBoundsSphereByMeshIndex[meshIndex];
 			}
 
-			const uint32_t objectId = m_sceneRegistry.registerObject(desc);
-			m_objectIdByMeshHandle[meshKey] = objectId;
+			const GPUSceneObjectHandle objectHandle = m_sceneRegistry.registerObject(desc);
+			m_objectHandleByMeshHandle[meshKey] = objectHandle;
 			appendedObjects = true;
 
 			if (m_enableExperimentalMeshletPath && meshIndex < asset.meshletPayloads.size())
@@ -2376,7 +3272,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					{
 						shaderio::Meshlet meshlet = sourceMeshlets[localMeshletIndex];
 						meshlet.materialIndex = desc.materialIndex;
-						meshlet.objectIndex = objectId;
+						meshlet.objectIndex = objectDrawIndex;
 						meshlet.flags = flags;
 						meshlet.localIndex = localMeshletIndex;
 						meshlet.indexOffset += baseIndexOffset;
@@ -2384,6 +3280,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						const uint32_t drawIndex = baseMeshletIndex + localMeshletIndex;
 						m_meshletDataCpu.push_back(meshlet);
 						m_meshHandleByDrawIndex[drawIndex] = meshHandle;
+						bindPersistentDrawIdentity(drawIndex, UINT32_MAX, objectHandle, objectDrawIndex);
 
 						switch (bucket)
 						{
@@ -2420,17 +3317,17 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 
 			appendSceneObjectDraw(meshKey, meshHandle, objectDrawIndex, bucket);
+			bindPersistentDrawIdentity(objectDrawIndex, UINT32_MAX, objectHandle, objectDrawIndex);
 		}
 
-		if (appendedObjects || firstSceneBuild)
+		if (appendedObjects)
 		{
-			++m_sceneTopologyVersion;
-			invalidateSortedBootstrapStates();
+			advanceSceneTopologyVersion();
 			m_sceneRegistry.syncToGpu(cmd);
 		}
-		if (m_enableExperimentalMeshletPath && (appendedMeshlets || firstSceneBuild))
+		if (m_enableExperimentalMeshletPath && appendedMeshlets)
 		{
-			m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
+			m_meshletUploadDirty = true;
 		}
 		m_sceneUploadPending = false;
 		m_persistentDrawDataDirty = true;
@@ -2444,8 +3341,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::clearGPUDrivenScene()
 	{
-		++m_sceneTopologyVersion;
-		invalidateSortedBootstrapStates();
+		advanceSceneTopologyVersion();
 		clearShadowPackedBufferMirrors();
 		m_sceneRegistry.clear();
 		if (m_enableExperimentalMeshletPath)
@@ -2456,18 +3352,22 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_meshletIndicesCpu.clear();
 		m_meshletCullObjectsCpu.clear();
 		m_sceneDrawRecords.clear();
+		m_transformHistoryByDrawRecord.clear();
+		m_drawIdentityByDrawIndex.clear();
+		m_drawIndicesByDrawRecord.clear();
 		m_persistentDrawData.clear();
+		m_persistentDrawFrameUploads.clear();
 		m_visibilitySortInputObjects.clear();
 		m_visibilitySortInputKeys.clear();
 		m_cachedStaticVisibilitySortObjects.clear();
 		m_cachedStaticVisibilitySortKeys.clear();
 		m_cachedStaticVisibilitySortTopologyVersion = 0;
-		m_objectIdByMeshHandle.clear();
-		m_objectIdsByMeshHandle.clear();
+		m_objectHandleByMeshHandle.clear();
+		m_objectHandlesByMeshHandle.clear();
 		m_drawIndexByMeshHandle.clear();
 		m_previousTransformByMeshHandle.clear();
 		m_previousTransformByDrawIndex.clear();
-		m_objectIdByDrawRecord.clear();
+		m_objectHandleByDrawRecord.clear();
 		m_drawIndexByDrawRecord.clear();
 		m_meshHandleByDrawIndex.clear();
 		m_opaqueDrawIndices.clear();
@@ -2476,6 +3376,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_sceneView = {};
 		m_runtimeStats = {};
 		m_activeUploadResult = nullptr;
+		m_meshletUploadDirty = false;
+		m_meshletMetadataFullRewriteDirty = false;
 		m_sceneUploadPending = false;
 		m_persistentDrawDataDirty = false;
 		m_previousTransformResetPending = false;
@@ -2487,27 +3389,61 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_previousTAAJitterUv = glm::vec2(0.0f);
 		m_previousCameraValid = false;
 		m_taaHistoryValid = false;
+		m_taaHistoryWrittenThisFrame = false;
+		m_taaHistoryWriteIndex = 0u;
 		m_temporalFrameCounter = 0;
 		m_ddgiUpdateOffset = 0;
 	}
 
+	void GPUDrivenRenderer::flushPendingMeshletUpload()
+	{
+		if (!m_enableExperimentalMeshletPath || !m_meshletUploadDirty)
+		{
+			return;
+		}
+
+		// GPUMeshletBuffer owns one persistently mapped GPU-visible allocation shared
+		// by every frame slot. RenderDevice's normal current-slot wait only retires the
+		// slot being reused; another slot may still be reading these bytes. Drain all
+		// in-flight work before uploadMeshlets rewrites or reallocates the shared buffers.
+		m_renderer.waitForIdle();
+		uploadPendingMeshletsAfterIdle();
+	}
+
+	void GPUDrivenRenderer::uploadPendingMeshletsAfterIdle()
+	{
+		if (!m_enableExperimentalMeshletPath || !m_meshletUploadDirty)
+		{
+			return;
+		}
+
+		const GPUMeshletBuffer::MetadataUploadMode metadataUploadMode =
+			m_meshletMetadataFullRewriteDirty
+				? GPUMeshletBuffer::MetadataUploadMode::forceFullRewrite
+				: GPUMeshletBuffer::MetadataUploadMode::incremental;
+		m_meshletBuffer.uploadMeshlets(
+			m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu, metadataUploadMode);
+		m_meshletUploadDirty = false;
+		m_meshletMetadataFullRewriteDirty = false;
+		m_runtimeStats.meshletCount = m_meshletBuffer.getMeshletCount();
+	}
+
 	void GPUDrivenRenderer::flushPendingSceneUploads()
 	{
-		if (!m_sceneUploadPending || (!m_sceneRegistry.isDirty() && !m_enableExperimentalMeshletPath))
+		if (!m_sceneUploadPending)
 		{
+			return;
+		}
+		if (!m_sceneRegistry.isDirty())
+		{
+			m_sceneUploadPending = false;
+			m_runtimeStats.pendingSceneUpdates = 0;
 			return;
 		}
 
 		m_renderer.executeUploadCommand([this](rhi::CommandBuffer& cmdBuffer)
 		{
-			if (m_sceneRegistry.isDirty())
-			{
-				m_sceneRegistry.syncToGpu(cmdBuffer);
-			}
-			if (m_enableExperimentalMeshletPath && !m_meshletDataCpu.empty())
-			{
-				m_meshletBuffer.uploadMeshlets(m_meshletDataCpu, m_meshletIndicesCpu, m_meshletCullObjectsCpu);
-			}
+			m_sceneRegistry.syncToGpu(cmdBuffer);
 		});
 		m_sceneUploadPending = false;
 		m_persistentDrawDataDirty = true;
@@ -2515,6 +3451,13 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_runtimeStats.sceneUploadCount += 1;
 		m_runtimeStats.pendingSceneUpdates = 0;
 		m_runtimeStats.objectCount = m_sceneRegistry.getObjectCount();
+	}
+
+	void GPUDrivenRenderer::advanceSceneTopologyVersion()
+	{
+		++m_sceneTopologyVersion;
+		invalidateSortedBootstrapStates();
+		invalidateRawCullingBootstrapStates();
 	}
 
 	void GPUDrivenRenderer::invalidateSortedBootstrapStates()
@@ -2536,10 +3479,16 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	void GPUDrivenRenderer::recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity,
 	                                                   uint32_t alphaCapacity)
 	{
-		if (frameIndex >= m_sortedBootstrapFrames.size())
+		const uint32_t frameSlotCount = getFrameSlotCount();
+		ASSERT(frameSlotCount > 0u && frameIndex < frameSlotCount,
+		       "Sorted bootstrap state must target the authoritative frame ring");
+		if (frameSlotCount == 0u || frameIndex >= frameSlotCount)
 		{
-			m_sortedBootstrapFrames.resize(std::max(frameIndex + 1u, getSwapchainImageCount()),
-			                               SortedBootstrapFrameState{});
+			return;
+		}
+		if (m_sortedBootstrapFrames.size() != frameSlotCount)
+		{
+			m_sortedBootstrapFrames.resize(frameSlotCount, SortedBootstrapFrameState{});
 		}
 
 		m_sortedBootstrapFrames[frameIndex] = SortedBootstrapFrameState{
@@ -2576,6 +3525,93 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		outOpaqueCapacity = frameState.opaqueCapacity;
 		outAlphaCapacity = frameState.alphaCapacity;
 		return outOpaqueCapacity + outAlphaCapacity > 0u;
+	}
+
+	void GPUDrivenRenderer::invalidateRawCullingBootstrapStates()
+	{
+		for (RawCullingBootstrapFrameState& frameState : m_rawCullingBootstrapFrames)
+		{
+			frameState = {};
+		}
+	}
+
+	void GPUDrivenRenderer::invalidateRawCullingBootstrapState(uint32_t frameIndex)
+	{
+		if (frameIndex < m_rawCullingBootstrapFrames.size())
+		{
+			m_rawCullingBootstrapFrames[frameIndex] = {};
+		}
+	}
+
+	void GPUDrivenRenderer::recordRawCullingBootstrapState(uint32_t frameIndex, uint32_t objectCount)
+	{
+		const uint32_t frameSlotCount = getFrameSlotCount();
+		ASSERT(frameSlotCount > 0u && frameIndex < frameSlotCount,
+		       "Raw culling bootstrap state must target the authoritative frame ring");
+		if (frameSlotCount == 0u || frameIndex >= frameSlotCount)
+		{
+			return;
+		}
+		if (objectCount == 0u)
+		{
+			invalidateRawCullingBootstrapState(frameIndex);
+			return;
+		}
+		if (m_rawCullingBootstrapFrames.size() != frameSlotCount)
+		{
+			m_rawCullingBootstrapFrames.resize(frameSlotCount, RawCullingBootstrapFrameState{});
+		}
+
+		m_rawCullingBootstrapFrames[frameIndex] = RawCullingBootstrapFrameState{
+			.objectCount = objectCount,
+			.sceneTopologyVersion = m_sceneTopologyVersion,
+			.valid = true,
+		};
+	}
+
+	GPUDrivenRenderer::PreviousRawCullingBootstrap GPUDrivenRenderer::getPreviousRawCullingBootstrap(
+		uint32_t frameIndex) const
+	{
+		PreviousRawCullingBootstrap bootstrap{};
+		const uint32_t frameSlotCount = getFrameSlotCount();
+		if (frameSlotCount == 0u || frameIndex >= frameSlotCount
+			|| m_rawCullingBootstrapFrames.size() != frameSlotCount)
+		{
+			return bootstrap;
+		}
+
+		const uint32_t previousFrameIndex = getPreviousFrameIndex(frameIndex);
+		const RawCullingBootstrapFrameState& frameState = m_rawCullingBootstrapFrames[previousFrameIndex];
+		if (!frameState.valid || frameState.objectCount == 0u
+			|| frameState.sceneTopologyVersion != m_sceneTopologyVersion)
+		{
+			return bootstrap;
+		}
+
+		// Resolve the previous ring slot only after generation identity matches.
+		// A topology transition therefore cannot even expose stale draw-stream
+		// handles to the depth prepass.
+		const uint64_t indirectBufferHandle = m_renderer.getPreviousGPUCullingIndirectBufferOpaque(frameIndex);
+		const uint64_t countBufferHandle = m_renderer.getPreviousGPUCullingDrawCountBufferOpaque(frameIndex);
+		const rhi::BufferHandle indirectBuffer =
+			m_renderer.getPreviousGPUCullingIndirectBufferRHIHandle(frameIndex);
+		const rhi::BufferHandle countBuffer =
+			m_renderer.getPreviousGPUCullingDrawCountBufferRHIHandle(frameIndex);
+		if (indirectBufferHandle == 0u || countBufferHandle == 0u
+			|| indirectBuffer.isNull() || countBuffer.isNull())
+		{
+			return bootstrap;
+		}
+
+		bootstrap = PreviousRawCullingBootstrap{
+			.indirectBufferHandle = indirectBufferHandle,
+			.countBufferHandle = countBufferHandle,
+			.indirectBuffer = indirectBuffer,
+			.countBuffer = countBuffer,
+			.objectCount = frameState.objectCount,
+			.valid = true,
+		};
+		return bootstrap;
 	}
 
 	void GPUDrivenRenderer::markPersistentDrawDirty(uint32_t drawIndex)
@@ -2616,7 +3652,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		return ranges;
 	}
 
-	void GPUDrivenRenderer::uploadPersistentDrawData()
+	void GPUDrivenRenderer::preparePersistentDrawData()
 	{
 		if (!m_sceneView.usePersistentCullingObjects)
 		{
@@ -2663,8 +3699,15 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				return;
 			}
 
+			const PersistentDrawIdentity* drawIdentity =
+				drawIndex < m_drawIdentityByDrawIndex.size() ? &m_drawIdentityByDrawIndex[drawIndex] : nullptr;
+			const uint32_t drawRecordIndex = drawIdentity != nullptr ? drawIdentity->drawRecordIndex : UINT32_MAX;
 			const SceneUploadResult::SceneDrawRecord* drawRecord =
-				drawIndex < m_sceneDrawRecords.size() ? &m_sceneDrawRecords[drawIndex] : nullptr;
+				drawRecordIndex < m_sceneDrawRecords.size() ? &m_sceneDrawRecords[drawRecordIndex] : nullptr;
+			const SubmittedTransformHistory* transformHistory =
+				drawRecordIndex < m_transformHistoryByDrawRecord.size()
+					? &m_transformHistoryByDrawRecord[drawRecordIndex]
+					: nullptr;
 			const MaterialHandle drawMaterialHandle =
 				drawRecord != nullptr ? drawRecord->materialHandle : kNullMaterialHandle;
 			const RenderDevice::MaterialTextureIndices drawMaterialTextures =
@@ -2672,18 +3715,25 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					? RenderDevice::MaterialTextureIndices{}
 					: m_renderer.getMaterialTextureIndices(drawMaterialHandle, m_activeUploadResult);
 			shaderio::DrawUniforms drawData{};
-			drawData.modelMatrix = drawRecord != nullptr ? drawRecord->worldTransform : mesh->transform;
-			drawData.prevModelMatrix = drawData.modelMatrix;
-			const uint64_t meshKey = packMeshHandleKey(meshHandle);
-			const auto previousDrawTransformIt = m_previousTransformByDrawIndex.find(drawIndex);
-			const auto previousTransformIt = m_previousTransformByMeshHandle.find(meshKey);
-			if (previousDrawTransformIt != m_previousTransformByDrawIndex.end())
+			drawData.modelMatrix = transformHistory != nullptr
+				                       ? transformHistory->currentWorldTransform
+				                       : (drawRecord != nullptr ? drawRecord->worldTransform : mesh->transform);
+			drawData.prevModelMatrix = transformHistory != nullptr
+				                           ? transformHistory->previousWorldTransform
+				                           : drawData.modelMatrix;
+			if (drawRecord == nullptr)
 			{
-				drawData.prevModelMatrix = previousDrawTransformIt->second;
-			}
-			else if (previousTransformIt != m_previousTransformByMeshHandle.end())
-			{
-				drawData.prevModelMatrix = previousTransformIt->second;
+				const uint64_t meshKey = packMeshHandleKey(meshHandle);
+				const auto previousDrawTransformIt = m_previousTransformByDrawIndex.find(drawIndex);
+				const auto previousTransformIt = m_previousTransformByMeshHandle.find(meshKey);
+				if (previousDrawTransformIt != m_previousTransformByDrawIndex.end())
+				{
+					drawData.prevModelMatrix = previousDrawTransformIt->second;
+				}
+				else if (previousTransformIt != m_previousTransformByMeshHandle.end())
+				{
+					drawData.prevModelMatrix = previousTransformIt->second;
+				}
 			}
 			const MeshRecord* materialSource = mesh;
 			drawData.baseColorFactor = drawMaterialHandle.isNull()
@@ -2737,48 +3787,134 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			}
 		}
 
-		const uint32_t frameCount = getSwapchainImageCount();
-		for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+		const uint32_t frameCount = getFrameSlotCount();
+		ASSERT(frameCount > 0u, "Persistent draw upload state requires a non-empty frame ring");
+		if (frameCount == 0u)
 		{
-			if (needsFullUpload)
+			return;
+		}
+		m_persistentDrawFrameUploads.resize(frameCount);
+		if (needsFullUpload)
+		{
+			for (PersistentDrawFrameUploadState& frameUpload : m_persistentDrawFrameUploads)
 			{
-				m_renderer.uploadMDIDrawData(frameIndex, m_persistentDrawData);
-				m_renderer.uploadGBufferMDIDrawData(frameIndex, m_persistentDrawData);
-				m_renderer.uploadDepthMDIDrawData(frameIndex, m_persistentDrawData);
-				continue;
+				frameUpload.fullUploadPending = true;
+				frameUpload.dirtyRanges.clear();
 			}
-
-			for (const DirtyRange& range : dirtyRanges)
+		}
+		else if (!dirtyRanges.empty())
+		{
+			const auto mergeDirtyRanges = [](std::vector<DirtyRange>& pendingRanges,
+			                                 const std::vector<DirtyRange>& incomingRanges)
 			{
+				pendingRanges.insert(pendingRanges.end(), incomingRanges.begin(), incomingRanges.end());
+				std::sort(pendingRanges.begin(), pendingRanges.end(), [](const DirtyRange& lhs, const DirtyRange& rhs)
+				{
+					return lhs.first < rhs.first;
+				});
+
+				size_t mergedCount = 0;
+				for (const DirtyRange range : pendingRanges)
+				{
+					if (range.count == 0u)
+					{
+						continue;
+					}
+					if (mergedCount == 0u)
+					{
+						pendingRanges[mergedCount++] = range;
+						continue;
+					}
+
+					DirtyRange& merged = pendingRanges[mergedCount - 1u];
+					const uint64_t mergedEnd = static_cast<uint64_t>(merged.first) + merged.count;
+					const uint64_t rangeEnd = static_cast<uint64_t>(range.first) + range.count;
+					if (static_cast<uint64_t>(range.first) <= mergedEnd)
+					{
+						merged.count = static_cast<uint32_t>(std::max(mergedEnd, rangeEnd) - merged.first);
+					}
+					else
+					{
+						pendingRanges[mergedCount++] = range;
+					}
+				}
+				pendingRanges.resize(mergedCount);
+			};
+
+			for (PersistentDrawFrameUploadState& frameUpload : m_persistentDrawFrameUploads)
+			{
+				if (!frameUpload.fullUploadPending)
+				{
+					mergeDirtyRanges(frameUpload.dirtyRanges, dirtyRanges);
+				}
+			}
+		}
+		bool hasMotionPreviousTransforms =
+			!m_previousTransformByDrawIndex.empty() || !m_previousTransformByMeshHandle.empty();
+		for (const SubmittedTransformHistory& history : m_transformHistoryByDrawRecord)
+		{
+			hasMotionPreviousTransforms = hasMotionPreviousTransforms || history.updatedSinceLastSubmit;
+		}
+		m_previousTransformResetPending = hasMotionPreviousTransforms && !resetPreviousTransforms;
+		m_persistentDrawDataDirty = false;
+		m_dirtyPersistentDrawIndices.clear();
+	}
+
+	void GPUDrivenRenderer::uploadPersistentDrawData(uint32_t frameIndex)
+	{
+		if (!m_sceneView.usePersistentCullingObjects)
+		{
+			return;
+		}
+
+		ASSERT(frameIndex == getCurrentFrameIndexHint(),
+		       "Persistent draw uploads must target the authoritative current frame slot");
+		const uint32_t frameCount = getFrameSlotCount();
+		ASSERT(frameCount > 0u && frameIndex < frameCount,
+		       "Persistent draw uploads must target the authoritative frame ring");
+		if (frameCount == 0u || frameIndex >= frameCount)
+		{
+			return;
+		}
+		m_persistentDrawFrameUploads.resize(frameCount);
+		ASSERT(frameIndex < m_persistentDrawFrameUploads.size(),
+		       "Persistent draw upload state must match the RenderDevice frame ring");
+
+		PersistentDrawFrameUploadState& frameUpload = m_persistentDrawFrameUploads[frameIndex];
+		if (m_persistentDrawData.empty())
+		{
+			frameUpload.fullUploadPending = false;
+			frameUpload.dirtyRanges.clear();
+			return;
+		}
+
+		if (frameUpload.fullUploadPending)
+		{
+			m_renderer.uploadMDIDrawData(frameIndex, m_persistentDrawData);
+			m_renderer.uploadGBufferMDIDrawData(frameIndex, m_persistentDrawData);
+			m_renderer.uploadDepthMDIDrawData(frameIndex, m_persistentDrawData);
+		}
+		else
+		{
+			for (const DirtyRange& range : frameUpload.dirtyRanges)
+			{
+				if (range.first >= m_persistentDrawData.size())
+				{
+					continue;
+				}
+				const uint32_t safeCount = std::min<uint32_t>(
+					range.count, static_cast<uint32_t>(m_persistentDrawData.size()) - range.first);
 				const std::span<const shaderio::DrawUniforms> drawRange{
-					m_persistentDrawData.data() + range.first, range.count
+					m_persistentDrawData.data() + range.first, safeCount
 				};
 				m_renderer.uploadMDIDrawDataRange(frameIndex, range.first, drawRange);
 				m_renderer.uploadGBufferMDIDrawDataRange(frameIndex, range.first, drawRange);
 				m_renderer.uploadDepthMDIDrawDataRange(frameIndex, range.first, drawRange);
 			}
 		}
-		bool hasMotionPreviousTransforms = !m_previousTransformByDrawIndex.empty();
-		for (uint32_t drawIndex = 0; drawIndex < static_cast<uint32_t>(m_meshHandleByDrawIndex.size()); ++drawIndex)
-		{
-			const MeshHandle meshHandle = m_meshHandleByDrawIndex[drawIndex];
-			if (meshHandle.isNull())
-			{
-				continue;
-			}
-			const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
-			if (mesh == nullptr)
-			{
-				continue;
-			}
-			const uint64_t meshKey = packMeshHandleKey(meshHandle);
-			hasMotionPreviousTransforms = hasMotionPreviousTransforms
-				|| (m_previousTransformByMeshHandle.find(meshKey) != m_previousTransformByMeshHandle.end());
-			m_previousTransformByMeshHandle[meshKey] = mesh->transform;
-		}
-		m_previousTransformResetPending = hasMotionPreviousTransforms && !resetPreviousTransforms;
-		m_persistentDrawDataDirty = false;
-		m_dirtyPersistentDrawIndices.clear();
+
+		frameUpload.fullUploadPending = false;
+		frameUpload.dirtyRanges.clear();
 	}
 
 	void GPUDrivenRenderer::refreshSceneView()
@@ -3087,10 +4223,10 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		                      GPUDrivenLightResources::CreateInfo{
 			                      .maxPointLights = 256,
 			                      .maxSpotLights = 128,
-			                      .frameCount = std::max(1u, getSwapchainImageCount()),
+			                      .frameCount = getFrameSlotCount(),
 		                      });
 
-		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+		const uint32_t frameCount = getFrameSlotCount();
 		// Shared linear-clamp sampler as an owned RHI handle; createSampler registers it in
 		// the resource table for the combinedImageSampler ArgumentWrites of the lighting set.
 		m_linearClampSamplerHandle = getRHIDevice().createSampler(rhi::SamplerDesc{
@@ -3101,6 +4237,19 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			.addressModeV = rhi::AddressMode::clampToEdge,
 			.addressModeW = rhi::AddressMode::clampToEdge,
 			.debugName = "GPUDriven.linearClampSampler",
+		});
+		// Manual PCF must compare individual depth texels. Filtering depth first and then
+		// comparing is not PCF and makes the result depend on sub-texel sampling phase.
+		m_shadowPointClampSamplerHandle = getRHIDevice().createSampler(rhi::SamplerDesc{
+			.magFilter = rhi::Filter::nearest,
+			.minFilter = rhi::Filter::nearest,
+			.mipmapMode = rhi::MipmapMode::nearest,
+			.addressModeU = rhi::AddressMode::clampToEdge,
+			.addressModeV = rhi::AddressMode::clampToEdge,
+			.addressModeW = rhi::AddressMode::clampToEdge,
+			.minLod = 0.0f,
+			.maxLod = 0.0f,
+			.debugName = "GPUDriven.shadowPointClampSampler",
 		});
 		// IBL samplers are created later in initIBLResources(); their handles are registered
 		// lazily on first use in updateLightingArgumentTable.
@@ -3379,6 +4528,10 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			getRHIDevice().destroySampler(m_linearClampSamplerHandle);
 		}
+		if (!m_shadowPointClampSamplerHandle.isNull())
+		{
+			getRHIDevice().destroySampler(m_shadowPointClampSamplerHandle);
+		}
 		// Owned ArgumentTables + layouts (lighting-input/scene/coarse) are freed by
 		// RenderDevice::destroyArgumentTablesAndLayouts(); here we drop the now-stale handles and the
 		// owned=false buffer/view/sampler mirrors registered in the resource table.
@@ -3393,6 +4546,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_lightingArgumentLayout = {};
 		m_lightingSceneArgumentLayout = {};
 		m_linearClampSamplerHandle = {};
+		m_shadowPointClampSamplerHandle = {};
 		m_iblCubeSamplerHandle = {};
 		m_iblLutSamplerHandle = {};
 		m_lightCoarseCullingBufferHandles.clear();
@@ -3593,7 +4747,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return;
 		}
-		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+		const uint32_t frameCount = getFrameSlotCount();
 
 		// AO set: 2 sampled images + 1 storage image (compute). RHI ArgumentLayout + per-frame
 		// owned ArgumentTables (AO trace + denoise). SSR set is already an RHI ArgumentLayout
@@ -3774,19 +4928,51 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::bindPhase7PassResources()
 	{
-		if (m_shadowAtlasImage.isNull())
+		if (!m_shadowAtlasImage.isNull())
 		{
-			return;
+			m_passExecutor.bindTexture({
+				.handle = kPassGPUDrivenShadowAtlasHandle,
+				.backendImageToken = resolveNativeTexture(getRHIDevice(), m_shadowAtlasImage),
+				.aspect = rhi::TextureAspect::depth,
+				.initialState = rhi::ResourceState::Undefined,
+				.isSwapchain = false,
+				.rhiTexture = m_shadowAtlasImage,
+			});
 		}
 
-		m_passExecutor.bindTexture({
-			.handle = kPassGPUDrivenShadowAtlasHandle,
-			.backendImageToken = resolveNativeTexture(getRHIDevice(), m_shadowAtlasImage),
-			.aspect = rhi::TextureAspect::depth,
-			.initialState = rhi::ResourceState::Undefined,
-			.isSwapchain = false,
-			.rhiTexture = m_shadowAtlasImage,
-		});
+		const std::array<TextureHandle, 9> bloomHandles{
+			kPassBloomHalfHandle,
+			kPassBloomQuarterHandle,
+			kPassBloomEighthHandle,
+			kPassBloomSixteenthHandle,
+			kPassBloomThirtySecondHandle,
+			kPassBloomUpsampleSixteenthHandle,
+			kPassBloomUpsampleEighthHandle,
+			kPassBloomUpsampleQuarterHandle,
+			kPassBloomOutputHandle,
+		};
+		const std::array<rhi::TextureHandle, 9> bloomImages{
+			getBloomHalfImage(),
+			getBloomQuarterImage(),
+			getBloomEighthImage(),
+			getBloomSixteenthImage(),
+			getBloomThirtySecondImage(),
+			getBloomUpsampleSixteenthImage(),
+			getBloomUpsampleEighthImage(),
+			getBloomUpsampleQuarterImage(),
+			getBloomOutputImage(),
+		};
+		static_assert(std::tuple_size_v<decltype(bloomHandles)> == std::tuple_size_v<decltype(bloomImages)>);
+		for (size_t bloomIndex = 0; bloomIndex < bloomHandles.size(); ++bloomIndex)
+		{
+			m_passExecutor.bindTexture({
+				.handle = bloomHandles[bloomIndex],
+				.backendImageToken = resolveNativeTexture(getRHIDevice(), bloomImages[bloomIndex]),
+				.aspect = rhi::TextureAspect::color,
+				.initialState = m_bloomResourceStates[bloomIndex],
+				.isSwapchain = false,
+			});
+		}
 	}
 
 	void GPUDrivenRenderer::initPhase7Pipelines()
@@ -4151,7 +5337,15 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			{
 				lightingUniforms.light.worldToShadow[i] = shadowData->cascadeViewProjection[i];
 			}
-			lightingUniforms.light.cascadeSplitDistances = shadowData->cascadeSplitDistances;
+			const shaderio::CascadeShadowParams& sourceCascadeParams = shadowData->cascadeSplitDistances;
+			shaderio::CascadeShadowParams& lightingCascadeParams =
+				lightingUniforms.light.cascadeSplitDistances;
+			lightingCascadeParams.x = sourceCascadeParams.x;
+			lightingCascadeParams.y = sourceCascadeParams.y;
+			lightingCascadeParams.z = sourceCascadeParams.z;
+			lightingCascadeParams.w = sourceCascadeParams.w;
+			lightingCascadeParams.invDepthRange = sourceCascadeParams.invDepthRange;
+			lightingCascadeParams.worldTexelSize = sourceCascadeParams.worldTexelSize;
 		}
 	lightingUniforms.light.lightDirectionAndShadowStrength =
 		glm::vec4(glm::normalize(-params.lightSettings.direction), params.lightSettings.shadowStrength);
@@ -4180,7 +5374,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			glm::vec4(1.0f / static_cast<float>(std::max(1u, getCSMShadowResources().getCascadeResolution())),
 			          params.lightSettings.depthBias,
 			          params.lightSettings.normalBias,
-			          static_cast<float>(shaderio::LCascadeCount));
+			          static_cast<float>(getCSMShadowResources().getCascadeCount()));
 		const bool disableIBLForFlax = isFlaxStyleDDGIRequested()
 			&& (getDDGIConfig().flaxGIDisableIBL || params.debugOptions.flaxGIDisableIBL);
 		const bool flaxIBLEnvironmentEnabled =
@@ -4244,14 +5438,14 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		const float flaxGIDebugMode = static_cast<float>(std::max(params.debugOptions.flaxGIDebugMode, 0));
 		const float flaxGIDebugScale = std::max(params.debugOptions.flaxGIDebugScale, 0.0f);
 		lightingUniforms.light.ddgiParams2 = glm::vec4(0.0f, flaxGIDebugMode, flaxGIDebugScale, 0.0f);
-		const FlaxGIOutputSelection flaxOutput = m_flaxDDGIPass != nullptr
-			? m_flaxDDGIPass->getLightingOutputSelection(params.debugOptions)
-			: FlaxGIOutputSelection{};
+		const FlaxGIOutputSnapshot flaxOutput = m_flaxDDGIPass != nullptr
+			? m_flaxDDGIPass->getLightingOutputSnapshot(params.debugOptions)
+			: FlaxGIOutputSnapshot{};
 		const bool flaxTexturesReady = isFlaxStyleDDGIRequested() && m_flaxDDGIPass != nullptr
-			&& m_flaxDDGIPass->isReady() && flaxOutput.valid
+			&& m_flaxDDGIPass->isReady() && flaxOutput.isValid()
 			&& !m_flaxDDGIPass->getProbesDataView().isNull()
-			&& !m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.parity).isNull()
-			&& !m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.parity).isNull();
+			&& !m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.atlas.parity).isNull()
+			&& !m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.atlas.parity).isNull();
 		const bool probeResourcesReady = isDDGIProbeDataPathEnabled() && m_ddgiProbeVolume.isInitialized()
 			&& m_ddgiProbeVolume.getProbePositionAddress().isValid()
 			&& !m_ddgiIrradianceLightingViews[0].isNull() && !m_ddgiIrradianceLightingViews[1].isNull()
@@ -4285,34 +5479,29 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			const bool flaxRequested = isFlaxStyleDDGIRequested();
 			if (flaxRequested)
 			{
-				const uint32_t realCascadeCount = m_flaxDDGIResources.isInitialized()
-						? m_flaxDDGIResources.getCascadeCount() : 0u;
-					lightingUniforms.light.ddgiFlaxEnabledAndCascades =
-						glm::vec4(flaxTexturesReady ? 1.0f : 0.0f,
-						          static_cast<float>(realCascadeCount),
-						          flaxTexturesReady ? 1.0f : 0.0f,
-						          ddgiConfig.viewBias);
-				// R3: populate per-cascade origin/spacing from Flax cascade descriptors
-				const uint32_t cascadeCount = m_flaxDDGIResources.isInitialized()
-					? m_flaxDDGIResources.getCascadeCount() : 0u;
-				for (uint32_t c = 0; c < std::min(cascadeCount, 4u); ++c)
+				const uint32_t cascadeCount = flaxOutput.isValid()
+					? std::min(flaxOutput.spatial.cascadeCount, kFlaxGIMaxPublishedCascades)
+					: 0u;
+				lightingUniforms.light.ddgiFlaxEnabledAndCascades =
+					glm::vec4(flaxTexturesReady ? 1.0f : 0.0f,
+					          static_cast<float>(cascadeCount),
+					          flaxTexturesReady ? 1.0f : 0.0f,
+					          ddgiConfig.viewBias);
+				for (uint32_t c = 0; c < cascadeCount; ++c)
 				{
-					if (c < m_flaxDDGICascades.size())
-					{
-						const auto& cascade = m_flaxDDGICascades[c];
-						lightingUniforms.light.ddgiFlaxOriginAndSpacing[c] =
-							glm::vec4(cascade.snappedOrigin, cascade.probeSpacing);
-						lightingUniforms.light.ddgiFlaxBlendOrigin[c] =
-							glm::vec4(cascade.blendOrigin, 0.0f);
-						lightingUniforms.light.ddgiFlaxScrollOffsets[c] =
-							glm::ivec4(cascade.scrollOffset, 0);
-					}
+					const FlaxGICascadeSpatialSnapshot& cascade = flaxOutput.spatial.cascades[c];
+					lightingUniforms.light.ddgiFlaxOriginAndSpacing[c] =
+						glm::vec4(cascade.origin[0], cascade.origin[1], cascade.origin[2], cascade.spacing);
+					lightingUniforms.light.ddgiFlaxBlendOrigin[c] =
+						glm::vec4(cascade.blendOrigin[0], cascade.blendOrigin[1], cascade.blendOrigin[2], 0.0f);
+					lightingUniforms.light.ddgiFlaxScrollOffsets[c] =
+						glm::ivec4(cascade.scrollOffset[0], cascade.scrollOffset[1], cascade.scrollOffset[2], 0);
 				}
-				// Probe counts from first cascade (shared atlas bridge for now)
-				const auto& ppc = m_flaxDDGIResources.getProbesPerCascade();
-				const glm::uvec3 counts0 = ppc.empty() ? glm::uvec3(0u) : ppc[0];
 				lightingUniforms.light.ddgiFlaxCountsAndRays =
-					glm::uvec4(counts0, ddgiConfig.raysPerProbe);
+					glm::uvec4(flaxOutput.spatial.probeCounts[0],
+					           flaxOutput.spatial.probeCounts[1],
+					           flaxOutput.spatial.probeCounts[2],
+					           ddgiConfig.raysPerProbe);
 				lightingUniforms.light.ddgiFlaxGammaWeightMaxDist =
 					glm::vec4(ddgiConfig.ddgiGamma,
 					          ddgiConfig.probeHistoryWeight,
@@ -4356,7 +5545,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		};
 		m_lightResources.updateLights(frameIndex, m_gpuDrivenPointLights, m_gpuDrivenSpotLights);
 		m_lightResources.updateUniforms(frameIndex, lightingUniforms, coarseUniforms, clusteredUniforms);
-		updateLightingArgumentTable(frameIndex, params.debugOptions);
+		updateLightingArgumentTable(frameIndex, flaxOutput);
 	}
 
 	rhi::ArgumentTableHandle GPUDrivenRenderer::getCurrentLightCullingArgumentTable() const
@@ -4368,7 +5557,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 	}
 
 	void GPUDrivenRenderer::updateLightingArgumentTable(
-		uint32_t frameIndex, const DebugPassOptions& debugOptions)
+		uint32_t frameIndex, const FlaxGIOutputSnapshot& flaxOutput)
 	{
 		if (frameIndex >= m_lightingInputArgumentTables.size() || m_lightingInputArgumentTables[frameIndex].isNull())
 		{
@@ -4428,16 +5617,13 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			viewOr(m_ddgiIrradianceLightingViews[ddgiParity], fallbackColor);
 		texViews[kGPUDrivenLightPassDDGIDepthIndex] =
 			viewOr(m_ddgiDepthLightingViews[ddgiParity], fallbackColor);
-		const FlaxGIOutputSelection flaxOutput = m_flaxDDGIPass != nullptr
-			? m_flaxDDGIPass->getLightingOutputSelection(debugOptions)
-			: FlaxGIOutputSelection{};
-		const rhi::TextureViewHandle flaxDataView = m_flaxDDGIPass != nullptr && flaxOutput.valid
+		const rhi::TextureViewHandle flaxDataView = m_flaxDDGIPass != nullptr && flaxOutput.isValid()
 			? m_flaxDDGIPass->getProbesDataView() : rhi::TextureViewHandle{};
-		const rhi::TextureViewHandle flaxDistanceView = m_flaxDDGIPass != nullptr && flaxOutput.valid
-			? m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.parity)
+		const rhi::TextureViewHandle flaxDistanceView = m_flaxDDGIPass != nullptr && flaxOutput.isValid()
+			? m_flaxDDGIPass->getProbesDistanceOutputView(flaxOutput.atlas.parity)
 			: rhi::TextureViewHandle{};
-		const rhi::TextureViewHandle flaxIrradianceView = m_flaxDDGIPass != nullptr && flaxOutput.valid
-			? m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.parity)
+		const rhi::TextureViewHandle flaxIrradianceView = m_flaxDDGIPass != nullptr && flaxOutput.isValid()
+			? m_flaxDDGIPass->getProbesIrradianceOutputView(flaxOutput.atlas.parity)
 			: rhi::TextureViewHandle{};
 		texViews[kGPUDrivenLightPassFlaxProbesDataIndex] = viewOr(flaxDataView, fallbackColor);
 		texViews[kGPUDrivenLightPassFlaxProbesDistanceIndex] = viewOr(flaxDistanceView, fallbackColor);
@@ -4498,7 +5684,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		}
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = shaderio::LBindShadowMap, .type = rhi::ArgumentType::combinedImageSampler,
-			.textureView = shadowView, .sampler = m_linearClampSamplerHandle
+			.textureView = shadowView, .sampler = m_shadowPointClampSamplerHandle
 		});
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = shaderio::LBindIBLIrradiance, .type = rhi::ArgumentType::combinedImageSampler,
@@ -4871,7 +6057,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			return;
 		}
 
-		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+		const uint32_t frameCount = getFrameSlotCount();
 
 		// 2 storage buffers (key + value), compute. RHI ArgumentLayout + per-frame owned tables.
 		const std::array<ArgumentLayoutEntry, 2> sortEntries{
@@ -4947,7 +6133,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			return;
 		}
 
-		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+		const uint32_t frameCount = getFrameSlotCount();
 		const std::array<ArgumentLayoutEntry, 6> patchEntries{
 			{
 				{0, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
@@ -5130,7 +6316,13 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 
 	uint32_t GPUDrivenRenderer::getPreviousFrameIndex(uint32_t frameIndex) const
 	{
-		const uint32_t frameCount = std::max(1u, getSwapchainImageCount());
+		const uint32_t frameCount = getFrameSlotCount();
+		ASSERT(frameCount > 0u && frameIndex < frameCount,
+		       "Previous frame lookup must use an index in the authoritative frame ring");
+		if (frameCount == 0u || frameIndex >= frameCount)
+		{
+			return 0u;
+		}
 		return (frameIndex + frameCount - 1u) % frameCount;
 	}
 
@@ -5166,7 +6358,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		                                              sourceIndirectBufferHandle,
 		                                              targetIndirectBufferHandle);
 
-		const TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
+		TransparentVisibilityFrameResources& frameResources = m_transparentVisibilityPatchFrames[frameIndex];
 		const uint32_t descriptorSetIndex =
 			targetIndirectBufferHandle == m_renderer.getForwardMDIIndirectBuffer(frameIndex) ? 1u : 0u;
 		if (frameResources.argumentTables[descriptorSetIndex].isNull()
@@ -5209,15 +6401,15 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			enc->dispatch(rhi::DispatchDesc{.groupCountX = groupCount, .groupCountY = 1u, .groupCountZ = 1u});
 			cmdBuffer.endEncoding();
 		};
-		// Ping-pong prefix scan: producer compute writes are made visible to the next compute read
-		// (RAW); write-after-read on the alternate buffer is covered by the execution dependency.
-		const auto barrierComputeToCompute = [&]()
+
+		if (frameResources.prefixReuseBarrierPending)
 		{
-			cmdBuffer.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute, rhi::HazardFlags::bufferWrites);
-		};
+			recordVisibilityPatchPrefixReuseWriteAfterReadBarrier(cmdBuffer);
+			frameResources.prefixReuseBarrierPending = false;
+		}
 
 		dispatchPatch(pushConstants);
-		barrierComputeToCompute();
+		recordVisibilityPatchScanReadAfterWriteBarrier(cmdBuffer);
 
 		uint32_t scanBufferIndex = 0u;
 		for (uint32_t scanOffset = 1u; scanOffset < elementCount; scanOffset <<= 1u)
@@ -5226,7 +6418,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			pushConstants.scanOffset = scanOffset;
 			pushConstants.scanBufferIndex = scanBufferIndex;
 			dispatchPatch(pushConstants);
-			barrierComputeToCompute();
+			recordVisibilityPatchScanReadAfterWriteBarrier(cmdBuffer);
 			scanBufferIndex = 1u - scanBufferIndex;
 		}
 
@@ -5234,11 +6426,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		pushConstants.scanOffset = 0u;
 		pushConstants.scanBufferIndex = scanBufferIndex;
 		dispatchPatch(pushConstants);
+		frameResources.prefixReuseBarrierPending = true;
 
 		// Same-pass/local barrier: final patched indirect args are consumed by
 		// drawIndexedIndirect(Count) on the same command stream.
-		cmdBuffer.barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
-		                  rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
+		recordVisibilityPatchIndirectReadBarrier(cmdBuffer);
 		return true;
 	}
 
@@ -5262,11 +6454,9 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			return;
 		}
 
-		if ((growSortBuffers && frameResources.capacity > 0) || (growPatchBuffers && patchFrameResources->prefixCapacity
-			> 0))
-		{
-			waitForIdle();
-		}
+		// The sole caller runs in the authoritative frame-slot callback. These buffers
+		// and their ArgumentTables belong only to frameIndex, whose timeline value has
+		// already retired, so replacement does not require a queue/device idle.
 
 		const uint64_t bufferSize = static_cast<uint64_t>(requiredCount) * sizeof(uint32_t);
 		if (growSortBuffers)

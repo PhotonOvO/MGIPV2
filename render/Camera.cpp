@@ -54,7 +54,6 @@ namespace demo
 	void Camera::update()
 	{
 		updateVectors();
-		updateMatrices();
 	}
 
 	void Camera::updateVectors()

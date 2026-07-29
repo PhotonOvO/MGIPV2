@@ -315,8 +315,8 @@ namespace demo
 		encoder->setPipeline(m_pipeline);
 		encoder->setArgumentTable(0, frameResources.argumentTable);
 		encoder->dispatch(rhi::DispatchDesc{
-			.groupCountX = (m_size.width + 7u) / 8u,
-			.groupCountY = (m_size.height + 7u) / 8u,
+			.groupCountX = (m_size.width + 15u) / 16u,
+			.groupCountY = (m_size.height + 15u) / 16u,
 			.groupCountZ = 1u
 		});
 		rhiCmd.endEncoding();

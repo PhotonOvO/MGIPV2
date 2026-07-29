@@ -513,7 +513,8 @@ namespace demo
 	rhi::ArgumentBinding makeArgumentBinding(uint32_t logicalIndex,
 	                                         rhi::BindlessResourceType resourceType,
 	                                         uint32_t descriptorCount,
-	                                         rhi::ResourceVisibility visibility);
+	                                         rhi::ResourceVisibility visibility,
+	                                         bool bindless = false);
 
 	static bool isValidExtent(rhi::Extent2D extent)
 	{
@@ -752,6 +753,10 @@ namespace demo
 			m_swapchainDependent.swapchain->getMaxFramesInFlight(),
 			rhi::ResourceState::Undefined);
 
+		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).configureArgumentPoolCapacity(
+			m_materials.maxTextures,
+			m_swapchainDependent.swapchain->getMaxFramesInFlight());
+
 		// Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
 		createMaterialArgumentTable();
 		createFrameSubmission(m_swapchainDependent.swapchain->getRequestedImageCount());
@@ -854,62 +859,49 @@ namespace demo
 			                                                  std::as_bytes(std::span{s_points}),
 			                                                  "pointsBuffer");
 
-			const std::vector<std::string> searchPaths = {".", "resources", "../resources", "../../resources"};
-			std::string filename = utils::findFile("image1.jpg", searchPaths);
-#ifdef __ANDROID__
-			if (filename.empty())
-			{
-				filename = "image1.jpg";
-			}
-#endif
-			ASSERT(!filename.empty(), "Could not load texture image!");
-			const LoadedImageHandles materialImage0 = loadAndCreateImage(rhiCmd, filename);
-			const TextureHandle materialTexture0 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
+			constexpr std::array<uint8_t, 4> defaultWhitePixel{255, 255, 255, 255};
+			constexpr std::array<uint8_t, 4> defaultNormalPixel{128, 128, 255, 255};
+			const UploadedImageHandles whiteFallbackImage = uploadRawRgba8Image(
+				rhiCmd, defaultWhitePixel, 1, 1, "DefaultWhiteMaterialTexture");
+			const TextureHandle whiteFallbackTexture = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
 				{
 					.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-					.sampledViewHandle = materialImage0.view,
+					.sampledViewHandle = whiteFallbackImage.view,
 				},
 				.cold =
 				{
-					.ownedTexture = materialImage0.texture,
-					.ownedTextureView = materialImage0.view,
-					.sourceExtent = {materialImage0.width, materialImage0.height},
+					.ownedTexture = whiteFallbackImage.texture,
+					.ownedTextureView = whiteFallbackImage.view,
+					.sourceExtent = {whiteFallbackImage.width, whiteFallbackImage.height},
 				},
 			});
 
-			filename = utils::findFile("image2.jpg", searchPaths);
-#ifdef __ANDROID__
-			if (filename.empty())
-			{
-				filename = "image2.jpg";
-			}
-#endif
-			ASSERT(!filename.empty(), "Could not load texture image!");
-			const LoadedImageHandles materialImage1 = loadAndCreateImage(rhiCmd, filename);
-			const TextureHandle materialTexture1 = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
+			const UploadedImageHandles normalFallbackImage = uploadRawRgba8Image(
+				rhiCmd, defaultNormalPixel, 1, 1, "DefaultNormalMaterialTexture");
+			const TextureHandle normalFallbackTexture = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
 				{
 					.runtimeKind = MaterialResources::TextureRuntimeKind::materialSampled,
-					.sampledViewHandle = materialImage1.view,
+					.sampledViewHandle = normalFallbackImage.view,
 				},
 				.cold =
 				{
-					.ownedTexture = materialImage1.texture,
-					.ownedTextureView = materialImage1.view,
-					.sourceExtent = {materialImage1.width, materialImage1.height},
+					.ownedTexture = normalFallbackImage.texture,
+					.ownedTextureView = normalFallbackImage.view,
+					.sourceExtent = {normalFallbackImage.width, normalFallbackImage.height},
 				},
 			});
 
 			m_materials.sampleMaterials[0] = m_materials.materialPool.emplace(MaterialResources::MaterialRecord{
-				.sampledTexture = materialTexture0,
+				.sampledTexture = whiteFallbackTexture,
 				.descriptorIndex = 0,
-				.debugName = "image1-material",
+				.debugName = "default-white-material",
 			});
 			m_materials.sampleMaterials[1] = m_materials.materialPool.emplace(MaterialResources::MaterialRecord{
-				.sampledTexture = materialTexture1,
+				.sampledTexture = normalFallbackTexture,
 				.descriptorIndex = 1,
-				.debugName = "image2-material",
+				.debugName = "default-normal-material",
 			});
 			m_materials.viewportTextureHandle = m_materials.texturePool.emplace(MaterialResources::TextureRecord{
 				.hot =
@@ -1000,11 +992,6 @@ namespace demo
 			frameUserData.transientAllocator.destroy();
 		}
 		m_perFrame.frameUserData.clear();
-		if (m_perFrame.frameContext)
-		{
-			m_perFrame.frameContext->deinit();
-			m_perFrame.frameContext.reset();
-		}
 
 		if (!m_device.vertexBuffer.isNull())
 			m_device.device->destroyBuffer(m_device.vertexBuffer);
@@ -1057,6 +1044,18 @@ namespace demo
 			// RHI destroy calls above enqueue owned native resources for delayed physical
 			// destruction; VulkanDevice::deinit drains them before destroying its allocator.
 			m_device.device->waitIdle();
+		}
+		// Keep the frame context alive while every RHI destroy call above computes its
+		// retirement point. waitIdle() has now drained all pending native retirements,
+		// so detach the backend's non-owning pointer before releasing the context.
+		if (m_device.device)
+		{
+			static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setFrameContext(nullptr);
+		}
+		if (m_perFrame.frameContext)
+		{
+			m_perFrame.frameContext->deinit();
+			m_perFrame.frameContext.reset();
 		}
 		surface.deinit();
 		if (m_device.device)
@@ -1422,7 +1421,10 @@ namespace demo
 		m_imguiRenderer.newFrame();
 	}
 
-	void RenderDevice::renderWithPassExecutor(const RenderParams& params, PassExecutor& passExecutor)
+	bool RenderDevice::renderWithPassExecutor(
+		const RenderParams& params,
+		PassExecutor& passExecutor,
+		const FrameSlotReadyCallback& onFrameSlotReady)
 	{
 		{
 			demo::profiling::ScopedCpuRange rendererPreRecordRange("RendererPreRecord");
@@ -1464,11 +1466,23 @@ namespace demo
 			}
 
 			if (!prepareFrameResources())
-				return;
+				return false;
+
+			const uint32_t preparedFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+			ASSERT(preparedFrameIndex < m_perFrame.frameUserData.size(),
+			       "Prepared frame index must map to frame user data");
+			if (onFrameSlotReady)
+			{
+				demo::profiling::ScopedCpuRange frameSlotReadyRange(
+					"RendererPreRecord.FrameSlotReadyCallback");
+				onFrameSlotReady(preparedFrameIndex);
+				ASSERT(m_perFrame.frameContext->getCurrentFrameIndex() == preparedFrameIndex,
+				       "Frame-slot callback must not advance the frame ring");
+			}
 
 			{
 				demo::profiling::ScopedCpuRange cacheStatsRange("RendererPreRecord.CacheGPUCullingStats");
-				cacheGPUCullingStats(m_perFrame.frameContext->getCurrentFrameIndex(),
+				cacheGPUCullingStats(preparedFrameIndex,
 				                     params.debugOptions.showGPUCullingOverlay);
 			}
 		}
@@ -1482,6 +1496,7 @@ namespace demo
 		}
 		ASSERT(cmdBuffer != nullptr, "RenderDevice::renderWithPassExecutor requires a command buffer");
 		endFrame(*cmdBuffer);
+		return true;
 	}
 
 	// Pass execution wrappers (used by PassNode implementations)
@@ -1759,6 +1774,35 @@ namespace demo
 		}
 	}
 
+	static void recordGPUCullingDrawCountReset(rhi::CommandBuffer& cmdBuffer,
+	                                           rhi::BufferHandle drawCountBuffer)
+	{
+		if (drawCountBuffer.isNull())
+		{
+			return;
+		}
+
+		// A recycled frame slot can still be read by a later submission's previous-frame
+		// depth bootstrap even after this slot's own completion signal has fired. Keep
+		// the reset on the GPU queue and order it after every old compute/indirect read.
+		cmdBuffer.barrier(rhi::StageFlags::compute | rhi::StageFlags::commandInput,
+		                  rhi::StageFlags::transfer,
+		                  rhi::HazardFlags::readBeforeWrite);
+
+		rhi::ComputeEncoder* clear = cmdBuffer.beginComputePass();
+		clear->fillBuffer(drawCountBuffer, 0, sizeof(shaderio::GPUCullDrawCounts), 0u);
+		cmdBuffer.endEncoding();
+
+		// Culling atomically accumulates into the reset counters. commandInput is also
+		// covered so zero-object frames can consume the cleared indirect counts without
+		// relying on a culling dispatch to provide an incidental barrier.
+		cmdBuffer.barrier(rhi::StageFlags::transfer,
+		                  rhi::StageFlags::compute | rhi::StageFlags::commandInput,
+		                  rhi::HazardFlags::bufferWrites
+			                  | rhi::HazardFlags::storageBufferReadWrite
+			                  | rhi::HazardFlags::drawArguments);
+	}
+
 	void RenderDevice::ensureGPUCullingBuffers(PerFrameResources::FrameUserData& frameUserData,
 	                                           uint32_t requiredMeshCount)
 	{
@@ -1801,6 +1845,7 @@ namespace demo
 		frameUserData.gpuCullingDrawCountBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(shaderio::GPUCullDrawCounts),
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::transferDst
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
 			.allowGpuAddress = true,
@@ -1931,11 +1976,6 @@ namespace demo
 
 		const shaderio::GPUCullStats zeroStats{};
 		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingStatsBuffer, &zeroStats, sizeof(zeroStats));
-		const shaderio::GPUCullDrawCounts zeroDrawCounts{};
-		writeHostVisibleBuffer(*m_device.device,
-		                       frameUserData.gpuCullingDrawCountBuffer,
-		                       &zeroDrawCounts,
-		                       sizeof(zeroDrawCounts));
 
 		const shaderio::GPUCullingUniforms uniforms = buildGPUCullingUniforms(params, objectCount);
 		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
@@ -2073,10 +2113,10 @@ namespace demo
 			return;
 		}
 
-		if (!frameUserData.gbufferMdiDrawDataBuffer.isNull())
-		{
-			waitForAllFrameSlots();
-		}
+		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
+		ASSERT(m_perFrame.frameContext != nullptr
+		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		       "GBuffer MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.gbufferMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gbufferMdiDrawDataBuffer);
 		frameUserData.gbufferMdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
@@ -2089,7 +2129,6 @@ namespace demo
 		frameUserData.gbufferMdiDrawCapacity = requiredCapacity;
 		frameUserData.gbufferMdiDrawDataBufferRHI = frameUserData.gbufferMdiDrawDataBuffer;
 
-		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateGBufferMdiDrawDataArgumentTable(frameIndex);
 	}
 
@@ -2102,10 +2141,10 @@ namespace demo
 			return;
 		}
 
-		if (!frameUserData.mdiDrawDataBuffer.isNull())
-		{
-			waitForAllFrameSlots();
-		}
+		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
+		ASSERT(m_perFrame.frameContext != nullptr
+		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		       "MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.mdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.mdiDrawDataBuffer);
 		frameUserData.mdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
@@ -2118,7 +2157,6 @@ namespace demo
 		frameUserData.mdiDrawCapacity = requiredCapacity;
 		frameUserData.mdiDrawDataBufferRHI = frameUserData.mdiDrawDataBuffer;
 
-		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateMdiDrawDataArgumentTable(frameIndex);
 	}
 
@@ -2131,10 +2169,10 @@ namespace demo
 			return;
 		}
 
-		if (!frameUserData.depthMdiDrawDataBuffer.isNull())
-		{
-			waitForAllFrameSlots();
-		}
+		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
+		ASSERT(m_perFrame.frameContext != nullptr
+		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		       "Depth MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.depthMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.depthMdiDrawDataBuffer);
 		frameUserData.depthMdiDrawDataBuffer = m_device.device->createBuffer(rhi::BufferDesc{
@@ -2147,7 +2185,6 @@ namespace demo
 		frameUserData.depthMdiDrawCapacity = requiredCapacity;
 		frameUserData.depthMdiDrawDataBufferRHI = frameUserData.depthMdiDrawDataBuffer;
 
-		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
 		updateDepthMdiDrawDataArgumentTable(frameIndex);
 	}
 
@@ -3067,7 +3104,8 @@ namespace demo
 		}
 	}
 
-	void RenderDevice::bindStaticPassResources(PassExecutor& passExecutor) const
+	void RenderDevice::bindStaticPassResources(PassExecutor& passExecutor,
+	                                           const StaticPassTextureStates& textureStates) const
 	{
 		// Bind static resources that don't change per-frame
 		// Called once after swapchain/resources rebuild
@@ -3080,7 +3118,7 @@ namespace demo
 			.backendImageToken = resolveNativeImage(*m_device.device,
 			                                        m_swapchainDependent.sceneResources.getColorImage(0)),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = textureStates.gbuffer[0],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
@@ -3088,7 +3126,7 @@ namespace demo
 			.backendImageToken = resolveNativeImage(*m_device.device,
 			                                        m_swapchainDependent.sceneResources.getColorImage(1)),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = textureStates.gbuffer[1],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
@@ -3096,7 +3134,7 @@ namespace demo
 			.backendImageToken = resolveNativeImage(*m_device.device,
 			                                        m_swapchainDependent.sceneResources.getColorImage(2)),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = textureStates.gbuffer[2],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
@@ -3145,7 +3183,7 @@ namespace demo
 			.backendImageToken = resolveNativeImage(*m_device.device,
 			                                        m_swapchainDependent.sceneResources.getSceneColorHdrImage()),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = textureStates.sceneColorHdr,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
@@ -3226,7 +3264,7 @@ namespace demo
 			.backendImageToken = resolveNativeImage(*m_device.device,
 			                                        m_swapchainDependent.sceneResources.getVelocityImage()),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = textureStates.velocity,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
@@ -3267,15 +3305,18 @@ namespace demo
 			demo::profiling::ScopedCpuRange buildRenderItemsRange("BuildRenderItems");
 
 			// Update CSM cascade matrices based on current camera and light direction
-			if (params.cameraUniforms != nullptr)
+			if (shouldUpdateCSMCascadeMatrices(params))
 			{
 				const Aabb sceneBounds = computeSceneBounds(params.gltfModel, params.gpuDrivenSceneView);
-				m_csmShadowResources.updateCascadeMatrices(*params.cameraUniforms,
+				const shaderio::CameraUniforms shadowFitCamera =
+					makeUnjitteredShadowFitCamera(*params.cameraUniforms);
+				m_csmShadowResources.updateCascadeMatrices(shadowFitCamera,
 				                                           params.lightSettings.direction,
 				                                           params.lightSettings.shadowDistance,
 				                                           sceneBounds.min,
 				                                           sceneBounds.max,
-				                                           sceneBounds.valid);
+				                                           sceneBounds.valid,
+				                                           params.lightSettings.normalBias);
 			}
 
 			m_frameLightingState = buildFrameLightingState(params);
@@ -3295,6 +3336,7 @@ namespace demo
 			                            shaderio::LightingUniforms{m_frameLightingState.lightParams});
 			updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
 			updateGPUCullingBuffers(currentFrameIndex, params);
+			recordGPUCullingDrawCountReset(cmdBuffer, frameUserData.gpuCullingDrawCountBufferRHI);
 			updateShadowCullingBuffers(currentFrameIndex, params);
 
 			// Route through pass executor to orchestrate multi-pass rendering
@@ -3915,22 +3957,30 @@ namespace demo
 
 		state.sceneBounds = computeSceneBounds(params.gltfModel, params.gpuDrivenSceneView);
 
-		const clipspace::ProjectionConvention projectionConvention =
-			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
-		const float cameraNear = std::abs(
-			clipspace::extractNearPlane(camera.projection, projectionConvention));
-		const float cameraFar =
-			std::abs(clipspace::extractFarPlane(camera.projection, projectionConvention));
-		state.shadowDistance = glm::clamp(params.lightSettings.shadowDistance, cameraNear + 0.5f,
-		                                  std::max(cameraFar, cameraNear + 1.0f));
-		state.viewFrustumCorners = clipspace::isOrthographicProjection(camera.projection)
-			? computeOrthoFrustumCorners(camera.inverseViewProjection)
-			: computePerspectiveFrustumCorners(camera, cameraNear, state.shadowDistance);
-
-		std::array<glm::vec3, 8> shadowFitCorners = state.viewFrustumCorners;
-		if (state.sceneBounds.valid)
+		const glm::vec3 lightTravelDir = glm::normalize(params.lightSettings.direction);
+		const glm::vec3 dirToLight = -lightTravelDir;
+		if (params.debugOptions.enabled)
 		{
-			shadowFitCorners = {
+			// Legacy single-shadow fitting is retained only for debug visualization.
+			// Use the stable camera contract so TAA jitter cannot move the overlay.
+			const shaderio::CameraUniforms shadowFitCamera =
+				makeUnjitteredShadowFitCamera(camera);
+			const clipspace::ProjectionConvention projectionConvention =
+				clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+			const float cameraNear = std::abs(
+				clipspace::extractNearPlane(shadowFitCamera.projection, projectionConvention));
+			const float cameraFar =
+				std::abs(clipspace::extractFarPlane(shadowFitCamera.projection, projectionConvention));
+			state.shadowDistance = glm::clamp(params.lightSettings.shadowDistance, cameraNear + 0.5f,
+			                                  std::max(cameraFar, cameraNear + 1.0f));
+			state.viewFrustumCorners = clipspace::isOrthographicProjection(shadowFitCamera.projection)
+				? computeOrthoFrustumCorners(shadowFitCamera.inverseViewProjection)
+				: computePerspectiveFrustumCorners(shadowFitCamera, cameraNear, state.shadowDistance);
+
+			std::array<glm::vec3, 8> shadowFitCorners = state.viewFrustumCorners;
+			if (state.sceneBounds.valid)
+			{
+				shadowFitCorners = {
 				{
 					{state.sceneBounds.min.x, state.sceneBounds.min.y, state.sceneBounds.min.z},
 					{state.sceneBounds.max.x, state.sceneBounds.min.y, state.sceneBounds.min.z},
@@ -3942,66 +3992,70 @@ namespace demo
 					{state.sceneBounds.max.x, state.sceneBounds.max.y, state.sceneBounds.max.z},
 				}
 			};
+			}
+
+			glm::vec3 center(0.0f);
+			for (const glm::vec3& corner : shadowFitCorners)
+			{
+				center += corner;
+			}
+			center /= static_cast<float>(shadowFitCorners.size());
+
+			const glm::vec3 upReference =
+				std::abs(lightTravelDir.y) > 0.95f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+
+			float radius = 0.0f;
+			for (const glm::vec3& corner : shadowFitCorners)
+			{
+				radius = std::max(radius, glm::length(corner - center));
+			}
+			radius = std::max(radius, 5.0f);
+
+			state.lightAnchor = center;
+			const glm::vec3 lightPosition = center - lightTravelDir * (radius + 10.0f);
+			const glm::mat4 lightView = glm::lookAt(lightPosition, center, upReference);
+
+			glm::vec3 minExtents(std::numeric_limits<float>::max());
+			glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
+			for (const glm::vec3& corner : shadowFitCorners)
+			{
+				const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+				minExtents = glm::min(minExtents, lightSpace);
+				maxExtents = glm::max(maxExtents, lightSpace);
+			}
+
+			const float xyExtent = std::max(maxExtents.x - minExtents.x, maxExtents.y - minExtents.y) * 0.5f + 2.0f;
+			glm::vec2 lightSpaceCenter((minExtents.x + maxExtents.x) * 0.5f, (minExtents.y + maxExtents.y) * 0.5f);
+			const float texelWorldSize = (xyExtent * 2.0f) / static_cast<float>(SceneResources::kShadowMapSize);
+			lightSpaceCenter = glm::floor(lightSpaceCenter / texelWorldSize) * texelWorldSize;
+
+			minExtents.x = lightSpaceCenter.x - xyExtent;
+			maxExtents.x = lightSpaceCenter.x + xyExtent;
+			minExtents.y = lightSpaceCenter.y - xyExtent;
+			maxExtents.y = lightSpaceCenter.y + xyExtent;
+			minExtents.z -= radius * 2.0f + 20.0f;
+			maxExtents.z += 20.0f;
+
+			const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
+				minExtents.x, maxExtents.x, minExtents.y, maxExtents.y, -maxExtents.z, -minExtents.z,
+				projectionConvention);
+			state.shadowCamera.view = lightView;
+			state.shadowCamera.projection = lightProjection;
+			state.shadowCamera.viewProjection = lightProjection * lightView;
+			state.shadowCamera.inverseViewProjection = glm::inverse(state.shadowCamera.viewProjection);
+			state.shadowCamera.unjitteredViewProjection = state.shadowCamera.viewProjection;
+			state.shadowCamera.unjitteredInverseViewProjection = state.shadowCamera.inverseViewProjection;
+			state.shadowCamera.prevUnjitteredViewProjection = state.shadowCamera.viewProjection;
+			state.shadowCamera.prevJitteredViewProjection = state.shadowCamera.viewProjection;
+			state.shadowCamera.cameraPosition = lightPosition;
+			// shader.shadow applies only a caster world-normal offset. Receiver depthBias
+			// is converted with the selected cascade's invDepthRange in the lighting shader,
+			// so forwarding it through the shadow camera would apply it twice in mixed units.
+			state.shadowCamera.shadowConstantBias = 0.0f;
+			state.shadowCamera.shadowDirectionAndSlopeBias =
+				glm::vec4(dirToLight, std::max(params.lightSettings.normalBias, 0.0f));
+			state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
 		}
-
-		glm::vec3 center(0.0f);
-		for (const glm::vec3& corner : shadowFitCorners)
-		{
-			center += corner;
-		}
-		center /= static_cast<float>(shadowFitCorners.size());
-
-		const glm::vec3 lightTravelDir = glm::normalize(params.lightSettings.direction);
-		const glm::vec3 dirToLight = -lightTravelDir;
-		const glm::vec3 upReference =
-			std::abs(lightTravelDir.y) > 0.95f ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
-
-		float radius = 0.0f;
-		for (const glm::vec3& corner : shadowFitCorners)
-		{
-			radius = std::max(radius, glm::length(corner - center));
-		}
-		radius = std::max(radius, 5.0f);
-
-		state.lightAnchor = center;
-		const glm::vec3 lightPosition = center - lightTravelDir * (radius + 10.0f);
-		const glm::mat4 lightView = glm::lookAt(lightPosition, center, upReference);
-
-		glm::vec3 minExtents(std::numeric_limits<float>::max());
-		glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
-		for (const glm::vec3& corner : shadowFitCorners)
-		{
-			const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
-			minExtents = glm::min(minExtents, lightSpace);
-			maxExtents = glm::max(maxExtents, lightSpace);
-		}
-
-		const float xyExtent = std::max(maxExtents.x - minExtents.x, maxExtents.y - minExtents.y) * 0.5f + 2.0f;
-		glm::vec2 lightSpaceCenter((minExtents.x + maxExtents.x) * 0.5f, (minExtents.y + maxExtents.y) * 0.5f);
-		const float texelWorldSize = (xyExtent * 2.0f) / static_cast<float>(SceneResources::kShadowMapSize);
-		lightSpaceCenter = glm::floor(lightSpaceCenter / texelWorldSize) * texelWorldSize;
-
-		minExtents.x = lightSpaceCenter.x - xyExtent;
-		maxExtents.x = lightSpaceCenter.x + xyExtent;
-		minExtents.y = lightSpaceCenter.y - xyExtent;
-		maxExtents.y = lightSpaceCenter.y + xyExtent;
-		minExtents.z -= radius * 2.0f + 20.0f;
-		maxExtents.z += 20.0f;
-
-		const glm::mat4 lightProjection = clipspace::makeOrthographicProjection(
-			minExtents.x, maxExtents.x, minExtents.y, maxExtents.y, -maxExtents.z, -minExtents.z, projectionConvention);
-		state.shadowCamera.view = lightView;
-		state.shadowCamera.projection = lightProjection;
-		state.shadowCamera.viewProjection = lightProjection * lightView;
-		state.shadowCamera.inverseViewProjection = glm::inverse(state.shadowCamera.viewProjection);
-		state.shadowCamera.unjitteredViewProjection = state.shadowCamera.viewProjection;
-		state.shadowCamera.unjitteredInverseViewProjection = state.shadowCamera.inverseViewProjection;
-		state.shadowCamera.prevUnjitteredViewProjection = state.shadowCamera.viewProjection;
-		state.shadowCamera.prevJitteredViewProjection = state.shadowCamera.viewProjection;
-		state.shadowCamera.cameraPosition = lightPosition;
-		state.shadowCamera.shadowConstantBias = params.lightSettings.depthBias;
-		state.shadowCamera.shadowDirectionAndSlopeBias = glm::vec4(dirToLight, params.lightSettings.normalBias);
-		state.shadowFrustumCorners = computeOrthoFrustumCorners(glm::inverse(state.shadowCamera.viewProjection));
 
 		// Populate CSM cascade matrices and split distances for LightParams
 		const shaderio::ShadowUniforms* shadowData = m_csmShadowResources.getShadowUniformsData();
@@ -4009,7 +4063,14 @@ namespace demo
 		{
 			state.lightParams.worldToShadow[i] = shadowData->cascadeViewProjection[i];
 		}
-		state.lightParams.cascadeSplitDistances = shadowData->cascadeSplitDistances;
+		const shaderio::CascadeShadowParams& sourceCascadeParams = shadowData->cascadeSplitDistances;
+		shaderio::CascadeShadowParams& lightingCascadeParams = state.lightParams.cascadeSplitDistances;
+		lightingCascadeParams.x = sourceCascadeParams.x;
+		lightingCascadeParams.y = sourceCascadeParams.y;
+		lightingCascadeParams.z = sourceCascadeParams.z;
+		lightingCascadeParams.w = sourceCascadeParams.w;
+		lightingCascadeParams.invDepthRange = sourceCascadeParams.invDepthRange;
+		lightingCascadeParams.worldTexelSize = sourceCascadeParams.worldTexelSize;
 		state.lightParams.lightDirectionAndShadowStrength =
 			glm::vec4(dirToLight, params.lightSettings.shadowStrength);
 		state.lightParams.lightColorAndNormalBias = glm::vec4(params.lightSettings.color,
@@ -4021,7 +4082,7 @@ namespace demo
 			1.0f / static_cast<float>(m_csmShadowResources.getCascadeResolution()),
 			params.lightSettings.depthBias,
 			params.lightSettings.normalBias,
-			static_cast<float>(shaderio::LCascadeCount));
+			static_cast<float>(m_csmShadowResources.getCascadeCount()));
 		state.lightParams.iblParams = glm::vec4(
 			params.debugOptions.enableIBL ? 1.0f : 0.0f,
 			params.debugOptions.iblIntensity,
@@ -4629,7 +4690,11 @@ namespace demo
 				.shaderStageCount = static_cast<uint32_t>(gbufferShaderStages.size()),
 				.vertexInput = gbufferVertexInput,
 				.rasterState = rhi::RasterState{},
-				.depthState = rhi::DepthState{true, false, rhi::CompareOp::greaterOrEqual},
+				// GBuffer rebuilds canonical current-visible depth after the previous-visible
+				// bootstrap has served Hi-Z culling. Reverse-Z GREATER_OR_EQUAL preserves
+				// equal-depth prepass matches while allowing nearer current-visible surfaces
+				// to replace any farther draw written earlier in this pass.
+				.depthState = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
 				.blendStates = gbufferBlendStates.data(),
 				.blendStateCount = static_cast<uint32_t>(gbufferBlendStates.size()),
 				.dynamicStates = gbufferDynamicStates.data(),
@@ -4833,7 +4898,8 @@ namespace demo
 				}
 			};
 
-			// Alpha blending for transparent objects
+			// Preserve SceneColorHDR.a from Light/Skybox as the shadow-reactive signal.
+			// Transparent materials keep their existing alpha-weighted RGB blend only.
 			const rhi::BlendAttachmentState forwardBlend{
 				.blendEnable = true,
 				.srcColorBlendFactor = rhi::BlendFactor::srcAlpha,
@@ -4842,7 +4908,9 @@ namespace demo
 				.srcAlphaBlendFactor = rhi::BlendFactor::one,
 				.dstAlphaBlendFactor = rhi::BlendFactor::oneMinusSrcAlpha,
 				.alphaBlendOp = rhi::BlendOp::add,
-				.colorWriteMask = rhi::ColorComponentFlags::all,
+				.colorWriteMask = rhi::ColorComponentFlags::r
+				                | rhi::ColorComponentFlags::g
+				                | rhi::ColorComponentFlags::b,
 			};
 
 			std::array<rhi::PipelineShaderStageDesc, 2> forwardShaderStages{
@@ -5074,7 +5142,7 @@ namespace demo
 		ImGuiRhiRenderer::InitInfo rendererInfo{
 			.device = m_device.device.get(),
 			.swapchainFormat = m_swapchainDependent.swapchainImageFormat,
-			.frameCount = m_swapchainDependent.swapchain->getMaxFramesInFlight(),
+			.frameCount = getFrameResourceCount(),
 			.window = window,
 		};
 		m_imguiRenderer.init(rendererInfo);
@@ -5124,7 +5192,7 @@ namespace demo
 		// Create per-frame material bind groups early - needed for pipeline layout creation
 		std::vector<rhi::ArgumentBinding> layoutEntries{
 			makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
-			                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics)
+			                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true)
 		};
 
 		const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
@@ -5160,7 +5228,7 @@ namespace demo
 		{
 			std::vector<rhi::ArgumentBinding> layoutEntries{
 				makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
-				                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics)
+				                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true)
 			};
 
 			const size_t existingCount = m_materials.materialArgumentTables.size();
@@ -5376,7 +5444,8 @@ namespace demo
 	rhi::ArgumentBinding makeArgumentBinding(uint32_t logicalIndex,
 	                                         rhi::BindlessResourceType resourceType,
 	                                         uint32_t descriptorCount,
-	                                         rhi::ResourceVisibility visibility)
+	                                         rhi::ResourceVisibility visibility,
+	                                         bool bindless)
 	{
 		const std::pair<rhi::ArgumentType, bool> mapped = toArgumentType(resourceType);
 		return rhi::ArgumentBinding{
@@ -5384,7 +5453,7 @@ namespace demo
 			.type = mapped.first,
 			.visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(visibility)),
 			.arrayCount = descriptorCount,
-			.bindless = false,
+			.bindless = bindless,
 			.dynamicOffset = mapped.second,
 		};
 	}
@@ -5518,29 +5587,18 @@ namespace demo
 		}
 	}
 
-	RenderDevice::LoadedImageHandles RenderDevice::loadAndCreateImage(rhi::CommandBuffer& cmd, const std::string& filename)
+	RenderDevice::UploadedImageHandles RenderDevice::uploadRawRgba8Image(rhi::CommandBuffer& cmd,
+	                                                                    std::span<const uint8_t> rgba8Pixels,
+	                                                                    uint32_t width,
+	                                                                    uint32_t height,
+	                                                                    const char* debugName)
 	{
-		int w = 0, h = 0, comp = 0, req_comp{4};
-		const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
-#ifdef __ANDROID__
-		std::array<stbi_uc, 16> fallbackPixels{};
-		if (data == nullptr)
-		{
-			const bool useBlue = filename.find("image2") != std::string::npos;
-			const std::array<stbi_uc, 4> color = useBlue
-				                                     ? std::array<stbi_uc, 4>{64, 128, 255, 255}
-				                                     : std::array<stbi_uc, 4>{255, 128, 64, 255};
-			for (size_t i = 0; i < fallbackPixels.size(); i += color.size())
-			{
-				std::copy(color.begin(), color.end(), fallbackPixels.begin() + static_cast<std::ptrdiff_t>(i));
-			}
-			data = fallbackPixels.data();
-			w = 2;
-			h = 2;
-			comp = req_comp;
-		}
-#endif
-		ASSERT(data != nullptr, "Could not load texture image!");
+		ASSERT(width > 0 && height > 0, "Raw RGBA8 image dimensions must be non-zero");
+		const uint64_t expectedByteSize = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4u;
+		ASSERT(static_cast<uint64_t>(rgba8Pixels.size_bytes()) == expectedByteSize,
+		       "Raw RGBA8 image byte size does not match its dimensions");
+		ASSERT(debugName != nullptr, "Raw RGBA8 image must have a debug name");
+
 		const uint32_t mipLevels = 1;
 
 		const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
@@ -5548,10 +5606,10 @@ namespace demo
 			.format = rhi::TextureFormat::rgba8Unorm,
 			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst |
 				rhi::TextureUsageFlags::transferSrc,
-			.extent = {uint32_t(w), uint32_t(h), 1},
+			.extent = {width, height, 1},
 			.mipLevels = mipLevels,
 			.arrayLayers = 1,
-			.debugName = "MaterialImage",
+			.debugName = debugName,
 		});
 		const rhi::TextureSubresourceRange imageRange{
 			.aspect = rhi::TextureAspect::color,
@@ -5569,8 +5627,7 @@ namespace demo
 		cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
 
 		BatchUploadContext upload;
-		const std::span<const std::byte> dataSpan(reinterpret_cast<const std::byte*>(data),
-		                                          static_cast<size_t>(w * h * 4));
+		const std::span<const std::byte> dataSpan = std::as_bytes(rgba8Pixels);
 		upload.init(*m_device.device, static_cast<uint64_t>(dataSpan.size_bytes()));
 		const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(dataSpan.size_bytes()), 4);
 		std::memcpy(slice.cpuPtr, dataSpan.data(), dataSpan.size_bytes());
@@ -5583,8 +5640,8 @@ namespace demo
 				.mipLevel = 0,
 				.baseArrayLayer = 0,
 				.layerCount = 1,
-				.width = static_cast<uint32_t>(w),
-				.height = static_cast<uint32_t>(h),
+				.width = width,
+				.height = height,
 				.depth = 1,
 			});
 		upload.executeUploads(cmd);
@@ -5592,7 +5649,7 @@ namespace demo
 		const rhi::TextureBarrier uploadEndBarrier{
 			.texture = imageHandle,
 			.before = rhi::ResourceState::TransferDst,
-			.after = rhi::ResourceState::General,
+			.after = rhi::ResourceState::ShaderRead,
 			.range = imageRange,
 		};
 		cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
@@ -5610,20 +5667,14 @@ namespace demo
 			.aspect = rhi::TextureAspect::color,
 			.levelCount = mipLevels,
 			.layerCount = 1,
+			.debugName = debugName,
 		});
 
-#ifdef __ANDROID__
-		if (data != fallbackPixels.data())
-#endif
-		{
-			stbi_image_free(const_cast<stbi_uc*>(data));
-		}
-
-		return LoadedImageHandles{
+		return UploadedImageHandles{
 			.texture = imageHandle,
 			.view = viewHandle,
-			.width = static_cast<uint32_t>(w),
-			.height = static_cast<uint32_t>(h),
+			.width = width,
+			.height = height,
 		};
 	}
 
@@ -6323,7 +6374,7 @@ namespace demo
 			const rhi::TextureBarrier uploadEndBarrier{
 				.texture = state.texture,
 				.before = rhi::ResourceState::TransferDst,
-				.after = rhi::ResourceState::General,
+				.after = rhi::ResourceState::ShaderRead,
 				.range =
 				{
 					.aspect = rhi::TextureAspect::color,
@@ -6742,7 +6793,7 @@ namespace demo
 			const rhi::TextureBarrier uploadEndBarrier{
 				.texture = state.texture,
 				.before = rhi::ResourceState::TransferDst,
-				.after = rhi::ResourceState::General,
+				.after = rhi::ResourceState::ShaderRead,
 				.range =
 				{
 					.aspect = rhi::TextureAspect::color,
@@ -6913,6 +6964,7 @@ namespace demo
 
 			result.shadowPackedMeshes.push_back(ShadowPackedMesh{
 				.meshIndex = meshIndex,
+				.drawRecordIndex = UINT32_MAX,
 				.indexCount = static_cast<uint32_t>(meshData.indices.size()),
 				.firstIndex = firstIndex,
 				.vertexOffset = 0,
@@ -6961,6 +7013,7 @@ namespace demo
 		std::vector<uint32_t> packedIndexData;
 
 		const auto appendPackedMesh = [&](size_t meshIndex,
+		                                  uint32_t drawRecordIndex,
 		                                  const glm::vec4& boundsSphere,
 		                                  const shaderio::DrawUniforms& drawData)
 		{
@@ -6996,6 +7049,7 @@ namespace demo
 
 			result.shadowPackedMeshes.push_back(ShadowPackedMesh{
 				.meshIndex = meshIndex,
+				.drawRecordIndex = drawRecordIndex,
 				.indexCount = mesh.indexCount,
 				.firstIndex = firstIndex,
 				.vertexOffset = 0,
@@ -7008,7 +7062,7 @@ namespace demo
 		{
 			for (const size_t drawRecordIndex : result.shadowCasterDrawIndices)
 			{
-				if (drawRecordIndex >= result.drawRecords.size())
+				if (drawRecordIndex >= result.drawRecords.size() || drawRecordIndex > UINT32_MAX)
 				{
 					continue;
 				}
@@ -7028,7 +7082,10 @@ namespace demo
 				const glm::vec4 boundsSphere = drawRecord.boundsSphere.w > 0.0f
 					                               ? drawRecord.boundsSphere
 					                               : computeBoundsSphere(*meshRecord, drawRecord.worldTransform);
-				appendPackedMesh(drawRecord.meshIndex, boundsSphere, buildShadowDrawUniforms(*meshRecord, drawRecord));
+				appendPackedMesh(
+					drawRecord.meshIndex,
+					static_cast<uint32_t>(drawRecordIndex),
+					boundsSphere, buildShadowDrawUniforms(*meshRecord, drawRecord));
 			}
 		}
 		else
@@ -7047,6 +7104,7 @@ namespace demo
 				}
 
 				appendPackedMesh(meshIndex,
+				                 UINT32_MAX,
 				                 glm::vec4(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius),
 				                 buildShadowDrawUniforms(*meshRecord));
 			}

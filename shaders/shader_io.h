@@ -11,7 +11,9 @@ typealias uvec4 = uint4;
 typealias mat4 = float4x4;
 #define STATIC_CONST static const
 #else
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
 // GLM configuration for Vulkan (must be defined before including glm)
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
@@ -198,7 +200,16 @@ STATIC_CONST uint32_t LClusterLightIndexMask = 0x3fffffffu;
 // CSM (Cascaded Shadow Maps) constants
 STATIC_CONST int LCascadeCount = 4;  // Number of shadow cascades
 STATIC_CONST float LCascadeSplitLambda = 0.5f;  // Practical split (log + linear mix)
-STATIC_CONST float LCascadeBlendRegion = 0.0f;  // Hard boundaries (no blending)
+STATIC_CONST float LCascadeBlendRegion = 0.10f;  // Fraction of each cascade blended into the next
+STATIC_CONST float LCascadeBlendMinDistance = 0.5f;
+STATIC_CONST int LCascadePcfRadius = 1;  // 1 => 3x3 manual PCF
+// Coverage-driven cascade blending owns an explicit protected ring inside the
+// projection. CPU fitting and shader selection share these exact texel counts.
+STATIC_CONST int LCascadeCoverageBlendTexels = 4;
+// One extra texel covers the worst-case 0.5-texel center snap; the coverage ring
+// then transitions to the adjacent coarser cascade before any PCF tap can escape.
+STATIC_CONST int LCascadePcfGuardTexels =
+  LCascadePcfRadius + 1 + LCascadeCoverageBlendTexels;
 
 // Cascade debug overlay mode
 STATIC_CONST int LCascadeOverlayModeOff = 0;
@@ -610,15 +621,51 @@ struct SurfaceAtlasLightingPush
   vec4 atlasResolutionAndPadding; // xy = resolution, z = enabled, w unused
 };
 
+// Shared CSM payload. Keeping the historical cascadeSplitDistances field name in
+// LightParams/ShadowUniforms lets existing CPU copy sites transfer this complete
+// block without touching renderer ownership code.
+struct CascadeShadowParams
+{
+  float x;
+  float y;
+  float z;
+  float w;
+  vec4 invDepthRange;  // Per cascade: 1 / (farPlane - nearPlane), world units^-1
+  vec4 worldTexelSize; // Per cascade: one shadow-map texel in world units
+
+#ifndef __SLANG__
+  CascadeShadowParams& operator=(const vec4& splitDistances)
+  {
+    x = splitDistances.x;
+    y = splitDistances.y;
+    z = splitDistances.z;
+    w = splitDistances.w;
+    return *this;
+  }
+
+  operator vec4() const
+  {
+    return vec4(x, y, z, w);
+  }
+#endif
+};
+
+#ifndef __SLANG__
+static_assert(std::is_standard_layout_v<CascadeShadowParams>);
+static_assert(sizeof(CascadeShadowParams) == sizeof(vec4) * 3);
+static_assert(offsetof(CascadeShadowParams, invDepthRange) == sizeof(vec4));
+static_assert(offsetof(CascadeShadowParams, worldTexelSize) == sizeof(vec4) * 2);
+#endif
+
 // Light parameters for PBR lighting pass (scene-level UBO)
 struct LightParams
 {
   mat4 worldToShadow[LCascadeCount];      // Per-cascade matrices
-  vec4 cascadeSplitDistances;             // x=c0, y=c1, z=c2, w=c3 far distances
+  CascadeShadowParams cascadeSplitDistances; // xyzw = cascade far distances + stable depth/texel metrics
   vec4 lightDirectionAndShadowStrength;   // xyz = shading direction to light, w = shadow strength
-  vec4 lightColorAndNormalBias;           // rgb = light intensity, w = normal bias
+  vec4 lightColorAndNormalBias;           // rgb = light intensity, w = caster normal bias in world units
   vec4 ambientColorAndTexelSize;          // rgb = ambient term, w = 1 / shadow map size
-  vec4 shadowMetrics;                     // x = texelSize, y = baseBias, z = slopeBias, w = cascadeCount
+  vec4 shadowMetrics;                     // x = UV texel, y = receiver depth bias (world), z = caster normal bias (world), w = cascadeCount
   vec4 iblParams;                         // x = enabled, y = intensity, z = max env mip, w = valid env texture
   vec4 iblDebugInfo;                      // x = debug mode, yzw = reserved
   vec4 phase7Info;                        // x = AO enabled, y = SSR enabled, zw = reserved until atlas sampling lands
@@ -663,17 +710,14 @@ struct ShadowUniforms
   mat4 cascadeViewProjection[LCascadeCount];
   mat4 cascadeWorldToShadowTexture[LCascadeCount];
 
-  // Cascade split distances (view-space depth)
-  vec4 cascadeSplitDistances;  // x=c0 far, y=c1 far, z=c2 far, w=c3 far
+  // Cascade split distances and stable per-cascade projection metrics.
+  CascadeShadowParams cascadeSplitDistances;
 
   // Light parameters (unchanged)
   vec4 lightDirectionAndIntensity;
 
   // Shadow parameters
   vec4 shadowMapMetrics;  // x=1/shadowSize, y=maxShadowDistance, z=unused, w=cascadeCount
-
-  // Per-cascade bias (scaled)
-  vec4 cascadeBiasScale;  // x=baseConstantBias, y=baseSlopeBias, z=scaleFactor(0.5), w=normalBias
 };
 
 // Debug line vertex format

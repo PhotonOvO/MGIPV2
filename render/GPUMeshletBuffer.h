@@ -18,13 +18,40 @@ namespace demo
 	class GPUMeshletBuffer
 	{
 	public:
+		// forceFullRewrite republishes existing metadata in-place while unchanged index geometry stays incremental.
+		enum class MetadataUploadMode : uint8_t
+		{
+			incremental,
+			forceFullRewrite,
+		};
+
+		struct UploadRange
+		{
+			uint32_t firstElement{0};
+			uint32_t elementCount{0};
+			uint64_t byteOffset{0};
+			uint64_t byteCount{0};
+		};
+
+		// Persistently mapped writes have no transfer command; this records their exact byte ranges.
+		struct UploadRecord
+		{
+			UploadRange meshletMetadata{};
+			UploadRange cullMetadata{};
+			UploadRange indexGeometry{};
+			bool buffersRecreated{false};
+			bool forcedFullMetadataRewrite{false};
+		};
+
 		void init(rhi::Device* rhiDevice);
 		void deinit();
 		void clear();
 
-		void uploadMeshlets(const std::vector<shaderio::Meshlet>& meshlets,
-		                    const std::vector<uint32_t>& meshletIndices,
-		                    const std::vector<shaderio::GPUCullObject>& meshletCullObjects);
+		UploadRecord uploadMeshlets(
+			const std::vector<shaderio::Meshlet>& meshlets,
+			const std::vector<uint32_t>& meshletIndices,
+			const std::vector<shaderio::GPUCullObject>& meshletCullObjects,
+			MetadataUploadMode metadataUploadMode = MetadataUploadMode::incremental);
 
 		[[nodiscard]] uint64_t getMeshletDataAddress() const { return m_meshletDataAddress.value; }
 

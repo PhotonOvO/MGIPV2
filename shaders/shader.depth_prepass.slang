@@ -63,13 +63,17 @@ VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstan
 [shader("fragment")]
 void fragmentMain(VertexOutput input)
 {
-    if(!alphaTestEnabled || draw.baseColorTextureIndex < 0)
+    if(!alphaTestEnabled)
     {
         return;
     }
 
-    uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
+    float alpha = draw.baseColorFactor.a;
+    if(draw.baseColorTextureIndex >= 0)
+    {
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+        alpha *= inTexture[baseColorTextureIndex].Sample(input.uv).a;
+    }
     if(alpha < draw.alphaCutoff)
     {
         discard;
@@ -79,15 +83,19 @@ void fragmentMain(VertexOutput input)
 [shader("fragment")]
 void fragmentMdiMain(VertexOutputMdi input)
 {
-    const DrawUniforms draw = drawData[input.drawIndex];
-    if(!alphaTestEnabled || draw.baseColorTextureIndex < 0)
+    const DrawUniforms mdiDraw = drawData[input.drawIndex];
+    if(!alphaTestEnabled)
     {
         return;
     }
 
-    uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
-    if(alpha < draw.alphaCutoff)
+    float alpha = mdiDraw.baseColorFactor.a;
+    if(mdiDraw.baseColorTextureIndex >= 0)
+    {
+        uint baseColorTextureIndex = NonUniformResourceIndex(uint(mdiDraw.baseColorTextureIndex));
+        alpha *= inTexture[baseColorTextureIndex].Sample(input.uv).a;
+    }
+    if(alpha < mdiDraw.alphaCutoff)
     {
         discard;
     }

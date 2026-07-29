@@ -11,50 +11,127 @@ namespace demo::rhi::vulkan
 {
 	namespace
 	{
-		[[nodiscard]] VkPipelineStageFlags2 toVkPipelineStage2(StageFlags stages)
+		[[nodiscard]] constexpr bool hasStage(StageFlags stages, StageFlags bit)
+		{
+			return (static_cast<uint64_t>(stages) & static_cast<uint64_t>(bit)) != 0;
+		}
+
+		[[nodiscard]] constexpr bool hasHazard(HazardFlags hazards, HazardFlags bit)
+		{
+			return (static_cast<uint32_t>(hazards) & static_cast<uint32_t>(bit)) != 0;
+		}
+
+		[[nodiscard]] constexpr VkPipelineStageFlags2 toVkPipelineStage2(StageFlags stages)
 		{
 			VkPipelineStageFlags2 out = VK_PIPELINE_STAGE_2_NONE;
-			const auto has = [&](StageFlags bit)
-			{
-				return (static_cast<uint64_t>(stages) & static_cast<uint64_t>(bit)) != 0;
-			};
 			if (stages == StageFlags::all) return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-			if (has(StageFlags::transfer)) out |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-			if (has(StageFlags::compute)) out |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			if (has(StageFlags::vertexShader)) out |= VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
-			if (has(StageFlags::fragmentShader)) out |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-			if (has(StageFlags::rasterColorOut)) out |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-			if (has(StageFlags::rasterDepthOut))
+			if (hasStage(stages, StageFlags::transfer)) out |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+			if (hasStage(stages, StageFlags::compute)) out |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			if (hasStage(stages, StageFlags::vertexShader)) out |= VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+			if (hasStage(stages, StageFlags::fragmentShader)) out |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+			if (hasStage(stages, StageFlags::rasterColorOut)) out |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+			if (hasStage(stages, StageFlags::rasterDepthOut))
 				out |= VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
 					VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-			if (has(StageFlags::commandInput)) out |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+			if (hasStage(stages, StageFlags::commandInput)) out |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
 			return out == VK_PIPELINE_STAGE_2_NONE ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : out;
 		}
 
-		// Conservative access masks; Wave 7 refines per-hazard. Correctness-first.
-		[[nodiscard]] VkAccessFlags2 inferProducerAccess(HazardFlags hazards)
+		[[nodiscard]] constexpr VkAccessFlags2 inferProducerAccess(HazardFlags hazards,
+		                                                          StageFlags producerStages)
 		{
-			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::readBeforeWrite)) != 0)
+			if (hasHazard(hazards, HazardFlags::readBeforeWrite))
 				return VK_ACCESS_2_MEMORY_READ_BIT
 					| VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
 					| VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-			VkAccessFlags2 out = VK_ACCESS_2_MEMORY_WRITE_BIT;
-			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::depthStencil)) != 0)
+
+			VkAccessFlags2 out = 0;
+			if (hasStage(producerStages, StageFlags::transfer))
+				out |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			if (hasStage(producerStages, StageFlags::compute)
+				|| hasStage(producerStages, StageFlags::vertexShader)
+				|| hasStage(producerStages, StageFlags::fragmentShader))
+			{
+				out |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+			}
+			if (hasStage(producerStages, StageFlags::rasterColorOut))
+				out |= VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+			if (hasStage(producerStages, StageFlags::rasterDepthOut)
+				|| hasHazard(hazards, HazardFlags::depthStencil))
 				out |= VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-			return out;
+			return out == 0 ? VK_ACCESS_2_MEMORY_WRITE_BIT : out;
 		}
 
-		[[nodiscard]] VkAccessFlags2 inferConsumerAccess(HazardFlags hazards)
+		[[nodiscard]] constexpr VkAccessFlags2 inferConsumerAccess(HazardFlags hazards,
+		                                                          StageFlags consumerStages)
 		{
-			VkAccessFlags2 out = VK_ACCESS_2_MEMORY_READ_BIT;
-			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::readBeforeWrite)) != 0)
-				return VK_ACCESS_2_MEMORY_WRITE_BIT
-					| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+			const auto hasStage = [consumerStages](StageFlags bit)
+			{
+				return (static_cast<uint64_t>(consumerStages) & static_cast<uint64_t>(bit)) != 0;
+			};
 
-			if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::drawArguments)) != 0)
+			if (hasHazard(hazards, HazardFlags::readBeforeWrite))
+			{
+				VkAccessFlags2 out = VK_ACCESS_2_MEMORY_WRITE_BIT;
+				if (hasStage(StageFlags::transfer))
+					out |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+				if (hasStage(StageFlags::compute)
+					|| hasStage(StageFlags::vertexShader)
+					|| hasStage(StageFlags::fragmentShader))
+				{
+					out |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+				}
+				if (hasStage(StageFlags::rasterColorOut))
+					out |= VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+				if (hasStage(StageFlags::rasterDepthOut))
+					out |= VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+				return out;
+			}
+
+			VkAccessFlags2 out = hasHazard(hazards, HazardFlags::storageBufferReadWrite)
+				                     ? VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+					                     | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+				                     : VK_ACCESS_2_MEMORY_READ_BIT;
+			if (hasHazard(hazards, HazardFlags::drawArguments))
 				out |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
 			return out;
 		}
+
+		[[nodiscard]] constexpr VkMemoryBarrier2 makeMemoryBarrier2(StageFlags producer,
+		                                                           StageFlags consumer,
+		                                                           HazardFlags hazards)
+		{
+			VkPipelineStageFlags2 dstStage = toVkPipelineStage2(consumer);
+			if (hasHazard(hazards, HazardFlags::drawArguments))
+				dstStage |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+			return VkMemoryBarrier2{
+				.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+				.srcStageMask = toVkPipelineStage2(producer),
+				.srcAccessMask = inferProducerAccess(hazards, producer),
+				.dstStageMask = dstStage,
+				.dstAccessMask = inferConsumerAccess(hazards, consumer),
+			};
+		}
+
+		constexpr VkMemoryBarrier2 kTransferToStorageReadWriteAndIndirectBarrierContract =
+			makeMemoryBarrier2(
+				StageFlags::transfer,
+				StageFlags::compute | StageFlags::commandInput,
+				HazardFlags::bufferWrites | HazardFlags::storageBufferReadWrite
+					| HazardFlags::drawArguments);
+		static_assert(
+			kTransferToStorageReadWriteAndIndirectBarrierContract.srcStageMask
+			== VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT);
+		static_assert(
+			kTransferToStorageReadWriteAndIndirectBarrierContract.srcAccessMask
+			== VK_ACCESS_2_TRANSFER_WRITE_BIT);
+		static_assert(
+			kTransferToStorageReadWriteAndIndirectBarrierContract.dstStageMask
+			== (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT));
+		static_assert(
+			kTransferToStorageReadWriteAndIndirectBarrierContract.dstAccessMask
+			== (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+				| VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT));
 
 		[[nodiscard]] VkImageLayout toVkImageLayout(ResourceState state)
 		{
@@ -475,21 +552,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanCommandBuffer::barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards)
 	{
-		VkPipelineStageFlags2 dstStage = toVkPipelineStage2(consumer);
-		// INDIRECT_COMMAND_READ access is only valid alongside the DRAW_INDIRECT stage, so
-		// when the consumer reads indirect arguments, ensure that stage is present even if
-		// the declarative consumer mask only named shader stages.
-		if ((static_cast<uint32_t>(hazards) & static_cast<uint32_t>(HazardFlags::drawArguments)) != 0)
-		{
-			dstStage |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-		}
-		const VkMemoryBarrier2 memoryBarrier{
-			.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-			.srcStageMask = toVkPipelineStage2(producer),
-			.srcAccessMask = inferProducerAccess(hazards),
-			.dstStageMask = dstStage,
-			.dstAccessMask = inferConsumerAccess(hazards),
-		};
+		const VkMemoryBarrier2 memoryBarrier = makeMemoryBarrier2(producer, consumer, hazards);
 		const VkDependencyInfo dependencyInfo{
 			.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
 			.memoryBarrierCount = 1,

@@ -302,6 +302,7 @@ namespace demo
 		}
 
 		[[nodiscard]] uint32_t getSwapchainImageCount() const { return m_renderer.getSwapchainImageCount(); }
+		[[nodiscard]] uint32_t getFrameSlotCount() const { return m_renderer.getFrameResourceCount(); }
 		void resize(rhi::Extent2D size);
 		void beginUiFrame() { m_renderer.beginUiFrame(); }
 		void render(const RenderParams& params);
@@ -337,13 +338,15 @@ namespace demo
 		void destroyGltfResources(const GltfUploadResult& result);
 		void updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
 		void updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
+		[[nodiscard]] bool removeSceneInstance(uint32_t instanceIndex);
+		void syncActiveSceneRuntimeState(SceneUploadResult& ioResult) const;
 
 		void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 		{
 			m_renderer.executeUploadCommand(std::move(uploadFn));
 		}
 
-		void waitForIdle() { m_renderer.waitForIdle(); }
+		void waitForIdle();
 		[[nodiscard]] bool loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError);
 		void setDDGIEnabled(bool enabled);
 		[[nodiscard]] bool isDDGIEnabled() const { return getDDGIConfig().enabled; }
@@ -409,6 +412,15 @@ namespace demo
 
 		[[nodiscard]] const GPUDrivenRuntimeStats& getRuntimeStats() const { return m_runtimeStats; }
 		[[nodiscard]] bool isTAAHistoryValid() const { return m_taaHistoryValid; }
+		[[nodiscard]] bool didTAAResolveWriteHistoryThisFrame() const
+		{
+			return m_taaHistoryWrittenThisFrame;
+		}
+
+		void markTAAResolveHistoryWrittenThisFrame()
+		{
+			m_taaHistoryWrittenThisFrame = true;
+		}
 
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const
 		{
@@ -546,8 +558,17 @@ namespace demo
 
 		[[nodiscard]] PipelineHandle getTAAResolvePipelineHandle() const
 		{
+			// Bloom/Final use this handle as the current-frame TAA source gate.
+			// Do not expose the history-writing pipeline until the resolve draw has
+			// actually been recorded for this frame.
+			return m_taaHistoryWrittenThisFrame ? m_gpuDrivenTAAResolvePipeline : PipelineHandle{};
+		}
+
+		[[nodiscard]] PipelineHandle getTAAResolveExecutionPipelineHandle() const
+		{
 			return m_gpuDrivenTAAResolvePipeline;
 		}
+
 
 		[[nodiscard]] PipelineHandle getForwardMDIPipelineHandle() const
 		{
@@ -715,7 +736,7 @@ namespace demo
 		[[nodiscard]] VisibilitySortDispatch getVisibilitySortDispatch(uint32_t frameIndex) const
 		{
 			VisibilitySortDispatch info{};
-			if (m_visibilitySortPipelineHandle.isNull() || frameIndex >= m_visibilitySortFrames.size())
+			if (frameIndex >= m_visibilitySortFrames.size())
 			{
 				return info;
 			}
@@ -727,8 +748,14 @@ namespace demo
 			info.keyBufferHandle = f.keyBuffer;
 			info.valueBufferHandle = f.valueBuffer;
 			info.paddedElementCount = f.paddedElementCount;
-			info.valid = !f.argumentTable.isNull() && f.paddedElementCount > 1u
-				&& !f.uploadKeyBuffer.isNull() && !f.uploadValueBuffer.isNull();
+			const bool copyBuffersValid =
+				!f.uploadKeyBuffer.isNull() && !f.uploadValueBuffer.isNull()
+				&& !f.keyBuffer.isNull() && !f.valueBuffer.isNull();
+			const bool bitonicDispatchReady =
+				f.paddedElementCount <= 1u
+				|| (!m_visibilitySortPipelineHandle.isNull() && !f.argumentTable.isNull());
+			info.valid =
+				f.paddedElementCount > 0u && copyBuffersValid && bitonicDispatchReady;
 			return info;
 		}
 
@@ -762,6 +789,21 @@ namespace demo
 		{
 			return m_renderer.getDepthMDIDrawArgumentTable(frameIndex);
 		}
+
+		// Previous-frame raw culling is a temporal draw stream, not merely a pair
+		// of ring-buffer handles. The package is populated only when the producing
+		// frame was recorded for the current scene topology generation.
+		struct PreviousRawCullingBootstrap
+		{
+			uint64_t indirectBufferHandle{0};
+			uint64_t countBufferHandle{0};
+			rhi::BufferHandle indirectBuffer{};
+			rhi::BufferHandle countBuffer{};
+			uint32_t objectCount{0};
+			bool valid{false};
+		};
+
+		[[nodiscard]] PreviousRawCullingBootstrap getPreviousRawCullingBootstrap(uint32_t frameIndex) const;
 
 		[[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
 		{
@@ -900,6 +942,10 @@ namespace demo
 		void publishSortedBootstrapStateForFrame(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity)
 		{
 			recordSortedBootstrapState(frameIndex, opaqueCapacity, alphaCapacity);
+		}
+		void publishRawCullingBootstrapStateForFrame(uint32_t frameIndex, uint32_t objectCount)
+		{
+			recordRawCullingBootstrapState(frameIndex, objectCount);
 		}
 
 		void recordDepthPrepassVisibilitySource(bool usedPreviousFrameIndirect,
@@ -1190,13 +1236,15 @@ namespace demo
 			m_renderer.executeImGuiPass(cmdBuffer, params);
 		}
 
-		void bindStaticPassResources()
+		void bindStaticPassResources();
+
+		[[nodiscard]] bool submitPassGraph(
+			const RenderParams& params,
+			const RenderDevice::FrameSlotReadyCallback& onFrameSlotReady)
 		{
-			m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
-			m_renderer.bindStaticPassResources(m_passExecutor);
+			return m_renderer.renderWithPassExecutor(params, m_passExecutor, onFrameSlotReady);
 		}
 
-		void submitPassGraph(const RenderParams& params) { m_renderer.renderWithPassExecutor(params, m_passExecutor); }
 		bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
 		                                       uint32_t frameIndex,
 		                                       uint64_t targetIndirectBufferHandle,
@@ -1208,6 +1256,19 @@ namespace demo
 		{
 			uint32_t first{0};
 			uint32_t count{0};
+		};
+
+		struct PersistentDrawIdentity
+		{
+			uint32_t drawRecordIndex{UINT32_MAX};
+			GPUSceneObjectHandle registryObjectHandle{};
+			uint32_t sceneObjectIndex{UINT32_MAX};
+		};
+
+		struct PersistentDrawFrameUploadState
+		{
+			std::vector<DirtyRange> dirtyRanges;
+			bool fullUploadPending{true};
 		};
 
 		struct VisibilitySortFrameResources
@@ -1237,6 +1298,11 @@ namespace demo
 			std::array<rhi::BufferHandle, 2> boundPrefixAHandles{};
 			std::array<rhi::BufferHandle, 2> boundPrefixBHandles{};
 			uint32_t prefixCapacity{0};
+			// Set after a final patch dispatch has read the ping-pong prefix data.
+			// The next patch category in the same command buffer must consume the
+			// explicit compute-read -> compute-write reuse barrier before mode 0
+			// overwrites prefix buffer A.
+			bool prefixReuseBarrierPending{false};
 		};
 
 		struct SortedBootstrapFrameState
@@ -1245,6 +1311,19 @@ namespace demo
 			uint32_t alphaCapacity{0};
 			uint64_t sceneTopologyVersion{0};
 			bool valid{false};
+		};
+
+		struct RawCullingBootstrapFrameState
+		{
+			uint32_t objectCount{0};
+			uint64_t sceneTopologyVersion{0};
+			bool valid{false};
+		};
+
+		struct PersistentTextureState
+		{
+			rhi::TextureHandle texture{};
+			rhi::ResourceState state{rhi::ResourceState::General};
 		};
 
 		static uint64_t packMeshHandleKey(MeshHandle handle);
@@ -1268,14 +1347,35 @@ namespace demo
 		                           const SceneUploadResult& uploadResult,
 		                           rhi::CommandBuffer& cmd);
 		void appendSceneObjectDraw(uint64_t meshKey, MeshHandle meshHandle, uint32_t drawIndex, SceneDrawBucket bucket);
+		void bindPersistentDrawIdentity(uint32_t drawIndex,
+		                                uint32_t drawRecordIndex,
+		                                GPUSceneObjectHandle registryObjectHandle,
+		                                uint32_t sceneObjectIndex);
+		void markMeshletMetadataForFullRewrite();
+		void beginSceneReplacement();
+		[[nodiscard]] bool applySceneObjectDenseRemap(const GPUSceneRemoveResult& removeResult);
+		void commitSubmittedSceneTransformHistory();
 		void clearGPUDrivenScene();
+		void flushPendingMeshletUpload();
+		void uploadPendingMeshletsAfterIdle();
 		void flushPendingSceneUploads();
+		void advanceSceneTopologyVersion();
 		void invalidateSortedBootstrapStates();
 		void invalidateSortedBootstrapState(uint32_t frameIndex);
 		void recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity);
+		void invalidateRawCullingBootstrapStates();
+		void invalidateRawCullingBootstrapState(uint32_t frameIndex);
+		void recordRawCullingBootstrapState(uint32_t frameIndex, uint32_t objectCount);
+		void resetTemporalAndPersistentTextureStates();
+		static void trackPersistentTextureIdentity(PersistentTextureState& textureState,
+		                                           rhi::TextureHandle texture);
+		static void commitPersistentTextureState(PersistentTextureState& textureState,
+		                                         rhi::TextureHandle texture,
+		                                         rhi::ResourceState terminalState);
 		void markPersistentDrawDirty(uint32_t drawIndex);
 		[[nodiscard]] std::vector<DirtyRange> buildPersistentDrawDirtyRanges() const;
-		void uploadPersistentDrawData();
+		void preparePersistentDrawData();
+		void uploadPersistentDrawData(uint32_t frameIndex);
 		void refreshSceneView();
 		void updateOwnershipDiagnostics(uint32_t frameIndex, bool sceneRenderingSuspended, uint32_t safeObjectCount);
 		void initLightingResources();
@@ -1283,7 +1383,8 @@ namespace demo
 		void initIBLResources();
 		void shutdownIBLResources();
 		void updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex);
-		void updateLightingArgumentTable(uint32_t frameIndex, const DebugPassOptions& debugOptions);
+		void updateLightingArgumentTable(
+			uint32_t frameIndex, const FlaxGIOutputSnapshot& flaxOutput);
 		void initLightingPipelines();
 		void shutdownLightingPipelines();
 		void initDDGIProbeResources();
@@ -1319,7 +1420,11 @@ namespace demo
 		uint64_t m_cachedStaticVisibilitySortTopologyVersion{0};
 		std::vector<shaderio::DrawUniforms> m_persistentDrawData;
 		std::vector<SceneUploadResult::SceneDrawRecord> m_sceneDrawRecords;
+		std::vector<SubmittedTransformHistory> m_transformHistoryByDrawRecord;
+		std::vector<PersistentDrawIdentity> m_drawIdentityByDrawIndex;
+		std::vector<std::vector<uint32_t>> m_drawIndicesByDrawRecord;
 		std::vector<uint32_t> m_dirtyPersistentDrawIndices;
+		std::vector<PersistentDrawFrameUploadState> m_persistentDrawFrameUploads;
 		std::unique_ptr<GPUDrivenDepthPrepass> m_depthPrepass;
 		std::unique_ptr<GPUDrivenDepthPyramidPass> m_depthPyramidPass;
 		std::unique_ptr<GPUDrivenCullingPass> m_gpuCullingPass;
@@ -1399,12 +1504,12 @@ namespace demo
 		GPUDrivenRuntimeStats m_runtimeStats{};
 		SceneUploadResult m_activeUploadResultStorage{};
 		const SceneUploadResult* m_activeUploadResult{nullptr};
-		std::unordered_map<uint64_t, uint32_t> m_objectIdByMeshHandle;
-		std::unordered_map<uint64_t, std::vector<uint32_t>> m_objectIdsByMeshHandle;
+		std::unordered_map<uint64_t, GPUSceneObjectHandle> m_objectHandleByMeshHandle;
+		std::unordered_map<uint64_t, std::vector<GPUSceneObjectHandle>> m_objectHandlesByMeshHandle;
 		std::unordered_map<uint64_t, uint32_t> m_drawIndexByMeshHandle;
 		std::unordered_map<uint64_t, glm::mat4> m_previousTransformByMeshHandle;
 		std::unordered_map<uint32_t, glm::mat4> m_previousTransformByDrawIndex;
-		std::vector<uint32_t> m_objectIdByDrawRecord;
+		std::vector<GPUSceneObjectHandle> m_objectHandleByDrawRecord;
 		std::vector<uint32_t> m_drawIndexByDrawRecord;
 		std::vector<MeshHandle> m_meshHandleByDrawIndex;
 		std::vector<uint32_t> m_opaqueDrawIndices;
@@ -1429,6 +1534,7 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
 		rhi::SamplerHandle m_linearClampSamplerHandle{};
+		rhi::SamplerHandle m_shadowPointClampSamplerHandle{};
 		rhi::SamplerHandle m_iblCubeSamplerHandle{};
 		rhi::SamplerHandle m_iblLutSamplerHandle{};
 		std::array<rhi::ArgumentLayoutHandle, 2> m_lightPipelineArgumentLayouts{};
@@ -1493,9 +1599,12 @@ namespace demo
 		std::string m_iblEnvironmentPath;
 		std::string m_iblEnvironmentStatus{"Not initialized"};
 		std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
+		std::vector<RawCullingBootstrapFrameState> m_rawCullingBootstrapFrames;
 		uint64_t m_sceneTopologyVersion{1};
 		bool m_enableExperimentalMeshletPath{false};
 		bool m_suspendSceneRendering{false};
+		bool m_meshletUploadDirty{false};
+		bool m_meshletMetadataFullRewriteDirty{false};
 		bool m_sceneUploadPending{false};
 		bool m_persistentDrawDataDirty{false};
 		bool m_previousTransformResetPending{false};
@@ -1510,6 +1619,38 @@ namespace demo
 		glm::vec2 m_previousTAAJitterUv{0.0f};
 		bool m_previousCameraValid{false};
 		bool m_taaHistoryValid{false};
+		bool m_taaHistoryWrittenThisFrame{false};
+		// Next physical image that a successful TAA resolve will write. This parity
+		// advances only after an actual history write; unrelated temporal systems
+		// continue to use m_temporalFrameCounter.
+		uint32_t m_taaHistoryWriteIndex{0u};
+		// Physical history-image terminal states. Logical read/write handles swap each
+		// successful TAA resolve, so their next initialState must follow image parity rather
+		// than a fixed cross-frame old-layout assumption.
+		std::array<PersistentTextureState, 3> m_gbufferResourceStates{};
+		PersistentTextureState m_sceneColorHdrResourceState{};
+		PersistentTextureState m_velocityResourceState{};
+		// These arrays are also physical-resource state: resize/lifecycle recreation
+		// resets them to SceneResources' real post-create layout (General).
+		std::array<rhi::ResourceState, 2> m_sceneColorHistoryStates{
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+		};
+		// BloomDownsample owns a private nine-image chain (half input plus eight
+		// intermediate/output targets). The executor sees each at its stable
+		// inter-pass sampled state; the pass temporarily transitions destinations
+		// to ColorAttachment and publishes them back to ShaderRead.
+		std::array<rhi::ResourceState, 9> m_bloomResourceStates{
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+			rhi::ResourceState::General,
+		};
 		uint64_t m_temporalFrameCounter{0};
 		// DDGI (Wave D4-2): staggered-update rotation counter,
 		// (offset + 1) % DDGIConfig::updateStride each frame, incremented

@@ -31,10 +31,13 @@ namespace demo
 		m_meshletIndexCapacity = 0;
 	}
 
-	void GPUMeshletBuffer::uploadMeshlets(const std::vector<shaderio::Meshlet>& meshlets,
-	                                      const std::vector<uint32_t>& meshletIndices,
-	                                      const std::vector<shaderio::GPUCullObject>& meshletCullObjects)
+	GPUMeshletBuffer::UploadRecord GPUMeshletBuffer::uploadMeshlets(
+		const std::vector<shaderio::Meshlet>& meshlets,
+		const std::vector<uint32_t>& meshletIndices,
+		const std::vector<shaderio::GPUCullObject>& meshletCullObjects,
+		GPUMeshletBuffer::MetadataUploadMode metadataUploadMode)
 	{
+		UploadRecord uploadRecord{};
 		const uint32_t newMeshletCount = static_cast<uint32_t>(meshlets.size());
 		const uint32_t newIndexCount = static_cast<uint32_t>(meshletIndices.size());
 		const uint32_t previousMeshletCount = m_meshletCount;
@@ -43,6 +46,10 @@ namespace demo
 			newMeshletCount > m_meshletCapacity || (newIndexCount > 0 && newIndexCount > m_meshletIndexCapacity);
 		const bool rewriteAll = capacityGrowth || newMeshletCount < m_meshletCount || newIndexCount <
 			m_meshletIndexCount;
+		const bool forceFullMetadataRewrite =
+			metadataUploadMode == MetadataUploadMode::forceFullRewrite;
+		uploadRecord.buffersRecreated = rewriteAll;
+		uploadRecord.forcedFullMetadataRewrite = forceFullMetadataRewrite;
 		if (rewriteAll)
 		{
 			clear();
@@ -52,45 +59,61 @@ namespace demo
 		m_meshletIndexCount = newIndexCount;
 		if (meshlets.empty())
 		{
-			return;
+			return uploadRecord;
 		}
 
 		ensureCapacities(newMeshletCount, newIndexCount);
 
-		const uint32_t meshletStart = rewriteAll ? 0u : std::min(previousMeshletCount, newMeshletCount);
+		const bool rewriteAllMetadata = rewriteAll || forceFullMetadataRewrite;
+		const uint32_t meshletStart = rewriteAllMetadata ? 0u : std::min(previousMeshletCount, newMeshletCount);
 		const uint32_t meshletUploadCount = newMeshletCount - meshletStart;
+		uploadRecord.meshletMetadata = UploadRange{
+			.firstElement = meshletStart,
+			.elementCount = meshletUploadCount,
+			.byteOffset = sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletStart),
+			.byteCount = sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletUploadCount),
+		};
 		if (meshletUploadCount > 0)
 		{
-			const uint64_t meshletOffsetBytes =
-				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletStart);
-			const uint64_t meshletUploadBytes =
-				sizeof(shaderio::Meshlet) * static_cast<uint64_t>(meshletUploadCount);
-			std::memcpy(static_cast<std::byte*>(m_meshletDataMapped) + meshletOffsetBytes,
+			std::memcpy(static_cast<std::byte*>(m_meshletDataMapped) + uploadRecord.meshletMetadata.byteOffset,
 			            meshlets.data() + meshletStart,
-			            static_cast<size_t>(meshletUploadBytes));
+			            static_cast<size_t>(uploadRecord.meshletMetadata.byteCount));
 		}
 
-		if (!meshletCullObjects.empty())
+		const uint32_t cullObjectCount =
+			std::min(newMeshletCount, static_cast<uint32_t>(meshletCullObjects.size()));
+		const uint32_t cullObjectStart =
+			rewriteAllMetadata ? 0u : std::min(previousMeshletCount, cullObjectCount);
+		const uint32_t cullObjectUploadCount = cullObjectCount - cullObjectStart;
+		uploadRecord.cullMetadata = UploadRange{
+			.firstElement = cullObjectStart,
+			.elementCount = cullObjectUploadCount,
+			.byteOffset = sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(cullObjectStart),
+			.byteCount = sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(cullObjectUploadCount),
+		};
+		if (cullObjectUploadCount > 0)
 		{
-			const uint32_t cullObjectUploadCount = std::min(newMeshletCount,
-			                                                static_cast<uint32_t>(meshletCullObjects.size()));
-			const uint64_t cullObjectUploadBytes =
-				sizeof(shaderio::GPUCullObject) * static_cast<uint64_t>(cullObjectUploadCount);
-			std::memcpy(m_meshletCullObjectMapped,
-			            meshletCullObjects.data(),
-			            static_cast<size_t>(cullObjectUploadBytes));
+			std::memcpy(static_cast<std::byte*>(m_meshletCullObjectMapped)
+			            + uploadRecord.cullMetadata.byteOffset,
+			            meshletCullObjects.data() + cullObjectStart,
+			            static_cast<size_t>(uploadRecord.cullMetadata.byteCount));
 		}
 
 		const uint32_t indexStart = rewriteAll ? 0u : std::min(previousIndexCount, newIndexCount);
 		const uint32_t indexUploadCount = newIndexCount - indexStart;
+		uploadRecord.indexGeometry = UploadRange{
+			.firstElement = indexStart,
+			.elementCount = indexUploadCount,
+			.byteOffset = sizeof(uint32_t) * static_cast<uint64_t>(indexStart),
+			.byteCount = sizeof(uint32_t) * static_cast<uint64_t>(indexUploadCount),
+		};
 		if (indexUploadCount > 0)
 		{
-			const uint64_t indexOffsetBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexStart);
-			const uint64_t indexUploadBytes = sizeof(uint32_t) * static_cast<uint64_t>(indexUploadCount);
-			std::memcpy(static_cast<std::byte*>(m_meshletIndexMapped) + indexOffsetBytes,
+			std::memcpy(static_cast<std::byte*>(m_meshletIndexMapped) + uploadRecord.indexGeometry.byteOffset,
 			            meshletIndices.data() + indexStart,
-			            static_cast<size_t>(indexUploadBytes));
+			            static_cast<size_t>(uploadRecord.indexGeometry.byteCount));
 		}
+		return uploadRecord;
 	}
 
 	void GPUMeshletBuffer::ensureCapacities(uint32_t requiredMeshletCount, uint32_t requiredIndexCount)

@@ -30,14 +30,46 @@
 #include <atomic>
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <thread>
 
 class MinimalLatestApp
 {
 public:
-  MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080})
+  enum class AutomationMode
+  {
+    none,
+    csmTranslateStop,
+    csmRotateStop,
+  };
+
+  struct AutomationOptions
+  {
+    AutomationMode mode{AutomationMode::none};
+    float fixedDeltaSeconds{1.0f / 60.0f};
+    uint32_t warmupFrames{60u};
+    uint32_t motionFrames{60u};
+    uint32_t holdFrames{60u};
+    bool noUi{false};
+    bool noPost{false};
+    bool noDdgi{false};
+    bool taa{false};
+    bool autoExit{false};
+    bool captureControlFrame{false};
+    std::filesystem::path captureSyncDirectory{};
+    uint32_t captureSyncTimeoutMilliseconds{30000u};
+  };
+
+  MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080}, AutomationOptions automationOptions = {})
       : m_windowSize(size)
+      , m_automationOptions(automationOptions)
   {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 #ifdef USE_SLANG
@@ -72,8 +104,32 @@ public:
     std::strncpy(m_modelPathBuffer, path.c_str(), sizeof(m_modelPathBuffer) - 1);
     m_modelPathBuffer[sizeof(m_modelPathBuffer) - 1] = '\0';
     setMeshSDFPathFromModelPath(path);
-    m_autoLoadSDFOnSceneReady = true;
+    m_autoLoadSDFOnSceneReady = !m_automationOptions.noDdgi;
+    if(m_automationOptions.noDdgi)
+    {
+      m_renderer.setDDGIEnabled(false);
+    }
     loadModelAsync(path);
+
+    if(isAutomationEnabled())
+    {
+      const std::string captureSyncDirectory = m_automationOptions.captureSyncDirectory.string();
+      LOGI("[CSM_AUTOMATION] marker=config mode=%s fixed_dt=%.9f warmup=%u motion=%u hold=%u no_ui=%d no_post=%d no_ddgi=%d taa=%d auto_exit=%d capture_sync=%d capture_control=%d capture_sync_timeout_ms=%u capture_sync_dir=%s",
+           automationModeName(),
+           m_automationOptions.fixedDeltaSeconds,
+           m_automationOptions.warmupFrames,
+           m_automationOptions.motionFrames,
+           m_automationOptions.holdFrames,
+           m_automationOptions.noUi ? 1 : 0,
+           m_automationOptions.noPost ? 1 : 0,
+           m_automationOptions.noDdgi ? 1 : 0,
+           m_automationOptions.taa ? 1 : 0,
+           m_automationOptions.autoExit ? 1 : 0,
+           isAutomationCaptureSyncEnabled() ? 1 : 0,
+           m_automationOptions.captureControlFrame ? 1 : 0,
+           m_automationOptions.captureSyncTimeoutMilliseconds,
+           captureSyncDirectory.c_str());
+    }
   }
 
   ~MinimalLatestApp()
@@ -126,6 +182,12 @@ public:
       // Camera input handling
       {
           demo::profiling::ScopedCpuRange inputCameraRange("AppPreRecord.InputCamera");
+          if(isAutomationEnabled())
+          {
+              applyAutomationCameraPose();
+          }
+          else
+          {
           // Keyboard movement
           glm::vec3 moveDir{0.0f};
           if(glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) moveDir.z += 1.0f;
@@ -183,6 +245,7 @@ public:
               glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
               m_cursorCaptured = false;
           }
+          }
 
           updateActiveCamera();
       }
@@ -202,6 +265,10 @@ public:
       {
         demo::profiling::ScopedCpuRange imguiNewFrameRange("AppPreRecord.ImGuiNewFrame");
         m_renderer.beginUiFrame();
+        if(isAutomationEnabled())
+        {
+          ImGui::GetIO().DeltaTime = m_automationOptions.fixedDeltaSeconds;
+        }
         framePhase = "ImGuiFrameBegin";
       }
       framePhase = "RuntimeProfiler";
@@ -271,6 +338,10 @@ public:
           m_viewportSize = requestedViewportSize;
           m_renderer.resize(m_viewportSize);
           m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
+          // Camera uniforms were populated before viewport handling. Refresh them
+          // without reapplying or advancing the automation pose/history so every
+          // render pass consumes the resized projection in this same frame.
+          refreshActiveCameraUniforms();
         }
 
         const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
@@ -845,8 +916,12 @@ public:
       {
         demo::profiling::ScopedCpuRange buildRenderParamsRange("AppPreRecord.BuildRenderParams");
         frameParams.viewportSize   = m_viewportSize;
-        frameParams.deltaTime      = ImGui::GetIO().DeltaTime;
-        frameParams.timeSeconds    = static_cast<float>(ImGui::GetTime());
+        frameParams.deltaTime      = isAutomationEnabled()
+                                   ? m_automationOptions.fixedDeltaSeconds
+                                   : ImGui::GetIO().DeltaTime;
+        frameParams.timeSeconds    = m_automationStarted
+                                   ? static_cast<float>(m_automationFrame) * m_automationOptions.fixedDeltaSeconds
+                                   : static_cast<float>(ImGui::GetTime());
         frameParams.materialHandle = m_selectedMaterial;
         frameParams.clearColor     = m_clearColor;
         frameParams.viewportImageRect = viewportImageRect;
@@ -866,14 +941,53 @@ public:
           frameParams.sceneLightGltfNodes = m_sceneModel->nodes;
         }
         frameParams.debugOptions   = m_debugOptions;
+        if(m_automationOptions.noPost)
+        {
+          frameParams.debugOptions.enablePostProcessing = false;
+          frameParams.debugOptions.enableTAA = false;
+          frameParams.debugOptions.upscalingMode = 0;
+        }
+        else if(m_automationOptions.taa)
+        {
+          frameParams.debugOptions.enablePostProcessing = true;
+          frameParams.debugOptions.enableTAA = true;
+          frameParams.debugOptions.upscalingMode = 1;
+        }
+        if(m_automationOptions.noDdgi)
+        {
+          frameParams.debugOptions.ddgiDebugVisualize = false;
+          frameParams.debugOptions.flaxGIDebugOverlayEnabled = false;
+          frameParams.debugOptions.flaxGIDebugViewMask = 0u;
+          frameParams.debugOptions.flaxGIDebugMode = 0;
+        }
         // Copy CSM debug settings to debugOptions
         frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
         frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
         frameParams.debugOptions.cascadeOverlayMode    = m_cascadeOverlayMode;
         frameParams.debugOptions.cascadeOverlayAlpha   = m_cascadeOverlayAlpha;
-        frameParams.recordUi       = []() {
+        if(m_automationStarted)
+        {
+          if(const char* boundary = automationTargetBoundaryMarkerForFrame(m_automationFrame);
+             boundary != nullptr)
+          {
+            frameParams.automationDebugMarker =
+                std::string("CSM_AUTOMATION_FRAME mode=") + automationModeName()
+                + " boundary=" + boundary
+                + " frame=" + std::to_string(m_automationFrame);
+          }
+        }
+        frameParams.recordUi       = [hideUi = m_automationOptions.noUi]() {
           demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
           ImGui::Render();
+          if(hideUi)
+          {
+            if(ImDrawData* drawData = ImGui::GetDrawData())
+            {
+              drawData->CmdListsCount = 0;
+              drawData->TotalIdxCount = 0;
+              drawData->TotalVtxCount = 0;
+            }
+          }
         };
       }
       }
@@ -881,6 +995,9 @@ public:
       const bool freezeRenderingForStreamingUpload = m_isLoading && m_renderer.isSceneRenderingSuspended();
       if(!freezeRenderingForStreamingUpload)
       {
+        framePhase = "AutomationCaptureSync";
+        waitForAutomationCaptureHandshake();
+        framePhase = "RendererFacadeRender";
         demo::profiling::ScopedCpuRange rendererFacadeRange("App.RendererFacadeRender");
         m_renderer.render(frameParams);
         ++m_gpuSmokeFrameCount;
@@ -893,6 +1010,7 @@ public:
         {
           LOGI("GPU smoke: 10 frames rendered");
         }
+        onAutomationFrameRendered();
       }
 
       {
@@ -958,6 +1076,21 @@ private:
   uint32_t                   m_gpuSmokeFrameCount{0};
   demo::MaterialHandle       m_selectedMaterial{};
   demo::rhi::ClearColorValue m_clearColor{0.2f, 0.2f, 0.3f, 1.0f};
+
+  struct AutomationPose
+  {
+    glm::vec3 position{8.0f, 1.5f, 0.0f};
+    float yawDegrees{180.0f};
+    float pitchDegrees{0.0f};
+  };
+
+  AutomationOptions m_automationOptions{};
+  bool m_automationSceneReadyObserved{false};
+  bool m_automationStarted{false};
+  bool m_automationComplete{false};
+  uint64_t m_automationFrame{0u};
+  AutomationPose m_automationCurrentPose{};
+  AutomationPose m_automationPreviousPose{};
 
   // glTF model loading
   std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
@@ -1072,10 +1205,24 @@ private:
   void updateAsyncLoading();
   void beginLegacySceneUpload();
   void beginExperimentalSceneUpload();
+  [[nodiscard]] bool isAutomationEnabled() const;
+  [[nodiscard]] const char* automationModeName() const;
+  [[nodiscard]] uint64_t automationSettledFrame() const;
+  [[nodiscard]] uint64_t automationTotalFrames() const;
+  [[nodiscard]] AutomationPose automationPoseForFrame(uint64_t frame) const;
+  [[nodiscard]] const char* automationTargetBoundaryMarkerForFrame(uint64_t frame) const;
+  [[nodiscard]] const char* automationBoundaryMarkerForFrame(uint64_t frame) const;
+  [[nodiscard]] const char* automationCaptureHandshakeMarkerForFrame(uint64_t frame) const;
+  [[nodiscard]] bool isAutomationCaptureSyncEnabled() const;
+  void applyAutomationCameraPose();
+  void waitForAutomationCaptureHandshake();
+  void onAutomationFrameRendered();
+  void logAutomationMarker(const char* marker) const;
   void resetSceneCameraNavigation();
   [[nodiscard]] bool populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const;
   [[nodiscard]] bool hasActiveSceneCamera() const;
   void updateActiveCamera();
+  void refreshActiveCameraUniforms();
   void syncLightAnglesFromDirection();
   void syncLightDirectionFromAngles();
   std::vector<demo::SceneLight>* editableSceneLights();
@@ -1187,6 +1334,338 @@ inline void MinimalLatestApp::resetSceneCameraNavigation()
   m_sceneCameraNavigation.update();
 }
 
+inline bool MinimalLatestApp::isAutomationEnabled() const
+{
+  return m_automationOptions.mode != AutomationMode::none;
+}
+
+inline const char* MinimalLatestApp::automationModeName() const
+{
+  switch(m_automationOptions.mode)
+  {
+    case AutomationMode::csmTranslateStop: return "csm-translate-stop";
+    case AutomationMode::csmRotateStop: return "csm-rotate-stop";
+    default: return "none";
+  }
+}
+
+inline uint64_t MinimalLatestApp::automationSettledFrame() const
+{
+  return static_cast<uint64_t>(m_automationOptions.warmupFrames)
+       + static_cast<uint64_t>(m_automationOptions.motionFrames)
+       + static_cast<uint64_t>(m_automationOptions.holdFrames) - 1u;
+}
+
+inline uint64_t MinimalLatestApp::automationTotalFrames() const
+{
+  return automationSettledFrame() + 1u + (m_automationOptions.captureControlFrame ? 1u : 0u);
+}
+
+inline MinimalLatestApp::AutomationPose MinimalLatestApp::automationPoseForFrame(uint64_t frame) const
+{
+  const AutomationPose start{};
+  AutomationPose finish = start;
+  if(m_automationOptions.mode == AutomationMode::csmTranslateStop)
+  {
+    finish.position.z += 1.0f;
+  }
+  else if(m_automationOptions.mode == AutomationMode::csmRotateStop)
+  {
+    finish.yawDegrees += 8.0f;
+  }
+
+  const uint64_t motionStart = m_automationOptions.warmupFrames;
+  const uint64_t motionEnd = motionStart + m_automationOptions.motionFrames;
+  if(frame < motionStart)
+  {
+    return start;
+  }
+  if(frame >= motionEnd)
+  {
+    return finish;
+  }
+
+  const float progress = static_cast<float>(frame - motionStart + 1u)
+                       / static_cast<float>(m_automationOptions.motionFrames);
+  AutomationPose pose = start;
+  pose.position = glm::mix(start.position, finish.position, progress);
+  pose.yawDegrees = glm::mix(start.yawDegrees, finish.yawDegrees, progress);
+  pose.pitchDegrees = glm::mix(start.pitchDegrees, finish.pitchDegrees, progress);
+  return pose;
+}
+
+inline const char* MinimalLatestApp::automationTargetBoundaryMarkerForFrame(uint64_t frame) const
+{
+  const uint64_t lastMovingFrame =
+      static_cast<uint64_t>(m_automationOptions.warmupFrames)
+      + static_cast<uint64_t>(m_automationOptions.motionFrames) - 1u;
+  if(frame == lastMovingFrame)
+  {
+    return "last-moving";
+  }
+  if(frame == lastMovingFrame + 1u)
+  {
+    return "first-still";
+  }
+  if(frame == automationSettledFrame())
+  {
+    return "settled";
+  }
+  return nullptr;
+}
+
+inline const char* MinimalLatestApp::automationBoundaryMarkerForFrame(uint64_t frame) const
+{
+  if(const char* boundary = automationTargetBoundaryMarkerForFrame(frame); boundary != nullptr)
+  {
+    return boundary;
+  }
+  if(m_automationOptions.captureControlFrame && frame == automationSettledFrame() + 1u)
+  {
+    return "control-still";
+  }
+  return nullptr;
+}
+
+inline const char* MinimalLatestApp::automationCaptureHandshakeMarkerForFrame(uint64_t frame) const
+{
+  const uint64_t lastMovingFrame =
+      static_cast<uint64_t>(m_automationOptions.warmupFrames)
+      + static_cast<uint64_t>(m_automationOptions.motionFrames) - 1u;
+  if(frame + 1u == lastMovingFrame)
+  {
+    return "arm-last-moving";
+  }
+  if(const char* boundary = automationBoundaryMarkerForFrame(frame); boundary != nullptr)
+  {
+    return boundary;
+  }
+  if(frame + 1u == automationSettledFrame())
+  {
+    return "arm-settled";
+  }
+  return nullptr;
+}
+
+inline bool MinimalLatestApp::isAutomationCaptureSyncEnabled() const
+{
+  return isAutomationEnabled() && !m_automationOptions.captureSyncDirectory.empty();
+}
+
+inline void MinimalLatestApp::applyAutomationCameraPose()
+{
+  if(!m_automationSceneReadyObserved)
+  {
+    return;
+  }
+  if(!m_automationStarted)
+  {
+    m_automationStarted = true;
+    m_automationFrame = 0u;
+    m_automationCurrentPose = automationPoseForFrame(0u);
+    m_automationPreviousPose = m_automationCurrentPose;
+    LOGI("[CSM_AUTOMATION] marker=start mode=%s frame=0", automationModeName());
+  }
+
+  const uint64_t poseFrame = m_automationComplete ? automationTotalFrames() - 1u : m_automationFrame;
+  m_automationCurrentPose = automationPoseForFrame(poseFrame);
+  m_camera.setPosition(m_automationCurrentPose.position);
+  m_camera.setYawPitch(m_automationCurrentPose.yawDegrees, m_automationCurrentPose.pitchDegrees);
+}
+
+inline void MinimalLatestApp::waitForAutomationCaptureHandshake()
+{
+  if(!isAutomationCaptureSyncEnabled() || !m_automationStarted || m_automationComplete)
+  {
+    return;
+  }
+
+  const char* boundary = automationCaptureHandshakeMarkerForFrame(m_automationFrame);
+  if(boundary == nullptr)
+  {
+    return;
+  }
+
+  std::error_code filesystemError;
+  std::filesystem::create_directories(m_automationOptions.captureSyncDirectory, filesystemError);
+  if(filesystemError)
+  {
+    throw std::runtime_error("Could not create capture sync directory: " + filesystemError.message());
+  }
+
+  const std::filesystem::path readyPath =
+      m_automationOptions.captureSyncDirectory / (std::string(boundary) + ".ready.json");
+  const std::filesystem::path readyTempPath = readyPath.string() + ".tmp";
+  const std::filesystem::path continuePath =
+      m_automationOptions.captureSyncDirectory / (std::string(boundary) + ".continue");
+
+  const auto removeStaleMarker = [](const std::filesystem::path& path) {
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
+    if(removeError)
+    {
+      throw std::runtime_error("Could not remove stale capture sync marker " + path.string()
+                               + ": " + removeError.message());
+    }
+  };
+  removeStaleMarker(readyTempPath);
+  removeStaleMarker(readyPath);
+  removeStaleMarker(continuePath);
+
+  {
+    std::ofstream readyFile(readyTempPath, std::ios::out | std::ios::trunc);
+    if(!readyFile)
+    {
+      throw std::runtime_error("Could not open capture ready marker: " + readyTempPath.string());
+    }
+    readyFile << std::fixed << std::setprecision(9)
+              << "{\n"
+              << "  \"protocol\": \"mgif-csm-capture-sync-v1\",\n"
+              << "  \"phase\": \"pre-render\",\n"
+              << "  \"no_post\": " << (m_automationOptions.noPost ? "true" : "false") << ",\n"
+              << "  \"no_ddgi\": " << (m_automationOptions.noDdgi ? "true" : "false") << ",\n"
+              << "  \"taa\": " << (m_automationOptions.taa ? "true" : "false") << ",\n"
+              << "  \"capture_control\": " << (m_automationOptions.captureControlFrame ? "true" : "false") << ",\n"
+              << "  \"marker\": \"" << boundary << "\",\n"
+              << "  \"mode\": \"" << automationModeName() << "\",\n"
+              << "  \"frame\": " << m_automationFrame << ",\n"
+              << "  \"current\": {\n"
+              << "    \"position\": [" << m_automationCurrentPose.position.x << ", "
+              << m_automationCurrentPose.position.y << ", " << m_automationCurrentPose.position.z << "],\n"
+              << "    \"yaw_degrees\": " << m_automationCurrentPose.yawDegrees << ",\n"
+              << "    \"pitch_degrees\": " << m_automationCurrentPose.pitchDegrees << "\n"
+              << "  },\n"
+              << "  \"previous\": {\n"
+              << "    \"position\": [" << m_automationPreviousPose.position.x << ", "
+              << m_automationPreviousPose.position.y << ", " << m_automationPreviousPose.position.z << "],\n"
+              << "    \"yaw_degrees\": " << m_automationPreviousPose.yawDegrees << ",\n"
+              << "    \"pitch_degrees\": " << m_automationPreviousPose.pitchDegrees << "\n"
+              << "  }\n"
+              << "}\n";
+    readyFile.flush();
+    if(!readyFile)
+    {
+      throw std::runtime_error("Could not write capture ready marker: " + readyTempPath.string());
+    }
+  }
+
+  std::filesystem::rename(readyTempPath, readyPath, filesystemError);
+  if(filesystemError)
+  {
+    throw std::runtime_error("Could not publish capture ready marker: " + filesystemError.message());
+  }
+
+  const std::string readyPathText = readyPath.string();
+  LOGI("[CSM_AUTOMATION] marker=capture-ready boundary=%s mode=%s frame=%llu phase=pre-render no_post=%d no_ddgi=%d taa=%d capture_control=%d ready=%s",
+       boundary,
+       automationModeName(),
+       static_cast<unsigned long long>(m_automationFrame),
+       m_automationOptions.noPost ? 1 : 0,
+       m_automationOptions.noDdgi ? 1 : 0,
+       m_automationOptions.taa ? 1 : 0,
+       m_automationOptions.captureControlFrame ? 1 : 0,
+       readyPathText.c_str());
+
+  const auto deadline = std::chrono::steady_clock::now()
+                      + std::chrono::milliseconds(m_automationOptions.captureSyncTimeoutMilliseconds);
+  while(true)
+  {
+    const bool continueRequested = std::filesystem::exists(continuePath, filesystemError);
+    if(filesystemError)
+    {
+      throw std::runtime_error("Could not query capture continue marker: " + filesystemError.message());
+    }
+    if(continueRequested)
+    {
+      break;
+    }
+    if(std::chrono::steady_clock::now() >= deadline)
+    {
+      LOGE("[CSM_AUTOMATION] marker=capture-timeout boundary=%s mode=%s frame=%llu timeout_ms=%u",
+           boundary,
+           automationModeName(),
+           static_cast<unsigned long long>(m_automationFrame),
+           m_automationOptions.captureSyncTimeoutMilliseconds);
+      throw std::runtime_error("Timed out waiting for capture continue marker: " + continuePath.string());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+
+  std::filesystem::remove(continuePath, filesystemError);
+  if(filesystemError)
+  {
+    throw std::runtime_error("Could not consume capture continue marker: " + filesystemError.message());
+  }
+  LOGI("[CSM_AUTOMATION] marker=capture-continue boundary=%s mode=%s frame=%llu phase=pre-render",
+       boundary,
+       automationModeName(),
+       static_cast<unsigned long long>(m_automationFrame));
+}
+
+inline void MinimalLatestApp::logAutomationMarker(const char* marker) const
+{
+  LOGI("[CSM_AUTOMATION] marker=%s mode=%s frame=%llu current_pos=(%.6f,%.6f,%.6f) current_yaw_pitch=(%.6f,%.6f) previous_pos=(%.6f,%.6f,%.6f) previous_yaw_pitch=(%.6f,%.6f)",
+       marker,
+       automationModeName(),
+       static_cast<unsigned long long>(m_automationFrame),
+       m_automationCurrentPose.position.x,
+       m_automationCurrentPose.position.y,
+       m_automationCurrentPose.position.z,
+       m_automationCurrentPose.yawDegrees,
+       m_automationCurrentPose.pitchDegrees,
+       m_automationPreviousPose.position.x,
+       m_automationPreviousPose.position.y,
+       m_automationPreviousPose.position.z,
+       m_automationPreviousPose.yawDegrees,
+       m_automationPreviousPose.pitchDegrees);
+}
+
+inline void MinimalLatestApp::onAutomationFrameRendered()
+{
+  if(!isAutomationEnabled())
+  {
+    return;
+  }
+
+  if(!m_automationSceneReadyObserved)
+  {
+    constexpr const char* sponzaPath = "resources/GLTF_Sponza/sponza.gltf";
+    if(m_modelLoaded && !m_isLoading && !m_renderer.isSceneRenderingSuspended()
+       && m_currentModel.has_value() && m_modelPath == sponzaPath)
+    {
+      m_automationSceneReadyObserved = true;
+      LOGI("[CSM_AUTOMATION] marker=scene-ready mode=%s model=%s",
+           automationModeName(), m_modelPath.c_str());
+    }
+    return;
+  }
+
+  if(!m_automationStarted || m_automationComplete)
+  {
+    return;
+  }
+
+  if(const char* boundary = automationBoundaryMarkerForFrame(m_automationFrame); boundary != nullptr)
+  {
+    logAutomationMarker(boundary);
+  }
+
+  m_automationPreviousPose = m_automationCurrentPose;
+  if(m_automationFrame == automationTotalFrames() - 1u)
+  {
+    m_automationComplete = true;
+    LOGI("[CSM_AUTOMATION] marker=complete mode=%s frames=%llu",
+         automationModeName(),
+         static_cast<unsigned long long>(automationTotalFrames()));
+    if(m_automationOptions.autoExit)
+    {
+      glfwSetWindowShouldClose(m_window, true);
+    }
+    return;
+  }
+  ++m_automationFrame;
+}
+
 inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const
 {
   if(m_activeSceneLoadPath == SceneLoadPath::experimentalSceneUploadPlan && m_sceneAsset.has_value())
@@ -1221,6 +1700,17 @@ inline void MinimalLatestApp::updateActiveCamera()
 {
   m_camera.update();
   m_sceneCameraNavigation.update();
+  refreshActiveCameraUniforms();
+}
+
+inline void MinimalLatestApp::refreshActiveCameraUniforms()
+{
+  if(m_automationStarted)
+  {
+    demo::populateCameraUniforms(
+        m_camera.getViewMatrix(), m_camera.getProjectionMatrix(), m_camera.getPosition(), m_cameraUniforms);
+    return;
+  }
 
   shaderio::CameraUniforms sceneCameraUniforms{};
   if(populateActiveSceneCameraUniforms(sceneCameraUniforms))
@@ -2648,6 +3138,11 @@ inline void MinimalLatestApp::applySceneGraphTransforms()
       updateSceneNodeWorldTransform(static_cast<int>(rootNodeIndex), glm::mat4(1.0f));
     }
     m_sceneAssetView = demo::makeSceneAssetView(*m_sceneAsset);
+    m_renderer.syncActiveSceneRuntimeState(*m_currentModel);
+    // Scene Graph edits may have changed the active camera node or any ancestor.
+    // Rebuild only the current uniforms snapshot; input and temporal history are
+    // advanced elsewhere exactly once per rendered frame.
+    refreshActiveCameraUniforms();
     return;
   }
 
@@ -2660,6 +3155,8 @@ inline void MinimalLatestApp::applySceneGraphTransforms()
   {
     updateSceneNodeWorldTransform(rootNodeIndex, glm::mat4(1.0f));
   }
+  refreshActiveCameraUniforms();
+  m_renderer.syncActiveSceneRuntimeState(*m_currentModel);
 }
 
 inline void MinimalLatestApp::updateSceneNodeWorldTransform(int nodeIndex, const glm::mat4& parentTransform)

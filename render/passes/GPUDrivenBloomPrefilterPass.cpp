@@ -19,8 +19,11 @@ namespace demo
 
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenBloomPrefilterPass::getDependencies() const
 	{
-		static const std::array<PassResourceDependency, 2> dependencies = {
-			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
+		static const std::array<PassResourceDependency, 3> dependencies = {
+			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassSceneColorHistoryWriteHandle, ResourceAccess::read,
+			                                rhi::ShaderStage::fragment, rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassBloomHalfHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ColorAttachment),
 		};

@@ -70,9 +70,12 @@ namespace demo
 				});
 				cmdBuffer->endEncoding();
 
-				// Same-pass/local barrier: culling output writes indirect args and draw count
-				// consumed by drawIndexedIndirectCount on the same command stream.
-				cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
+				// Same-pass/local producer barrier: culling writes indirect args/count
+				// consumed first by the visibility-patch compute shader and later by
+				// drawIndexedIndirectCount. Keep both consumers explicit; the patch RAW
+				// dependency must not rely on a multi-element bitonic-sort barrier.
+				cmdBuffer->barrier(rhi::StageFlags::compute,
+				                   rhi::StageFlags::compute | rhi::StageFlags::commandInput,
 				                   rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
 			}
 		}

@@ -70,8 +70,8 @@ namespace demo
 		// Parses the .bin and creates + uploads the R16F Texture3D. The upload is
 		// recorded on `cmd` (caller submits it, e.g. via executeImmediateUpload);
 		// the staging buffer handle is appended to `outStagingBuffers` and must be
-		// retired by the caller after submission (same contract as
-		// RenderDevice::loadAndCreateImage).
+		// retired by the caller after submission (the generic RHI upload lifetime
+		// contract also used by RenderDevice::uploadRawRgba8Image).
 		[[nodiscard]] static SDFLoadResult load(const std::filesystem::path& path, rhi::Device& device,
 		                                        rhi::CommandBuffer& cmd,
 		                                        std::vector<rhi::BufferHandle>& outStagingBuffers);

@@ -88,25 +88,27 @@ namespace demo
 		const rhi::ArgumentTableHandle drawTable = m_renderer->getDrawArgumentTable(context.frameIndex);
 		MeshPool& meshPool = m_renderer->getMeshPool();
 
+		const GPUDrivenRenderer::PreviousRawCullingBootstrap previousRawBootstrap =
+			m_renderer->getPreviousRawCullingBootstrap(context.frameIndex);
 		uint32_t previousOpaqueCapacity = 0u;
 		uint32_t previousAlphaCapacity = 0u;
-		const bool previousBootstrapValid =
-			m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity,
-			                                            previousAlphaCapacity);
-		const uint64_t previousBootstrapIndirectBufferHandle = previousBootstrapValid
+		const bool previousSortedBootstrapValid =
+			previousRawBootstrap.valid
+			&& m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity,
+			                                               previousAlphaCapacity);
+		const uint64_t previousBootstrapIndirectBufferHandle = previousSortedBootstrapValid
 			                                                       ? m_renderer->
 			                                                       getPreviousGPUDrivenPersistentIndirectStreamBuffer(
 				                                                       context.frameIndex)
 			                                                       : 0;
 		const uint64_t indirectBufferHandle = previousBootstrapIndirectBufferHandle != 0
 			                                      ? previousBootstrapIndirectBufferHandle
-			                                      : m_renderer->getPreviousGPUCullingIndirectBufferOpaque(
-				                                      context.frameIndex);
-		const uint64_t countBufferHandle = m_renderer->getPreviousGPUCullingDrawCountBufferOpaque(context.frameIndex);
-		const uint32_t previousIndirectObjectCount = m_renderer->getPreviousGPUCullingObjectCount(context.frameIndex);
+			                                      : previousRawBootstrap.indirectBufferHandle;
+		const uint64_t countBufferHandle = previousRawBootstrap.countBufferHandle;
+		const uint32_t previousIndirectObjectCount = previousRawBootstrap.objectCount;
 		const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
-		if (indirectBufferHandle != 0 && countBufferHandle != 0 && previousIndirectObjectCount > 0u && !drawTable.
-			isNull())
+		if (previousRawBootstrap.valid && indirectBufferHandle != 0 && countBufferHandle != 0
+			&& previousIndirectObjectCount > 0u && !drawTable.isNull())
 		{
 			const rhi::ArgumentTableHandle mdiDrawTable = m_renderer->getDepthMDIDrawArgumentTable(context.frameIndex);
 			if (!mdiDrawTable.isNull())
@@ -188,9 +190,8 @@ namespace demo
 				const rhi::BufferHandle indirectBufferRHI =
 					previousBootstrapIndirectBufferHandle != 0
 						? m_renderer->getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex)
-						: m_renderer->getPreviousGPUCullingIndirectBufferRHIHandle(context.frameIndex);
-				const rhi::BufferHandle countBufferRHI =
-					m_renderer->getPreviousGPUCullingDrawCountBufferRHIHandle(context.frameIndex);
+						: previousRawBootstrap.indirectBuffer;
+				const rhi::BufferHandle countBufferRHI = previousRawBootstrap.countBuffer;
 
 				enc->setPipeline(m_renderer->getDepthPrepassOpaqueMDIPipelineHandle());
 				const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();

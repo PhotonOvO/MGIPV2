@@ -356,8 +356,7 @@ namespace demo
 			m_resources.colorGradingLutImage.image =
 				createImage(makeTextureDesc(kColorGradingLutFormat,
 				                            m_resources.colorGradingLutExtent,
-				                            rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst |
-				                            rhi::TextureUsageFlags::transferSrc,
+				                            rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
 				                            rhi::SampleCount::count1,
 				                            1,
 				                            "BuiltInColorGradingLUT"));
@@ -391,7 +390,7 @@ namespace demo
 			const rhi::TextureBarrier lutReadyBarrier{
 				.texture = m_resources.colorGradingLutImage.image,
 				.before = rhi::ResourceState::TransferDst,
-				.after = rhi::ResourceState::General,
+				.after = rhi::ResourceState::ShaderRead,
 				.range = {.aspect = rhi::TextureAspect::color, .levelCount = 1, .layerCount = 1},
 			};
 			// Upload layout boundary: make the LUT image shader-readable after copy.

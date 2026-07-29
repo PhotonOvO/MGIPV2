@@ -6,6 +6,7 @@
 #include "VulkanDeviceInterop.h"
 
 #include <functional>
+#include <unordered_map>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -89,6 +90,8 @@ public:
   ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle layout) override;
   void                 destroyArgumentTable(ArgumentTableHandle handle) override;
   void                 updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes) override;
+  void configureArgumentPoolCapacity(uint32_t bindlessCombinedImageSamplersPerFrameSlot,
+                                     uint32_t frameSlotCount);
   PipelineHandle       createGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
   PipelineHandle       createComputePipeline(const ComputePipelineDesc& desc) override;
   void                 destroyPipeline(PipelineHandle handle) override;
@@ -217,7 +220,10 @@ private:
   VulkanResourceTable* m_resourceTable{nullptr};
   VulkanFrameContext*  m_frameContext{nullptr};
   VmaAllocator         m_allocator{nullptr};
-  VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // lazily created for argument tables
+  VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // active pool for new argument tables
+  uint32_t             m_combinedImageSamplerPoolCapacity{16384};
+  std::vector<VkDescriptorPool> m_argumentPools;
+  std::unordered_map<uint64_t, VkDescriptorPool> m_argumentSetPools;
   std::vector<NativeRetirement> m_pendingRetirements;
 
   // Upload cmd pool — migrated from RenderDevice (UPL-02)

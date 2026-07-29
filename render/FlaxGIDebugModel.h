@@ -120,13 +120,55 @@ namespace demo
 		[[nodiscard]] constexpr bool operator==(const FlaxGIOutputSelection&) const noexcept = default;
 	};
 
+	inline constexpr uint32_t kFlaxGIMaxPublishedCascades = 4u;
+
+	struct FlaxGICascadeSpatialSnapshot
+	{
+		std::array<float, 3> origin{};
+		float spacing{0.0f};
+		std::array<float, 3> blendOrigin{};
+		std::array<int32_t, 3> scrollOffset{};
+
+		[[nodiscard]] constexpr bool operator==(
+			const FlaxGICascadeSpatialSnapshot&) const noexcept = default;
+	};
+
+	struct FlaxGISpatialSnapshot
+	{
+		std::array<FlaxGICascadeSpatialSnapshot, kFlaxGIMaxPublishedCascades> cascades{};
+		std::array<uint32_t, 3> probeCounts{};
+		uint32_t cascadeCount{0};
+		uint64_t version{0};
+		bool valid{false};
+
+		[[nodiscard]] constexpr bool operator==(
+			const FlaxGISpatialSnapshot&) const noexcept = default;
+	};
+
+	struct FlaxGIOutputSnapshot
+	{
+		FlaxGIOutputSelection atlas{};
+		FlaxGISpatialSnapshot spatial{};
+
+		[[nodiscard]] constexpr bool isValid() const noexcept
+		{
+			return atlas.valid && spatial.valid;
+		}
+
+		[[nodiscard]] constexpr bool operator==(
+			const FlaxGIOutputSnapshot&) const noexcept = default;
+	};
+
 	// Tracks the atlas pair independently from the renderer-wide temporal counter.
-	// A parity becomes visible to consumers only after a complete irradiance update.
+	// A parity and its spatial metadata become published together only after a
+	// complete irradiance update.
 	struct FlaxGIOutputState
 	{
 		uint32_t nextWriteParity{0};
 		uint32_t publishedParity{0};
 		bool publishedValid{false};
+		uint64_t nextPublishedVersion{1};
+		FlaxGISpatialSnapshot publishedSpatial{};
 
 		[[nodiscard]] constexpr FlaxGIOutputSelection selectForFrame(
 			bool willPublish, bool willInvalidate) const noexcept
@@ -147,16 +189,47 @@ namespace demo
 			return {publishedParity & 1u, publishedValid};
 		}
 
-		constexpr void publishPending() noexcept
+		[[nodiscard]] constexpr FlaxGIOutputSnapshot selectSnapshotForFrame(
+			bool willPublish,
+			bool willInvalidate,
+			FlaxGISpatialSnapshot pendingSpatial = {}) const noexcept
+		{
+			const FlaxGIOutputSelection selection =
+				selectForFrame(willPublish, willInvalidate);
+			if(willPublish)
+			{
+				pendingSpatial.version = nextPublishedVersion;
+				pendingSpatial.valid = pendingSpatial.valid && selection.valid;
+				return {selection, pendingSpatial};
+			}
+
+			FlaxGISpatialSnapshot spatial = publishedSpatial;
+			if(willInvalidate)
+			{
+				spatial.valid = false;
+			}
+			return {selection, spatial};
+		}
+
+		[[nodiscard]] constexpr FlaxGIOutputSnapshot publishedSnapshot() const noexcept
+		{
+			return {published(), publishedSpatial};
+		}
+
+		constexpr void publishPending(FlaxGISpatialSnapshot spatial = {}) noexcept
 		{
 			publishedParity = nextWriteParity & 1u;
 			publishedValid = true;
+			spatial.version = nextPublishedVersion++;
+			spatial.valid = spatial.valid && publishedValid;
+			publishedSpatial = spatial;
 			nextWriteParity = publishedParity ^ 1u;
 		}
 
 		constexpr void invalidate() noexcept
 		{
 			publishedValid = false;
+			publishedSpatial.valid = false;
 		}
 
 		constexpr void reset() noexcept
@@ -164,8 +237,38 @@ namespace demo
 			nextWriteParity = 0u;
 			publishedParity = 0u;
 			publishedValid = false;
+			publishedSpatial = {};
 		}
 	};
+
+	static_assert([]
+	{
+		FlaxGIOutputState state{};
+		FlaxGISpatialSnapshot spatial{};
+		spatial.valid = true;
+		spatial.cascadeCount = 1u;
+		spatial.probeCounts = {4u, 3u, 4u};
+		spatial.cascades[0].spacing = 1.5f;
+
+		const FlaxGIOutputSnapshot pending =
+			state.selectSnapshotForFrame(true, false, spatial);
+		if(!pending.isValid() || pending.atlas.parity != 0u
+		   || pending.spatial.version != 1u)
+		{
+			return false;
+		}
+
+		state.publishPending(spatial);
+		const FlaxGIOutputSnapshot published = state.publishedSnapshot();
+		const FlaxGIOutputSnapshot frozen =
+			state.selectSnapshotForFrame(false, false);
+		const FlaxGIOutputSnapshot next =
+			state.selectSnapshotForFrame(true, false, spatial);
+		return published == pending
+			&& frozen == published
+			&& next.atlas.parity == 1u
+			&& next.spatial.version == 2u;
+	}(), "FlaxGI atlas parity and spatial metadata must publish atomically");
 
 	struct FlaxGIDebugTelemetry
 	{

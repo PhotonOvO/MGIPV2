@@ -570,6 +570,23 @@ if(BUILD_TESTING AND NOT ANDROID)
   target_link_libraries(mesh_sdf_quality_tests PRIVATE glm)
   target_include_directories(mesh_sdf_quality_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
   add_test(NAME mesh_sdf_quality COMMAND mesh_sdf_quality_tests)
+
+  add_executable(gpu_scene_registry_model_tests
+    tests/gpu_scene_registry_model_tests.cpp
+  )
+  target_link_libraries(gpu_scene_registry_model_tests PRIVATE demo_core)
+  add_test(NAME gpu_scene_registry_model COMMAND gpu_scene_registry_model_tests)
+
+  add_executable(csm_shadow_stability_tests
+    tests/csm_shadow_stability_tests.cpp
+  )
+  target_link_libraries(csm_shadow_stability_tests PRIVATE demo_core)
+  add_test(NAME csm_shadow_stability COMMAND csm_shadow_stability_tests)
+
+  add_executable(gpu_visibility_depth_model_tests
+    tests/gpu_visibility_depth_model_tests.cpp
+  )
+  add_test(NAME gpu_visibility_depth_model COMMAND gpu_visibility_depth_model_tests)
 endif()
 
 

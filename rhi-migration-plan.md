@@ -672,7 +672,7 @@ layout 由后端 tracker 推断。**`transitionTexture/transitionBuffer` 重塑�
 
 ## 12.5 Wave 9 终局：子系统 RHI 化（移除 RenderDevice 的 native Vk* 成员）
 
-> **背景（2026-06-05 勘察）**：Wave 9 的「清 escape / 死代码 / 死 getter / 活 native compute 迁移」已全部完成（本会话 13 个提交；render 层活渲染路径 `getNativeCommandBuffer` 已清零，仅剩 `loadAndCreateImage` 的 2 处 init 期原生上传）。
+> **背景（2026-06-05 勘察）**：Wave 9 的「清 escape / 死代码 / 死 getter / 活 native compute 迁移」已全部完成（本会话 13 个提交；render 层活渲染路径 `getNativeCommandBuffer` 已清零，仅剩当时名为 `loadAndCreateImage` 的 2 处 init 期原生上传；该旧函数现已由 `uploadRawRgba8Image`/通用 RHI 上传路径取代）。
 > 剩余 = 把各子系统的 native descriptor/pipeline 创建+更新迁到 RH（`createArgumentLayout`/`createArgumentTable`/`updateArgumentTable`/`createPipeline`/`createSampler`），从而移除 RenderDevice 的 `Vk*` 成员（pipeline layout / descriptor set layout / descriptor set / 上传命令池 / sampler cache 等）。**注意**：帧提交的 cmd/fence/semaphore **早已在 FrameContext**，不在 RenderDevice。
 > 每个子系统都与原生 descriptor/pipeline 基础设施纠缠，无小增量，建议作为专门 milestone 分批做，每步编译绿 + 实机验证。
 
@@ -687,7 +687,7 @@ layout 由后端 tracker 推断。**`transitionTexture/transitionBuffer` 重塑�
 - [ ] lightCoarseCulling（同构，未列但存在）：`lightCoarseCullingSetLayout`/`lightCoarseCullingDescriptorSets`/`lightCoarseCullingPipelineLayout`（5 binding，含 1 UBO）。同 gpuCulling 模式可迁。
 - [ ] LightPass graphics pipeline → RHI `createPipeline`（复杂：render target/blend），移除 `lightPipelineLayout`。
 - [ ] material/scene/sampler：SamplerCache → `createSampler`，移除 `gbufferTextureSetLayout` 等。
-- [ ] 上传基础设施：`loadAndCreateImage` 的原生上传 + `transient/upload/computeCmdPool`。
+- [ ] 上传基础设施：现有 `uploadRawRgba8Image`/其他资源上传已走通用 RHI 上传契约；继续收口后端 `transient/upload/computeCmdPool`。
 - [ ] 全部迁完后：`Common.h`/`RenderDevice.h` 停止透传 volk → 满足 invariant #2 → 加 CI 守卫。
 
 ---
