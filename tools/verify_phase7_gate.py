@@ -254,6 +254,7 @@ def main():
     zero_baseline = os.path.join(root, "tools", "phase7_zero_baseline.json")
     allowlist = os.path.join(root, ".rhi-boundary-allow")
     build_cmd = os.path.join(root, "build_debug_with_vsdevcmd.cmd")
+    demo_exe = os.path.join(root, "out", "build", "x64-debug", "Demo.exe")
     android_dir = os.path.join(root, "android")
     gradlew = os.path.join(android_dir, "gradlew.bat")
 
@@ -363,7 +364,7 @@ def main():
     runbook_path = os.path.join(root, "tools", "VULKAN_SMOKE_RUNBOOK.md")
     print(f"  ACTION REQUIRED: Follow the manual smoke runbook at:")
     print(f"    {runbook_path}")
-    print(f"  Run out/build/x64-Debug/Demo.exe and verify no new Vulkan VUID/layout/sync errors.")
+    print(f"  Run {demo_exe} and verify no new Vulkan VUID/layout/sync errors.")
     results.append({
         "name": "Vulkan smoke",
         "status": "manual",
