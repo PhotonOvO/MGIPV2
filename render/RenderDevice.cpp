@@ -699,6 +699,7 @@ namespace demo
 
 	void RenderDevice::init(void* window, rhi::Surface& surface, bool vSync)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.Init");
 		m_swapchainDependent.vSync = vSync;
 		m_materials = MaterialResources{};
 
@@ -924,6 +925,7 @@ namespace demo
 
 	void RenderDevice::shutdown(rhi::Surface& surface)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.Shutdown");
 		m_device.device->waitIdle();
 
 		if (m_swapchainDependent.swapchain)
@@ -1067,6 +1069,7 @@ namespace demo
 
 	void RenderDevice::resize(rhi::Extent2D size)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.Resize");
 		rebuildSwapchainDependentResources(size);
 	}
 
@@ -1418,6 +1421,7 @@ namespace demo
 
 	void RenderDevice::beginUiFrame()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.BeginUIFrame");
 		m_imguiRenderer.newFrame();
 	}
 
@@ -1426,6 +1430,7 @@ namespace demo
 		PassExecutor& passExecutor,
 		const FrameSlotReadyCallback& onFrameSlotReady)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.RenderWithPassExecutor");
 		{
 			demo::profiling::ScopedCpuRange rendererPreRecordRange("RendererPreRecord");
 
@@ -1581,6 +1586,7 @@ namespace demo
 
 	bool RenderDevice::prepareFrameResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.PrepareFrameResources");
 		demo::profiling::ScopedCpuRange prepareFrameRange("RendererPreRecord.PrepareFrameResources");
 
 		{
@@ -1641,6 +1647,7 @@ namespace demo
 
 	bool RenderDevice::acquireSwapchainImageForPresent()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.AcquireSwapchainImage");
 		ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before late acquire");
 
 		m_swapchainDependent.hasAcquiredImage = false;
@@ -1665,6 +1672,7 @@ namespace demo
 
 	void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.CreateIBLResources");
 		destroyIBLResources();
 
 		m_device.iblEnvironmentPath = kDefaultIBLEnvironmentPath;
@@ -1878,6 +1886,7 @@ namespace demo
 
 	void RenderDevice::updateGPUCullingBuffers(uint32_t frameIndex, const RenderParams& params)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.UpdateGPUCullingBuffers");
 		if (frameIndex >= m_perFrame.frameUserData.size())
 		{
 			return;
@@ -2304,6 +2313,7 @@ namespace demo
 
 	void RenderDevice::updateShadowCullingBuffers(uint32_t frameIndex, const RenderParams& params)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.UpdateShadowCullingBuffers");
 		struct ShadowCullingSource
 		{
 			const MeshHandle* meshHandles{nullptr};
@@ -2415,6 +2425,7 @@ namespace demo
 
 	void RenderDevice::cacheGPUCullingStats(uint32_t frameIndex, bool readOverlayObjects)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.CacheGPUCullingStats");
 		if (frameIndex >= m_perFrame.frameUserData.size())
 		{
 			return;
@@ -3042,6 +3053,7 @@ namespace demo
 
 	void RenderDevice::rebuildSwapchainDependentResources(std::optional<rhi::Extent2D> requestedViewportSize)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.RebuildSwapchainResources");
 		if (requestedViewportSize.has_value() && isValidExtent(requestedViewportSize.value()))
 		{
 			if (extentChanged(m_swapchainDependent.viewportSize, requestedViewportSize.value()))
@@ -3287,6 +3299,7 @@ namespace demo
 
 	rhi::CommandBuffer& RenderDevice::beginCommandRecording()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.BeginCommandRecording");
 		ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 		auto* vulkanFrameContext = dynamic_cast<rhi::vulkan::VulkanFrameContext*>(m_perFrame.frameContext.get());
 		ASSERT(vulkanFrameContext != nullptr, "RenderDevice currently requires VulkanFrameContext");
@@ -3298,6 +3311,7 @@ namespace demo
 
 	void RenderDevice::drawFrame(rhi::CommandBuffer& cmdBuffer, const RenderParams& params, PassExecutor& passExecutor)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.DrawFrame");
 		const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
 		auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
 
@@ -3462,6 +3476,7 @@ namespace demo
 
 	void RenderDevice::endFrame(rhi::CommandBuffer& cmdBuffer)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.EndFrame");
 		ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
 
 		{
@@ -4096,6 +4111,7 @@ namespace demo
 
 	void RenderDevice::buildDebugDrawList(const RenderParams& params)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.BuildDebugDrawList");
 		m_debugDrawList.clear();
 		if (!params.debugOptions.enabled)
 		{
@@ -4147,6 +4163,7 @@ namespace demo
 
 	void RenderDevice::prebuildRequiredPipelineVariants()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.PrebuildPipelines");
 		createPrebuiltGraphicsPipelineVariants();
 		createPrebuiltComputePipelineVariant();
 		createGPUCullingPipeline();
@@ -4155,6 +4172,7 @@ namespace demo
 
 	void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.CreateGraphicsPipelines");
 #ifdef USE_SLANG
 		const char* vertEntryName = "vertexMain";
 		const char* fragEntryName = "fragmentMain";
@@ -5680,6 +5698,7 @@ namespace demo
 
 	void RenderDevice::createPrebuiltComputePipelineVariant()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.CreateComputePipelines");
 #ifdef USE_SLANG
 		const uint32_t* computeSpirvCode = shader_comp_slang;
 		const size_t computeSpirvSize = std::size(shader_comp_slang) * sizeof(uint32_t);
@@ -5862,12 +5881,14 @@ namespace demo
 
 	void RenderDevice::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.ExecuteUploadCommand");
 		// Upload cmd pool + fence lifecycle sunk into VulkanDevice (UPL-02).
 		m_device.device->executeImmediateUpload(std::move(uploadFn));
 	}
 
 	void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.FlushUploadCommands");
 		if (m_device.device == nullptr)
 		{
 			return;
@@ -5885,6 +5906,7 @@ namespace demo
 
 	GltfUploadResult RenderDevice::uploadGltfModel(const GltfModel& model, rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.UploadGltfModel");
 		GltfUploadResult result;
 		initializeGltfUploadResult(model, result);
 
@@ -5902,6 +5924,7 @@ namespace demo
 	SceneUploadResult RenderDevice::commitSceneUploadPlan(const SceneAsset& asset, const SceneUploadPlan& plan,
 	                                                      rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.CommitSceneUploadPlan");
 		const SceneUploadPlanValidationResult validation =
 			SceneUploadPlanner::validate(makeSceneAssetView(asset), plan);
 		ASSERT(validation.valid, "SceneUploadPlan validation failed before GPU commit");
@@ -6428,6 +6451,7 @@ namespace demo
 	                                        GltfUploadResult& ioResult,
 	                                        rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.UploadGltfBatch");
 		if (ioResult.meshes.size() != model.meshes.size()
 			|| ioResult.materials.size() != model.materials.size()
 			|| ioResult.textures.size() != model.images.size())
@@ -7130,6 +7154,7 @@ namespace demo
 
 	void RenderDevice::destroyGltfResources(const GltfUploadResult& result)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.Device.DestroyGltfResources");
 		const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
 
 		destroyUploadBufferRecord(m_device.device.get(), result.shadowPackedVertexBuffer);

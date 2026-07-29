@@ -1,5 +1,6 @@
 #include "SceneAssetSerializer.h"
 
+#include "../common/ProfilerMarkers.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -369,6 +370,7 @@ std::filesystem::path SceneAssetSerializer::buildAssetPath(const std::filesystem
 bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
                                 const SceneAsset&            asset,
                                 const std::filesystem::path& sourcePath) {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Serialize.Save");
   m_lastError.clear();
 
   try {
@@ -565,6 +567,7 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
 }
 
 bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAsset& asset) {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Serialize.Load");
   m_lastError.clear();
 
   try {
@@ -714,6 +717,7 @@ bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAss
 }
 
 bool SceneAssetSerializer::isValid(const std::filesystem::path& assetPath, const std::filesystem::path& sourcePath) {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Serialize.Validate");
   m_lastError.clear();
 
   try {

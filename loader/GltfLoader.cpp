@@ -1,4 +1,5 @@
 #include "GltfLoader.h"
+#include "../common/ProfilerMarkers.h"
 
 #define TINYGLTF_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
@@ -483,6 +484,7 @@ static bool readFloatAccessor(
 );
 
 bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.Load");
     outModel = {};
     m_nodeVisitState.clear();
     m_lightDefinitions.clear();
@@ -607,6 +609,7 @@ bool GltfLoader::load(const std::string& filepath, GltfModel& outModel) {
 
 void GltfLoader::processLightDefinitions(const tinygltf::Model& model)
 {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.ProcessLights");
     m_lightDefinitions.clear();
 
     if(!model.lights.empty())
@@ -708,6 +711,7 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
                              int parentNodeIndex,
                              const glm::mat4& parentTransform,
                              GltfModel& outModel) {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.ProcessNode");
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(model.nodes.size())) {
         m_lastError = "Invalid node index: " + std::to_string(nodeIndex);
         return false;
@@ -873,6 +877,7 @@ bool GltfLoader::processNode(const tinygltf::Model& model,
 
 bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
                               const glm::mat4& transform, GltfModel& outModel) {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.ProcessMesh");
     if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) {
         m_lastError = "Invalid mesh index: " + std::to_string(meshIndex);
         return false;
@@ -1012,6 +1017,7 @@ bool GltfLoader::processMesh(const tinygltf::Model& model, int meshIndex,
 }
 
 void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outModel) {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.ProcessMaterials");
     outModel.materials.reserve(model.materials.size());
 
     for (const auto& mat : model.materials) {
@@ -1108,6 +1114,7 @@ void GltfLoader::processMaterials(const tinygltf::Model& model, GltfModel& outMo
 }
 
 void GltfLoader::processImages(const tinygltf::Model& model, const std::filesystem::path& sourcePath, GltfModel& outModel) {
+    VKDEMO_CPU_SCOPE("Scene.Gltf.ProcessImages");
     (void)sourcePath;
     outModel.images.clear();
     outModel.images.resize(model.images.size());

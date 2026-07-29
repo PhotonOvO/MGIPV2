@@ -1,4 +1,5 @@
 #include "MeshPool.h"
+#include "../common/ProfilerMarkers.h"
 #include "BatchUploadContext.h"
 #include "../loader/GltfLoader.h"
 #include "../scene/SceneAsset.h"
@@ -217,6 +218,7 @@ namespace demo
 
 	void MeshPool::reserve(uint64_t additionalVertexBytes, uint64_t additionalIndexBytes, rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.MeshPool.Reserve");
 		ensureSharedCapacity(m_sharedVertexBuffer,
 		                     m_sharedVertexBuffer.bytesUsed + additionalVertexBytes,
 		                     rhi::BufferUsageFlags::vertex | rhi::BufferUsageFlags::transferSrc,
@@ -230,6 +232,7 @@ namespace demo
 	MeshHandle MeshPool::uploadMesh(const GltfMeshData& meshData, rhi::CommandBuffer& cmd,
 	                                BatchUploadContext* batchUpload)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.MeshPool.UploadGltfMesh");
 		// Validate input
 		if (meshData.positions.empty() || meshData.indices.empty())
 		{
@@ -310,6 +313,7 @@ namespace demo
 	MeshHandle MeshPool::uploadMesh(const SceneMeshData& meshData, rhi::CommandBuffer& cmd,
 	                                BatchUploadContext* batchUpload)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.MeshPool.UploadSceneMesh");
 		if (meshData.interleavedVertexData.empty() || meshData.indices.empty() || meshData.vertexCount == 0)
 		{
 			return kNullMeshHandle;
@@ -493,6 +497,7 @@ namespace demo
 
 	void MeshPool::freeStagingBuffers()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.MeshPool.FreeStagingBuffers");
 		if (m_rhiDevice != nullptr)
 		{
 			for (rhi::BufferHandle buffer : m_rhiStagingBuffers)

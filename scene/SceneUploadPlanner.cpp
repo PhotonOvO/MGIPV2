@@ -1,5 +1,6 @@
 #include "SceneUploadPlanner.h"
 
+#include "../common/ProfilerMarkers.h"
 #include "TransformSystem.h"
 
 #include <array>
@@ -26,6 +27,7 @@ SceneDrawBucket classifyDrawBucket(int32_t alphaMode)
 SceneLoadJobGraph SceneUploadPlanner::buildJobGraph(const SceneAssetView& asset,
                                                     const BuildOptions&   options)
 {
+  VKDEMO_CPU_SCOPE("Scene.UploadPlan.BuildJobGraph");
   SceneLoadJobGraph graph;
 
   std::vector<uint32_t> textureJobIndices;
@@ -107,6 +109,7 @@ SceneLoadJobGraph SceneUploadPlanner::buildJobGraph(const SceneAssetView& asset)
 SceneUploadPlanValidationResult SceneUploadPlanner::validate(const SceneAssetView& asset,
                                                              const SceneUploadPlan& plan)
 {
+  VKDEMO_CPU_SCOPE("Scene.UploadPlan.Validate");
   const SceneAssetValidationResult assetValidation = validateSceneAssetView(asset);
   if(!assetValidation.valid) {
     return {false, assetValidation.error};
@@ -210,6 +213,7 @@ SceneUploadPlanBuildResult SceneUploadPlanner::build(const SceneAssetView& asset
 SceneUploadPlanBuildResult SceneUploadPlanner::build(const SceneAssetView& asset,
                                                      const BuildOptions& options) const
 {
+  VKDEMO_CPU_SCOPE("Scene.UploadPlan.Build");
   SceneUploadPlanBuildResult result;
   SceneUploadPlan& plan = result.plan;
   result.jobGraph = buildJobGraph(asset, options);

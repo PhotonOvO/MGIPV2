@@ -6,6 +6,7 @@
   }
 
 #include "VulkanDevice.h"
+#include "../../common/ProfilerMarkers.h"
 #include "internal/VulkanCommon.h"
 #include "VulkanCommandBuffer.h"
 #include "VulkanFrameContext.h"
@@ -97,6 +98,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::init(const DeviceCreateInfo& createInfo)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.Init");
 		// Delegate to initVulkan with only the base fields; Vulkan extension/layer
 		// fields remain empty. RenderDevice calls initVulkan() directly to supply them.
 		VulkanDeviceCreateInfo vkCreateInfo;
@@ -106,6 +108,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::initVulkan(const VulkanDeviceCreateInfo& createInfo)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.InitVulkan");
 		ensure(!m_initialized, "VulkanDevice::initVulkan called twice");
 		m_createInfo = createInfo;
 		LOGI("VulkanDevice::init: begin");
@@ -191,6 +194,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::deinit()
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.Deinit");
 		if (m_device != VK_NULL_HANDLE)
 		{
 			vkDeviceWaitIdle(m_device);
@@ -1210,6 +1214,7 @@ namespace demo::rhi::vulkan
 
 	TextureViewHandle VulkanDevice::createTextureView(const TextureViewCreateDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateTextureView");
 		assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTextureView");
 		const VkImage nativeImage = resolveTexture(desc.image);
 		const VkImageViewCreateInfo info{
@@ -1309,6 +1314,7 @@ namespace demo::rhi::vulkan
 
 	TextureHandle VulkanDevice::createTexture(const TextureDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateTexture");
 		assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createTexture");
 		assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createTexture");
 		assert(desc.extent.width > 0 && desc.extent.height > 0 && desc.extent.depth > 0);
@@ -1430,6 +1436,7 @@ namespace demo::rhi::vulkan
 
 	BufferHandle VulkanDevice::createBuffer(const BufferDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateBuffer");
 		assert(m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createBuffer");
 		assert(m_allocator != nullptr && "VulkanDevice::setAllocator must be called before createBuffer");
 
@@ -1715,6 +1722,7 @@ namespace demo::rhi::vulkan
 
 	ArgumentLayoutHandle VulkanDevice::createArgumentLayout(const ArgumentLayoutDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateArgumentLayout");
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentLayout");
 		std::vector<VkDescriptorSetLayoutBinding> bindings(desc.bindingCount);
@@ -1808,6 +1816,7 @@ namespace demo::rhi::vulkan
 
 	ArgumentTableHandle VulkanDevice::createArgumentTable(ArgumentLayoutHandle layout)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateArgumentTable");
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createArgumentTable");
 		const std::array<VkDescriptorPoolSize, 8> sizes{
@@ -1880,6 +1889,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.UpdateArgumentTable");
 		if (m_resourceTable == nullptr || writeCount == 0 || writes == nullptr)
 		{
 			return;
@@ -2147,6 +2157,7 @@ namespace demo::rhi::vulkan
 
 	PipelineHandle VulkanDevice::createGraphicsPipeline(const GraphicsPipelineDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateGraphicsPipeline");
 		assert(
 			m_resourceTable != nullptr &&
 			"VulkanDevice::setResourceTable must be called before createGraphicsPipeline");
@@ -2170,6 +2181,7 @@ namespace demo::rhi::vulkan
 
 	PipelineHandle VulkanDevice::createComputePipeline(const ComputePipelineDesc& desc)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.CreateComputePipeline");
 		assert(
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createComputePipeline");
 
@@ -2216,6 +2228,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.ExecuteImmediateUpload");
 		assert(m_device != VK_NULL_HANDLE && "VulkanDevice::executeImmediateUpload called before init");
 		assert(
 			m_uploadCmdPool != VK_NULL_HANDLE &&
@@ -2265,6 +2278,7 @@ namespace demo::rhi::vulkan
 
 	void VulkanDevice::flushUploadRetirements(bool waitForCompletion)
 	{
+		VKDEMO_CPU_SCOPE("RHI.Vulkan.Device.FlushUploadRetirements");
 		if (m_uploadPendingFrames.empty() || m_device == VK_NULL_HANDLE)
 		{
 			return;

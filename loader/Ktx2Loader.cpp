@@ -1,4 +1,5 @@
 #include "Ktx2Loader.h"
+#include "../common/ProfilerMarkers.h"
 #include "../render/RHIFormatBridge.h"  // toPortableTextureFormat()
 
 #include <array>
@@ -66,6 +67,7 @@ std::filesystem::path Ktx2Loader::buildSidecarPath(const std::filesystem::path& 
 
 bool Ktx2Loader::load(const std::filesystem::path& filepath, Ktx2Texture& outTexture)
 {
+  VKDEMO_CPU_SCOPE("Scene.Ktx2.Load");
   m_lastError.clear();
   outTexture = {};
 
@@ -98,6 +100,7 @@ bool Ktx2Loader::load(const std::filesystem::path& filepath, Ktx2Texture& outTex
 
 bool Ktx2Loader::loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& outTexture)
 {
+  VKDEMO_CPU_SCOPE("Scene.Ktx2.Decode");
   m_lastError.clear();
   outTexture = {};
 

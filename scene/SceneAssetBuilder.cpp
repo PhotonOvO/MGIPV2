@@ -1,5 +1,6 @@
 #include "SceneAssetBuilder.h"
 
+#include "../common/ProfilerMarkers.h"
 #include "../render/MeshPool.h"
 #include "../render/MeshletConverter.h"
 
@@ -76,6 +77,7 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model)
 
 SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& options)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build");
   SceneAsset asset;
   asset.name = model.name;
   asset.sourcePath = model.sourcePath;
@@ -105,6 +107,7 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
 
 void SceneAssetBuilder::buildMeshes(SceneAsset& asset, const GltfModel& model, const BuildOptions& options)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.Meshes");
   asset.meshes.reserve(model.meshes.size());
 
   size_t totalVertexBytes = 0;
@@ -159,6 +162,7 @@ void SceneAssetBuilder::buildMeshes(SceneAsset& asset, const GltfModel& model, c
 
 void SceneAssetBuilder::buildMaterials(SceneAsset& asset, const GltfModel& model)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.Materials");
   asset.materials.reserve(model.materials.size());
 
   for(const GltfMaterialData& gltfMat : model.materials) {
@@ -186,6 +190,7 @@ void SceneAssetBuilder::buildMaterials(SceneAsset& asset, const GltfModel& model
 
 void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.Textures");
   asset.textures.reserve(model.images.size());
   asset.texturePayload.clear();
 
@@ -225,6 +230,7 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
 
 void SceneAssetBuilder::buildNodes(SceneAsset& asset, const GltfModel& model)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.Nodes");
   asset.nodes.reserve(model.nodes.size());
   asset.rootNodes.clear();
   asset.rootNodes.reserve(model.rootNodes.size());
@@ -264,6 +270,7 @@ void SceneAssetBuilder::buildNodes(SceneAsset& asset, const GltfModel& model)
 
 void SceneAssetBuilder::buildMeshlets(SceneAsset& asset, const GltfModel& model)
 {
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.Meshlets");
   // TODO: integrate MeshletConverter when meshlet path is needed
   // For now, leave meshletPayloads empty; the GPUDrivenRenderer can fall back
   // to runtime conversion from GltfModel or from SceneAsset's vertexPayload.

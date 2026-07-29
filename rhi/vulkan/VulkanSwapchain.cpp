@@ -1,4 +1,5 @@
 #include "VulkanSwapchain.h"
+#include "../../common/ProfilerMarkers.h"
 #include "rhi/vulkan/VulkanFormatUtils.h"
 
 #include <algorithm>
@@ -86,6 +87,7 @@ PFN_vkReleaseFullScreenExclusiveModeEXT getReleaseFullScreenExclusiveModeFn(VkDe
 
 void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Init");
   m_physicalDevice = static_cast<VkPhysicalDevice>(nativePhysicalDevice);
   m_device         = static_cast<VkDevice>(nativeDevice);
   m_queue          = static_cast<VkQueue>(nativeQueue);
@@ -103,6 +105,7 @@ void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void*
 
 void VulkanSwapchain::deinit()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Deinit");
   destroyResources();
   m_physicalDevice = VK_NULL_HANDLE;
   m_device         = VK_NULL_HANDLE;
@@ -176,6 +179,7 @@ bool VulkanSwapchain::needsRebuild() const
 
 void VulkanSwapchain::rebuild()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Rebuild");
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::rebuild requires VkQueue");
   vkQueueWaitIdle(m_queue);
   m_frameResourceIndex = 0;
@@ -188,6 +192,7 @@ void VulkanSwapchain::rebuild()
 
 AcquireResult VulkanSwapchain::acquireNextImage()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Acquire");
   ensure(m_device != VK_NULL_HANDLE, "VulkanSwapchain::acquireNextImage requires VkDevice");
   ensure(m_swapchain != VK_NULL_HANDLE, "VulkanSwapchain::acquireNextImage requires initialized swapchain");
   ensure(!m_frameResources.empty(), "VulkanSwapchain::acquireNextImage requires frame resources");
@@ -234,6 +239,7 @@ AcquireResult VulkanSwapchain::acquireNextImage()
 
 PresentResult VulkanSwapchain::present()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Present");
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::present requires VkQueue");
   ensure(m_swapchain != VK_NULL_HANDLE, "VulkanSwapchain::present requires initialized swapchain");
 
@@ -350,6 +356,7 @@ VkSemaphore VulkanSwapchain::renderFinishedSemaphoreForCurrentImage() const
 
 Extent2D VulkanSwapchain::createResources(bool vSync)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.CreateResources");
   ensure(m_physicalDevice != VK_NULL_HANDLE, "VulkanSwapchain::createResources requires VkPhysicalDevice");
   ensure(m_device != VK_NULL_HANDLE, "VulkanSwapchain::createResources requires VkDevice");
   ensure(m_surface != VK_NULL_HANDLE, "VulkanSwapchain::createResources requires VkSurfaceKHR");
@@ -474,6 +481,7 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 
 void VulkanSwapchain::destroyResources()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.DestroyResources");
   m_hasAcquiredImage = false;
   releaseFullScreenExclusiveMode();
   if(m_device == VK_NULL_HANDLE)

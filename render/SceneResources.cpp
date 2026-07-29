@@ -1,4 +1,5 @@
 #include "SceneResources.h"
+#include "../common/ProfilerMarkers.h"
 #include "BatchUploadContext.h"
 #include "RHIFormatBridge.h"
 
@@ -86,6 +87,7 @@ namespace demo
 
 	void SceneResources::init(rhi::Device& device, rhi::CommandBuffer& cmd, const CreateInfo& createInfo)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.SceneResources.Init");
 		ASSERT(m_createInfo.color.empty(), "Missing deinit()");
 		m_rhiDevice = &device;
 		m_createInfo = createInfo;
@@ -101,6 +103,7 @@ namespace demo
 
 	void SceneResources::update(rhi::CommandBuffer& cmd, rhi::Extent2D newSize)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.SceneResources.Resize");
 		if (newSize.width == m_createInfo.size.width && newSize.height == m_createInfo.size.height)
 		{
 			return;
@@ -163,6 +166,7 @@ namespace demo
 
 	void SceneResources::create(rhi::CommandBuffer& cmdBuffer)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.SceneResources.Create");
 		const auto numColor = static_cast<uint32_t>(m_createInfo.color.size());
 
 		// Centralizes RHI view creation. Debug naming flows through the desc debugName
@@ -547,6 +551,7 @@ namespace demo
 
 	void SceneResources::destroy()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.SceneResources.Destroy");
 		if (m_rhiDevice == nullptr)
 		{
 			return;

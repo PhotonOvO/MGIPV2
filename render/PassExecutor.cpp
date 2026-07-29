@@ -281,6 +281,7 @@ namespace demo
 
 	void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks) const
 	{
+		VKDEMO_CPU_SCOPE("Renderer.PassExecutor.Execute");
 		m_executionBufferStates.clear();
 		m_executionTextureStates.clear();
 

@@ -1,4 +1,5 @@
 #include "GPUDrivenRenderer.h"
+#include "../common/ProfilerMarkers.h"
 #include "ArgumentTables.h"
 #include "BatchUploadContext.h"
 #include "MeshSDFQuality.h"
@@ -362,6 +363,7 @@ namespace demo
 
 	void GPUDrivenRenderer::init(void* window, rhi::Surface& surface, bool vSync)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.Init");
 		m_renderer.init(window, surface, vSync);
 		resetTemporalAndPersistentTextureStates();
 		const uint32_t frameSlotCount = getFrameSlotCount();
@@ -473,6 +475,7 @@ namespace demo
 
 	void GPUDrivenRenderer::shutdown(rhi::Surface& surface)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.Shutdown");
 		shutdownLightingPipelines();
 		shutdownPhase7Pipelines();
 		if (kEnableShippingVisibilitySort)
@@ -567,6 +570,7 @@ namespace demo
 
 	void GPUDrivenRenderer::bindStaticPassResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.BindStaticPassResources");
 		RenderDevice::StaticPassTextureStates textureStates{};
 		static_assert(std::tuple_size_v<decltype(textureStates.gbuffer)>
 			== std::tuple_size_v<decltype(m_gbufferResourceStates)>);
@@ -589,6 +593,7 @@ namespace demo
 
 	void GPUDrivenRenderer::initFlaxDDGIResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitFlaxDDGI");
 		if (!isFlaxStyleDDGIRequested()) return;
 
 		waitForIdle();
@@ -914,6 +919,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::initDDGIResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitDDGI");
 		if (!isCurrentDDGIPathEnabled())
 		{
 			return;
@@ -923,6 +929,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::shutdownDDGIResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.ShutdownDDGI");
 		shutdownFlaxDDGIResources();
 
 		if (m_ddgiDebugPass != nullptr)
@@ -1219,6 +1226,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	bool GPUDrivenRenderer::loadDDGIMeshSDF(const std::filesystem::path& path, std::string& outError)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.LoadMeshSDF");
 		outError.clear();
 		if (m_globalSDFPass == nullptr)
 		{
@@ -1309,6 +1317,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::resize(rhi::Extent2D size)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.Resize");
 		const rhi::Extent2D previousSceneExtent = getSceneExtent();
 		m_renderer.resize(size);
 		const bool sceneResourcesRecreated =
@@ -1346,6 +1355,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::render(const RenderParams& params)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.Render");
 		// GPUDrivenRenderer owns all extent-dependent resources layered over
 		// RenderDevice. Consume viewport changes before refreshing scene handles or
 		// preparing temporal state, leaving RenderDevice's internal resize check as a
@@ -2125,6 +2135,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	                                                           const SceneUploadPlan& plan,
 	                                                           rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.CommitSceneUploadPlan");
 		beginSceneReplacement();
 		SceneUploadResult result = m_renderer.commitSceneUploadPlan(asset, plan, cmd);
 		m_activeUploadResultStorage = result;
@@ -2629,6 +2640,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	void GPUDrivenRenderer::rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult,
 	                                              rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.RebuildGltfScene");
 		m_activeUploadResult = &uploadResult;
 
 		bool appendedObjects = false;
@@ -2918,6 +2930,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	                                              const SceneUploadResult& uploadResult,
 	                                              rhi::CommandBuffer& cmd)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.RebuildAssetScene");
 		m_activeUploadResult = &uploadResult;
 
 		bool appendedObjects = false;
@@ -3430,6 +3443,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::flushPendingSceneUploads()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.FlushSceneUploads");
 		if (!m_sceneUploadPending)
 		{
 			return;
@@ -3654,6 +3668,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::preparePersistentDrawData()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.PreparePersistentDrawData");
 		if (!m_sceneView.usePersistentCullingObjects)
 		{
 			return;
@@ -3862,6 +3877,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::uploadPersistentDrawData(uint32_t frameIndex)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.UploadPersistentDrawData");
 		if (!m_sceneView.usePersistentCullingObjects)
 		{
 			return;
@@ -3919,6 +3935,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::refreshSceneView()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.RefreshSceneView");
 		m_sceneView.gpuSceneObjectBufferAddress = m_sceneRegistry.getBufferAddress();
 		m_sceneView.gpuCullObjectBufferAddress = m_sceneRegistry.getCullBufferAddress();
 		m_sceneView.gpuCullObjectBuffer = m_sceneRegistry.getCullBufferHandle();
@@ -4219,6 +4236,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::initLightingResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitLightingResources");
 		m_lightResources.init(getRHIDevice(),
 		                      GPUDrivenLightResources::CreateInfo{
 			                      .maxPointLights = 256,
@@ -4560,6 +4578,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::initIBLResources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitIBLResources");
 		shutdownIBLResources();
 		m_iblEnvironmentPath = kGPUDrivenDefaultIBLEnvironmentPath;
 		m_iblEnvironmentStatus = "Using flat ambient fallback";
@@ -4741,6 +4760,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::initPhase7Resources()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitPostProcessResources");
 		shutdownPhase7Resources();
 
 		if (!m_renderer.hasRHIDevice())
@@ -4977,6 +4997,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::initPhase7Pipelines()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitPostProcessPipelines");
 		shutdownPhase7Pipelines();
 		if (!m_renderer.hasRHIDevice() || m_aoArgumentLayout.isNull() || m_ssrLayoutHandle.isNull())
 		{
@@ -5274,6 +5295,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 	void GPUDrivenRenderer::updateGPUDrivenLights(const RenderParams& params, uint32_t frameIndex)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.UpdateLights");
 		m_gpuDrivenPointLights.clear();
 		m_gpuDrivenSpotLights.clear();
 		if (params.debugOptions.enablePointLights)
@@ -5708,6 +5730,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 
 	void GPUDrivenRenderer::initLightingPipelines()
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.InitLightingPipelines");
 		if (!m_renderer.hasRHIDevice() || m_lightPipelineArgumentLayouts[0].isNull()
 			|| m_lightPipelineArgumentLayouts[1].isNull())
 		{
@@ -6548,6 +6571,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 
 	void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
 	{
+		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.PrepareVisibilitySort");
 		if (frameIndex >= m_visibilitySortFrames.size())
 		{
 			return;

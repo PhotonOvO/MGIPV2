@@ -1,5 +1,6 @@
 #include "ParallelSceneLoader.h"
 
+#include "../common/ProfilerMarkers.h"
 #include "TransformSystem.h"
 
 #include <array>
@@ -30,6 +31,7 @@ ParallelSceneLoader::BuildResult ParallelSceneLoader::build(const SceneAssetView
 
 ParallelSceneLoader::BuildResult ParallelSceneLoader::build(const SceneAssetView& asset, const BuildOptions& options) const
 {
+  VKDEMO_CPU_SCOPE("Scene.ParallelLoader.Build");
   BuildResult result;
   result.jobGraph = SceneUploadPlanner::buildJobGraph(asset, options.plannerOptions);
 

@@ -1,4 +1,5 @@
 #include "AsyncLoadingCoordinator.h"
+#include "../common/ProfilerMarkers.h"
 
 #include <algorithm>
 #include <array>
@@ -111,6 +112,7 @@ namespace demo
 	                                    uint32_t firstBatchMeshBudget,
 	                                    uint32_t batchMeshBudget)
 	{
+		VKDEMO_CPU_SCOPE("Scene.Streaming.BeginGltf");
 		m_scenePlanMode = false;
 		m_model = &model;
 		m_scenePlan = nullptr;
@@ -192,6 +194,7 @@ namespace demo
 	                                    uint32_t firstBatchMeshBudget,
 	                                    uint32_t batchMeshBudget)
 	{
+		VKDEMO_CPU_SCOPE("Scene.Streaming.BeginAsset");
 		m_scenePlanMode = true;
 		m_model = nullptr;
 		m_sceneAssetView = asset;
@@ -283,6 +286,7 @@ namespace demo
 
 	AsyncLoadingCoordinator::UploadBatch AsyncLoadingCoordinator::takeNextBatch()
 	{
+		VKDEMO_CPU_SCOPE("Scene.Streaming.TakeNextBatch");
 		UploadBatch batch{};
 		if (!hasPendingBatches())
 		{
@@ -530,6 +534,7 @@ namespace demo
 
 	void AsyncLoadingCoordinator::markBatchUploaded(const UploadBatch& batch)
 	{
+		VKDEMO_CPU_SCOPE("Scene.Streaming.MarkBatchUploaded");
 		for (uint32_t index : batch.textureIndices)
 		{
 			if (index < m_uploadedTextures.size())

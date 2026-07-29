@@ -1,4 +1,5 @@
 #include "VulkanFrameContext.h"
+#include "../../common/ProfilerMarkers.h"
 #include "VulkanSwapchain.h"
 #include "internal/VulkanCommon.h"
 
@@ -38,6 +39,7 @@ VulkanFrameContext::~VulkanFrameContext()
 
 void VulkanFrameContext::init(void* nativeDevice, uint32_t queueFamilyIndex, uint32_t frameCount)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.FrameContext.Init");
   assert((nativeDevice != nullptr) && "VulkanFrameContext::init requires VkDevice");
   assert((frameCount > 0) && "VulkanFrameContext::init requires non-zero frameCount");
   assert((m_device == VK_NULL_HANDLE) && "VulkanFrameContext::init already initialized");
@@ -69,6 +71,7 @@ void VulkanFrameContext::init(void* nativeDevice, uint32_t queueFamilyIndex, uin
 
 void VulkanFrameContext::deinit()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.FrameContext.Deinit");
   if(m_timelineSemaphore != nullptr)
   {
     processRetirements(m_timelineSemaphore->getCurrentValue());
@@ -108,6 +111,7 @@ void VulkanFrameContext::deinit()
 
 void VulkanFrameContext::beginFrame()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.Begin");
   assert((m_device != VK_NULL_HANDLE) && "VulkanFrameContext::beginFrame requires initialized context");
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::beginFrame invalid frame index");
 
@@ -129,6 +133,7 @@ void VulkanFrameContext::beginFrame()
 
 SubmissionReceipt VulkanFrameContext::endFrame(CommandBuffer* cmdBuffer)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.End");
   assert((cmdBuffer != nullptr) && "VulkanFrameContext::endFrame requires command buffer");
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::endFrame invalid frame index");
 
@@ -144,6 +149,7 @@ void VulkanFrameContext::setSwapchain(Swapchain* swapchain)
 
 SubmissionReceipt VulkanFrameContext::submitCommandBuffers(const SubmissionRequest* requests, uint32_t requestCount)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.SubmitCommandBuffers");
   assert((requests != nullptr) && "VulkanFrameContext::submitCommandBuffers requires request list");
   assert((requestCount > 0) && "VulkanFrameContext::submitCommandBuffers requires non-zero request count");
   assert((requests[0].commandBuffer != nullptr) && "VulkanFrameContext::submitCommandBuffers requires command buffer");
@@ -152,6 +158,7 @@ SubmissionReceipt VulkanFrameContext::submitCommandBuffers(const SubmissionReque
 
 void VulkanFrameContext::waitForSubmission(SubmissionReceipt receipt)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.WaitForSubmission");
   assert((m_timelineSemaphore != nullptr) && "VulkanFrameContext::waitForSubmission requires timeline semaphore");
   m_timelineSemaphore->wait(receipt.timelineValue);
 }
@@ -190,6 +197,7 @@ void VulkanFrameContext::waitForFrame(uint64_t frameIndex)
 
 void VulkanFrameContext::waitForFrameCompletion()
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.WaitForCompletion");
   assert((m_timelineSemaphore != nullptr) && "VulkanFrameContext::waitForFrameCompletion requires timeline semaphore");
   assert((m_currentFrameIndex < m_frames.size()) && "VulkanFrameContext::waitForFrameCompletion invalid frame index");
 
@@ -271,6 +279,7 @@ VkCommandBuffer VulkanFrameContext::nativeCommandBuffer(uint32_t frameIndex) con
 
 SubmissionReceipt VulkanFrameContext::submitCurrentFrame(CommandBuffer& commandBuffer)
 {
+  VKDEMO_CPU_SCOPE("RHI.Vulkan.Frame.SubmitCurrent");
   assert((m_graphicsQueue != VK_NULL_HANDLE) && "VulkanFrameContext::submitCurrentFrame requires graphics queue");
   assert((m_timelineSemaphore != nullptr) && "VulkanFrameContext::submitCurrentFrame requires timeline semaphore");
   assert((m_swapchain != nullptr) && "VulkanFrameContext::submitCurrentFrame requires swapchain");
