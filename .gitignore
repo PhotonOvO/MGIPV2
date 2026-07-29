@@ -1,10 +1,17 @@
 out/
 .vs/
+.idea/
 resources/
 build/
 build_*/
 .worktrees/
 .superpowers/
+captures/
+resources.pre-submodule-backup-*/
+__pycache__/
+*.py[cod]
+*.exe
+*.orig
 android/.gradle/
 android/app/build/
 android/app/.cxx/
