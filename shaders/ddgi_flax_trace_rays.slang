@@ -9,7 +9,7 @@
 
 [[vk::binding(0, 0)]] Texture2D<float4> probesData        : register(t0);
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes : register(u0);
-[[vk::binding(2, 0)]] RWTexture2D<float4> probesTrace      : register(u1); // rays x batch
+[[vk::binding(2, 0)]] RWTexture2D<float4> probesTrace      : register(u1); // rays x selected update slot
 
 // Global SDF + albedo
 [[vk::binding(3, 0)]] Sampler3D<float> globalSDFTex            : register(t1);
@@ -40,7 +40,10 @@ static const float kFlaxDDGIMultiBounceFeedback = 0.5f;
 
 
 
-static const uint kBatchSize = 256;
+// One workgroup owns one selected probe. Keeping the group to two warps limits
+// duplicated probe setup while providing enough independent probe groups to
+// occupy the GPU; lanes cover all configured rays with a fixed stride.
+static const uint kRayGroupSize = 64;
 // Surface Atlas raster/lighting is not complete yet. Keep the bindings stable,
 // but make the textured GlobalSDF hit path authoritative until the atlas
 // contains real draws and lighting data.
@@ -135,15 +138,16 @@ float3 evaluateFlaxRadianceSources(float3 hitPosition, float3 hitNormal,
     return incomingRadiance;
 }
 
-[numthreads(kBatchSize, 1, 1)]
-void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
+[numthreads(kRayGroupSize, 1, 1)]
+void CS_TraceRays(uint3 groupId : SV_GroupID,
+                  uint3 groupThreadId : SV_GroupThreadID)
 {
-    uint batchIndex = dispatchThreadId.x;
+    uint updateSlot = groupId.x;
     uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
     uint probeIndex;
     uint requiredState;
     if (!getProbeUpdateSelection(
-            ddgi, activeProbes, cascadeIndex, batchIndex, probeIndex, requiredState)) return;
+            ddgi, activeProbes, cascadeIndex, updateSlot, probeIndex, requiredState)) return;
     uint3 probeCoords = getProbeCoords(ddgi, probeIndex);
     uint scrolledIdx = getScrollingProbeIndex(ddgi, cascadeIndex, probeCoords);
     uint2 dataCoord = getProbeTexelCoords(ddgi, cascadeIndex, scrolledIdx);
@@ -183,9 +187,10 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float probeClearance =
         sampleGlobalSDFFineDistance(globalSDFTex, sdfConfig, probeUvw);
 
-    // Ray tracing loop
+    // Ray tracing loop. Each lane owns a disjoint ray sequence, so the trace
+    // atlas writes require no group-shared reduction or synchronization.
     uint raysPerProbe = ddgi.raysCount;
-    for (uint r = 0; r < raysPerProbe; r++)
+    for (uint r = groupThreadId.x; r < raysPerProbe; r += kRayGroupSize)
     {
         float3 rayDir = flaxSphericalFibonacci(float(r), float(raysPerProbe));
         float3 origin = probePos + rayDir * rayStartOffset;
@@ -286,8 +291,8 @@ void CS_TraceRays(uint3 dispatchThreadId : SV_DispatchThreadID)
             }
 	    }
 
-        // Write to trace buffer (column = ray, row = batch probe)
-        probesTrace[uint2(r, batchIndex)] =
+        // Write to trace buffer (column = ray, row = selected update slot).
+        probesTrace[uint2(r, updateSlot)] =
             float4(radiance, storedDistance);
     }
 }

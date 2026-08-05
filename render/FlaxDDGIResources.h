@@ -150,7 +150,8 @@ public:
 
   // Per-cascade active probes buffer. Layout: [0] active count,
   // [1] priority count, [2] regular count, [3] dynamically allocated update
-  // count, followed by deterministic priority and regular probe-index lists.
+  // count, followed by priority/regular flags and deterministic priority and
+  // regular probe-index lists in disjoint ranges.
   [[nodiscard]] rhi::BufferHandle getActiveProbes(uint32_t cascade) const {
     return cascade < m_activeProbes.size() ? m_activeProbes[cascade] : rhi::BufferHandle{};
   }

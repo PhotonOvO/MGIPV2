@@ -154,15 +154,16 @@ void FlaxDDGIResources::init(rhi::Device& device, const DDGIConfig& config,
     m_distanceAtlasExtent = {maxAtlasWidth, totalAtlasHeight};
   }
 
-  // --- ActiveProbes: counters + disjoint priority/regular compact lists ---
+  // --- ActiveProbes: counters + disjoint flags and compact lists ---
   m_activeProbes.resize(cascadeCount);
   for (uint32_t c = 0; c < cascadeCount; ++c) {
     const uint32_t probeCount = probesPerCascade[c].x * probesPerCascade[c].y * probesPerCascade[c].z;
     rhi::BufferDesc desc{};
     // [0] active count, [1] priority count, [2] regular count,
-    // [3] dynamically allocated update count; then one probe-index array for
-    // each class, each with probeCount capacity.
-    desc.size = static_cast<uint64_t>(4u + 2u * probeCount) * sizeof(uint32_t);
+    // [3] dynamically allocated update count; then priority/regular flag
+    // arrays followed by priority/regular compact probe-index lists. Keeping
+    // inputs and outputs disjoint makes parallel stable compaction race-free.
+    desc.size = static_cast<uint64_t>(4u + 4u * probeCount) * sizeof(uint32_t);
     desc.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst
                | rhi::BufferUsageFlags::transferSrc;
     desc.memoryUsage = rhi::MemoryUsage::gpuOnly;
@@ -246,7 +247,7 @@ uint64_t FlaxDDGIResources::getTotalMemoryBytes() const
   // ActiveProbes per cascade
   for (size_t c = 0; c < m_probesPerCascade.size(); ++c) {
     const uint32_t n = m_probesPerCascade[c].x * m_probesPerCascade[c].y * m_probesPerCascade[c].z;
-    total += (static_cast<uint64_t>(4u) + 2u * n) * 4;
+    total += (static_cast<uint64_t>(4u) + 4u * n) * 4;
   }
   // InitArgs plus one shared slack counter.
   total += (static_cast<uint64_t>(m_cascadeCount)

@@ -238,8 +238,8 @@ bool getProbeUpdateSelection(
     uint activeCount = min(activeProbes[0], totalProbes);
     uint priorityCount = min(activeProbes[1], activeCount);
     uint regularCount = min(activeProbes[2], activeCount - priorityCount);
-    uint priorityBase = 4u;
-    uint regularBase = priorityBase + totalProbes;
+    uint priorityListBase = 4u + 2u * totalProbes;
+    uint regularListBase = priorityListBase + totalProbes;
     if (activeCount == 0u || updateSlot >= totalProbes)
     {
         probeIndex = 0u;
@@ -263,9 +263,9 @@ bool getProbeUpdateSelection(
     if (updateCount >= activeCount)
     {
         if (updateSlot < priorityCount)
-            probeIndex = activeProbes[priorityBase + updateSlot];
+            probeIndex = activeProbes[priorityListBase + updateSlot];
         else
-            probeIndex = activeProbes[regularBase + (updateSlot - priorityCount)];
+            probeIndex = activeProbes[regularListBase + (updateSlot - priorityCount)];
         requiredState = kDDGIProbeStateAnyValid;
         return probeIndex < totalProbes;
     }
@@ -287,7 +287,7 @@ bool getProbeUpdateSelection(
         uint priorityOffset = ddgi.updateParams[cascadeIndex].z;
         uint prioritySlot = priorityCount == 0u ? 0u
             : (priorityOffset + updateSlot) % priorityCount;
-        probeIndex = activeProbes[priorityBase + prioritySlot];
+        probeIndex = activeProbes[priorityListBase + prioritySlot];
         requiredState = kDDGIProbeStateAnyValid;
         return probeIndex < totalProbes;
     }
@@ -306,7 +306,7 @@ bool getProbeUpdateSelection(
         return false;
     }
     uint regularOffset = ddgi.updateParams[cascadeIndex].x;
-    probeIndex = activeProbes[regularBase + ((regularOffset + regularSlot) % regularCount)];
+    probeIndex = activeProbes[regularListBase + ((regularOffset + regularSlot) % regularCount)];
     requiredState = kDDGIProbeStateAnyValid;
     return probeIndex < totalProbes;
 }
