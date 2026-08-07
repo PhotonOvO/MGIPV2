@@ -76,7 +76,7 @@ namespace demo
 				.range = colorRange
 			},
 		};
-		context.commandBuffer->resourceBarrier(toBlit, 2, nullptr, 0);
+		context.commandBuffer->resourceBarrier(toBlit, {});
 
 		rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();
 		enc->blitTexture(rhi::TextureBlitDesc{
@@ -102,7 +102,7 @@ namespace demo
 				.range = colorRange
 			},
 		};
-		context.commandBuffer->resourceBarrier(fromBlit, 2, nullptr, 0);
+		context.commandBuffer->resourceBarrier(fromBlit, {});
 
 		context.commandBuffer->endEvent();
 	}

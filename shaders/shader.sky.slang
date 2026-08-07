@@ -45,6 +45,24 @@ struct VSOutput
     float2 uv       : TEXCOORD0;
 };
 
+float2 clipPositionToFramebufferUv(float2 clipPosition)
+{
+    float2 uv = clipPosition * 0.5 + 0.5;
+#ifdef DEMO_D3D12
+    uv.y = 1.0 - uv.y;
+#endif
+    return uv;
+}
+
+float2 framebufferUvToNdc(float2 uv)
+{
+    float2 ndc = uv * 2.0 - 1.0;
+#ifdef DEMO_D3D12
+    ndc.y = -ndc.y;
+#endif
+    return ndc;
+}
+
 [shader("vertex")]
 VSOutput vertexMain(uint vertexIndex : SV_VertexID)
 {
@@ -55,7 +73,7 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
         float2(-1.0,  3.0)
     };
     output.position = float4(positions[vertexIndex], 0.0, 1.0);
-    output.uv = positions[vertexIndex] * 0.5 + 0.5;
+    output.uv = clipPositionToFramebufferUv(positions[vertexIndex]);
     return output;
 }
 
@@ -68,7 +86,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
         discard;
     }
 
-    float2 ndc = input.uv * 2.0 - 1.0;
+    float2 ndc = framebufferUvToNdc(input.uv);
     float4 clipPos = float4(ndc.x, ndc.y, 0.0, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     vec3 direction = normalize(worldPos.xyz / worldPos.w - camera.cameraPosition);

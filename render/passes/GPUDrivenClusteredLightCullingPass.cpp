@@ -68,6 +68,16 @@ namespace demo
 			// through lighting tables that are not fully represented in pass dependencies.
 			context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader,
 			                               rhi::HazardFlags::bufferWrites);
+
+			const rhi::BufferHandle statsReadback =
+				m_renderer->getClusterStatsReadbackBufferHandle(context.frameIndex);
+			if (!statsBuffer.isNull() && !statsReadback.isNull())
+			{
+				rhi::ComputeEncoder* copy = context.commandBuffer->beginComputePass();
+				copy->copyBuffer(statsBuffer, 0u, statsReadback, 0u,
+				                 sizeof(GPUDrivenLightResources::ClusterStats));
+				context.commandBuffer->endEncoding();
+			}
 		}
 
 		context.commandBuffer->endEvent();

@@ -587,7 +587,7 @@ namespace demo
 			.after = rhi::ResourceState::General,
 			.range = {.aspect = rhi::TextureAspect::depth, .levelCount = 1, .layerCount = m_cascadeCount},
 		};
-		cmd.resourceBarrier(&initBarrier, 1, nullptr, 0);
+		cmd.resourceBarrier(std::span{&initBarrier, 1}, {});
 	}
 
 	void CSMShadowResources::deinit()

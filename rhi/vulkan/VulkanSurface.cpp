@@ -9,10 +9,10 @@ namespace demo {
 namespace rhi {
 namespace vulkan {
 
-void VulkanSurface::init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window)
+void VulkanSurface::initVulkan(VkInstance instance, VkPhysicalDevice physicalDevice, const WindowHandle& window)
 {
-  m_instance       = static_cast<VkInstance>(nativeInstance);
-  m_physicalDevice = static_cast<VkPhysicalDevice>(nativePhysicalDevice);
+  m_instance       = instance;
+  m_physicalDevice = physicalDevice;
 
   ASSERT(m_instance != VK_NULL_HANDLE, "VulkanSurface requires a valid VkInstance");
   ASSERT(m_physicalDevice != VK_NULL_HANDLE, "VulkanSurface requires a valid VkPhysicalDevice");

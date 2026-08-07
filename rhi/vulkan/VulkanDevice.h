@@ -4,8 +4,8 @@
 #include "../RHIResourceLifetime.h"
 #include "VulkanDeviceCreateInfo.h"
 #include "VulkanDeviceInterop.h"
+#include "VulkanQueue.h"
 
-#include <functional>
 #include <unordered_map>
 #include <vector>
 #include <vulkan/vulkan.h>
@@ -17,12 +17,11 @@ using VmaAllocator = struct VmaAllocator_T*;
 namespace demo::rhi::vulkan {
 
 class VulkanResourceTable;
-class VulkanFrameContext;
 
 class VulkanDevice final : public demo::rhi::Device, public VulkanDeviceInterop
 {
 public:
-  VulkanDevice() = default;
+  VulkanDevice();
   ~VulkanDevice() override;
 
   void init(const DeviceCreateInfo& createInfo) override;
@@ -32,7 +31,7 @@ public:
   void initVulkan(const VulkanDeviceCreateInfo& createInfo);
   void deinit() override;
 
-  uint32_t                  getApiVersion() const override;
+  BackendInfo               getBackendInfo() const override;
   const char*               getDeviceName() const override;
   const PhysicalDeviceInfo& getPhysicalDeviceInfo() const override;
   const DeviceFeatureInfo&  getEnabledFeatureInfo() const override;
@@ -40,42 +39,38 @@ public:
   bool                      supports(CapabilityTier tier) const override;
   const MemoryProperties&   getPhysicalMemoryProperties() const override;
 
-  QueueInfo getGraphicsQueue() const override;
-  QueueInfo getComputeQueue() const override;
-  QueueInfo getTransferQueue() const override;
+  Queue* getQueue(QueueClass queueClass) override;
+  std::unique_ptr<CommandAllocator> createCommandAllocator(QueueClass queueClass) override;
+  void collectGarbage() override;
 
   void initSurface(Surface& surface, const WindowHandle& window) override;
   std::unique_ptr<Swapchain> createSwapchain(Surface& surface, bool vSync) override;
-  std::unique_ptr<FrameContext> createFrameContext(Swapchain* swapchain, uint32_t frameCount) override;
   float getTimestampPeriodNs() const override;
 
-  bool isInstanceExtensionSupported(const char* name) const override;
-  bool isDeviceExtensionSupported(const char* name) const override;
+
+
   bool isFormatSupported(TextureFormat format, FormatFeatureFlag feature) const override;
 
   void waitIdle() override;
 
   // --- Immediate upload seam (UPL-02) ---
-  void executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn) override;
-  void flushUploadRetirements(bool waitForCompletion) override;
 
   TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) override;
-  TextureViewHandle registerExternalTextureView(uint64_t externalView) override;
   void              destroyTextureView(TextureViewHandle handle) override;
 
   TextureHandle createTexture(const TextureDesc& desc) override;
   void          destroyTexture(TextureHandle handle) override;
-  TextureHandle registerExternalTexture(uint64_t externalImage) override;
-  void          destroyImage(TextureHandle handle) override;
+
 
   // --- Modern GPU interface (Wave 1: buffers / samplers / query pools) ---
   BufferHandle createBuffer(const BufferDesc& desc) override;
   void         destroyBuffer(BufferHandle handle) override;
-  BufferHandle registerExternalBuffer(uint64_t externalBuffer) override;
-  void         updateBufferBinding(BufferHandle handle, uint64_t externalBuffer) override;
   GpuPtr       getBufferGpuAddress(BufferHandle handle) const override;
   void*        mapBuffer(BufferHandle handle) override;
   void         unmapBuffer(BufferHandle handle) override;
+  Result<MappedBufferRange> mapBufferRange(BufferHandle handle, const BufferMapDesc& desc) override;
+  RHIResult flushMappedBufferRange(BufferHandle handle, uint64_t offset, uint64_t size) override;
+  RHIResult invalidateMappedBufferRange(BufferHandle handle, uint64_t offset, uint64_t size) override;
 
   SamplerHandle createSampler(const SamplerDesc& desc) override;
   void          destroySampler(SamplerHandle handle) override;
@@ -83,26 +78,22 @@ public:
   QueryPoolHandle createQueryPool(uint32_t queryCount) override;
   void            destroyQueryPool(QueryPoolHandle handle) override;
   uint64_t        getQueryPoolResult(QueryPoolHandle handle, uint32_t queryIndex) override;
-  bool            getQueryPoolResultsWithAvailability(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, uint64_t* outPairs) override;
+  bool getQueryPoolResultsWithAvailability(QueryPoolHandle handle, uint32_t firstQuery, std::span<uint64_t> outValueAvailabilityPairs) override;
 
   ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc& desc) override;
   void                 destroyArgumentLayout(ArgumentLayoutHandle handle) override;
-  ArgumentTableHandle  createArgumentTable(ArgumentLayoutHandle layout) override;
+  ArgumentTableHandle  createArgumentTable(const ArgumentTableCreateDesc& desc) override;
   void                 destroyArgumentTable(ArgumentTableHandle handle) override;
-  void                 updateArgumentTable(ArgumentTableHandle table, uint32_t writeCount, const ArgumentWrite* writes) override;
-  void configureArgumentPoolCapacity(uint32_t bindlessCombinedImageSamplersPerFrameSlot,
-                                     uint32_t frameSlotCount);
+  void                 updateArgumentTable(ArgumentTableHandle table, ArgumentWriteBatch writes) override;
+  ArgumentLayoutHandle getArgumentTableLayout(ArgumentTableHandle table) const override;
   PipelineHandle       createGraphicsPipeline(const GraphicsPipelineDesc& desc) override;
   PipelineHandle       createComputePipeline(const ComputePipelineDesc& desc) override;
   void                 destroyPipeline(PipelineHandle handle) override;
-  uint64_t             resolveArgumentLayoutNative(ArgumentLayoutHandle layout) const;
-  uint64_t             resolveArgumentTableNative(ArgumentTableHandle table) const;
-
-  // The render layer owns the resource table and injects it here so the device can
-  // back its texture-view handles. Must be called before any createTextureView call.
-  void setResourceTable(VulkanResourceTable* table) { m_resourceTable = table; }
-  void setFrameContext(VulkanFrameContext* frameContext) { m_frameContext = frameContext; }
-
+  ShaderLibraryHandle  createShaderLibrary(const ShaderLibraryDesc& desc) override;
+  void                 destroyShaderLibrary(ShaderLibraryHandle handle) override;
+  Result<ResidencySetHandle> createResidencySet(const ResidencySetDesc& desc) override;
+  RHIResult destroyResidencySet(ResidencySetHandle handle) override;
+  RHIResult updateResidencySet(ResidencySetHandle handle, const ResidencyUpdateBatch& batch) override;
   // The VMA allocator is created and owned backend-internally (RDEV-06).
 
   VkInstance       instance() const { return m_instance; }
@@ -121,21 +112,19 @@ public:
   VkImageView resolveTextureView(rhi::TextureViewHandle handle) const override;
   VkSampler   resolveSampler(rhi::SamplerHandle handle) const override;
 
-  uint32_t processRetirements(uint64_t completedTimelineValue);
-
-  // rhi/vulkan 内部使用——供 RenderDevice::init() 传入 VulkanSwapchain::init（RDEV-01 方案 B）
-  VkCommandPool transientCmdPool() const { return m_transientCmdPool; }
+  uint32_t processRetirements();
 
 private:
   struct NativeRetirement
   {
     ResourceHandle resource{};
-    uint64_t       retireTimelineValue{0};
+    SubmissionTokenSet retirementDependencies{};
     uint64_t       nativeObject{0};
     uint64_t       nativeAllocation{0};
     uint64_t       secondaryNativeObject{0};
     bool           owned{false};
     bool           ownsSecondary{false};
+    bool           preciseDependencies{false};
   };
 
   struct NativeQueueInfo
@@ -165,10 +154,12 @@ private:
   static bool layerAvailable(const char* name, const std::vector<VkLayerProperties>& layers);
   static void appendFeatureNode(VkBaseOutStructure*& chainHead, void* featureStruct);
 
-  uint64_t retirementTimelineValue() const;
-  void     enqueueRetirement(NativeRetirement retirement);
+  [[nodiscard]] SubmissionTokenSet retirementDependencies() const;
+  [[nodiscard]] bool isRetirementComplete(const SubmissionTokenSet& dependencies) const;
+  void enqueueRetirement(NativeRetirement retirement);
   void     destroyRetiredResource(const NativeRetirement& retirement);
   void     drainRetirements();
+  void     releaseResourceTableObjects();
 
   static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
                                                       VkDebugUtilsMessageTypeFlagsEXT             type,
@@ -186,6 +177,12 @@ private:
   NativeQueueInfo m_computeQueue{};
   NativeQueueInfo m_transferQueue{};
 
+  std::unique_ptr<VulkanQueueSyncRegistry> m_queueSyncRegistry;
+  std::unique_ptr<VulkanQueue> m_graphicsQueueApi;
+  std::unique_ptr<VulkanQueue> m_computeQueueApi;
+  std::unique_ptr<VulkanQueue> m_transferQueueApi;
+
+  uint32_t           m_queueGeneration{0};
   uint32_t           m_apiVersion{0};
   PhysicalDeviceInfo m_physicalDeviceInfo{};
   DeviceFeatureInfo  m_featureInfo{};
@@ -217,8 +214,7 @@ private:
   std::vector<const char*>           m_enabledDeviceExtensions;
   bool                               m_initialized{false};
 
-  VulkanResourceTable* m_resourceTable{nullptr};
-  VulkanFrameContext*  m_frameContext{nullptr};
+  std::unique_ptr<VulkanResourceTable> m_resourceTable;
   VmaAllocator         m_allocator{nullptr};
   VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // active pool for new argument tables
   uint32_t             m_combinedImageSamplerPoolCapacity{16384};
@@ -226,18 +222,7 @@ private:
   std::unordered_map<uint64_t, VkDescriptorPool> m_argumentSetPools;
   std::vector<NativeRetirement> m_pendingRetirements;
 
-  // Upload cmd pool — migrated from RenderDevice (UPL-02)
-  VkCommandPool m_uploadCmdPool{VK_NULL_HANDLE};
-  // Transient graphics cmd pool — migrated from RenderDevice (RDEV-01)
-  VkCommandPool m_transientCmdPool{VK_NULL_HANDLE};
 
-  // Per-frame pending upload cmd buffers + fences — migrated from FrameUserData (UPL-02/03)
-  struct UploadPendingFrame
-  {
-    std::vector<VkCommandBuffer> cmds;
-    std::vector<VkFence>         fences;
-  };
-  std::vector<UploadPendingFrame> m_uploadPendingFrames;
 };
 
 }  // namespace demo::rhi::vulkan

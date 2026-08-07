@@ -85,10 +85,10 @@ namespace demo
 
 		void syncToGpu(rhi::CommandBuffer& cmd);
 
-		[[nodiscard]] uint64_t getBufferAddress() const { return m_objectBufferAddress.value; }
+		[[nodiscard]] rhi::GpuPtr getBufferAddress() const { return m_objectBufferAddress; }
 		[[nodiscard]] rhi::BufferHandle getBufferHandle() const { return m_objectBufferRHI; }
 
-		[[nodiscard]] uint64_t getCullBufferAddress() const { return m_cullObjectBufferAddress.value; }
+		[[nodiscard]] rhi::GpuPtr getCullBufferAddress() const { return m_cullObjectBufferAddress; }
 
 		[[nodiscard]] rhi::BufferHandle getCullBufferHandle() const { return m_cullObjectBufferRHI; }
 		[[nodiscard]] uint32_t getObjectCount() const { return static_cast<uint32_t>(m_gpuObjects.size()); }

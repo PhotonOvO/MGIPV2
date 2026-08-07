@@ -1,4 +1,5 @@
 #include "GlobalSDFPass.h"
+#include "../EmbeddedShaderLibrary.h"
 
 #include "../ArgumentTables.h"
 #include "../GPUDrivenRenderer.h"
@@ -138,8 +139,7 @@ namespace demo
 			}
 		};
 		m_clearLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = clearBindings.data(),
-			.bindingCount = static_cast<uint32_t>(clearBindings.size()),
+			.bindings = clearBindings,
 			.debugName = "global-sdf-clear",
 		});
 
@@ -168,8 +168,7 @@ namespace demo
 			}
 		};
 		m_composeLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = composeBindings.data(),
-			.bindingCount = static_cast<uint32_t>(composeBindings.size()),
+			.bindings = composeBindings,
 			.debugName = "global-sdf-compose",
 		});
 
@@ -186,13 +185,12 @@ namespace demo
 			}
 		};
 		m_mipmapLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = mipmapBindings.data(),
-			.bindingCount = static_cast<uint32_t>(mipmapBindings.size()),
+			.bindings = mipmapBindings,
 			.debugName = "global-sdf-mipmap",
 		});
 
 		// --- Argument tables ---
-		m_clearTable = device.createArgumentTable(m_clearLayout);
+		m_clearTable = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_clearLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 		{
 			const std::array<rhi::ArgumentWrite, 2> clearWrites{
 				{
@@ -208,13 +206,13 @@ namespace demo
 					},
 				}
 			};
-			device.updateArgumentTable(m_clearTable, static_cast<uint32_t>(clearWrites.size()), clearWrites.data());
+			device.updateArgumentTable(m_clearTable, clearWrites);
 		}
 
 		m_mipmapTables.resize(kMipCount - 1u);
 		for (uint32_t mip = 1; mip < kMipCount; ++mip)
 		{
-			m_mipmapTables[mip - 1u] = device.createArgumentTable(m_mipmapLayout);
+			m_mipmapTables[mip - 1u] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_mipmapLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			const std::array<rhi::ArgumentWrite, 2> mipWrites{
 				{
 					// Source mip stays in General layout (written via storage
@@ -231,15 +229,14 @@ namespace demo
 					},
 				}
 			};
-			device.updateArgumentTable(m_mipmapTables[mip - 1u],
-			                           static_cast<uint32_t>(mipWrites.size()), mipWrites.data());
+			device.updateArgumentTable(m_mipmapTables[mip - 1u], mipWrites);
 		}
 
 		m_composeTables.resize(m_frameCount);
 		m_composeUniformBuffers.resize(m_frameCount);
 		for (uint32_t i = 0; i < m_frameCount; ++i)
 		{
-			m_composeTables[i] = device.createArgumentTable(m_composeLayout);
+			m_composeTables[i] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_composeLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			m_composeUniformBuffers[i] = device.createBuffer(rhi::BufferDesc{
 				.size = sizeof(shaderio::GlobalSDFComposeUniforms),
 				.usage = rhi::BufferUsageFlags::uniform,
@@ -254,25 +251,27 @@ namespace demo
 		                                rhi::ArgumentLayoutHandle layout, uint32_t pushSize, uint32_t variant)
 		{
 			const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{layout}};
-			const std::array<rhi::PipelinePushConstantRange, 1> pushRanges{
-				{
-					rhi::PipelinePushConstantRange{
-						.stages = rhi::ShaderStage::compute, .offset = 0, .size = pushSize
-					},
-				}
-			};
+			const std::array<rhi::RootBindingDesc, 1> rootBindings{{
+				rhi::RootBindingDesc{
+					.slot = 0,
+					.kind = rhi::RootBindingKind::constants,
+					.visibility = rhi::ShaderStage::compute,
+					.size = pushSize,
+					.alignment = 4,
+				},
+			}};
+			const std::span<const rhi::RootBindingDesc> activeRootBindings{
+				rootBindings.data(), pushSize > 0u ? rootBindings.size() : 0u};
+			const rhi::PipelineBindingSchemaStorage bindingSchema{layouts, activeRootBindings};
 			const rhi::ComputePipelineDesc desc{
 				.shaderStage =
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::compute,
-					.spirvCode = spirv,
-					.spirvSize = wordCount * sizeof(uint32_t),
+					.library = loadEmbeddedSpirvLibrary(
+						device, spirv, wordCount * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
 				},
-				.argumentLayouts = layouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(layouts.size()),
-				.pushConstantRanges = pushSize > 0u ? pushRanges.data() : nullptr,
-				.pushConstantRangeCount = pushSize > 0u ? static_cast<uint32_t>(pushRanges.size()) : 0u,
+				.bindingSchema = bindingSchema.view(),
 				.specializationVariant = variant,
 			};
 			return device.createComputePipeline(desc);
@@ -526,7 +525,7 @@ namespace demo
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
 		}
-		m_device->updateArgumentTable(m_composeTables[frameIndex], writeCount, writes.data());
+		m_device->updateArgumentTable(m_composeTables[frameIndex], rhi::ArgumentWriteBatch{writes.data(), writeCount});
 	}
 
 	void GlobalSDFPass::execute(const PassContext& context) const
@@ -589,7 +588,7 @@ namespace demo
 					},
 				},
 			};
-			cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()), nullptr, 0);
+			cmd.resourceBarrier(initBarriers, {});
 			m_layoutInitialized = true;
 		}
 
@@ -604,7 +603,7 @@ namespace demo
 			rhi::ComputeEncoder* clear = cmd.beginComputePass();
 			clear->setPipeline(m_clearPipeline);
 			clear->setArgumentTable(0, m_clearTable);
-			clear->setRootConstants(kPrimaryRootConstantsSlot, &clearPush, sizeof(clearPush));
+			clear->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&clearPush, 1}));
 			clear->dispatch(rhi::DispatchDesc{baseGroups, baseGroups, baseGroups});
 			cmd.endEncoding();
 			cmd.endEvent();
@@ -648,7 +647,7 @@ namespace demo
 			rhi::ComputeEncoder* mipmap = cmd.beginComputePass();
 			mipmap->setPipeline(m_mipmapPipeline);
 			mipmap->setArgumentTable(0, m_mipmapTables[mip - 1u]);
-			mipmap->setRootConstants(kPrimaryRootConstantsSlot, &mipPush, sizeof(mipPush));
+			mipmap->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&mipPush, 1}));
 			mipmap->dispatch(rhi::DispatchDesc{mipGroups, mipGroups, mipGroups});
 			cmd.endEncoding();
 

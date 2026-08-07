@@ -1,4 +1,5 @@
 #include "HiZDepthPyramid.h"
+#include "EmbeddedShaderLibrary.h"
 
 #include "../rhi/RHICommandBuffer.h"
 
@@ -113,26 +114,25 @@ namespace demo
 			}
 		};
 		m_argumentLayout = m_rhiDevice->createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = bindings.data(),
-			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.bindings = bindings,
 			.debugName = "hiz-depth-pyramid",
 		});
 		for (uint32_t frameIndex = 0; frameIndex < m_frameCount; ++frameIndex)
 		{
-			m_perFrame[frameIndex].argumentTable = m_rhiDevice->createArgumentTable(m_argumentLayout);
+			m_perFrame[frameIndex].argumentTable = m_rhiDevice->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_argumentLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 		}
 
 		const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{m_argumentLayout}};
+		const rhi::PipelineBindingSchemaStorage bindingSchema{argumentLayouts};
 		const rhi::ComputePipelineDesc pipelineDesc{
 			.shaderStage =
-			rhi::PipelineShaderStageDesc{
+			rhi::ShaderEntry{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = shader_depth_pyramid_slang,
-				.spirvSize = std::size(shader_depth_pyramid_slang) * sizeof(uint32_t),
+				.library = loadEmbeddedSpirvLibrary(
+					*m_rhiDevice, shader_depth_pyramid_slang, "depth-pyramid"),
 				.entryPoint = "depthPyramid",
 			},
-			.argumentLayouts = argumentLayouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+			.bindingSchema = bindingSchema.view(),
 			.specializationVariant = 0x7101u,
 		};
 		m_pipeline = m_rhiDevice->createComputePipeline(pipelineDesc);
@@ -291,7 +291,7 @@ namespace demo
 					.baseArrayLayer = 0, .layerCount = 1
 				},
 			};
-			rhiCmd.resourceBarrier(&initPyramidBarrier, 1, nullptr, 0);
+			rhiCmd.resourceBarrier(std::span{&initPyramidBarrier, 1}, {});
 			m_layoutInitialized = true;
 		}
 
@@ -304,7 +304,7 @@ namespace demo
 				.layerCount = 1
 			},
 		};
-		rhiCmd.resourceBarrier(&sourceBarrier, 1, nullptr, 0);
+		rhiCmd.resourceBarrier(std::span{&sourceBarrier, 1}, {});
 
 		rhi::ComputeEncoder* encoder = rhiCmd.beginComputePass();
 		if (encoder == nullptr)
@@ -331,7 +331,7 @@ namespace demo
 				.layerCount = 1
 			},
 		};
-		rhiCmd.resourceBarrier(&pyramidBarrier, 1, nullptr, 0);
+		rhiCmd.resourceBarrier(std::span{&pyramidBarrier, 1}, {});
 
 		++m_generationCount;
 	}
@@ -387,7 +387,7 @@ namespace demo
 			.buffer = frameResources.uniformBufferHandle,
 			.size = sizeof(shaderio::DepthPyramidUniforms),
 		};
-		m_rhiDevice->updateArgumentTable(frameResources.argumentTable, writeCount, writes.data());
+		m_rhiDevice->updateArgumentTable(frameResources.argumentTable, rhi::ArgumentWriteBatch{writes.data(), writeCount});
 	}
 
 	void HiZDepthPyramid::recreateResources()

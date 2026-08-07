@@ -1,4 +1,5 @@
 #include "DDGIDebugPass.h"
+#include "../EmbeddedShaderLibrary.h"
 
 #include "../DDGIProbeVolume.h"
 #include "../GPUDrivenRenderer.h"
@@ -125,8 +126,7 @@ namespace demo
 			}
 		};
 		m_layout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = bindings.data(),
-			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.bindings = bindings,
 			.debugName = "ddgi-debug",
 		});
 
@@ -150,7 +150,7 @@ namespace demo
 				{
 					rhi::ArgumentTableHandle& table =
 						m_tables[uniformIndex * 2u + parity];
-					table = device.createArgumentTable(m_layout);
+					table = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_layout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 					const std::array<rhi::ArgumentWrite, 3> writes{
 						{
 							rhi::ArgumentWrite{
@@ -172,25 +172,24 @@ namespace demo
 							},
 						}
 					};
-					device.updateArgumentTable(
-						table, static_cast<uint32_t>(writes.size()), writes.data());
+					device.updateArgumentTable(table, writes);
 				}
 			}
 		}
 
 #ifdef USE_SLANG
-		const std::array<rhi::PipelineShaderStageDesc, 2> stages{
+		const rhi::ShaderLibraryHandle shaderLibrary = loadEmbeddedSpirvLibrary(
+			device, ddgi_probe_visualization_slang, "ddgi-probe-visualization");
+		const std::array<rhi::ShaderEntry, 2> stages{
 			{
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::vertex,
-					.spirvCode = ddgi_probe_visualization_slang,
-					.spirvSize = std::size(ddgi_probe_visualization_slang) * sizeof(uint32_t),
+					.library = shaderLibrary,
 					.entryPoint = "vertexProbeVisMain"
 				},
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::fragment,
-					.spirvCode = ddgi_probe_visualization_slang,
-					.spirvSize = std::size(ddgi_probe_visualization_slang) * sizeof(uint32_t),
+					.library = shaderLibrary,
 					.entryPoint = "fragmentProbeVisMain"
 				},
 			}
@@ -208,26 +207,22 @@ namespace demo
 		};
 		const std::array<rhi::TextureFormat, 1> colorFormats{{m_renderer->getSceneColorHdrFormat()}};
 		const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{m_layout}};
+		const rhi::PipelineBindingSchemaStorage bindingSchema{layouts};
 		rhi::GraphicsPipelineDesc desc{
-			.shaderStages = stages.data(),
-			.shaderStageCount = static_cast<uint32_t>(stages.size()),
+			.shaderStages = stages,
 			.vertexInput = rhi::VertexInputLayoutDesc{}, // buffer-less procedural sphere
 			.rasterState = rhi::RasterState{},
 			// Depth test on / write off against the scene depth (reversed-Z:
 			// greaterOrEqual, matching the engine's geometry passes).
 			.depthState = rhi::DepthState{true, false, rhi::CompareOp::greaterOrEqual},
-			.blendStates = blendStates.data(),
-			.blendStateCount = static_cast<uint32_t>(blendStates.size()),
-			.dynamicStates = dynamicStates.data(),
-			.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+			.blendStates = blendStates,
+			.dynamicStates = dynamicStates,
 			.renderingInfo =
 			{
-				.colorFormats = colorFormats.data(),
-				.colorFormatCount = static_cast<uint32_t>(colorFormats.size()),
+				.colorFormats = colorFormats,
 				.depthFormat = m_renderer->getSceneDepthFormat(),
 			},
-			.argumentLayouts = layouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(layouts.size()),
+			.bindingSchema = bindingSchema.view(),
 			.specializationVariant = 0x7409u,
 		};
 		desc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
@@ -456,8 +451,7 @@ namespace demo
 
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 			.renderArea = {{0, 0}, targets.extent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = &depthTarget,
 		});
 		enc->setViewport(rhi::Viewport{

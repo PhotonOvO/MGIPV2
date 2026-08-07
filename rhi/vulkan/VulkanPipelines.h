@@ -11,13 +11,18 @@ struct GraphicsPipelineCreateInfo
 {
   const GraphicsPipelineDesc* desc{nullptr};
   VkPipelineLayout            layout{VK_NULL_HANDLE};
+  const VkShaderModule*        shaderModules{nullptr};
+  uint32_t                     shaderModuleCount{0};
 };
 
 struct ComputePipelineCreateInfo
 {
   const ComputePipelineDesc*  desc{nullptr};
   VkPipelineLayout            layout{VK_NULL_HANDLE};
+  const VkShaderModule*        shaderModules{nullptr};
+  uint32_t                     shaderModuleCount{0};
   VkPipelineCreateFlags2 pipelineFlags{0};
+  VkShaderModule         shaderModule{VK_NULL_HANDLE};
 };
 
 VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateInfo& createInfo);

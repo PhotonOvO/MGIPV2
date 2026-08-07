@@ -5,7 +5,9 @@
 #include "RHIStageBarrier.h"
 #include "RHITypes.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace demo::rhi
 {
@@ -60,6 +62,17 @@ namespace demo::rhi
 		uint64_t offset{0};
 	};
 
+
+	struct VertexBufferBinding
+
+	{
+
+	  BufferHandle buffer{};
+
+	  uint64_t offset{0};
+
+	};
+
 	struct BufferTextureCopyDesc
 	{
 		BufferHandle buffer{};
@@ -108,14 +121,19 @@ namespace demo::rhi
 		// per-stage (Metal4); Vulkan binds pipeline-wide
 		virtual void setDynamicBuffer(ShaderStage stages, uint32_t slot, BufferHandle buffer, uint64_t offset,
 		                              uint64_t size) = 0;
-		virtual void setRootConstants(ShaderStage stages, uint32_t slot, const void* data, uint32_t size) = 0;
+		virtual void setRootConstants(ShaderStage stages, uint32_t slot,
+		                              std::span<const std::byte> data) = 0;
 		virtual void setRootPointer(ShaderStage stages, uint32_t slot, GpuPtr ptr) = 0;
 
 		virtual void setViewport(const Viewport& viewport) = 0;
 		virtual void setScissor(const Rect2D& scissor) = 0;
-
-		virtual void bindVertexBuffers(uint32_t firstBinding, const BufferHandle* buffers, const uint64_t* offsets,
-		                               uint32_t count) = 0;
+        virtual void bindVertexBuffers(uint32_t firstBinding,
+                                       std::span<const VertexBufferBinding> bindings) = 0;
+        void bindVertexBuffer(uint32_t binding, BufferHandle buffer, uint64_t offset = 0)
+        {
+          const VertexBufferBinding value{buffer, offset};
+          bindVertexBuffers(binding, std::span{&value, 1});
+        }
 		virtual void bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format) = 0;
 
 		// Reserved for tile-resident deferred (input attachment / local read).
@@ -144,7 +162,7 @@ namespace demo::rhi
 		// offsets into a backend push-constant range.
 		virtual void setPipeline(PipelineHandle pipeline) = 0;
 		virtual void setArgumentTable(uint32_t slot, ArgumentTableHandle table) = 0;
-		virtual void setRootConstants(uint32_t slot, const void* data, uint32_t size) = 0;
+		virtual void setRootConstants(uint32_t slot, std::span<const std::byte> data) = 0;
 		virtual void setRootPointer(uint32_t slot, GpuPtr ptr) = 0;
 
 		virtual void dispatch(const DispatchDesc& desc) = 0;

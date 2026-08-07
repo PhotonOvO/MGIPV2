@@ -35,36 +35,19 @@ def extract_function(source: str, signature: str) -> str:
 
 
 class VulkanBindlessFallbackContractTests(unittest.TestCase):
-    def test_pool_budget_uses_runtime_material_capacity_and_frame_slots(self) -> None:
-        configure_call = re.search(
-            r"configureArgumentPoolCapacity\(\s*"
-            r"m_materials\.maxTextures,\s*"
-            r"m_swapchainDependent\.swapchain->getMaxFramesInFlight\(\)\s*"
-            r"\);",
-            RENDER_DEVICE,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(configure_call)
-        self.assertIn("void configureArgumentPoolCapacity(", VULKAN_DEVICE_HEADER)
-
-        configure_pool = extract_function(
-            VULKAN_DEVICE,
-            "void VulkanDevice::configureArgumentPoolCapacity(",
-        )
-        self.assertIn(
-            "static_cast<uint64_t>(bindlessCombinedImageSamplersPerFrameSlot) * "
-            "frameSlotCount",
-            configure_pool,
-        )
-        self.assertIn("m_combinedImageSamplerPoolCapacity", configure_pool)
+    def test_pool_budget_is_backend_owned_and_grows_on_exhaustion(self) -> None:
+        self.assertNotIn("configureArgumentPoolCapacity", RENDER_DEVICE)
+        self.assertNotIn("configureArgumentPoolCapacity", VULKAN_DEVICE_HEADER)
+        self.assertNotIn("configureArgumentPoolCapacity", VULKAN_DEVICE)
+        self.assertIn("kDefaultCombinedImageSamplerPoolCapacity = 16384u", VULKAN_DEVICE)
         self.assertIn(
             "{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "
             "m_combinedImageSamplerPoolCapacity}",
             VULKAN_DEVICE,
         )
+        self.assertIn("VK_ERROR_OUT_OF_POOL_MEMORY", VULKAN_DEVICE)
+        self.assertIn("VK_ERROR_FRAGMENTED_POOL", VULKAN_DEVICE)
         self.assertNotIn("kAuthoritativeFrameSlotCount", VULKAN_DEVICE)
-        self.assertNotIn("kCombinedImageSamplerPoolCapacity", VULKAN_DEVICE)
-
     def test_pool_grows_and_retries_fragmented_or_exhausted_allocations(self) -> None:
         create_table = extract_function(
             VULKAN_DEVICE,
@@ -107,7 +90,7 @@ class VulkanBindlessFallbackContractTests(unittest.TestCase):
             "VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT",
             create_layout,
         )
-        self.assertIn("bindingFlags(desc.bindingCount, 0)", create_layout)
+        self.assertIn("bindingFlags(static_cast<uint32_t>(desc.bindings.size()), 0)", create_layout)
         self.assertIn("vkGetDescriptorSetLayoutSupport", create_layout)
 
     def test_supported_descriptor_features_are_not_forced_or_overrequired(self) -> None:

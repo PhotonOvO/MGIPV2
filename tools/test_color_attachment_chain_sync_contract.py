@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PASS_EXECUTOR = (ROOT / "render/PassExecutor.cpp").read_text(encoding="utf-8")
 GPU_DRIVEN_RENDERER = (ROOT / "render/GPUDrivenRenderer.cpp").read_text(encoding="utf-8")
-VULKAN_COMMAND_BUFFER = (ROOT / "rhi/vulkan/VulkanCommandBuffer.cpp").read_text(encoding="utf-8")
+VULKAN_BARRIER_CONVERSIONS = (ROOT / "rhi/vulkan/VulkanBarrierConversions.h").read_text(encoding="utf-8")
 
 CHAIN = (
     ("GPUDrivenLightPass", "render/passes/GPUDrivenLightPass.cpp", "write"),
@@ -133,8 +133,8 @@ class ColorAttachmentChainSyncContractTests(unittest.TestCase):
                 self.assertEqual(current["stage"], "rasterColorOut")
 
     def test_vulkan_backend_maps_raster_color_producers_to_attachment_output(self) -> None:
-        stage_map = braced_source(VULKAN_COMMAND_BUFFER, "toVkPipelineStage2(")
-        producer_access = braced_source(VULKAN_COMMAND_BUFFER, "inferProducerAccess(")
+        stage_map = braced_source(VULKAN_BARRIER_CONVERSIONS, "toVkPipelineStage2(")
+        producer_access = braced_source(VULKAN_BARRIER_CONVERSIONS, "inferProducerAccess(")
 
         self.assertRegex(
             stage_map,

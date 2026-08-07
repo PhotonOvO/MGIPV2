@@ -46,7 +46,13 @@ namespace demo
 			frame.clusterCountsBuffer = createStorageBuffer(clusterCountBytes, rhi::MemoryUsage::gpuOnly);
 			frame.clusterIndicesBuffer = createStorageBuffer(clusterIndexBytes, rhi::MemoryUsage::gpuOnly);
 			frame.clusterStatsBuffer =
-				createStorageBuffer(sizeof(ClusterStats), rhi::MemoryUsage::gpuToCpu);
+				createStorageBuffer(sizeof(ClusterStats), rhi::MemoryUsage::gpuOnly);
+			frame.clusterStatsReadbackBuffer = m_device->createBuffer(rhi::BufferDesc{
+				.size = sizeof(ClusterStats),
+				.usage = rhi::BufferUsageFlags::transferDst,
+				.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+				.debugName = "GPUDrivenClusterStatsReadbackBuffer",
+			});
 		}
 	}
 
@@ -66,6 +72,7 @@ namespace demo
 				destroyBuffer(frame.clusterCountsBuffer);
 				destroyBuffer(frame.clusterIndicesBuffer);
 				destroyBuffer(frame.clusterStatsBuffer);
+				destroyBuffer(frame.clusterStatsReadbackBuffer);
 			}
 		}
 
@@ -169,6 +176,13 @@ namespace demo
 		return frameIndex < m_frames.size() ? m_frames[frameIndex].clusterStatsBuffer : rhi::BufferHandle{};
 	}
 
+	rhi::BufferHandle GPUDrivenLightResources::getClusterStatsReadbackBuffer(uint32_t frameIndex) const
+	{
+		return frameIndex < m_frames.size()
+			       ? m_frames[frameIndex].clusterStatsReadbackBuffer
+			       : rhi::BufferHandle{};
+	}
+
 	void GPUDrivenLightResources::cacheClusterStats(uint32_t frameIndex)
 	{
 		if (frameIndex >= m_frames.size())
@@ -177,7 +191,7 @@ namespace demo
 			return;
 		}
 
-		const rhi::BufferHandle buffer = m_frames[frameIndex].clusterStatsBuffer;
+		const rhi::BufferHandle buffer = m_frames[frameIndex].clusterStatsReadbackBuffer;
 		void* mapped = m_device != nullptr ? m_device->mapBuffer(buffer) : nullptr;
 		if (buffer.isNull() || mapped == nullptr)
 		{

@@ -72,6 +72,12 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 		{
 			showHelp = true;
 		}
+		else if(const std::string_view value = optionValue(argument, "--backend"); !value.empty())
+		{
+			if(value == "vulkan") options.backend = demo::rhi::BackendType::vulkan;
+			else if(value == "d3d12") options.backend = demo::rhi::BackendType::d3d12;
+			else throw std::invalid_argument("Unknown --backend value: " + std::string(value));
+		}
 		else if(const std::string_view value = optionValue(argument, "--automation"); !value.empty())
 		{
 			if(value == "csm-translate-stop") options.mode = AutomationMode::csmTranslateStop;
@@ -126,6 +132,10 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 		{
 			options.captureSyncTimeoutMilliseconds = parseFrameCount(value, "--capture-sync-timeout-ms");
 		}
+		else if(const std::string_view value = optionValue(argument, "--metrics-output"); !value.empty())
+		{
+			options.metricsOutputPath = std::filesystem::path(std::string(value));
+		}
 		else
 		{
 			throw std::invalid_argument("Unknown command-line option: " + std::string(argument));
@@ -171,12 +181,14 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 void printUsage()
 {
 	std::cout
-	    << "Usage: Demo [--automation=csm-translate-stop|csm-rotate-stop]\n"
+	    << "Usage: Demo [--backend=vulkan|d3d12]\n"
+	    << "            [--automation=csm-translate-stop|csm-rotate-stop]\n"
 	    << "            [--fixed-dt=SECONDS] [--warmup-frames=N]\n"
 	    << "            [--motion-frames=N] [--hold-frames=N]\n"
 	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi] [--auto-exit]\n"
 	    << "            [--capture-sync-dir=PATH] [--capture-sync-timeout-ms=N]\n"
-	    << "            [--capture-control-frame]\n";
+	    << "            [--capture-control-frame] [--metrics-output=PATH]"
+	    << std::endl;
 }
 }  // namespace
 

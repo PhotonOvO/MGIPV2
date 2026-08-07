@@ -1,5 +1,5 @@
 #include "MetalDevice.h"
-#include "../RHIBoundary.h"
+#include <stdexcept>
 
 #include <cassert>
 
@@ -28,13 +28,13 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
   // if (!device) { /* error handling */ }
   // id<MTLCommandQueue> queue = [device newCommandQueue];
   (void)createInfo;
-  RHI_UNIMPLEMENTED("MetalDevice::init");
+  throw std::runtime_error("Metal backend is contract-shaped and requires a macOS Metal 4 implementation");
 }
 
 void MetalDevice::deinit()
 {
-  // deinit must be safe to call (RAII cleanup never aborts). Since init() aborts via
-  // RHI_UNIMPLEMENTED, m_initialized can never be true here — so this is a clean no-op.
+  // Deinit remains safe after a failed or unavailable Metal initialization.
+
   if (!m_initialized)
     return;
   // TODO: Metal implementation
@@ -44,13 +44,13 @@ void MetalDevice::deinit()
   // 3. Clear capability state
 }
 
-uint32_t MetalDevice::getApiVersion() const
+BackendInfo MetalDevice::getBackendInfo() const
 {
-  // TODO: Metal implementation
-  // NOTES: Map Metal version to Vulkan-style API version
-  // Metal 3+ on macOS 14+ â†’ ~1.4 equivalent
-  // Return 0 or mapped version
-  return 0;
+  return BackendInfo{
+    .type = BackendType::metal,
+    .apiName = "Metal",
+    .version = BackendVersion{.major = 4},
+  };
 }
 
 const char* MetalDevice::getDeviceName() const
@@ -109,33 +109,18 @@ const MemoryProperties& MetalDevice::getPhysicalMemoryProperties() const
   return m_memoryProperties;
 }
 
-QueueInfo MetalDevice::getGraphicsQueue() const
+Queue* MetalDevice::getQueue(QueueClass)
 {
-  // TODO: Metal implementation
-  // NOTES: Return graphics queue info
-  // Metal queues are command queues, not separate families
-  return m_graphicsQueue.toRhi();
+  return nullptr;
 }
 
-QueueInfo MetalDevice::getComputeQueue() const
+std::unique_ptr<CommandAllocator> MetalDevice::createCommandAllocator(QueueClass)
 {
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have separate compute queues
-  // Return same as graphics or shared queue
-  return m_computeQueue.toRhi();
+  throw std::runtime_error("Metal command allocators require the macOS Metal 4 backend");
 }
-
-QueueInfo MetalDevice::getTransferQueue() const
-{
-  // TODO: Metal implementation
-  // NOTES: Metal doesn't have separate transfer queues
-  // Return same as graphics (use blit encoder for transfers)
-  return m_transferQueue.toRhi();
-}
-
 void MetalDevice::waitIdle()
 {
-  RHI_UNIMPLEMENTED("MetalDevice::waitIdle");
+  throw std::runtime_error("Metal waitIdle requires the macOS Metal 4 backend");
   // TODO: Metal implementation
   // NOTES: Use MTLCommandBuffer addCompletedHandler to wait
   // Or use MTLSharedEvent for synchronization

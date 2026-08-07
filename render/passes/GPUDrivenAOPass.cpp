@@ -34,15 +34,15 @@ namespace demo
 		if (!context.params->debugOptions.enableAO)
 			return;
 
-		// [2] Pipeline opaque check (one-shot warning).
-		if (m_renderer->getAOTracePipelineOpaque() == 0 || m_renderer->getAODenoisePipelineOpaque() == 0)
+		const PipelineHandle aoTracePipeline = m_renderer->getAOTracePipelineHandle();
+		const PipelineHandle aoDenoisePipeline = m_renderer->getAODenoisePipelineHandle();
+		if (aoTracePipeline.isNull() || aoDenoisePipeline.isNull())
 		{
 			static bool s_loggedPipeline = false;
 			if (!s_loggedPipeline)
 			{
-				LOGW("GPUDrivenAOPass skipped: AO pipeline handle not ready (trace=%llu denoise=%llu)",
-				     static_cast<unsigned long long>(m_renderer->getAOTracePipelineOpaque()),
-				     static_cast<unsigned long long>(m_renderer->getAODenoisePipelineOpaque()));
+				LOGW("GPUDrivenAOPass skipped: AO pipeline handle not ready (trace=%d denoise=%d)",
+				     aoTracePipeline.isNull() ? 0 : 1, aoDenoisePipeline.isNull() ? 0 : 1);
 				s_loggedPipeline = true;
 			}
 			return;
@@ -64,30 +64,16 @@ namespace demo
 			return;
 		}
 
-		// [4] Pipeline handle check (one-shot warning).
-		const PipelineHandle aoTracePipeline = m_renderer->getAOTracePipelineHandle();
-		const PipelineHandle aoDenoisePipeline = m_renderer->getAODenoisePipelineHandle();
-		if (aoTracePipeline.isNull() || aoDenoisePipeline.isNull())
-		{
-			static bool s_loggedHandle = false;
-			if (!s_loggedHandle)
-			{
-				LOGW("GPUDrivenAOPass skipped: pipeline handle null (trace=%d denoise=%d)",
-				     aoTracePipeline.isNull() ? 0 : 1, aoDenoisePipeline.isNull() ? 0 : 1);
-				s_loggedHandle = true;
-			}
-			return;
-		}
-
-		// [5] Image opaque check (one-shot warning).
-		if (m_renderer->getAORawImageOpaque() == 0 || m_renderer->getAODenoisedImageOpaque() == 0)
+		// [4] Image handle check (one-shot warning).
+		const rhi::TextureHandle aoRawImage = m_renderer->getAORawImageHandle();
+		const rhi::TextureHandle aoDenoisedImage = m_renderer->getAODenoisedImageHandle();
+		if (aoRawImage.isNull() || aoDenoisedImage.isNull())
 		{
 			static bool s_loggedImage = false;
 			if (!s_loggedImage)
 			{
-				LOGW("GPUDrivenAOPass skipped: AO image null (raw=%llu denoised=%llu)",
-				     static_cast<unsigned long long>(m_renderer->getAORawImageOpaque()),
-				     static_cast<unsigned long long>(m_renderer->getAODenoisedImageOpaque()));
+				LOGW("GPUDrivenAOPass skipped: AO image null (raw=%d denoised=%d)",
+				     aoRawImage.isNull() ? 0 : 1, aoDenoisedImage.isNull() ? 0 : 1);
 				s_loggedImage = true;
 			}
 			return;
@@ -110,7 +96,7 @@ namespace demo
 		rhi::ComputeEncoder* trace = context.commandBuffer->beginComputePass();
 		trace->setPipeline(aoTracePipeline);
 		trace->setArgumentTable(0, aoTable);
-		trace->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+		trace->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 		trace->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		context.commandBuffer->endEncoding();
 
@@ -123,7 +109,7 @@ namespace demo
 		rhi::ComputeEncoder* denoise = context.commandBuffer->beginComputePass();
 		denoise->setPipeline(aoDenoisePipeline);
 		denoise->setArgumentTable(0, aoDenoiseTable);
-		denoise->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+		denoise->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 		denoise->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		context.commandBuffer->endEncoding();
 		// Local output barrier: AO denoise writes a renderer-private texture sampled by

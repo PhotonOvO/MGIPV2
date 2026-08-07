@@ -4561,11 +4561,20 @@ def run_case(
             capture_options,
             False,
         )
-        injection_result = int(injection.result)
+        injection_details = injection.result
+        if hasattr(injection_details, "code") and hasattr(injection_details, "OK"):
+            injection_result = int(injection_details.code)
+            injection_succeeded = bool(injection_details.OK())
+            injection_message = str(injection_details.Message())
+        else:
+            injection_result = int(injection_details)
+            injection_succeeded = injection_result == 0
+            injection_message = ""
         ident = int(injection.ident)
         case["renderdoc_injection"] = {
             "backend": "renderdoc.InjectIntoProcess",
             "result": injection_result,
+            "message": injection_message,
             "ident": ident,
             "target_pid": target_process_identity.pid,
             "target_identity": target_process_identity.identity,
@@ -4581,10 +4590,10 @@ def run_case(
                 else None
             ),
         }
-        if injection_result != 0 or ident <= 0:
+        if not injection_succeeded or ident <= 0:
             raise SmokeFailure(
                 "RenderDoc InjectIntoProcess failed or returned no exact target ident: "
-                f"result={injection_result}, ident={ident}"
+                f"result={injection_result}, ident={ident}, message={injection_message}"
             )
         resume_status = int(
             _NTDLL.NtResumeProcess(wintypes.HANDLE(int(getattr(launcher, "_handle", 0))))

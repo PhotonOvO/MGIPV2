@@ -7,12 +7,15 @@
 
 namespace demo::rhi::vulkan {
 
+class VulkanQueueSyncRegistry;
+class VulkanResourceTable;
+
 class VulkanSwapchain final : public demo::rhi::Swapchain
 {
 public:
   VulkanSwapchain() = default;
 
-  void init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync);
+  void init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, VulkanQueueSyncRegistry* syncRegistry, VulkanResourceTable* resourceTable, bool vSync);
   void deinit() override;
   void setVSync(bool vSync) override;
   void setFullscreen(bool enabled, void* platformHandle) override { set_fullscreen(enabled, platformHandle); }
@@ -27,6 +30,7 @@ public:
   AcquireResult acquireNextImage() override;
   PresentResult present() override;
   TextureHandle currentTexture() const override;
+  TextureViewHandle textureView(uint32_t imageIndex) const override;
   Extent2D      getExtent() const override;
   uint32_t      getMaxFramesInFlight() const override;
   uint32_t      getRequestedImageCount() const { return m_requestedImageCount; }
@@ -45,11 +49,14 @@ private:
     VkImageView   imageView{VK_NULL_HANDLE};
     VkSemaphore   renderFinishedSemaphore{VK_NULL_HANDLE};
     TextureHandle texture{};
+    TextureViewHandle view{};
+    QueueSyncHandle renderFinishedSync{};
   };
 
   struct FrameResource
   {
     VkSemaphore imageAvailableSemaphore{VK_NULL_HANDLE};
+    QueueSyncHandle imageAvailableSync{};
   };
 
   Extent2D createResources(bool vSync);
@@ -64,7 +71,6 @@ private:
   VkDevice         m_device{VK_NULL_HANDLE};
   VkQueue          m_queue{VK_NULL_HANDLE};
   VkSurfaceKHR     m_surface{VK_NULL_HANDLE};
-  VkCommandPool    m_cmdPool{VK_NULL_HANDLE};
   VkSwapchainKHR   m_swapchain{VK_NULL_HANDLE};
   VkFormat         m_imageFormat{VK_FORMAT_UNDEFINED};
 
@@ -80,6 +86,8 @@ private:
   bool     m_vSync{true};
   bool     m_needsRebuild{false};
   VkPresentModeKHR m_presentMode{VK_PRESENT_MODE_FIFO_KHR};
+  VulkanQueueSyncRegistry* m_syncRegistry{nullptr};
+  VulkanResourceTable* m_resourceTable{nullptr};
   bool     m_fullscreen{false};
   bool     m_fullscreenExclusiveAcquired{false};
   void*    m_platform_handle{nullptr};

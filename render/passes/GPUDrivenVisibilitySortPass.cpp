@@ -57,7 +57,7 @@ namespace demo
 				rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();
 				enc->setPipeline(sort.pipelineHandle);
 				enc->setArgumentTable(0, sort.argumentTable);
-				enc->setRootConstants(kPrimaryRootConstantsSlot, &pushConstants, sizeof(pushConstants));
+				enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&pushConstants, 1}));
 				enc->dispatch(rhi::DispatchDesc{(sort.paddedElementCount + 63u) / 64u, 1u, 1u});
 				context.commandBuffer->endEncoding();
 				// Same-pass barrier: each bitonic step reads the key/value data written

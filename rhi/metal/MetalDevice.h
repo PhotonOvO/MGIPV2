@@ -15,7 +15,7 @@ public:
   void init(const DeviceCreateInfo& createInfo) override;
   void deinit() override;
 
-  uint32_t                  getApiVersion() const override;
+  BackendInfo               getBackendInfo() const override;
   const char*               getDeviceName() const override;
   const PhysicalDeviceInfo& getPhysicalDeviceInfo() const override;
   const DeviceFeatureInfo&  getEnabledFeatureInfo() const override;
@@ -23,9 +23,9 @@ public:
   bool                      supports(CapabilityTier tier) const override;
   const MemoryProperties&   getPhysicalMemoryProperties() const override;
 
-  QueueInfo getGraphicsQueue() const override;
-  QueueInfo getComputeQueue() const override;
-  QueueInfo getTransferQueue() const override;
+  Queue* getQueue(QueueClass queueClass) override;
+  std::unique_ptr<CommandAllocator> createCommandAllocator(QueueClass queueClass) override;
+
 
   void waitIdle() override;
 

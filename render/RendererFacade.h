@@ -14,7 +14,10 @@ namespace demo
 	class RendererFacade
 	{
 	public:
-		RendererFacade() = default;
+		explicit RendererFacade(rhi::BackendType backend = rhi::defaultBackend())
+			: m_gpuDrivenRenderer(backend)
+		{
+		}
 
 		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const;
 		void init(void* window, rhi::Surface& surface, bool vSync);
@@ -62,6 +65,8 @@ namespace demo
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
+		[[nodiscard]] rhi::RHIHotPathCounters getRhiHotPathCounters() const noexcept;
+		void resetRhiHotPathCounters() noexcept;
 		[[nodiscard]] shaderio::ShadowUniforms* getShadowUniformsData();
 		[[nodiscard]] CSMShadowResources& getCSMShadowResources();
 		[[nodiscard]] RendererBackend getBackend() const { return RendererBackend::gpuDriven; }

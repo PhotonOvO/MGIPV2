@@ -3,13 +3,9 @@
 #include "RHIHandles.h"
 
 #include <cstdint>
+#include <span>
 
 namespace demo::rhi {
-
-enum class QueueType : uint8_t
-{
-  graphics = 0,
-};
 
 enum class ShaderStage : uint32_t
 {
@@ -58,72 +54,9 @@ enum class ResourceState : uint8_t
   ShaderWrite,
   TransferSrc,
   TransferDst,
+  IndirectArgument,
   Present,
-
-  undefined       = Undefined,
-  general         = General,
-  colorAttachment = ColorAttachment,
-  depthAttachment = DepthStencilAttachment,
-  depthReadOnly   = DepthStencilReadOnly,
-  shaderRead      = ShaderRead,
-  shaderWrite     = ShaderWrite,
-  transferSrc     = TransferSrc,
-  transferDst     = TransferDst,
-  present         = Present,
 };
-
-enum class BarrierType : uint8_t
-{
-  Memory = 0,
-  Execution,
-  LayoutTransition,
-
-  memory           = Memory,
-  execution        = Execution,
-  layoutTransition = LayoutTransition,
-};
-
-enum class PipelineStage : uint32_t
-{
-  None           = 0,
-  TopOfPipe      = 1u << 0u,
-  VertexShader   = 1u << 1u,
-  FragmentShader = 1u << 2u,
-  Compute        = 1u << 3u,
-  Transfer       = 1u << 4u,
-  BottomOfPipe   = 1u << 5u,
-  DrawIndirect   = 1u << 6u,
-  Host           = 1u << 7u,
-  All            = TopOfPipe | VertexShader | FragmentShader | Compute | Transfer | BottomOfPipe | DrawIndirect | Host,
-
-  none           = None,
-  topOfPipe      = TopOfPipe,
-  vertexShader   = VertexShader,
-  fragmentShader = FragmentShader,
-  compute        = Compute,
-  transfer       = Transfer,
-  bottomOfPipe   = BottomOfPipe,
-  drawIndirect   = DrawIndirect,
-  host           = Host,
-  all            = All,
-};
-
-constexpr PipelineStage operator|(PipelineStage lhs, PipelineStage rhs)
-{
-  return static_cast<PipelineStage>(static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
-}
-
-constexpr PipelineStage operator|=(PipelineStage& lhs, PipelineStage rhs)
-{
-  lhs = lhs | rhs;
-  return lhs;
-}
-
-constexpr bool any(PipelineStage stages)
-{
-  return static_cast<uint32_t>(stages) != 0;
-}
-
 enum class TextureAspect : uint8_t
 {
   color = 0,
@@ -160,37 +93,34 @@ struct ComponentMapping
 
 enum class TextureFormat : uint8_t
 {
-  undefined   = 0,
-  rgba8Unorm  = 1,
-  rgba8Srgb   = 13,
-  bgra8Unorm  = 2,
-  rgba16Sfloat = 3,
-  d16Unorm    = 4,
-  d32Sfloat   = 5,
-  d24UnormS8  = 6,
-  d32SfloatS8 = 7,
-  rg16Sfloat  = 8,
-  r32Sfloat   = 9,
-	r16Sfloat       = 10,
-	rgba8Snorm      = 11,  // Flax DDGI ProbesData (SNORM-packed probe state)
-	r11g11b10Ufloat = 12,  // Flax DDGI irradiance / atlas lighting (HDR packed)
-	// Block-compressed formats for KTX2 asset pipeline (D-01/D-03)
-  // Enum values mirror the real VkFormat numeric values (Vulkan SDK 1.4.x).
-  bc6hUfloatBlock = 143,   // VK_FORMAT_BC6H_UFLOAT_BLOCK — HDR environment maps (unsigned)
-  bc6hSfloatBlock = 144,   // VK_FORMAT_BC6H_SFLOAT_BLOCK — HDR environment maps (signed)
-  bc7UnormBlock   = 145,   // VK_FORMAT_BC7_UNORM_BLOCK   — normal/metallic/roughness
-  bc7SrgbBlock    = 146,   // VK_FORMAT_BC7_SRGB_BLOCK    — albedo/emissive sRGB
+  undefined = 0,
+  rgba8Unorm,
+  rgba8Srgb,
+  bgra8Unorm,
+  rgba16Sfloat,
+  d16Unorm,
+  d32Sfloat,
+  d24UnormS8,
+  d32SfloatS8,
+  rg16Sfloat,
+  r32Sfloat,
+  r16Sfloat,
+  rgba8Snorm,
+  r11g11b10Ufloat,
+  bc6hUfloatBlock,
+  bc6hSfloatBlock,
+  bc7UnormBlock,
+  bc7SrgbBlock,
 };
-
 // Feature flags for format capability queries (IFACE-01).
-// Values mirror the corresponding VkFormatFeatureFlagBits for easy mapping.
+// Values are backend-neutral semantic capability bits.
 enum class FormatFeatureFlag : uint32_t
 {
   none                    = 0,
-  sampledImage            = 1u << 0u,  // VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-  storageImage            = 1u << 1u,  // VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
-  colorAttachment         = 1u << 2u,  // VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-  depthStencilAttachment  = 1u << 3u,  // VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+  sampledImage            = 1u << 0u,
+  storageImage            = 1u << 1u,
+  colorAttachment         = 1u << 2u,
+  depthStencilAttachment  = 1u << 3u,
 };
 
 constexpr FormatFeatureFlag operator|(FormatFeatureFlag a, FormatFeatureFlag b)
@@ -198,10 +128,8 @@ constexpr FormatFeatureFlag operator|(FormatFeatureFlag a, FormatFeatureFlag b)
   return static_cast<FormatFeatureFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
 
-// Describes a texture view to create through the RHI. Fully portable: the source image is
-// an RHI handle (adopt a native image via Device::registerExternalTexture) and the format is
-// the portable TextureFormat enum. The handle returned by createTextureView is the only thing
-// business/pass code should hold.
+// Describes a portable texture view from an RHI-owned texture handle. The returned
+// view handle is the only representation exposed to renderer and pass code.
 struct TextureViewCreateDesc
 {
   TextureHandle    image{};
@@ -364,10 +292,10 @@ struct VertexAttributeDesc
 
 struct VertexInputLayoutDesc
 {
-  const VertexBindingDesc*   bindings{nullptr};
-  uint32_t                   bindingCount{0};
-  const VertexAttributeDesc* attributes{nullptr};
-  uint32_t                   attributeCount{0};
+  std::span<const VertexBindingDesc>   bindings{};
+
+  std::span<const VertexAttributeDesc> attributes{};
+
 };
 
 struct RasterState
@@ -503,6 +431,30 @@ enum class MemoryUsage : uint8_t
   transientAttachment,
 };
 
+enum class BufferMapMode : uint8_t
+{
+  read = 0,
+  write,
+  readWrite,
+};
+
+struct BufferMapDesc
+{
+  uint64_t offset{0};
+  uint64_t size{0};  // 0 means the remainder of the buffer.
+  BufferMapMode mode{BufferMapMode::write};
+  bool invalidateBeforeRead{true};
+};
+
+struct MappedBufferRange
+{
+  void* data{nullptr};
+  uint64_t offset{0};
+  uint64_t size{0};
+  bool coherent{false};
+  bool persistent{false};
+};
+
 enum class BufferUsageFlags : uint32_t
 {
   none                = 0,
@@ -614,7 +566,7 @@ struct RenderTargetDesc
 {
   TextureHandle     texture{};
   TextureViewHandle view{};  // Texture view for rendering
-  ResourceState     state{ResourceState::general};
+  ResourceState     state{ResourceState::General};
   LoadOp            loadOp{LoadOp::load};
   StoreOp           storeOp{StoreOp::store};
   ClearColorValue   clearColor{};
@@ -624,7 +576,7 @@ struct DepthTargetDesc
 {
   TextureHandle          texture{};
   TextureViewHandle      view{};  // Texture view for rendering
-  ResourceState          state{ResourceState::general};
+  ResourceState          state{ResourceState::General};
   LoadOp                 loadOp{LoadOp::load};
   StoreOp                storeOp{StoreOp::store};
   ClearDepthStencilValue clearValue{};
@@ -642,12 +594,12 @@ struct InputAttachmentDesc
 struct RenderPassDesc
 {
   Rect2D                  renderArea{};
-  const RenderTargetDesc* colorTargets{nullptr};
-  uint32_t                colorTargetCount{0};
+  std::span<const RenderTargetDesc> colorTargets{};
+
   const DepthTargetDesc*  depthTarget{nullptr};
   // --- reserved: tile-resident deferred (see InputAttachmentDesc) ---
-  const InputAttachmentDesc* inputAttachments{nullptr};
-  uint32_t                   inputAttachmentCount{0};
+  std::span<const InputAttachmentDesc> inputAttachments{};
+
   bool                       enableLocalRead{false};
 };
 

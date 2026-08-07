@@ -478,7 +478,7 @@ float3 sampleFlaxDDGIIrradianceCascade(
 
         // Load probe data
         uint2 texelCoord = getProbeTexelCoords(ddgi, cascadeIndex, probeIndex);
-        float4 probeData = probesData.Load(int3(texelCoord, 0));
+        float4 probeData = combinedTextureLoad(probesData, int3(texelCoord, 0));
         uint state = decodeProbeState(probeData);
 
         float2 irrUV = getProbeUV(ddgi, cascadeIndex, probeIndex, surfaceNormalOct,

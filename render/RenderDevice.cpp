@@ -1,13 +1,9 @@
 #include "RenderDevice.h"
 #include "../rhi/RHIFactory.h"
-#include "../rhi/vulkan/VulkanSwapchain.h"
-#include "../rhi/vulkan/VulkanDevice.h"
-#include "../rhi/vulkan/VulkanFrameContext.h"
-#include "FrameSubmission.h"
-#include "RHIFormatBridge.h"
 #include "ClipSpaceConvention.h"
 #include "ImguiAxis.h"
 #include "BatchUploadContext.h"
+#include "EmbeddedShaderLibrary.h"
 #include "CSMShadowResources.h"
 #include "MipmapGenerator.h"
 #include "../common/ProfilerMarkers.h"
@@ -16,9 +12,25 @@
 #include "../scene/SceneAssetView.h"
 #include "../scene/SceneUploadPlanner.h"
 
+#ifdef USE_SLANG
+#include "_autogen/shader.comp.slang.h"
+#include "_autogen/shader.debug.slang.h"
+#include "_autogen/shader.depth_prepass.slang.h"
+#include "_autogen/shader.forward.slang.h"
+#include "_autogen/shader.gbuffer.slang.h"
+#include "_autogen/shader.gpu_culling.slang.h"
+#include "_autogen/shader.rast.slang.h"
+#include "_autogen/shader.shadow.slang.h"
+#include "_autogen/shader.shadow_culling.slang.h"
+#else
+#include "_autogen/shader.comp.glsl.h"
+#include "_autogen/shader.frag.glsl.h"
+#include "_autogen/shader.vert.glsl.h"
+#endif
+
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <numeric>
@@ -30,6 +42,32 @@ namespace demo
 {
 	namespace
 	{
+		[[nodiscard]] constexpr clipspace::BackendConvention toClipSpaceBackend(rhi::BackendType backend)
+		{
+			switch (backend)
+			{
+			case rhi::BackendType::d3d12:
+				return clipspace::BackendConvention::d3d12;
+			case rhi::BackendType::metal:
+				return clipspace::BackendConvention::metal;
+			case rhi::BackendType::vulkan:
+			default:
+				return clipspace::BackendConvention::vulkan;
+			}
+		}
+
+		const auto s_vertices = std::to_array<shaderio::Vertex>({
+			{{0.0F, -0.5F, 0.5F}, {1.0F, 0.0F, 0.0F}, {0.5F, 0.5F}},
+			{{-0.5F, 0.5F, 0.5F}, {0.0F, 0.0F, 1.0F}, {0.5F, 0.5F}},
+			{{0.5F, 0.5F, 0.5F}, {0.0F, 1.0F, 0.0F}, {0.5F, 0.5F}},
+			{{0.1F, -0.4F, 0.75F}, {0.3F, 0.3F, 0.3F}, {0.5F, 1.0F}},
+			{{-0.4F, 0.6F, 0.25F}, {1.0F, 1.0F, 1.0F}, {1.0F, 0.0F}},
+			{{0.6F, 0.6F, 0.75F}, {0.7F, 0.7F, 0.7F}, {0.0F, 0.0F}},
+		});
+
+		const auto s_points = std::to_array<glm::vec2>(
+			{{0.05F, 0.0F}, {-0.05F, 0.0F}, {0.0F, -0.05F}, {0.0F, 0.05F}});
+
 		constexpr uint32_t kPerFrameTransientAllocatorSize = 4u << 20;
 		constexpr uint32_t kLightPassTextureCount = kPackedGBufferTargetCount + 18u;
 		constexpr uint32_t kLightPassDepthTextureIndex = kPackedGBufferTargetCount;
@@ -521,14 +559,6 @@ namespace demo
 		return extent.width > 0 && extent.height > 0;
 	}
 
-	[[nodiscard]] uint64_t resolveNativeImage(const rhi::Device& device, rhi::TextureHandle handle)
-	{
-		if (handle.isNull())
-			return 0u;
-		auto& interop = static_cast<const rhi::vulkan::VulkanDeviceInterop&>(
-		    static_cast<const rhi::vulkan::VulkanDevice&>(device));
-		return reinterpret_cast<uintptr_t>(interop.resolveTexture(handle));
-	}
 
 	[[nodiscard]] rhi::ResourceVisibility toResourceVisibility(rhi::ShaderStage stages)
 	{
@@ -560,25 +590,13 @@ namespace demo
 	                                        uint64_t offset,
 	                                        const void* data,
 	                                        uint64_t size);
-
-	static UploadBufferRecord toUploadBufferRecord(const rhi::vulkan::BufferRecord& buffer, rhi::BufferHandle handle)
-	{
-		return UploadBufferRecord{
-			.buffer = static_cast<uintptr_t>(buffer.nativeBuffer),
-			.allocation = static_cast<uintptr_t>(buffer.nativeAllocation),
-			.address = static_cast<uintptr_t>(buffer.gpuAddress),
-			.mapped = buffer.mapped,
-			.rhiHandle = handle,
-		};
-	}
-
 	static void destroyUploadBufferRecord(rhi::Device* device, UploadBufferRecord& buffer)
 	{
-		ASSERT(buffer.isNull() || !buffer.rhiHandle.isNull(),
+		ASSERT(buffer.isNull() || !buffer.buffer.isNull(),
 		       "UploadBufferRecord must be RHI-owned (native VMA records no longer exist)");
-		if (!buffer.rhiHandle.isNull() && device != nullptr)
+		if (!buffer.buffer.isNull() && device != nullptr)
 		{
-			device->destroyBuffer(buffer.rhiHandle);
+			device->destroyBuffer(buffer.buffer);
 		}
 		buffer = {};
 	}
@@ -589,11 +607,11 @@ namespace demo
 		{
 			return;
 		}
-		ASSERT(!buffer.rhiHandle.isNull(),
+		ASSERT(!buffer.buffer.isNull(),
 		       "UploadBufferRecord must be RHI-owned (native VMA records no longer exist)");
 		if (device != nullptr)
 		{
-			device->destroyBuffer(buffer.rhiHandle);
+			device->destroyBuffer(buffer.buffer);
 		}
 	}
 
@@ -702,6 +720,11 @@ namespace demo
 		VKDEMO_CPU_SCOPE("Renderer.Device.Init");
 		m_swapchainDependent.vSync = vSync;
 		m_materials = MaterialResources{};
+		if (m_backend == rhi::BackendType::d3d12)
+		{
+			// Three frame-local tables must fit D3D12's 2048-entry shader-visible sampler heap.
+			m_materials.maxTextures = 512;
+		}
 
 		// Backend-neutral device creation (RDEV-06): the Vulkan loader bootstrap, WSI /
 		// debug extension lists, feature chains and the VMA allocator all live inside
@@ -712,13 +735,8 @@ namespace demo
 #else
 		deviceCreateInfo.enableValidationLayers = false;
 #endif
-		m_device.device = rhi::createDevice();
+		m_device.device = rhi::createDevice(m_backend);
 		m_device.device->init(deviceCreateInfo);
-
-		// The device backs its texture-view/image handles with the render-layer-owned
-		// resource table.
-		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setResourceTable(&m_device.resourceTable);
-
 		const rhi::CapabilityReport capabilityReport = m_device.device->queryCapabilities();
 		ASSERT(m_device.device->supports(rhi::CapabilityTier::Core),
 		       "RenderDevice::init requires RHI Core capability tier");
@@ -753,11 +771,6 @@ namespace demo
 		m_swapchainDependent.imageStates.assign(
 			m_swapchainDependent.swapchain->getMaxFramesInFlight(),
 			rhi::ResourceState::Undefined);
-
-		static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).configureArgumentPoolCapacity(
-			m_materials.maxTextures,
-			m_swapchainDependent.swapchain->getMaxFramesInFlight());
-
 		// Create material bind group BEFORE createFrameSubmission() because it's needed for pipeline layout
 		createMaterialArgumentTable();
 		createFrameSubmission(m_swapchainDependent.swapchain->getRequestedImageCount());
@@ -777,7 +790,7 @@ namespace demo
 			.debugName = "SceneLinearSampler",
 		});
 
-		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
+		m_perFrame.uploadManager.execute([&](rhi::CommandBuffer& rhiCmd)
 		{
 			const rhi::TextureFormat depthFormat = findPortableDepthFormat(*m_device.device);
 			SceneResources::CreateInfo sceneResourcesInit{
@@ -812,6 +825,8 @@ namespace demo
 				.cascadeCount = 4,
 				.cascadeResolution = 1024,
 				.shadowFormat = rhi::TextureFormat::d32Sfloat,
+				.projectionConvention =
+					clipspace::getProjectionConvention(toClipSpaceBackend(m_backend)),
 			};
 			LOGI("RenderDevice::init: CSM resources begin");
 			m_csmShadowResources.init(*m_device.device, rhiCmd, csmInfo);
@@ -848,7 +863,7 @@ namespace demo
 		createGraphicsArgumentTables();
 		prebuildRequiredPipelineVariants();
 
-		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
+		m_perFrame.uploadManager.execute([&](rhi::CommandBuffer& rhiCmd)
 		{
 			m_device.vertexBuffer = createBufferAndUploadData(*m_device.device,
 			                                                  m_device.rhiStagingBuffers, rhiCmd,
@@ -920,7 +935,7 @@ namespace demo
 
 	std::unique_ptr<rhi::Surface> RenderDevice::createSurface() const
 	{
-		return rhi::createSurface();
+		return rhi::createSurface(m_backend);
 	}
 
 	void RenderDevice::shutdown(rhi::Surface& surface)
@@ -953,25 +968,6 @@ namespace demo
 		m_lightResources.deinit();
 		destroyIBLResources();
 		destroyPipelines();
-		// Destroy any owned texture views still registered (adopted/external ones are left to
-		// their owners). Route through destroyTextureView so each view is both freed and removed
-		// from the registry: later per-subsystem destroyTextureView() calls then hit a generation
-		// mismatch and become safe no-ops instead of double-freeing the same VkImageView.
-		{
-			std::vector<rhi::TextureViewHandle> ownedViewHandles;
-			m_device.resourceTable.forEachTextureView(
-				[&](rhi::TextureViewHandle handle, const rhi::vulkan::TextureViewRecord& record)
-				{
-					if (record.owned && record.nativeView != 0)
-					{
-						ownedViewHandles.push_back(handle);
-					}
-				});
-			for (const rhi::TextureViewHandle handle : ownedViewHandles)
-			{
-				m_device.device->destroyTextureView(handle);
-			}
-		}
 		// Per-frame argument tables already destroyed by destroyArgumentTablesAndLayouts() above
 		// Just cleanup the transient allocators
 		for (auto& frameUserData : m_perFrame.frameUserData)
@@ -1047,18 +1043,9 @@ namespace demo
 			// destruction; VulkanDevice::deinit drains them before destroying its allocator.
 			m_device.device->waitIdle();
 		}
-		// Keep the frame context alive while every RHI destroy call above computes its
-		// retirement point. waitIdle() has now drained all pending native retirements,
-		// so detach the backend's non-owning pointer before releasing the context.
-		if (m_device.device)
-		{
-			static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device).setFrameContext(nullptr);
-		}
-		if (m_perFrame.frameContext)
-		{
-			m_perFrame.frameContext->deinit();
-			m_perFrame.frameContext.reset();
-		}
+		m_perFrame.uploadManager.shutdown();
+		m_perFrame.frameScheduler.shutdown();
+		m_perFrame.activeCommandBuffer = nullptr;
 		surface.deinit();
 		if (m_device.device)
 		{
@@ -1295,20 +1282,8 @@ namespace demo
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
 		}
-		m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex],
-		                                     static_cast<uint32_t>(writes.size()),
-		                                     writes.data());
+		m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex], writes);
 	}
-
-	uint64_t RenderDevice::getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
-	{
-		if (frameIndex >= m_perFrame.frameUserData.size())
-		{
-			return 0;
-		}
-		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].shadowCullingIndirectBuffer);
-	}
-
 	uint32_t RenderDevice::getShadowCullingMeshCapacity(uint32_t frameIndex) const
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size())
@@ -1324,63 +1299,15 @@ namespace demo
 		{
 			return {};
 		}
-		// Swapchain::currentTexture() is a swapchain-local synthetic handle that is NOT in
-		// the device resource table the command buffer resolves against. Mirror the current
-		// backbuffer's native image into that table instead, caching one handle per image
-		// index and re-registering only when the native image changes (swapchain rebuild).
-		const uint32_t idx = m_swapchainDependent.currentImageIndex;
-		const uint64_t native = reinterpret_cast<uintptr_t>(
-		    static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain).nativeImage(idx));
-		if (native == 0)
-		{
-			return {};
-		}
-		auto& table = const_cast<rhi::vulkan::VulkanResourceTable&>(m_device.resourceTable);
-		if (idx >= m_swapchainTextureHandles.size())
-		{
-			m_swapchainTextureHandles.resize(idx + 1);
-			m_swapchainTextureNatives.resize(idx + 1, 0);
-		}
-		if (m_swapchainTextureNatives[idx] != native)
-		{
-			if (!m_swapchainTextureHandles[idx].isNull())
-			{
-				table.removeTexture(m_swapchainTextureHandles[idx]);
-			}
-			m_swapchainTextureHandles[idx] = table.registerTexture(native, 0, /*owned=*/false);
-			m_swapchainTextureNatives[idx] = native;
-		}
-		return m_swapchainTextureHandles[idx];
+		return m_swapchainDependent.swapchain->currentTexture();
 	}
 
-	// Lazily registers (or re-registers on native-change) the VkImageView for the given
-	// swapchain image index as an external TextureViewHandle. Cleared by rebuildSwapchainDependentResources
-	// on swapchain rebuild to prevent stale view handles (IFACE-03 / T-01-02).
 	rhi::TextureViewHandle RenderDevice::getOrRegisterSwapchainViewHandle(uint32_t idx) const
 	{
-		const uint64_t native = reinterpret_cast<uintptr_t>(
-		    static_cast<rhi::vulkan::VulkanSwapchain&>(*m_swapchainDependent.swapchain).nativeImageView(idx));
-		if (native == 0)
-		{
-			return {};
-		}
-		if (idx >= m_swapchainViewHandles.size())
-		{
-			m_swapchainViewHandles.resize(idx + 1);
-			m_swapchainViewNatives.resize(idx + 1, 0);
-		}
-		if (m_swapchainViewNatives[idx] != native)
-		{
-			if (!m_swapchainViewHandles[idx].isNull())
-			{
-				m_device.device->destroyTextureView(m_swapchainViewHandles[idx]);
-			}
-			m_swapchainViewHandles[idx] = m_device.device->registerExternalTextureView(native);
-			m_swapchainViewNatives[idx] = native;
-		}
-		return m_swapchainViewHandles[idx];
+		return m_swapchainDependent.swapchain != nullptr
+			? m_swapchainDependent.swapchain->textureView(idx)
+			: rhi::TextureViewHandle{};
 	}
-
 	rhi::TextureViewHandle RenderDevice::getOutputTextureView() const
 	{
 		return m_swapchainDependent.sceneResources.getOutputTextureView();
@@ -1473,7 +1400,7 @@ namespace demo
 			if (!prepareFrameResources())
 				return false;
 
-			const uint32_t preparedFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+			const uint32_t preparedFrameIndex = m_perFrame.frameScheduler.currentFrameIndex();
 			ASSERT(preparedFrameIndex < m_perFrame.frameUserData.size(),
 			       "Prepared frame index must map to frame user data");
 			if (onFrameSlotReady)
@@ -1481,7 +1408,7 @@ namespace demo
 				demo::profiling::ScopedCpuRange frameSlotReadyRange(
 					"RendererPreRecord.FrameSlotReadyCallback");
 				onFrameSlotReady(preparedFrameIndex);
-				ASSERT(m_perFrame.frameContext->getCurrentFrameIndex() == preparedFrameIndex,
+				ASSERT(m_perFrame.frameScheduler.currentFrameIndex() == preparedFrameIndex,
 				       "Frame-slot callback must not advance the frame ring");
 			}
 
@@ -1538,15 +1465,12 @@ namespace demo
 			swapchainHandle,
 			viewHandle,
 			m_swapchainDependent.windowSize,
-			m_perFrame.frameContext->getCurrentFrameIndex());
+			m_perFrame.frameScheduler.currentFrameIndex());
 	}
 	void RenderDevice::createFrameSubmission(uint32_t numFrames)
 	{
-		// Frame context creation/wiring is backend-internal (RDEV-06): native device,
-		// queue family, swapchain hookup and resource-table injection happen inside
-		// VulkanDevice::createFrameContext.
-		m_perFrame.frameContext =
-			m_device.device->createFrameContext(m_swapchainDependent.swapchain.get(), numFrames);
+		m_perFrame.frameScheduler.init(*m_device.device, numFrames);
+		m_perFrame.uploadManager.init(*m_device.device, numFrames);
 
 		m_perFrame.frameUserData.resize(numFrames);
 		for (auto& frameUserData : m_perFrame.frameUserData)
@@ -1595,25 +1519,17 @@ namespace demo
 			rebuildSwapchainDependentResources();
 		}
 
-		ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
-
-		// Wait for the frame slot we are about to reuse. beginFrame()/submitFrame()
-		// operate on the current slot, and endFrame() advances after submission.
-		// Keeping the order as wait(current) -> begin(current) -> submit(current) ->
-		// advance(next) preserves actual CPU/GPU overlap across the frame ring.
-		{
-			demo::profiling::ScopedCpuRange waitFrameRange("PrepareFrameResources.WaitForFrameCompletion");
-			m_perFrame.frameContext->waitForFrameCompletion();
-			static_cast<rhi::vulkan::VulkanDevice&>(*m_device.device)
-				.processRetirements(m_perFrame.frameContext->getCurrentFrameValue());
-		}
+		ASSERT(m_perFrame.frameScheduler.frameCount() != 0,
+		       "Per-frame FrameScheduler must be initialized");
 
 		{
-			demo::profiling::ScopedCpuRange beginFrameRange("PrepareFrameResources.BeginFrame");
-			m_perFrame.frameContext->beginFrame();
+			demo::profiling::ScopedCpuRange beginFrameRange(
+				"PrepareFrameResources.BeginFrame");
+			m_perFrame.activeCommandBuffer =
+				&m_perFrame.frameScheduler.beginFrame();
 		}
 
-		const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+		const uint32_t currentFrameIndex = m_perFrame.frameScheduler.currentFrameIndex();
 		ASSERT(currentFrameIndex < m_perFrame.frameUserData.size(), "Current frame index must map to frame user data");
 		{
 			demo::profiling::ScopedCpuRange syncMaterialRange("PrepareFrameResources.SyncMaterialArgumentTable");
@@ -1648,28 +1564,37 @@ namespace demo
 	bool RenderDevice::acquireSwapchainImageForPresent()
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.AcquireSwapchainImage");
-		ASSERT(m_swapchainDependent.swapchain != nullptr, "Swapchain must exist before late acquire");
+		ASSERT(m_swapchainDependent.swapchain != nullptr,
+		       "Swapchain must exist before late acquire");
 
 		m_swapchainDependent.hasAcquiredImage = false;
-		if (!acquireSwapchainImage(*m_swapchainDependent.swapchain, m_swapchainDependent.currentImageIndex))
+		m_swapchainDependent.acquireWaitPoint = {};
+		m_swapchainDependent.renderCompleteSignal = {};
+
+		const rhi::AcquireResult acquireResult =
+			m_swapchainDependent.swapchain->acquireNextImage();
+		if (acquireResult.status == rhi::AcquireResult::Status::outOfDate
+			|| acquireResult.status == rhi::AcquireResult::Status::notReady)
 		{
 			if (m_swapchainDependent.swapchain->needsRebuild())
-			{
 				m_swapchainDependent.swapchain->requestRebuild();
-			}
 			return false;
 		}
 
-		if (m_swapchainDependent.currentImageIndex >= m_swapchainDependent.imageStates.size())
+		m_swapchainDependent.currentImageIndex = acquireResult.imageIndex;
+		m_swapchainDependent.acquireWaitPoint = acquireResult.waitPoint;
+		m_swapchainDependent.renderCompleteSignal = acquireResult.signalPoint;
+		if (m_swapchainDependent.currentImageIndex
+			>= m_swapchainDependent.imageStates.size())
 		{
-			m_swapchainDependent.imageStates.resize(m_swapchainDependent.currentImageIndex + 1u,
-			                                        rhi::ResourceState::Undefined);
+			m_swapchainDependent.imageStates.resize(
+				m_swapchainDependent.currentImageIndex + 1u,
+				rhi::ResourceState::Undefined);
 		}
 
 		m_swapchainDependent.hasAcquiredImage = true;
 		return true;
 	}
-
 	void RenderDevice::createIBLResources(rhi::CommandBuffer& cmd)
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.CreateIBLResources");
@@ -1770,19 +1695,20 @@ namespace demo
 
 	void RenderDevice::waitForAllFrameSlots()
 	{
-		if (m_perFrame.frameContext == nullptr)
+		if (m_perFrame.frameScheduler.frameCount() == 0)
 		{
 			return;
 		}
 
-		const uint32_t frameCount = m_perFrame.frameContext->getFrameCount();
+		const uint32_t frameCount = m_perFrame.frameScheduler.frameCount();
 		for (uint32_t i = 0; i < frameCount; ++i)
 		{
-			m_perFrame.frameContext->waitForFrame(i);
+			m_perFrame.frameScheduler.waitForFrame(i);
 		}
 	}
 
 	static void recordGPUCullingDrawCountReset(rhi::CommandBuffer& cmdBuffer,
+	                                           rhi::BufferHandle statsBuffer,
 	                                           rhi::BufferHandle drawCountBuffer)
 	{
 		if (drawCountBuffer.isNull())
@@ -1799,6 +1725,10 @@ namespace demo
 
 		rhi::ComputeEncoder* clear = cmdBuffer.beginComputePass();
 		clear->fillBuffer(drawCountBuffer, 0, sizeof(shaderio::GPUCullDrawCounts), 0u);
+		if (!statsBuffer.isNull())
+		{
+			clear->fillBuffer(statsBuffer, 0, sizeof(shaderio::GPUCullStats), 0u);
+		}
 		cmdBuffer.endEncoding();
 
 		// Culling atomically accumulates into the reset counters. commandInput is also
@@ -1843,7 +1773,7 @@ namespace demo
 			.debugName = "gpuCullingObjectBuffer",
 		});
 		frameUserData.gpuCullingIndirectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
-			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity * 4u,
+			.size = static_cast<uint64_t>(getGPUCullingIndirectCommandStride()) * requiredCapacity * 4u,
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
@@ -1855,21 +1785,22 @@ namespace demo
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
 			       | rhi::BufferUsageFlags::transferDst
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
-			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "gpuCullingDrawCountBuffer",
 		});
 		frameUserData.gpuCullingStatsBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(shaderio::GPUCullStats),
-			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
-			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "gpuCullingStatsBuffer",
 		});
 		frameUserData.gpuCullingResultBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(uint32_t) * requiredCapacity,
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
-			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "gpuCullingResultBuffer",
 		});
@@ -1930,7 +1861,7 @@ namespace demo
 				? params.gpuDrivenSceneView->gpuCullSceneObjectBuffer
 				: rhi::BufferHandle{};
 		frameUserData.externalGPUCullingObjectBufferAddress =
-			useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : 0;
+			useExternalPersistentObjects ? params.gpuDrivenSceneView->gpuCullObjectBufferAddress : rhi::GpuPtr{};
 		frameUserData.useExternalGPUCullingMeshletData =
 			useExternalPersistentObjects
 			&& frameUserData.externalGPUCullingMeshletBufferRHI.isValid()
@@ -1983,8 +1914,7 @@ namespace demo
 			                       sizeof(shaderio::GPUCullObject) * objects.size());
 		}
 
-		const shaderio::GPUCullStats zeroStats{};
-		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingStatsBuffer, &zeroStats, sizeof(zeroStats));
+
 
 		const shaderio::GPUCullingUniforms uniforms = buildGPUCullingUniforms(params, objectCount);
 		writeHostVisibleBuffer(*m_device.device, frameUserData.gpuCullingUniformBuffer, &uniforms, sizeof(uniforms));
@@ -2020,10 +1950,11 @@ namespace demo
 			.debugName = "shadowCullingObjectBuffer",
 		});
 		frameUserData.shadowCullingIndirectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
-			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+			.size = static_cast<uint64_t>(getGPUCullingIndirectCommandStride()) * requiredCapacity,
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::transferDst
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
-			.memoryUsage = rhi::MemoryUsage::cpuToGpu,
+			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "shadowCullingIndirectBuffer",
 		});
@@ -2068,12 +1999,12 @@ namespace demo
 				},
 				rhi::ArgumentWrite{
 					.binding = 1, .type = rhi::ArgumentType::storageBuffer,
-					.buffer = frameUserData.shadowCullingIndirectBufferRHI
+					.buffer = frameUserData.shadowCullingIndirectBufferRHI,
+					.accessIntent = rhi::ArgumentAccessIntent::readWrite
 				},
 			}
 		};
-		m_device.device->updateArgumentTable(m_device.shadowCullingArgumentTables[frameIndex],
-		                                     static_cast<uint32_t>(writes.size()), writes.data());
+		m_device.device->updateArgumentTable(m_device.shadowCullingArgumentTables[frameIndex], writes);
 	}
 
 	void RenderDevice::updateShadowCullingDrawDataArgumentTable(uint32_t frameIndex)
@@ -2123,8 +2054,8 @@ namespace demo
 		}
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-		ASSERT(m_perFrame.frameContext != nullptr
-		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		ASSERT(m_perFrame.frameScheduler.frameCount() != 0
+		       && frameIndex == m_perFrame.frameScheduler.currentFrameIndex(),
 		       "GBuffer MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.gbufferMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gbufferMdiDrawDataBuffer);
@@ -2151,8 +2082,8 @@ namespace demo
 		}
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-		ASSERT(m_perFrame.frameContext != nullptr
-		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		ASSERT(m_perFrame.frameScheduler.frameCount() != 0
+		       && frameIndex == m_perFrame.frameScheduler.currentFrameIndex(),
 		       "MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.mdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.mdiDrawDataBuffer);
@@ -2179,8 +2110,8 @@ namespace demo
 		}
 
 		const uint32_t frameIndex = static_cast<uint32_t>(&frameUserData - m_perFrame.frameUserData.data());
-		ASSERT(m_perFrame.frameContext != nullptr
-		       && frameIndex == m_perFrame.frameContext->getCurrentFrameIndex(),
+		ASSERT(m_perFrame.frameScheduler.frameCount() != 0
+		       && frameIndex == m_perFrame.frameScheduler.currentFrameIndex(),
 		       "Depth MDI draw-data growth must target the retired current frame slot");
 
 		if (!frameUserData.depthMdiDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.depthMdiDrawDataBuffer);
@@ -2213,7 +2144,7 @@ namespace demo
 
 		if (!frameUserData.gpuDrivenPersistentIndirectStreamBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuDrivenPersistentIndirectStreamBuffer);
 		frameUserData.gpuDrivenPersistentIndirectStreamBuffer = m_device.device->createBuffer(rhi::BufferDesc{
-			.size = sizeof(shaderio::GPUCullIndirectCommand) * requiredCapacity,
+			.size = static_cast<uint64_t>(getGPUCullingIndirectCommandStride()) * requiredCapacity,
 			.usage = rhi::BufferUsageFlags::indirect | rhi::BufferUsageFlags::storage
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
@@ -2415,9 +2346,45 @@ namespace demo
 		{
 			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingObjectBuffer, objects.data(),
 			                       sizeof(shaderio::ShadowCullObject) * objectCount);
-			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingIndirectBuffer,
-			                       bootstrapCommands.data(),
-			                       sizeof(shaderio::GPUCullIndirectCommand) * objectCount);
+			const uint32_t bootstrapStride = getGPUCullingIndirectCommandStride();
+			const uint64_t bootstrapSize =
+				static_cast<uint64_t>(bootstrapStride) * objectCount;
+			std::vector<std::byte> bootstrapBytes(static_cast<size_t>(bootstrapSize));
+			for (uint32_t commandIndex = 0; commandIndex < objectCount; ++commandIndex)
+			{
+				std::byte* destination =
+					bootstrapBytes.data() + static_cast<size_t>(bootstrapStride) * commandIndex;
+				if (m_backend == rhi::BackendType::d3d12)
+				{
+					const uint32_t drawIndex = bootstrapCommands[commandIndex].firstInstance;
+					std::memcpy(destination, &drawIndex, sizeof(drawIndex));
+					destination += sizeof(drawIndex);
+				}
+				std::memcpy(destination, &bootstrapCommands[commandIndex],
+				            sizeof(shaderio::GPUCullIndirectCommand));
+			}
+			BatchUploadContext bootstrapUpload;
+			bootstrapUpload.init(*m_device.device, bootstrapSize);
+			const BatchUploadContext::Slice bootstrapSlice =
+				bootstrapUpload.allocate(bootstrapSize, 16u);
+			std::memcpy(bootstrapSlice.cpuPtr, bootstrapBytes.data(),
+			            static_cast<size_t>(bootstrapSize));
+			bootstrapUpload.recordBufferUpload(
+				bootstrapSlice, frameUserData.shadowCullingIndirectBuffer, 0u,
+				bootstrapSize);
+			const auto recordBootstrapUpload = [&](rhi::CommandBuffer& commandBuffer)
+			{
+				bootstrapUpload.executeUploads(commandBuffer);
+			};
+			if (m_backend == rhi::BackendType::d3d12)
+				m_perFrame.uploadManager.execute(recordBootstrapUpload);
+			else
+				m_perFrame.uploadManager.executeTransfer(recordBootstrapUpload);
+			if (rhi::BufferHandle staging = bootstrapUpload.releaseStagingBuffer();
+			    !staging.isNull())
+			{
+				m_device.rhiStagingBuffers.push_back(staging);
+			}
 			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingDrawDataBuffer, drawData.data(),
 			                       sizeof(shaderio::DrawUniforms) * objectCount);
 		}
@@ -2654,8 +2621,7 @@ namespace demo
 		}
 
 		std::vector<uint64_t> queryData(static_cast<size_t>(m_passGpuProfile.queryCount) * 2u, 0ull);
-		if (!m_device.device->getQueryPoolResultsWithAvailability(frame.queryPool, 0, m_passGpuProfile.queryCount,
-		                                                          queryData.data()))
+		if (!m_device.device->getQueryPoolResultsWithAvailability(frame.queryPool, 0, queryData))
 		{
 			frame.valid = false;
 			return;
@@ -2909,7 +2875,7 @@ namespace demo
 			m_device.gpuCullingArgumentTables[frameIndex] = createArgumentTable(ArgumentTableDesc{
 				.slot = ArgumentSlot::shaderSpecific,
 				.layout = cullingLayout,
-				.table = m_device.device->createArgumentTable(cullingLayout),
+				.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = cullingLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 				.primaryLogicalIndex = 0,
 				.debugName = "gpu-culling",
 			});
@@ -2941,7 +2907,7 @@ namespace demo
 			m_device.shadowCullingArgumentTables[frameIndex] = createArgumentTable(ArgumentTableDesc{
 				.slot = ArgumentSlot::shaderSpecific,
 				.layout = shadowLayout,
-				.table = m_device.device->createArgumentTable(shadowLayout),
+				.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = shadowLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 				.primaryLogicalIndex = 0,
 				.debugName = "shadow-culling",
 			});
@@ -3001,18 +2967,22 @@ namespace demo
 			.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = objectHandle
 		});
 		writes.push_back(rhi::ArgumentWrite{
-			.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingIndirectBufferRHI
+			.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingIndirectBufferRHI,
+			.accessIntent = rhi::ArgumentAccessIntent::readWrite
 		});
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = 2, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingStatsBufferRHI,
-			.size = sizeof(shaderio::GPUCullStats)
+			.size = sizeof(shaderio::GPUCullStats),
+			.accessIntent = rhi::ArgumentAccessIntent::readWrite
 		});
 		writes.push_back(rhi::ArgumentWrite{
-			.binding = 3, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingResultBufferRHI
+			.binding = 3, .type = rhi::ArgumentType::storageBuffer, .buffer = frameUserData.gpuCullingResultBufferRHI,
+			.accessIntent = rhi::ArgumentAccessIntent::readWrite
 		});
 		writes.push_back(rhi::ArgumentWrite{
 			.binding = 4, .type = rhi::ArgumentType::storageBuffer,
-			.buffer = frameUserData.gpuCullingDrawCountBufferRHI, .size = sizeof(shaderio::GPUCullDrawCounts)
+			.buffer = frameUserData.gpuCullingDrawCountBufferRHI, .size = sizeof(shaderio::GPUCullDrawCounts),
+			.accessIntent = rhi::ArgumentAccessIntent::readWrite
 		});
 		for (uint32_t i = 0; i < static_cast<uint32_t>(shaderio::LDepthPyramidMaxMips); ++i)
 		{
@@ -3021,7 +2991,6 @@ namespace demo
 				.arrayElement = i,
 				.type = rhi::ArgumentType::sampledTexture,
 				.textureView = sceneResources.getDepthPyramidMipView(std::min(i, mipCount - 1u)),
-				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			});
 		}
 		writes.push_back(rhi::ArgumentWrite{
@@ -3035,8 +3004,7 @@ namespace demo
 			.binding = 8, .type = rhi::ArgumentType::storageBuffer, .buffer = sceneObjectHandle
 		});
 
-		m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex],
-		                                     static_cast<uint32_t>(writes.size()), writes.data());
+		m_device.device->updateArgumentTable(m_device.gpuCullingArgumentTables[frameIndex], writes);
 	}
 
 	void RenderDevice::createLightResources()
@@ -3069,17 +3037,6 @@ namespace demo
 			m_swapchainDependent.swapchain->rebuild();
 			// WR-08: update authoritative format after rebuild.
 			m_swapchainDependent.swapchainImageFormat = m_swapchainDependent.swapchain->getFormat();
-			// WR-01: destroy cached view handles before clearing — prevents handle pool leak on resize/rebuild.
-			for (const rhi::TextureViewHandle& handle : m_swapchainViewHandles)
-			{
-				if (!handle.isNull())
-				{
-					m_device.device->destroyTextureView(handle);
-				}
-			}
-			// Swapchain images/views are recreated; cached view handles are now stale (IFACE-03 T-01-02).
-			m_swapchainViewHandles.clear();
-			m_swapchainViewNatives.clear();
 			const rhi::Extent2D extent = m_swapchainDependent.swapchain->getExtent();
 			m_swapchainDependent.windowSize = extent;
 			m_swapchainDependent.currentImageIndex = 0;
@@ -3099,13 +3056,13 @@ namespace demo
 		// SceneResources are referenced by every graphics pass. Before destroying and
 		// recreating them, wait for every frame slot to retire so no in-flight command
 		// buffer can still reference the old attachments.
-		const uint32_t frameCount = m_perFrame.frameContext->getFrameCount();
+		const uint32_t frameCount = m_perFrame.frameScheduler.frameCount();
 		for (uint32_t i = 0; i < frameCount; ++i)
 		{
-			m_perFrame.frameContext->waitForFrame(i);
+			m_perFrame.frameScheduler.waitForFrame(i);
 		}
 
-		m_device.device->executeImmediateUpload([&](rhi::CommandBuffer& rhiCmd)
+		m_perFrame.uploadManager.execute([&](rhi::CommandBuffer& rhiCmd)
 		{
 			m_swapchainDependent.sceneResources.update(rhiCmd, m_swapchainDependent.viewportSize);
 		});
@@ -3123,44 +3080,39 @@ namespace demo
 		// Called once after swapchain/resources rebuild
 		passExecutor.bindBuffer({
 			.handle = kPassVertexBufferHandle,
-			.backendBufferToken = m_device.resourceTable.resolveBuffer(m_device.vertexBuffer),
+			.rhiBuffer = m_device.vertexBuffer,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassGBuffer0Handle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getColorImage(0)),
+			.rhiTexture = m_swapchainDependent.sceneResources.getColorImage(0),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = textureStates.gbuffer[0],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassGBuffer1Handle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getColorImage(1)),
+			.rhiTexture = m_swapchainDependent.sceneResources.getColorImage(1),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = textureStates.gbuffer[1],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassGBuffer2Handle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getColorImage(2)),
+			.rhiTexture = m_swapchainDependent.sceneResources.getColorImage(2),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = textureStates.gbuffer[2],
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassSceneDepthHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getDepthImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getDepthImage(),
 			.aspect = sceneDepthTextureAspect(m_swapchainDependent.sceneResources.getDepthFormat()),
 			.initialState = rhi::ResourceState::Undefined,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassShadowHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getShadowMapImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getShadowMapImage(),
 			.aspect = rhi::TextureAspect::depth,
 			// After swapchain rebuild, cmdInitImageLayout initializes shadow map to GENERAL
 			.initialState = rhi::ResourceState::General,
@@ -3168,7 +3120,7 @@ namespace demo
 		});
 		passExecutor.bindTexture({
 			.handle = kPassCSMShadowHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device, m_csmShadowResources.getCascadeImage()),
+			.rhiTexture = m_csmShadowResources.getCascadeImage(),
 			.aspect = rhi::TextureAspect::depth,
 			// The CSM pass clears the cascade array at the start of each frame.
 			.initialState = rhi::ResourceState::Undefined,
@@ -3176,123 +3128,108 @@ namespace demo
 		});
 		passExecutor.bindTexture({
 			.handle = kPassDepthPyramidHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getDepthPyramidImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getDepthPyramidImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassOutputHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getOutputTextureImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getOutputTextureImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassSceneColorHdrHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getSceneColorHdrImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getSceneColorHdrImage(),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = textureStates.sceneColorHdr,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomHalfHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomHalfImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomHalfImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomQuarterHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomQuarterImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomQuarterImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomEighthHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomEighthImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomEighthImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomSixteenthHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomSixteenthImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomSixteenthImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomThirtySecondHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomThirtySecondImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomThirtySecondImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomUpsampleSixteenthHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.
-			                                                             getBloomUpsampleSixteenthImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.
+			                                                             getBloomUpsampleSixteenthImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomUpsampleEighthHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomUpsampleEighthImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomUpsampleQuarterHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomUpsampleQuarterImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassBloomOutputHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getBloomOutputImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getBloomOutputImage(),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassVelocityHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getVelocityImage()),
+			.rhiTexture = m_swapchainDependent.sceneResources.getVelocityImage(),
 			.aspect = rhi::TextureAspect::color,
 			.initialState = textureStates.velocity,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassSceneColorHistoryReadHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getSceneColorHistoryImage(1)),
+			.rhiTexture = m_swapchainDependent.sceneResources.getSceneColorHistoryImage(1),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({
 			.handle = kPassSceneColorHistoryWriteHandle,
-			.backendImageToken = resolveNativeImage(*m_device.device,
-			                                        m_swapchainDependent.sceneResources.getSceneColorHistoryImage(0)),
+			.rhiTexture = m_swapchainDependent.sceneResources.getSceneColorHistoryImage(0),
 			.aspect = rhi::TextureAspect::color,
-			.initialState = rhi::ResourceState::general,
+			.initialState = rhi::ResourceState::General,
 			.isSwapchain = false,
 		});
 	}
@@ -3300,19 +3237,14 @@ namespace demo
 	rhi::CommandBuffer& RenderDevice::beginCommandRecording()
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.BeginCommandRecording");
-		ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
-		auto* vulkanFrameContext = dynamic_cast<rhi::vulkan::VulkanFrameContext*>(m_perFrame.frameContext.get());
-		ASSERT(vulkanFrameContext != nullptr, "RenderDevice currently requires VulkanFrameContext");
-		vulkanFrameContext->setResourceTable(&m_device.resourceTable);
-		rhi::CommandBuffer* cmdBuffer = m_perFrame.frameContext->getCommandBuffer();
-		ASSERT(cmdBuffer != nullptr, "Current frame command buffer must be valid");
-		return *cmdBuffer;
+		ASSERT(m_perFrame.activeCommandBuffer != nullptr,
+		       "FrameScheduler must begin a command buffer before recording");
+		return *m_perFrame.activeCommandBuffer;
 	}
-
 	void RenderDevice::drawFrame(rhi::CommandBuffer& cmdBuffer, const RenderParams& params, PassExecutor& passExecutor)
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.DrawFrame");
-		const uint32_t currentFrameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+		const uint32_t currentFrameIndex = m_perFrame.frameScheduler.currentFrameIndex();
 		auto& frameUserData = m_perFrame.frameUserData[currentFrameIndex];
 
 		{
@@ -3350,7 +3282,8 @@ namespace demo
 			                            shaderio::LightingUniforms{m_frameLightingState.lightParams});
 			updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
 			updateGPUCullingBuffers(currentFrameIndex, params);
-			recordGPUCullingDrawCountReset(cmdBuffer, frameUserData.gpuCullingDrawCountBufferRHI);
+			recordGPUCullingDrawCountReset(cmdBuffer, frameUserData.gpuCullingStatsBufferRHI,
+			                                    frameUserData.gpuCullingDrawCountBufferRHI);
 			updateShadowCullingBuffers(currentFrameIndex, params);
 
 			// Route through pass executor to orchestrate multi-pass rendering
@@ -3359,56 +3292,49 @@ namespace demo
 			// Only bind dynamic per-frame resources here
 			passExecutor.bindBuffer({
 				.handle = kTransientAllocatorBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					frameUserData.transientAllocator.getBufferHandle()),
+				.rhiBuffer = frameUserData.transientAllocator.getBufferHandle(),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassPointLightBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					m_lightResources.getPointLightBuffer(currentFrameIndex)),
+				.rhiBuffer = m_lightResources.getPointLightBuffer(currentFrameIndex),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassSpotLightBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					m_lightResources.getSpotLightBuffer(currentFrameIndex)),
+				.rhiBuffer = m_lightResources.getSpotLightBuffer(currentFrameIndex),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassPointLightCoarseBoundsHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex)),
+				.rhiBuffer = m_lightResources.getPointCoarseBoundsBuffer(currentFrameIndex),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassSpotLightCoarseBoundsHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex)),
+				.rhiBuffer = m_lightResources.getSpotCoarseBoundsBuffer(currentFrameIndex),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassLightCoarseCullingUniformHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(
-					m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex)),
+				.rhiBuffer = m_lightResources.getCoarseCullingUniformBuffer(currentFrameIndex),
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullObjectBufferHandle,
-				.backendBufferToken = frameUserData.useExternalGPUCullingObjectBuffer
-					                      ? m_device.resourceTable.resolveBuffer(
-						                      frameUserData.externalGPUCullingObjectBufferRHI)
-					                      : m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingObjectBuffer),
+				.rhiBuffer = frameUserData.useExternalGPUCullingObjectBuffer
+					             ? frameUserData.externalGPUCullingObjectBufferRHI
+					             : frameUserData.gpuCullingObjectBuffer,
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullIndirectBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingIndirectBuffer),
+				.rhiBuffer = frameUserData.gpuCullingIndirectBuffer,
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullStatsBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingStatsBuffer),
+				.rhiBuffer = frameUserData.gpuCullingStatsBuffer,
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullUniformBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingUniformBuffer),
+				.rhiBuffer = frameUserData.gpuCullingUniformBuffer,
 			});
 			passExecutor.bindBuffer({
 				.handle = kPassGPUCullResultBufferHandle,
-				.backendBufferToken = m_device.resourceTable.resolveBuffer(frameUserData.gpuCullingResultBuffer),
+				.rhiBuffer = frameUserData.gpuCullingResultBuffer,
 			});
 			m_perPass.drawStream.clear();
 		}
@@ -3431,7 +3357,7 @@ namespace demo
 			                              glm::vec3(0.0f, 1.0f, 0.0f));
 			cameraData.projection = clipspace::makePerspectiveProjection(
 				glm::radians(45.0f), viewportWidth / viewportHeight, 0.1f, 100.0f,
-				clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+				clipspace::getProjectionConvention(toClipSpaceBackend(m_backend)));
 			cameraData.viewProjection = cameraData.projection * cameraData.view;
 			cameraData.inverseViewProjection = glm::inverse(cameraData.viewProjection);
 			cameraData.cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f);
@@ -3477,23 +3403,24 @@ namespace demo
 	void RenderDevice::endFrame(rhi::CommandBuffer& cmdBuffer)
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.EndFrame");
-		ASSERT(m_perFrame.frameContext != nullptr, "Per-frame FrameContext must be initialized");
+		ASSERT(m_perFrame.frameScheduler.frameCount() != 0,
+		       "Per-frame FrameScheduler must be initialized");
 
 		{
 			demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
-			submitFrame(*m_perFrame.frameContext, cmdBuffer);
+			(void)m_perFrame.frameScheduler.submitFrame(
+				cmdBuffer,
+				m_swapchainDependent.acquireWaitPoint,
+				m_swapchainDependent.renderCompleteSignal);
+			m_perFrame.activeCommandBuffer = nullptr;
 		}
-
-		// Frame advancement and wait moved to prepareFrameResources for CPU/GPU overlap
-		// GPU executes frame N while CPU records frame N+1
 
 		{
 			demo::profiling::ScopedCpuRange presentRange("Present");
-			presentFrame(*m_swapchainDependent.swapchain);
+			(void)m_swapchainDependent.swapchain->present();
 		}
 		m_perFrame.frameCounter++;
 	}
-
 	void RenderDevice::DebugDrawList::addLine(const glm::vec3& a, const glm::vec3& b, const glm::vec4& color)
 	{
 		vertices.push_back(shaderio::DebugLineVertex{a, color});
@@ -3782,7 +3709,7 @@ namespace demo
 	std::array<glm::vec3, 8> RenderDevice::computeOrthoFrustumCorners(const glm::mat4& inverseViewProjection) const
 	{
 		const clipspace::ProjectionConvention projectionConvention =
-			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+			clipspace::getProjectionConvention(toClipSpaceBackend(m_backend));
 		const std::array<glm::vec3, 8> clipCorners{
 			{
 				{-1.0f, -1.0f, projectionConvention.ndcNearZ},
@@ -3820,7 +3747,7 @@ namespace demo
 			camera.view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 			camera.projection = clipspace::makePerspectiveProjection(
 				glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
-				clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+				clipspace::getProjectionConvention(toClipSpaceBackend(m_backend)));
 			camera.viewProjection = camera.projection * camera.view;
 			camera.inverseViewProjection = glm::inverse(camera.viewProjection);
 			camera.unjitteredViewProjection = camera.viewProjection;
@@ -3831,7 +3758,7 @@ namespace demo
 		}
 
 		const clipspace::ProjectionConvention projectionConvention =
-			clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+			clipspace::getProjectionConvention(toClipSpaceBackend(m_backend));
 		const float nearPlane = std::abs(
 			clipspace::extractNearPlane(camera.projection, projectionConvention));
 		const float farPlane = std::abs(clipspace::extractFarPlane(camera.projection, projectionConvention));
@@ -3867,7 +3794,7 @@ namespace demo
 			camera.view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 			camera.projection = clipspace::makePerspectiveProjection(
 				glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
-				clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+				clipspace::getProjectionConvention(toClipSpaceBackend(m_backend)));
 			camera.viewProjection = camera.projection * camera.view;
 			camera.inverseViewProjection = glm::inverse(camera.viewProjection);
 			camera.unjitteredViewProjection = camera.viewProjection;
@@ -3937,11 +3864,11 @@ namespace demo
 		FrameLightingState state{};
 		const shaderio::CameraUniforms fallbackCamera{
 			.view = glm::lookAt(glm::vec3(8.0f, 2.0f, 0.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
-			.projection = []
+			.projection = [this]
 			{
 				return clipspace::makePerspectiveProjection(
 					glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f,
-					clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
+					clipspace::getProjectionConvention(toClipSpaceBackend(m_backend)));
 			}(),
 			.viewProjection = glm::mat4(1.0f),
 			.inverseViewProjection = glm::mat4(1.0f),
@@ -3981,7 +3908,7 @@ namespace demo
 			const shaderio::CameraUniforms shadowFitCamera =
 				makeUnjitteredShadowFitCamera(camera);
 			const clipspace::ProjectionConvention projectionConvention =
-				clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+				clipspace::getProjectionConvention(toClipSpaceBackend(m_backend));
 			const float cameraNear = std::abs(
 				clipspace::extractNearPlane(shadowFitCamera.projection, projectionConvention));
 			const float cameraFar =
@@ -4165,7 +4092,10 @@ namespace demo
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.PrebuildPipelines");
 		createPrebuiltGraphicsPipelineVariants();
-		createPrebuiltComputePipelineVariant();
+		if (m_backend != rhi::BackendType::d3d12)
+		{
+			createPrebuiltComputePipelineVariant();
+		}
 		createGPUCullingPipeline();
 		createShadowCullingPipeline();
 	}
@@ -4173,6 +4103,8 @@ namespace demo
 	void RenderDevice::createPrebuiltGraphicsPipelineVariants()
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.CreateGraphicsPipelines");
+		if (m_backend != rhi::BackendType::d3d12)
+		{
 #ifdef USE_SLANG
 		const char* vertEntryName = "vertexMain";
 		const char* fragEntryName = "fragmentMain";
@@ -4189,32 +4121,39 @@ namespace demo
 		const size_t fragSpirvSize = std::size(shader_frag_glsl) * sizeof(uint32_t);
 #endif
 
-		const auto bindingDescription = Vertex::getBindingDescription();
-		const auto attributeDescriptions = Vertex::getAttributeDescriptions();
+		const rhi::ShaderLibraryHandle vertLibrary = loadEmbeddedSpirvLibrary(
+			*m_device.device, vertSpirvCode, vertSpirvSize, "prebuilt-raster-vertex");
+		const rhi::ShaderLibraryHandle fragLibrary =
+			vertSpirvCode == fragSpirvCode && vertSpirvSize == fragSpirvSize
+				? vertLibrary
+				: loadEmbeddedSpirvLibrary(
+					*m_device.device, fragSpirvCode, fragSpirvSize, "prebuilt-raster-fragment");
 
 		ASSERT(!m_perFrame.frameUserData.empty(), "Per-frame resources must exist before graphics pipeline creation");
-		const rhi::vulkan::ArgumentTableRecord* materialTableRecord =
-			m_device.resourceTable.tryGetArgumentTable(m_materials.materialArgumentTable);
-		const rhi::vulkan::ArgumentTableRecord* sceneTableRecord =
-			m_device.resourceTable.tryGetArgumentTable(m_perFrame.frameUserData.front().sceneArgumentTable);
-		ASSERT(materialTableRecord != nullptr && sceneTableRecord != nullptr,
+		const rhi::ArgumentLayoutHandle materialLayout =
+            m_device.device->getArgumentTableLayout(m_materials.materialArgumentTable);
+        const rhi::ArgumentLayoutHandle sceneLayout = m_device.device->getArgumentTableLayout(
+            m_perFrame.frameUserData.front().sceneArgumentTable);
+        ASSERT(materialLayout.isValid() && sceneLayout.isValid(),
 		       "Prebuilt graphics pipelines require argument tables");
 
 		const rhi::ShaderReflectionData rasterReflection = buildRasterShaderReflection();
-		const std::vector<rhi::PipelinePushConstantRange> pushConstantRanges =
-			rhi::derivePipelinePushConstantRanges(rasterReflection);
+		const std::vector<rhi::RootBindingDesc> rootBindings =
+			rhi::derivePipelineRootBindings(rasterReflection);
 		const std::array<rhi::ArgumentLayoutHandle, 2> graphicsArgumentLayouts{
 			{
-				materialTableRecord->layout,
-				sceneTableRecord->layout,
+				materialLayout,
+				sceneLayout,
 			}
 		};
+		const rhi::PipelineBindingSchemaStorage graphicsBindingSchema{
+			graphicsArgumentLayouts, rootBindings};
 
 		const std::array<rhi::VertexBindingDesc, 1> vertexBindings{
 			{
 				rhi::VertexBindingDesc{
-					.binding = bindingDescription[0].binding,
-					.stride = bindingDescription[0].stride,
+					.binding = 0,
+					.stride = sizeof(shaderio::Vertex),
 					.inputRate = rhi::VertexInputRate::perVertex,
 				},
 			}
@@ -4222,30 +4161,28 @@ namespace demo
 		const std::array<rhi::VertexAttributeDesc, 3> vertexAttributes{
 			{
 				rhi::VertexAttributeDesc{
-					.location = attributeDescriptions[0].location,
-					.binding = attributeDescriptions[0].binding,
+					.location = shaderio::LVPosition,
+					.binding = 0,
 					.format = rhi::VertexFormat::r32g32b32Sfloat,
-					.offset = attributeDescriptions[0].offset,
+					.offset = static_cast<uint32_t>(offsetof(shaderio::Vertex, position)),
 				},
 				rhi::VertexAttributeDesc{
-					.location = attributeDescriptions[1].location,
-					.binding = attributeDescriptions[1].binding,
+					.location = shaderio::LVColor,
+					.binding = 0,
 					.format = rhi::VertexFormat::r32g32b32Sfloat,
-					.offset = attributeDescriptions[1].offset,
+					.offset = static_cast<uint32_t>(offsetof(shaderio::Vertex, color)),
 				},
 				rhi::VertexAttributeDesc{
-					.location = attributeDescriptions[2].location,
-					.binding = attributeDescriptions[2].binding,
+					.location = shaderio::LVTexCoord,
+					.binding = 0,
 					.format = rhi::VertexFormat::r32g32Sfloat,
-					.offset = attributeDescriptions[2].offset,
+					.offset = static_cast<uint32_t>(offsetof(shaderio::Vertex, texCoord)),
 				},
 			}
 		};
 		const rhi::VertexInputLayoutDesc vertexInput{
-			.bindings = vertexBindings.data(),
-			.bindingCount = static_cast<uint32_t>(vertexBindings.size()),
-			.attributes = vertexAttributes.data(),
-			.attributeCount = static_cast<uint32_t>(vertexAttributes.size()),
+			.bindings = vertexBindings,
+			.attributes = vertexAttributes,
 		};
 
 		const std::array<rhi::DynamicState, 2> dynamicStates{
@@ -4269,18 +4206,18 @@ namespace demo
 			}
 		};
 
-		std::array<rhi::PipelineShaderStageDesc, 2> shaderStages{
+		std::array<rhi::ShaderEntry, 2> shaderStages{
 			{
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::vertex,
-					.spirvCode = vertSpirvCode,
-					.spirvSize = vertSpirvSize,
+					.library = vertLibrary,
+
 					.entryPoint = vertEntryName,
 				},
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::fragment,
-					.spirvCode = fragSpirvCode,
-					.spirvSize = fragSpirvSize,
+					.library = fragLibrary,
+
 					.entryPoint = fragEntryName,
 					.specializationVariant = 1,
 				},
@@ -4291,37 +4228,29 @@ namespace demo
 		// Textured variant: useTexture = true (uint32_t = 4 bytes; Specialization constant)
 		uint32_t useTextureTrue = uint32_t{1};
 		rhi::SpecializationConstant specConstantTrue(0, 0, sizeof(uint32_t));
-		rhi::SpecializationData specDataTrue{&useTextureTrue, sizeof(uint32_t)};
+		rhi::SpecializationData specDataTrue{std::as_bytes(std::span{&useTextureTrue, 1})};
 		shaderStages[1].specializationData = specDataTrue;
-		shaderStages[1].specializationConstants = &specConstantTrue;
-		shaderStages[1].specializationConstantCount = 1;
+		shaderStages[1].specializationConstants = std::span{&specConstantTrue, 1};
 
 		const std::array<rhi::TextureFormat, 1> colorFormats{
 			{
-				toPortableTextureFormat(m_swapchainDependent.sceneResources.getColorFormat()),
+				(m_swapchainDependent.sceneResources.getColorFormat()),
 			}
 		};
 
 		rhi::GraphicsPipelineDesc graphicsDesc{
-			.shaderStages = shaderStages.data(),
-			.shaderStageCount = static_cast<uint32_t>(shaderStages.size()),
+			.shaderStages = shaderStages,
 			.vertexInput = vertexInput,
 			.rasterState = rhi::RasterState{},
 			.depthState = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
-			.blendStates = blendStates.data(),
-			.blendStateCount = static_cast<uint32_t>(blendStates.size()),
-			.dynamicStates = dynamicStates.data(),
-			.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+			.blendStates = blendStates,
+			.dynamicStates = dynamicStates,
 			.renderingInfo =
 			{
-				.colorFormats = colorFormats.data(),
-				.colorFormatCount = static_cast<uint32_t>(colorFormats.size()),
-				.depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+				.colorFormats = colorFormats,
+				.depthFormat = (m_swapchainDependent.sceneResources.getDepthFormat()),
 			},
-			.argumentLayouts = graphicsArgumentLayouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(graphicsArgumentLayouts.size()),
-			.pushConstantRanges = pushConstantRanges.data(),
-			.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size()),
+			.bindingSchema = graphicsBindingSchema.view(),
 		};
 		graphicsDesc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
 		graphicsDesc.rasterState.cullMode = rhi::CullMode::none;
@@ -4337,12 +4266,12 @@ namespace demo
 		// Non-textured variant: useTexture = false (uint32_t = 4 bytes; Specialization constant)
 		uint32_t useTextureFalse = uint32_t{0};
 		rhi::SpecializationConstant specConstantFalse(0, 0, sizeof(uint32_t));
-		rhi::SpecializationData specDataFalse{&useTextureFalse, sizeof(uint32_t)};
+		rhi::SpecializationData specDataFalse{std::as_bytes(std::span{&useTextureFalse, 1})};
 		shaderStages[1].specializationData = specDataFalse;
-		shaderStages[1].specializationConstants = &specConstantFalse;
-		shaderStages[1].specializationConstantCount = 1;
+		shaderStages[1].specializationConstants = std::span{&specConstantFalse, 1};
 		const PipelineHandle graphicsPipelineWithoutTexture = m_device.device->createGraphicsPipeline(graphicsDesc);
 		m_device.prebuiltPipelines.graphicsNonTextured = graphicsPipelineWithoutTexture;
+		}
 
 		// Create GBuffer pipeline layout with uniform buffer bindings
 		{
@@ -4366,7 +4295,7 @@ namespace demo
 			for (uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
 			{
 				PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
-				const rhi::ArgumentTableHandle cameraTable = m_device.device->createArgumentTable(cameraLayout);
+				const rhi::ArgumentTableHandle cameraTable = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = cameraLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 				fud.cameraArgumentTable = createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::shaderSpecific,
 					.layout = cameraLayout,
@@ -4396,8 +4325,7 @@ namespace demo
 						},
 					}
 				};
-				m_device.device->updateArgumentTable(cameraTable, static_cast<uint32_t>(cameraWrites.size()),
-				                                     cameraWrites.data());
+				m_device.device->updateArgumentTable(cameraTable, cameraWrites);
 			}
 
 			// Set 2: Draw uniform buffer (dynamic). One shared ArgumentLayout, per-frame table.
@@ -4410,7 +4338,7 @@ namespace demo
 			for (uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
 			{
 				PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
-				const rhi::ArgumentTableHandle drawTable = m_device.device->createArgumentTable(drawLayout);
+				const rhi::ArgumentTableHandle drawTable = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = drawLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 				fud.drawArgumentTable = createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::shaderSpecific,
 					.layout = drawLayout,
@@ -4422,7 +4350,7 @@ namespace demo
 					.binding = shaderio::LBindDrawModel, .type = rhi::ArgumentType::uniformBuffer,
 					.buffer = fud.transientBufferRHI, .offset = 0, .size = sizeof(shaderio::DrawUniforms)
 				};
-				m_device.device->updateArgumentTable(drawTable, 1, &drawWrite);
+				m_device.device->updateArgumentTable(drawTable, rhi::ArgumentWriteBatch{&drawWrite, 1});
 			}
 
 			// MDI draw-data: one shared storage-buffer ArgumentLayout for the three per-frame MDI
@@ -4439,7 +4367,7 @@ namespace demo
 				return createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::shaderSpecific,
 					.layout = mdiDrawLayout,
-					.table = m_device.device->createArgumentTable(mdiDrawLayout),
+					.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = mdiDrawLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 					.primaryLogicalIndex = shaderio::LBindDrawModelMdi,
 					.debugName = name,
 				});
@@ -4461,20 +4389,39 @@ namespace demo
 				updateShadowCullingDrawDataArgumentTable(i);
 			}
 
-			const rhi::vulkan::ArgumentTableRecord* materialLayoutRecord =
-				m_device.resourceTable.tryGetArgumentTable(m_materials.materialArgumentTable);
-			ASSERT(materialLayoutRecord != nullptr, "Material argument table must exist before graphics pipelines");
-			m_device.gbufferArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, drawLayout};
-			m_device.mdiArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, mdiDrawLayout};
-			m_device.csmShadowMdiArgumentLayouts = {materialLayoutRecord->layout, cameraLayout, mdiDrawLayout};
-			m_device.debugArgumentLayouts = {materialLayoutRecord->layout, cameraLayout};
-			m_device.fullscreenArgumentLayouts = {materialLayoutRecord->layout, cameraLayout};
+			const rhi::ArgumentLayoutHandle materialLayout =
+                m_device.device->getArgumentTableLayout(m_materials.materialArgumentTable);
+            ASSERT(materialLayout.isValid(), "Material argument table must exist before graphics pipelines");
+			m_device.gbufferArgumentLayouts = {materialLayout, cameraLayout, drawLayout};
+			m_device.mdiArgumentLayouts = {materialLayout, cameraLayout, mdiDrawLayout};
+			m_device.csmShadowMdiArgumentLayouts = {materialLayout, cameraLayout, mdiDrawLayout};
+			m_device.debugArgumentLayouts = {materialLayout, cameraLayout};
+			m_device.fullscreenArgumentLayouts = {materialLayout, cameraLayout};
 		}
+
+		const std::array<rhi::RootBindingDesc, 1> d3d12MdiDrawIndexRootBinding{
+			{
+				rhi::RootBindingDesc{
+					.slot = 0,
+					.kind = rhi::RootBindingKind::constants,
+					.visibility = rhi::ShaderStage::vertex,
+					.size = sizeof(shaderio::MdiDrawIndexPushConstants),
+					.alignment = alignof(shaderio::MdiDrawIndexPushConstants),
+					.debugName = "d3d12-mdi-draw-index",
+				},
+			}
+		};
+		const std::span<const rhi::RootBindingDesc> mdiDrawIndexRootBindings =
+			m_backend == rhi::BackendType::d3d12
+				? std::span<const rhi::RootBindingDesc>{d3d12MdiDrawIndexRootBinding}
+				: std::span<const rhi::RootBindingDesc>{};
 
 		// Create depth prepass pipelines (Opaque + AlphaTest variants)
 		{
 			const uint32_t* depthPrepassSpirvCode = shader_depth_prepass_slang;
 			const size_t depthPrepassSpirvSize = std::size(shader_depth_prepass_slang) * sizeof(uint32_t);
+			const rhi::ShaderLibraryHandle depthPrepassLibrary = loadEmbeddedSpirvLibrary(
+				*m_device.device, depthPrepassSpirvCode, depthPrepassSpirvSize, "depth-prepass");
 
 			const std::array<rhi::VertexBindingDesc, 1> depthBindings{
 				{
@@ -4502,10 +4449,8 @@ namespace demo
 				}
 			};
 			const rhi::VertexInputLayoutDesc depthVertexInput{
-				.bindings = depthBindings.data(),
-				.bindingCount = static_cast<uint32_t>(depthBindings.size()),
-				.attributes = depthAttributes.data(),
-				.attributeCount = static_cast<uint32_t>(depthAttributes.size()),
+				.bindings = depthBindings,
+				.attributes = depthAttributes,
 			};
 
 			const std::array<rhi::DynamicState, 2> depthDynamicStates{
@@ -4514,49 +4459,45 @@ namespace demo
 					rhi::DynamicState::scissor,
 				}
 			};
-			const std::array<rhi::PipelineShaderStageDesc, 2> depthStages{
+			const std::array<rhi::ShaderEntry, 2> depthStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = depthPrepassSpirvCode,
-						.spirvSize = depthPrepassSpirvSize, .entryPoint = "vertexMain"
+						.stage = rhi::ShaderStage::vertex, .library = depthPrepassLibrary,
+						 .entryPoint = "vertexMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = depthPrepassSpirvCode,
-						.spirvSize = depthPrepassSpirvSize, .entryPoint = "fragmentMain"
+						.stage = rhi::ShaderStage::fragment, .library = depthPrepassLibrary,
+						 .entryPoint = "fragmentMain"
 					},
 				}
 			};
-			const std::array<rhi::PipelineShaderStageDesc, 2> depthMdiStages{
+			const std::array<rhi::ShaderEntry, 2> depthMdiStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = depthPrepassSpirvCode,
-						.spirvSize = depthPrepassSpirvSize, .entryPoint = "vertexMdiMain"
+						.stage = rhi::ShaderStage::vertex, .library = depthPrepassLibrary,
+						 .entryPoint = "vertexMdiMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = depthPrepassSpirvCode,
-						.spirvSize = depthPrepassSpirvSize, .entryPoint = "fragmentMdiMain"
+						.stage = rhi::ShaderStage::fragment, .library = depthPrepassLibrary,
+						 .entryPoint = "fragmentMdiMain"
 					},
 				}
 			};
 
+			const rhi::PipelineBindingSchemaStorage depthBindingSchema{m_device.gbufferArgumentLayouts};
 			rhi::GraphicsPipelineDesc depthDesc{
-				.shaderStages = depthStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(depthStages.size()),
+				.shaderStages = depthStages,
 				.vertexInput = depthVertexInput,
 				.rasterState = rhi::RasterState{},
 				.depthState = rhi::DepthState{true, true, rhi::CompareOp::greater},
-				.blendStates = nullptr,
-				.blendStateCount = 0,
-				.dynamicStates = depthDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(depthDynamicStates.size()),
+				.blendStates = {},
+				.dynamicStates = depthDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = nullptr,
-					.colorFormatCount = 0,
-					.depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+					.colorFormats = {},
+					.depthFormat = (m_swapchainDependent.sceneResources.getDepthFormat()),
 				},
-				.argumentLayouts = m_device.gbufferArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
+				.bindingSchema = depthBindingSchema.view(),
 			};
 			depthDesc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
 			depthDesc.rasterState.cullMode = rhi::CullMode::back;
@@ -4564,35 +4505,34 @@ namespace demo
 			depthDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
 			rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
-			std::array<rhi::PipelineShaderStageDesc, 2> depthShaderStages = depthStages;
-			depthDesc.shaderStages = depthShaderStages.data();
+			std::array<rhi::ShaderEntry, 2> depthShaderStages = depthStages;
+			depthDesc.shaderStages = depthShaderStages;
 
 			uint32_t alphaTestFalse = uint32_t{0};
-			rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
+			rhi::SpecializationData specDataFalse{std::as_bytes(std::span{&alphaTestFalse, 1})};
 			depthShaderStages[1].specializationData = specDataFalse;
-			depthShaderStages[1].specializationConstants = &specConstantAlphaTest;
-			depthShaderStages[1].specializationConstantCount = 1;
+			depthShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
 
 			depthDesc.specializationVariant = 10;
 			m_depthPrepassOpaquePipeline = m_device.device->createGraphicsPipeline(depthDesc);
 
 			uint32_t alphaTestTrue = uint32_t{1};
-			rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
+			rhi::SpecializationData specDataTrue{std::as_bytes(std::span{&alphaTestTrue, 1})};
 			depthShaderStages[1].specializationData = specDataTrue;
 			depthDesc.specializationVariant = 11;
 			m_depthPrepassAlphaTestPipeline = m_device.device->createGraphicsPipeline(depthDesc);
 
 			if (!m_device.mdiArgumentLayouts[0].isNull())
 			{
+				const rhi::PipelineBindingSchemaStorage depthMdiBindingSchema{
+					m_device.mdiArgumentLayouts, mdiDrawIndexRootBindings};
 				rhi::GraphicsPipelineDesc depthMdiDesc = depthDesc;
-				std::array<rhi::PipelineShaderStageDesc, 2> depthMdiShaderStages = depthMdiStages;
-				depthMdiDesc.shaderStages = depthMdiShaderStages.data();
-				depthMdiDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
-				depthMdiDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
+				std::array<rhi::ShaderEntry, 2> depthMdiShaderStages = depthMdiStages;
+				depthMdiDesc.shaderStages = depthMdiShaderStages;
+				depthMdiDesc.bindingSchema = depthMdiBindingSchema.view();
 
 				depthMdiShaderStages[1].specializationData = specDataFalse;
-				depthMdiShaderStages[1].specializationConstants = &specConstantAlphaTest;
-				depthMdiShaderStages[1].specializationConstantCount = 1;
+				depthMdiShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
 				depthMdiDesc.specializationVariant = 13;
 				m_depthPrepassOpaqueMDIPipeline = m_device.device->createGraphicsPipeline(depthMdiDesc);
 
@@ -4606,6 +4546,8 @@ namespace demo
 		{
 			const uint32_t* gbufferSpirvCode = shader_gbuffer_slang;
 			const size_t gbufferSpirvSize = std::size(shader_gbuffer_slang) * sizeof(uint32_t);
+			const rhi::ShaderLibraryHandle gbufferLibrary = loadEmbeddedSpirvLibrary(
+				*m_device.device, gbufferSpirvCode, gbufferSpirvSize, "gbuffer");
 
 			// GBuffer vertex input: Position(12) + Normal(12) + TexCoord(8) + Tangent(16) = 48 bytes
 			const std::array<rhi::VertexBindingDesc, 1> gbufferBindings{
@@ -4636,10 +4578,8 @@ namespace demo
 			};
 
 			const rhi::VertexInputLayoutDesc gbufferVertexInput{
-				.bindings = gbufferBindings.data(),
-				.bindingCount = static_cast<uint32_t>(gbufferBindings.size()),
-				.attributes = gbufferAttributes.data(),
-				.attributeCount = static_cast<uint32_t>(gbufferAttributes.size()),
+				.bindings = gbufferBindings,
+				.attributes = gbufferAttributes,
 			};
 
 			const std::array<rhi::DynamicState, 2> gbufferDynamicStates{
@@ -4670,42 +4610,42 @@ namespace demo
 			// Specialization constant for alpha test (uint32_t = 4 bytes)
 			rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
 
-			std::array<rhi::PipelineShaderStageDesc, 2> gbufferShaderStages{
+			std::array<rhi::ShaderEntry, 2> gbufferShaderStages{
 				{
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::vertex,
-						.spirvCode = gbufferSpirvCode,
-						.spirvSize = gbufferSpirvSize,
+						.library = gbufferLibrary,
+
 						.entryPoint = "vertexMain",
 					},
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::fragment,
-						.spirvCode = gbufferSpirvCode,
-						.spirvSize = gbufferSpirvSize,
+						.library = gbufferLibrary,
+
 						.entryPoint = "fragmentMain",
 					},
 				}
 			};
-			std::array<rhi::PipelineShaderStageDesc, 2> gbufferMdiShaderStages{
+			std::array<rhi::ShaderEntry, 2> gbufferMdiShaderStages{
 				{
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::vertex,
-						.spirvCode = gbufferSpirvCode,
-						.spirvSize = gbufferSpirvSize,
+						.library = gbufferLibrary,
+
 						.entryPoint = "vertexMdiMain",
 					},
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::fragment,
-						.spirvCode = gbufferSpirvCode,
-						.spirvSize = gbufferSpirvSize,
+						.library = gbufferLibrary,
+
 						.entryPoint = "fragmentMdiMain",
 					},
 				}
 			};
 
+			const rhi::PipelineBindingSchemaStorage gbufferBindingSchema{m_device.gbufferArgumentLayouts};
 			rhi::GraphicsPipelineDesc gbufferGraphicsDesc{
-				.shaderStages = gbufferShaderStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(gbufferShaderStages.size()),
+				.shaderStages = gbufferShaderStages,
 				.vertexInput = gbufferVertexInput,
 				.rasterState = rhi::RasterState{},
 				// GBuffer rebuilds canonical current-visible depth after the previous-visible
@@ -4713,18 +4653,14 @@ namespace demo
 				// equal-depth prepass matches while allowing nearer current-visible surfaces
 				// to replace any farther draw written earlier in this pass.
 				.depthState = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
-				.blendStates = gbufferBlendStates.data(),
-				.blendStateCount = static_cast<uint32_t>(gbufferBlendStates.size()),
-				.dynamicStates = gbufferDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(gbufferDynamicStates.size()),
+				.blendStates = gbufferBlendStates,
+				.dynamicStates = gbufferDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = gbufferColorFormats.data(),
-					.colorFormatCount = static_cast<uint32_t>(gbufferColorFormats.size()),
-					.depthFormat = toPortableTextureFormat(m_swapchainDependent.sceneResources.getDepthFormat()),
+					.colorFormats = gbufferColorFormats,
+					.depthFormat = (m_swapchainDependent.sceneResources.getDepthFormat()),
 				},
-				.argumentLayouts = m_device.gbufferArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
+				.bindingSchema = gbufferBindingSchema.view(),
 			};
 			gbufferGraphicsDesc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
 			gbufferGraphicsDesc.rasterState.cullMode = rhi::CullMode::back;
@@ -4733,31 +4669,30 @@ namespace demo
 
 			// Variant 0: Opaque (alphaTestEnabled = false)
 			uint32_t alphaTestFalse = uint32_t{0};
-			rhi::SpecializationData specDataFalse{&alphaTestFalse, sizeof(uint32_t)};
+			rhi::SpecializationData specDataFalse{std::as_bytes(std::span{&alphaTestFalse, 1})};
 			gbufferShaderStages[1].specializationData = specDataFalse;
-			gbufferShaderStages[1].specializationConstants = &specConstantAlphaTest;
-			gbufferShaderStages[1].specializationConstantCount = 1;
+			gbufferShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
 
 			gbufferGraphicsDesc.specializationVariant = 3; // GBuffer Opaque variant
 			m_gbufferOpaquePipeline = m_device.device->createGraphicsPipeline(gbufferGraphicsDesc);
 
 			// Variant 1: AlphaTest (alphaTestEnabled = true)
 			uint32_t alphaTestTrue = uint32_t{1};
-			rhi::SpecializationData specDataTrue{&alphaTestTrue, sizeof(uint32_t)};
+			rhi::SpecializationData specDataTrue{std::as_bytes(std::span{&alphaTestTrue, 1})};
 			gbufferShaderStages[1].specializationData = specDataTrue;
 			gbufferGraphicsDesc.specializationVariant = 4; // GBuffer AlphaTest variant
 			m_gbufferAlphaTestPipeline = m_device.device->createGraphicsPipeline(gbufferGraphicsDesc);
 
 			if (!m_device.mdiArgumentLayouts[0].isNull())
 			{
+				const rhi::PipelineBindingSchemaStorage gbufferMdiBindingSchema{
+					m_device.mdiArgumentLayouts, mdiDrawIndexRootBindings};
 				rhi::GraphicsPipelineDesc gbufferMdiGraphicsDesc = gbufferGraphicsDesc;
-				gbufferMdiGraphicsDesc.shaderStages = gbufferMdiShaderStages.data();
-				gbufferMdiGraphicsDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
-				gbufferMdiGraphicsDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
+				gbufferMdiGraphicsDesc.shaderStages = gbufferMdiShaderStages;
+				gbufferMdiGraphicsDesc.bindingSchema = gbufferMdiBindingSchema.view();
 
 				gbufferMdiShaderStages[1].specializationData = specDataFalse;
-				gbufferMdiShaderStages[1].specializationConstants = &specConstantAlphaTest;
-				gbufferMdiShaderStages[1].specializationConstantCount = 1;
+				gbufferMdiShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
 				gbufferMdiGraphicsDesc.specializationVariant = 15;
 				m_gbufferOpaqueMDIPipeline = m_device.device->createGraphicsPipeline(gbufferMdiGraphicsDesc);
 
@@ -4771,6 +4706,8 @@ namespace demo
 		{
 			const uint32_t* shadowSpirvCode = shader_shadow_slang;
 			const size_t shadowSpirvSize = std::size(shader_shadow_slang) * sizeof(uint32_t);
+			const rhi::ShaderLibraryHandle shadowLibrary = loadEmbeddedSpirvLibrary(
+				*m_device.device, shadowSpirvCode, shadowSpirvSize, "shadow");
 
 			const std::array<rhi::VertexBindingDesc, 1> shadowBindings{
 				{
@@ -4798,10 +4735,8 @@ namespace demo
 				}
 			};
 			const rhi::VertexInputLayoutDesc shadowVertexInput{
-				.bindings = shadowBindings.data(),
-				.bindingCount = static_cast<uint32_t>(shadowBindings.size()),
-				.attributes = shadowAttributes.data(),
-				.attributeCount = static_cast<uint32_t>(shadowAttributes.size()),
+				.bindings = shadowBindings,
+				.attributes = shadowAttributes,
 			};
 			const std::array<rhi::DynamicState, 2> shadowDynamicStates{
 				{
@@ -4809,36 +4744,32 @@ namespace demo
 					rhi::DynamicState::scissor,
 				}
 			};
-			const std::array<rhi::PipelineShaderStageDesc, 2> shadowStages{
+			const std::array<rhi::ShaderEntry, 2> shadowStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize,
+						.stage = rhi::ShaderStage::vertex, .library = shadowLibrary,
 						.entryPoint = "vertexMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize,
+						.stage = rhi::ShaderStage::fragment, .library = shadowLibrary,
 						.entryPoint = "fragmentMain"
 					},
 				}
 			};
+			const rhi::PipelineBindingSchemaStorage shadowBindingSchema{m_device.gbufferArgumentLayouts};
 			rhi::GraphicsPipelineDesc shadowDesc{
-				.shaderStages = shadowStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(shadowStages.size()),
+				.shaderStages = shadowStages,
 				.vertexInput = shadowVertexInput,
 				.rasterState = rhi::RasterState{},
 				.depthState = rhi::DepthState{true, true, rhi::CompareOp::greaterOrEqual},
-				.blendStates = nullptr,
-				.blendStateCount = 0,
-				.dynamicStates = shadowDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size()),
+				.blendStates = {},
+				.dynamicStates = shadowDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = nullptr,
-					.colorFormatCount = 0,
-					.depthFormat = toPortableTextureFormat(m_csmShadowResources.getShadowFormat()),
+					.colorFormats = {},
+					.depthFormat = (m_csmShadowResources.getShadowFormat()),
 				},
-				.argumentLayouts = m_device.gbufferArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
+				.bindingSchema = shadowBindingSchema.view(),
 			};
 			shadowDesc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
 			shadowDesc.rasterState.cullMode = rhi::CullMode::none;
@@ -4848,22 +4779,23 @@ namespace demo
 			shadowDesc.specializationVariant = 6;
 			m_shadowPipeline = m_device.device->createGraphicsPipeline(shadowDesc);
 
-			std::array<rhi::PipelineShaderStageDesc, 2> shadowMdiStages{
+			std::array<rhi::ShaderEntry, 2> shadowMdiStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize,
+						.stage = rhi::ShaderStage::vertex, .library = shadowLibrary,
 						.entryPoint = "vertexMdiMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = shadowSpirvCode, .spirvSize = shadowSpirvSize,
+						.stage = rhi::ShaderStage::fragment, .library = shadowLibrary,
 						.entryPoint = "fragmentMdiMain"
 					},
 				}
 			};
+			const rhi::PipelineBindingSchemaStorage shadowMdiBindingSchema{
+				m_device.csmShadowMdiArgumentLayouts, mdiDrawIndexRootBindings};
 			rhi::GraphicsPipelineDesc shadowMdiDesc = shadowDesc;
-			shadowMdiDesc.shaderStages = shadowMdiStages.data();
-			shadowMdiDesc.argumentLayouts = m_device.csmShadowMdiArgumentLayouts.data();
-			shadowMdiDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.csmShadowMdiArgumentLayouts.size());
+			shadowMdiDesc.shaderStages = shadowMdiStages;
+			shadowMdiDesc.bindingSchema = shadowMdiBindingSchema.view();
 
 			shadowMdiDesc.specializationVariant = 7;
 			m_csmShadowPipeline = m_device.device->createGraphicsPipeline(shadowMdiDesc);
@@ -4873,6 +4805,8 @@ namespace demo
 		{
 			const uint32_t* forwardSpirvCode = shader_forward_slang;
 			const size_t forwardSpirvSize = std::size(shader_forward_slang) * sizeof(uint32_t);
+			const rhi::ShaderLibraryHandle forwardLibrary = loadEmbeddedSpirvLibrary(
+				*m_device.device, forwardSpirvCode, forwardSpirvSize, "forward");
 
 			// Same vertex input as GBuffer
 			const std::array<rhi::VertexBindingDesc, 1> forwardBindings{
@@ -4903,10 +4837,8 @@ namespace demo
 			};
 
 			const rhi::VertexInputLayoutDesc forwardVertexInput{
-				.bindings = forwardBindings.data(),
-				.bindingCount = static_cast<uint32_t>(forwardBindings.size()),
-				.attributes = forwardAttributes.data(),
-				.attributeCount = static_cast<uint32_t>(forwardAttributes.size()),
+				.bindings = forwardBindings,
+				.attributes = forwardAttributes,
 			};
 
 			const std::array<rhi::DynamicState, 2> forwardDynamicStates{
@@ -4931,34 +4863,34 @@ namespace demo
 				                | rhi::ColorComponentFlags::b,
 			};
 
-			std::array<rhi::PipelineShaderStageDesc, 2> forwardShaderStages{
+			std::array<rhi::ShaderEntry, 2> forwardShaderStages{
 				{
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::vertex,
-						.spirvCode = forwardSpirvCode,
-						.spirvSize = forwardSpirvSize,
+						.library = forwardLibrary,
+
 						.entryPoint = "vertexMain",
 					},
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::fragment,
-						.spirvCode = forwardSpirvCode,
-						.spirvSize = forwardSpirvSize,
+						.library = forwardLibrary,
+
 						.entryPoint = "fragmentMain",
 					},
 				}
 			};
-			std::array<rhi::PipelineShaderStageDesc, 2> forwardMdiShaderStages{
+			std::array<rhi::ShaderEntry, 2> forwardMdiShaderStages{
 				{
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::vertex,
-						.spirvCode = forwardSpirvCode,
-						.spirvSize = forwardSpirvSize,
+						.library = forwardLibrary,
+
 						.entryPoint = "vertexMdiMain",
 					},
-					rhi::PipelineShaderStageDesc{
+					rhi::ShaderEntry{
 						.stage = rhi::ShaderStage::fragment,
-						.spirvCode = forwardSpirvCode,
-						.spirvSize = forwardSpirvSize,
+						.library = forwardLibrary,
+
 						.entryPoint = "fragmentMdiMain",
 					},
 				}
@@ -4967,29 +4899,25 @@ namespace demo
 			// Render to swapchain format
 			const rhi::TextureFormat swapchainFormat = m_swapchainDependent.swapchainImageFormat;
 			const rhi::TextureFormat hdrSceneColorFormat =
-				toPortableTextureFormat(SceneResources::kSceneColorHdrFormat);
-			const rhi::TextureFormat depthFormat = toPortableTextureFormat(
+				(SceneResources::kSceneColorHdrFormat);
+			const rhi::TextureFormat depthFormat = (
 				m_swapchainDependent.sceneResources.getDepthFormat());
 
+			const rhi::PipelineBindingSchemaStorage forwardBindingSchema{m_device.gbufferArgumentLayouts};
 			rhi::GraphicsPipelineDesc forwardGraphicsDesc{
-				.shaderStages = forwardShaderStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(forwardShaderStages.size()),
+				.shaderStages = forwardShaderStages,
 				.vertexInput = forwardVertexInput,
 				.rasterState = rhi::RasterState{},
 				.depthState = rhi::DepthState{true, false, rhi::CompareOp::greaterOrEqual},
 				// Test enabled, write disabled
-				.blendStates = &forwardBlend,
-				.blendStateCount = 1,
-				.dynamicStates = forwardDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(forwardDynamicStates.size()),
+				.blendStates = std::span{&forwardBlend, 1},
+				.dynamicStates = forwardDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = &swapchainFormat,
-					.colorFormatCount = 1,
+					.colorFormats = std::span{&swapchainFormat, 1},
 					.depthFormat = depthFormat,
 				},
-				.argumentLayouts = m_device.gbufferArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
+				.bindingSchema = forwardBindingSchema.view(),
 			};
 			forwardGraphicsDesc.rasterState.topology = rhi::PrimitiveTopology::triangleList;
 			forwardGraphicsDesc.rasterState.cullMode = rhi::CullMode::back;
@@ -5001,11 +4929,12 @@ namespace demo
 
 			if (!m_device.mdiArgumentLayouts[0].isNull())
 			{
+				const rhi::PipelineBindingSchemaStorage forwardMdiBindingSchema{
+					m_device.mdiArgumentLayouts, mdiDrawIndexRootBindings};
 				rhi::GraphicsPipelineDesc forwardMdiGraphicsDesc = forwardGraphicsDesc;
-				forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages.data();
-				forwardMdiGraphicsDesc.renderingInfo.colorFormats = &hdrSceneColorFormat;
-				forwardMdiGraphicsDesc.argumentLayouts = m_device.mdiArgumentLayouts.data();
-				forwardMdiGraphicsDesc.argumentLayoutCount = static_cast<uint32_t>(m_device.mdiArgumentLayouts.size());
+				forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages;
+				forwardMdiGraphicsDesc.renderingInfo.colorFormats = std::span{&hdrSceneColorFormat, 1};
+				forwardMdiGraphicsDesc.bindingSchema = forwardMdiBindingSchema.view();
 
 				forwardMdiGraphicsDesc.specializationVariant = 17;
 				m_forwardMDIPipeline = m_device.device->createGraphicsPipeline(forwardMdiGraphicsDesc);
@@ -5016,6 +4945,8 @@ namespace demo
 		{
 			const uint32_t* debugSpirvCode = shader_debug_slang;
 			const size_t debugSpirvSize = std::size(shader_debug_slang) * sizeof(uint32_t);
+			const rhi::ShaderLibraryHandle debugLibrary = loadEmbeddedSpirvLibrary(
+				*m_device.device, debugSpirvCode, debugSpirvSize, "debug");
 
 			const std::array<rhi::VertexBindingDesc, 1> debugBindings{
 				{
@@ -5040,10 +4971,8 @@ namespace demo
 				}
 			};
 			const rhi::VertexInputLayoutDesc debugVertexInput{
-				.bindings = debugBindings.data(),
-				.bindingCount = static_cast<uint32_t>(debugBindings.size()),
-				.attributes = debugAttributes.data(),
-				.attributeCount = static_cast<uint32_t>(debugAttributes.size()),
+				.bindings = debugBindings,
+				.attributes = debugAttributes,
 			};
 			const std::array<rhi::DynamicState, 2> debugDynamicStates{
 				{
@@ -5061,48 +4990,45 @@ namespace demo
 				.alphaBlendOp = rhi::BlendOp::add,
 				.colorWriteMask = rhi::ColorComponentFlags::all,
 			};
-			const std::array<rhi::PipelineShaderStageDesc, 2> debugStages{
+			const std::array<rhi::ShaderEntry, 2> debugStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize,
+						.stage = rhi::ShaderStage::vertex, .library = debugLibrary,
 						.entryPoint = "vertexMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize,
+						.stage = rhi::ShaderStage::fragment, .library = debugLibrary,
 						.entryPoint = "fragmentMain"
 					},
 				}
 			};
-			const std::array<rhi::PipelinePushConstantRange, 1> debugPushConstants{
-				{
-					rhi::PipelinePushConstantRange{
-						.stages = rhi::ShaderStage::vertex,
-						.offset = 0,
-						.size = sizeof(shaderio::PushConstantGPUCullDebug),
-					},
-				}
-			};
+			const std::array<rhi::RootBindingDesc, 1> debugRootBindings{{
+				rhi::RootBindingDesc{
+					.slot = kPrimaryRootConstantsSlot,
+					.kind = rhi::RootBindingKind::constants,
+					.visibility = rhi::ShaderStage::vertex,
+					.size = sizeof(shaderio::PushConstantGPUCullDebug),
+					.alignment = alignof(shaderio::PushConstantGPUCullDebug),
+				},
+			}};
+			const rhi::PipelineBindingSchemaStorage debugBindingSchema{
+				m_device.gbufferArgumentLayouts, debugRootBindings};
+			const rhi::PipelineBindingSchemaStorage debugCullBindingSchema{
+				m_device.debugArgumentLayouts, debugRootBindings};
 			const rhi::TextureFormat outputFormat = rhi::TextureFormat::bgra8Unorm;
 			rhi::GraphicsPipelineDesc debugDesc{
-				.shaderStages = debugStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(debugStages.size()),
+				.shaderStages = debugStages,
 				.vertexInput = debugVertexInput,
 				.rasterState = rhi::RasterState{},
 				.depthState = rhi::DepthState{false, false, rhi::CompareOp::always},
-				.blendStates = &debugBlend,
-				.blendStateCount = 1,
-				.dynamicStates = debugDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(debugDynamicStates.size()),
+				.blendStates = std::span{&debugBlend, 1},
+				.dynamicStates = debugDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = &outputFormat,
-					.colorFormatCount = 1,
+					.colorFormats = std::span{&outputFormat, 1},
 					.depthFormat = rhi::TextureFormat::undefined,
 				},
-				.argumentLayouts = m_device.gbufferArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.gbufferArgumentLayouts.size()),
-				.pushConstantRanges = debugPushConstants.data(),
-				.pushConstantRangeCount = static_cast<uint32_t>(debugPushConstants.size()),
+				.bindingSchema = debugBindingSchema.view(),
 			};
 			debugDesc.rasterState.topology = rhi::PrimitiveTopology::lineList;
 			debugDesc.rasterState.cullMode = rhi::CullMode::none;
@@ -5112,38 +5038,31 @@ namespace demo
 			debugDesc.specializationVariant = 7;
 			m_debugPipeline = m_device.device->createGraphicsPipeline(debugDesc);
 
-			const std::array<rhi::PipelineShaderStageDesc, 2> debugCullStages{
+			const std::array<rhi::ShaderEntry, 2> debugCullStages{
 				{
 					{
-						.stage = rhi::ShaderStage::vertex, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize,
+						.stage = rhi::ShaderStage::vertex, .library = debugLibrary,
 						.entryPoint = "vertexCullMain"
 					},
 					{
-						.stage = rhi::ShaderStage::fragment, .spirvCode = debugSpirvCode, .spirvSize = debugSpirvSize,
+						.stage = rhi::ShaderStage::fragment, .library = debugLibrary,
 						.entryPoint = "fragmentMain"
 					},
 				}
 			};
 			rhi::GraphicsPipelineDesc debugCullDesc{
-				.shaderStages = debugCullStages.data(),
-				.shaderStageCount = static_cast<uint32_t>(debugCullStages.size()),
+				.shaderStages = debugCullStages,
 				.vertexInput = {},
 				.rasterState = rhi::RasterState{},
 				.depthState = rhi::DepthState{false, false, rhi::CompareOp::always},
-				.blendStates = &debugBlend,
-				.blendStateCount = 1,
-				.dynamicStates = debugDynamicStates.data(),
-				.dynamicStateCount = static_cast<uint32_t>(debugDynamicStates.size()),
+				.blendStates = std::span{&debugBlend, 1},
+				.dynamicStates = debugDynamicStates,
 				.renderingInfo =
 				{
-					.colorFormats = &outputFormat,
-					.colorFormatCount = 1,
+					.colorFormats = std::span{&outputFormat, 1},
 					.depthFormat = rhi::TextureFormat::undefined,
 				},
-				.argumentLayouts = m_device.debugArgumentLayouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(m_device.debugArgumentLayouts.size()),
-				.pushConstantRanges = debugPushConstants.data(),
-				.pushConstantRangeCount = static_cast<uint32_t>(debugPushConstants.size()),
+				.bindingSchema = debugCullBindingSchema.view(),
 			};
 			debugCullDesc.rasterState.topology = rhi::PrimitiveTopology::lineList;
 			debugCullDesc.rasterState.cullMode = rhi::CullMode::none;
@@ -5151,7 +5070,10 @@ namespace demo
 			debugCullDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
 			debugCullDesc.specializationVariant = 8;
-			m_gpuCullingDebugPipeline = m_device.device->createGraphicsPipeline(debugCullDesc);
+			if (m_backend != rhi::BackendType::d3d12)
+			{
+				m_gpuCullingDebugPipeline = m_device.device->createGraphicsPipeline(debugCullDesc);
+			}
 		}
 	}
 
@@ -5165,7 +5087,7 @@ namespace demo
 		};
 		m_imguiRenderer.init(rendererInfo);
 	}
-	// createDescriptorPool() removed (D-05, plan 04-04): VkDescriptorPool was only used for
+	// createDescriptorPool() removed (D-05, plan 04-04): backend descriptor pool was only used for
 	// create/destroy — no direct vkAllocateDescriptorSets consumer. Descriptor set allocation
 	// now goes through VulkanDevice::m_argumentPool (ArgumentTable backend lazy-created pool).
 
@@ -5228,7 +5150,7 @@ namespace demo
 			m_materials.materialArgumentTables.push_back(createArgumentTable(ArgumentTableDesc{
 				.slot = ArgumentSlot::material,
 				.layout = materialLayout,
-				.table = m_device.device->createArgumentTable(materialLayout),
+				.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = materialLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 				.primaryLogicalIndex = kMaterialBindlessTexturesIndex,
 				.debugName = "material-texture-bind-group",
 			}));
@@ -5259,7 +5181,7 @@ namespace demo
 				m_materials.materialArgumentTables.push_back(createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::material,
 					.layout = materialLayout,
-					.table = m_device.device->createArgumentTable(materialLayout),
+					.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = materialLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 					.primaryLogicalIndex = kMaterialBindlessTexturesIndex,
 					.debugName = "material-texture-bind-group",
 				}));
@@ -5280,7 +5202,7 @@ namespace demo
 				m_perFrame.frameUserData[i].sceneArgumentTable = createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::drawDynamic,
 					.layout = sceneLayout,
-					.table = m_device.device->createArgumentTable(sceneLayout),
+					.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = sceneLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 					.primaryLogicalIndex = kSceneBindlessInfoIndex,
 					.debugName = "scene-dynamic-bind-group",
 				});
@@ -5332,7 +5254,6 @@ namespace demo
 				.sampler = m_materials.materialSamplerHandle,
 			};
 		}
-		++m_materials.materialDescriptorGeneration;
 
 		for (uint32_t frameIndex = 0; frameIndex < m_materials.materialArgumentTables.size(); ++frameIndex)
 		{
@@ -5427,9 +5348,9 @@ namespace demo
 		}
 
 		uint32_t frameIndex = 0;
-		if (m_perFrame.frameContext != nullptr)
+		if (m_perFrame.frameScheduler.frameCount() != 0)
 		{
-			frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+			frameIndex = m_perFrame.frameScheduler.currentFrameIndex();
 		}
 		if (frameIndex >= m_materials.materialArgumentTables.size())
 		{
@@ -5481,8 +5402,7 @@ namespace demo
 		const char* debugName)
 	{
 		const rhi::ArgumentLayoutDesc layoutDesc{
-			.bindings = bindings.data(),
-			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.bindings = bindings,
 			.debugName = debugName,
 		};
 		const rhi::ArgumentLayoutHandle layout = m_device.device->createArgumentLayout(layoutDesc);
@@ -5510,9 +5430,7 @@ namespace demo
 		{
 			return;
 		}
-		// Destroy only the ArgumentTable (descriptor set). The layout it was built from is
-		// owned separately (ownedArgumentLayouts) and released in destroyArgumentTablesAndLayouts(). For
-		// adopted external tables (owned=false) this just unregisters the mirror.
+		// The source layout is owned separately and released during renderer teardown.
 		m_device.device->destroyArgumentTable(handle);
 	}
 
@@ -5531,7 +5449,7 @@ namespace demo
 		return createArgumentTable(ArgumentTableDesc{
 			.slot = ArgumentSlot::shaderSpecific,
 			.layout = layout,
-			.table = m_device.device->createArgumentTable(layout),
+			.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = layout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 			.primaryLogicalIndex = 0,
 			.debugName = debugName,
 		});
@@ -5549,10 +5467,10 @@ namespace demo
 
 		// Allocate a fresh ArgumentTable from the shared layout and write it now. The handle is
 		// recycled (destroyArgumentTable) when this frame index is recorded again.
-		const rhi::ArgumentTableHandle table = m_device.device->createArgumentTable(layoutHandle);
+		const rhi::ArgumentTableHandle table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = layoutHandle, .lifetime = rhi::ArgumentTableLifetime::frameLocal, .debugName = debugName});
 		if (writeCount > 0)
 		{
-			m_device.device->updateArgumentTable(table, writeCount, writes);
+			m_device.device->updateArgumentTable(table, rhi::ArgumentWriteBatch{writes, writeCount});
 		}
 
 		const uint32_t frameIndex = getCurrentFrameIndexHint();
@@ -5571,7 +5489,7 @@ namespace demo
 		{
 			return;
 		}
-		m_device.device->updateArgumentTable(handle, writeCount, writes);
+		m_device.device->updateArgumentTable(handle, rhi::ArgumentWriteBatch{writes, writeCount});
 	}
 
 	void RenderDevice::destroyArgumentTablesAndLayouts()
@@ -5642,7 +5560,7 @@ namespace demo
 			.after = rhi::ResourceState::TransferDst,
 			.range = imageRange,
 		};
-		cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+		cmd.resourceBarrier(std::span{&uploadBeginBarrier, 1}, {});
 
 		BatchUploadContext upload;
 		const std::span<const std::byte> dataSpan = std::as_bytes(rgba8Pixels);
@@ -5670,7 +5588,7 @@ namespace demo
 			.after = rhi::ResourceState::ShaderRead,
 			.range = imageRange,
 		};
-		cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+		cmd.resourceBarrier(std::span{&uploadEndBarrier, 1}, {});
 
 		rhi::BufferHandle staging = upload.releaseStagingBuffer();
 		if (!staging.isNull())
@@ -5706,26 +5624,29 @@ namespace demo
 		const uint32_t* computeSpirvCode = shader_comp_glsl;
 		const size_t computeSpirvSize = std::size(shader_comp_glsl) * sizeof(uint32_t);
 #endif
+		const rhi::ShaderLibraryHandle computeLibrary = loadEmbeddedSpirvLibrary(
+			*m_device.device, computeSpirvCode, computeSpirvSize, "prebuilt-compute");
 
-		const std::array<rhi::PipelinePushConstantRange, 1> computePushConstants{
-			{
-				rhi::PipelinePushConstantRange{
-					.stages = rhi::ShaderStage::compute,
-					.offset = 0,
-					.size = sizeof(shaderio::PushConstantCompute),
-				},
-			}
-		};
+		const std::array<rhi::RootBindingDesc, 1> computeRootBindings{{
+			rhi::RootBindingDesc{
+				.slot = kPrimaryRootConstantsSlot,
+				.kind = rhi::RootBindingKind::constants,
+				.visibility = rhi::ShaderStage::compute,
+				.size = sizeof(shaderio::PushConstantCompute),
+				.alignment = alignof(shaderio::PushConstantCompute),
+			},
+		}};
+		const rhi::PipelineBindingSchemaStorage computeBindingSchema{
+			std::span<const rhi::ArgumentLayoutHandle>{}, computeRootBindings};
 		const rhi::ComputePipelineDesc computeDesc{
 			.shaderStage =
 			{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = computeSpirvCode,
-				.spirvSize = computeSpirvSize,
+				.library = computeLibrary,
+
 				.entryPoint = "main",
 			},
-			.pushConstantRanges = computePushConstants.data(),
-			.pushConstantRangeCount = static_cast<uint32_t>(computePushConstants.size()),
+			.bindingSchema = computeBindingSchema.view(),
 		};
 		m_device.prebuiltPipelines.compute = m_device.device->createComputePipeline(computeDesc);
 	}
@@ -5739,21 +5660,21 @@ namespace demo
 		}
 
 #ifdef USE_SLANG
-		const rhi::vulkan::ArgumentTableRecord* tableRecord =
-			m_device.resourceTable.tryGetArgumentTable(m_device.gpuCullingArgumentTables.front());
-		ASSERT(tableRecord != nullptr, "GPU culling pipeline requires an argument layout");
-		const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableRecord->layout}};
+		const rhi::ArgumentLayoutHandle tableLayout =
+            m_device.device->getArgumentTableLayout(m_device.gpuCullingArgumentTables.front());
+        ASSERT(tableLayout.isValid(), "GPU culling pipeline requires an argument layout");
+        const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableLayout}};
+		const rhi::PipelineBindingSchemaStorage bindingSchema{argumentLayouts};
 
 		const rhi::ComputePipelineDesc computeDesc{
 			.shaderStage =
 			{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = shader_gpu_culling_slang,
-				.spirvSize = std::size(shader_gpu_culling_slang) * sizeof(uint32_t),
+				.library = loadEmbeddedSpirvLibrary(
+					*m_device.device, shader_gpu_culling_slang, "gpu-culling"),
 				.entryPoint = "gpuCullingMain",
 			},
-			.argumentLayouts = argumentLayouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
+			.bindingSchema = bindingSchema.view(),
 			.specializationVariant = 13,
 		};
 		m_gpuCullingPipeline = m_device.device->createComputePipeline(computeDesc);
@@ -5768,32 +5689,30 @@ namespace demo
 		}
 
 #ifdef USE_SLANG
-		const rhi::vulkan::ArgumentTableRecord* tableRecord =
-			m_device.resourceTable.tryGetArgumentTable(m_device.shadowCullingArgumentTables.front());
-		ASSERT(tableRecord != nullptr, "Shadow culling pipeline requires an argument layout");
-		const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableRecord->layout}};
-		const std::array<rhi::PipelinePushConstantRange, 1> pushConstants{
-			{
-				rhi::PipelinePushConstantRange{
-					.stages = rhi::ShaderStage::compute,
-					.offset = 0,
-					.size = sizeof(shaderio::ShadowCullPushConstants)
-				},
-			}
-		};
+		const rhi::ArgumentLayoutHandle tableLayout =
+            m_device.device->getArgumentTableLayout(m_device.shadowCullingArgumentTables.front());
+        ASSERT(tableLayout.isValid(), "Shadow culling pipeline requires an argument layout");
+        const std::array<rhi::ArgumentLayoutHandle, 1> argumentLayouts{{tableLayout}};
+		const std::array<rhi::RootBindingDesc, 1> rootBindings{{
+			rhi::RootBindingDesc{
+				.slot = kPrimaryRootConstantsSlot,
+				.kind = rhi::RootBindingKind::constants,
+				.visibility = rhi::ShaderStage::compute,
+				.size = sizeof(shaderio::ShadowCullPushConstants),
+				.alignment = alignof(shaderio::ShadowCullPushConstants),
+			},
+		}};
+		const rhi::PipelineBindingSchemaStorage bindingSchema{argumentLayouts, rootBindings};
 
 		const rhi::ComputePipelineDesc computeDesc{
 			.shaderStage =
 			{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = shader_shadow_culling_slang,
-				.spirvSize = std::size(shader_shadow_culling_slang) * sizeof(uint32_t),
+				.library = loadEmbeddedSpirvLibrary(
+					*m_device.device, shader_shadow_culling_slang, "shadow-culling"),
 				.entryPoint = "shadowCullingMain",
 			},
-			.argumentLayouts = argumentLayouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(argumentLayouts.size()),
-			.pushConstantRanges = pushConstants.data(),
-			.pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size()),
+			.bindingSchema = bindingSchema.view(),
 			.specializationVariant = 14,
 		};
 		m_shadowCullingPipeline = m_device.device->createComputePipeline(computeDesc);
@@ -5807,27 +5726,46 @@ namespace demo
 		return m_device.device->createTextureView(desc);
 	}
 
-	rhi::TextureViewHandle RenderDevice::registerExternalTextureView(uint64_t externalView)
-	{
-		return m_device.device->registerExternalTextureView(externalView);
-	}
-
 	void RenderDevice::destroyTextureView(rhi::TextureViewHandle handle)
 	{
 		m_device.device->destroyTextureView(handle);
 	}
-
 	void RenderDevice::destroyPipelines()
 	{
-		std::vector<PipelineHandle> handles;
-		m_device.resourceTable.forEachPipeline(
-			[&](PipelineHandle handle, const auto&) { handles.push_back(handle); });
-
+		const std::array<PipelineHandle, 27> handles{
+			m_device.prebuiltPipelines.compute,
+			m_device.prebuiltPipelines.graphicsTextured,
+			m_device.prebuiltPipelines.graphicsNonTextured,
+			m_lightPipeline,
+			m_depthPrepassOpaquePipeline,
+			m_depthPrepassAlphaTestPipeline,
+			m_depthPrepassOpaqueMDIPipeline,
+			m_depthPrepassAlphaTestMDIPipeline,
+			m_gpuCullingPipeline,
+			m_shadowCullingPipeline,
+			m_gbufferOpaquePipeline,
+			m_gbufferAlphaTestPipeline,
+			m_gbufferOpaqueMDIPipeline,
+			m_gbufferAlphaTestMDIPipeline,
+			m_shadowPipeline,
+			m_csmShadowPipeline,
+			m_forwardPipeline,
+			m_forwardMDIPipeline,
+			m_gpuDrivenLightHdrPipeline,
+			m_gpuDrivenSkyboxPipeline,
+			m_bloomPrefilterPipeline,
+			m_bloomDownsamplePipeline,
+			m_finalColorPipeline,
+			m_velocityPipeline,
+			m_taaResolvePipeline,
+			m_debugPipeline,
+			m_gpuCullingDebugPipeline,
+		};
 		for (const PipelineHandle handle : handles)
 		{
-			m_device.device->destroyPipeline(handle);
+			if (!handle.isNull())
+				m_device.device->destroyPipeline(handle);
 		}
-
 		m_device.prebuiltPipelines.compute = kNullPipelineHandle;
 		m_device.prebuiltPipelines.graphicsTextured = kNullPipelineHandle;
 		m_device.prebuiltPipelines.graphicsNonTextured = kNullPipelineHandle;
@@ -5843,6 +5781,7 @@ namespace demo
 		m_gbufferOpaqueMDIPipeline = kNullPipelineHandle;
 		m_gbufferAlphaTestMDIPipeline = kNullPipelineHandle;
 		m_shadowPipeline = kNullPipelineHandle;
+		m_csmShadowPipeline = kNullPipelineHandle;
 		m_forwardPipeline = kNullPipelineHandle;
 		m_forwardMDIPipeline = kNullPipelineHandle;
 		m_gpuDrivenLightHdrPipeline = kNullPipelineHandle;
@@ -5883,7 +5822,7 @@ namespace demo
 	{
 		VKDEMO_CPU_SCOPE("Renderer.Device.ExecuteUploadCommand");
 		// Upload cmd pool + fence lifecycle sunk into VulkanDevice (UPL-02).
-		m_device.device->executeImmediateUpload(std::move(uploadFn));
+		m_perFrame.uploadManager.execute(std::move(uploadFn));
 	}
 
 	void RenderDevice::flushPendingUploadCommands(bool waitForCompletion)
@@ -5895,7 +5834,7 @@ namespace demo
 		}
 		// Step 1: backend fence/cmd retirement — VulkanDevice polls or blocks on upload fences
 		// and recycles their cmd buffers (UPL-02/03 lifecycle preserved).
-		m_device.device->flushUploadRetirements(waitForCompletion);
+		m_perFrame.uploadManager.flush(waitForCompletion);
 
 		// Step 2: render-layer staging buffer retirement.
 		// rhiStagingBuffers (rhi::BufferHandle retirement queue) stays here — VulkanDevice
@@ -6027,7 +5966,7 @@ namespace demo
 				.after = rhi::ResourceState::TransferDst,
 				.range = imageRange,
 			};
-			cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+			cmd.resourceBarrier(std::span{&uploadBeginBarrier, 1}, {});
 			textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
 			if (isKtxPayload)
@@ -6407,7 +6346,7 @@ namespace demo
 					.layerCount = 1,
 				},
 			};
-			cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+			cmd.resourceBarrier(std::span{&uploadEndBarrier, 1}, {});
 		}
 
 		rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
@@ -6609,7 +6548,7 @@ namespace demo
 				.after = rhi::ResourceState::TransferDst,
 				.range = imageRange,
 			};
-			cmd.resourceBarrier(&uploadBeginBarrier, 1, nullptr, 0);
+			cmd.resourceBarrier(std::span{&uploadBeginBarrier, 1}, {});
 			textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
 			if (hasSupportedKtx2Sidecar)
@@ -6827,7 +6766,7 @@ namespace demo
 					.layerCount = 1,
 				},
 			};
-			cmd.resourceBarrier(&uploadEndBarrier, 1, nullptr, 0);
+			cmd.resourceBarrier(std::span{&uploadEndBarrier, 1}, {});
 		}
 
 		rhi::BufferHandle textureStagingBuffer = textureBatchUpload.releaseStagingBuffer();
@@ -6886,15 +6825,17 @@ namespace demo
 			m_device.rhiStagingBuffers.push_back(staging);
 		}
 
-		const rhi::vulkan::BufferRecord* record = m_device.resourceTable.tryGetBuffer(buffer);
-		ASSERT(record != nullptr, "RHI shadow packed buffer must be registered in the resource table");
-		return toUploadBufferRecord(*record, buffer);
+		const rhi::GpuPtr address = m_device.device->getBufferGpuAddress(buffer);
+		return UploadBufferRecord{
+			.buffer = buffer,
+			.address = address,
+		};
 	}
 
 	void RenderDevice::rebuildShadowPackedBuffers(const GltfModel& model, GltfUploadResult& result,
 	                                              rhi::CommandBuffer& cmd)
 	{
-		if (result.shadowPackedVertexBuffer.buffer != 0 || result.shadowPackedIndexBuffer.buffer != 0)
+		if (!result.shadowPackedVertexBuffer.buffer.isNull() || !result.shadowPackedIndexBuffer.buffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
@@ -7020,7 +6961,7 @@ namespace demo
 	void RenderDevice::rebuildShadowPackedBuffers(const SceneAsset& asset, SceneUploadResult& result,
 	                                              rhi::CommandBuffer& cmd)
 	{
-		if (result.shadowPackedVertexBuffer.buffer != 0 || result.shadowPackedIndexBuffer.buffer != 0)
+		if (!result.shadowPackedVertexBuffer.buffer.isNull() || !result.shadowPackedIndexBuffer.buffer.isNull())
 		{
 			waitForAllFrameSlots();
 		}
@@ -7256,47 +7197,28 @@ namespace demo
 		m_lightResources.updateCoarseCullingUniforms(frameIndex, uniforms);
 	}
 
-	uint64_t RenderDevice::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
+	rhi::GpuPtr RenderDevice::getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size())
 		{
-			return 0;
+			return {};
 		}
 		const PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
 		if (frameUserData.useExternalGPUCullingObjectBuffer)
 		{
 			return frameUserData.externalGPUCullingObjectBufferAddress;
 		}
-		return m_device.device->getBufferGpuAddress(frameUserData.gpuCullingObjectBuffer).value;
+		return m_device.device->getBufferGpuAddress(frameUserData.gpuCullingObjectBuffer);
 	}
 
-	uint64_t RenderDevice::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
+	rhi::GpuPtr RenderDevice::getGPUCullingResultBufferAddress(uint32_t frameIndex) const
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size())
 		{
-			return 0;
+			return {};
 		}
-		return m_device.device->getBufferGpuAddress(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer).value;
+		return m_device.device->getBufferGpuAddress(m_perFrame.frameUserData[frameIndex].gpuCullingResultBuffer);
 	}
-
-	uint64_t RenderDevice::getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
-	{
-		if (frameIndex >= m_perFrame.frameUserData.size())
-		{
-			return 0;
-		}
-		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].gpuCullingIndirectBuffer);
-	}
-
-	uint64_t RenderDevice::getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
-	{
-		if (frameIndex >= m_perFrame.frameUserData.size())
-		{
-			return 0;
-		}
-		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBuffer);
-	}
-
 	uint32_t RenderDevice::getGPUCullingObjectCount(uint32_t frameIndex) const
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size())
@@ -7308,47 +7230,12 @@ namespace demo
 
 	uint32_t RenderDevice::getCurrentFrameIndexHint() const
 	{
-		if (m_perFrame.frameContext == nullptr)
+		if (m_perFrame.frameScheduler.frameCount() == 0)
 		{
 			return 0;
 		}
-		return m_perFrame.frameContext->getCurrentFrameIndex();
+		return m_perFrame.frameScheduler.currentFrameIndex();
 	}
-
-	uint64_t RenderDevice::getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const
-	{
-		const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-		if (frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
-		{
-			return 0;
-		}
-
-		const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
-		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[previousFrameIndex].gpuCullingIndirectBuffer);
-	}
-
-	uint64_t RenderDevice::getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const
-	{
-		const uint32_t frameCount = static_cast<uint32_t>(m_perFrame.frameUserData.size());
-		if (frameCount == 0 || currentFrameIndex >= frameCount || m_perFrame.frameCounter <= 1)
-		{
-			return 0;
-		}
-
-		const uint32_t previousFrameIndex = (currentFrameIndex + frameCount - 1u) % frameCount;
-		return m_device.resourceTable.resolveBuffer(m_perFrame.frameUserData[previousFrameIndex].gpuCullingDrawCountBuffer);
-	}
-
-	uint64_t RenderDevice::getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
-	{
-		if (frameIndex >= m_perFrame.frameUserData.size())
-		{
-			return 0;
-		}
-		return m_device.resourceTable.resolveBuffer(
-			m_perFrame.frameUserData[frameIndex].gpuDrivenPersistentIndirectStreamBuffer);
-	}
-
 	rhi::BufferHandle RenderDevice::getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
@@ -7478,11 +7365,6 @@ namespace demo
 			return m_perFrame.frameUserData[frameIndex].csmShadowMdiDrawArgumentTables[cascadeIndex];
 		}
 		return {};
-	}
-
-	uint64_t RenderDevice::getForwardMDIIndirectBuffer(uint32_t frameIndex) const
-	{
-		return getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
 	}
 
 	void RenderDevice::uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData)
@@ -7626,9 +7508,9 @@ namespace demo
 	rhi::BufferHandle RenderDevice::getCurrentTransientBufferHandle() const
 	{
 		uint32_t frameIndex = 0;
-		if (m_perFrame.frameContext != nullptr)
+		if (m_perFrame.frameScheduler.frameCount() != 0)
 		{
-			frameIndex = m_perFrame.frameContext->getCurrentFrameIndex();
+			frameIndex = m_perFrame.frameScheduler.currentFrameIndex();
 		}
 		if (frameIndex >= m_perFrame.frameUserData.size())
 		{

@@ -1,4 +1,5 @@
 #include "DDGIRayTracePass.h"
+#include "../EmbeddedShaderLibrary.h"
 
 #include "../DDGIProbeVolume.h"
 #include "../GPUDrivenRenderer.h"
@@ -204,8 +205,7 @@ namespace demo
 			}
 		};
 		m_layout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = bindings.data(),
-			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.bindings = bindings,
 			.debugName = "ddgi-raytrace",
 		});
 		const std::array<rhi::ArgumentBinding, 2> relocationBindings{
@@ -221,8 +221,7 @@ namespace demo
 			}
 		};
 		m_relocationLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = relocationBindings.data(),
-			.bindingCount = static_cast<uint32_t>(relocationBindings.size()),
+			.bindings = relocationBindings,
 			.debugName = "ddgi-probe-relocation",
 		});
 
@@ -241,7 +240,7 @@ namespace demo
 				.memoryUsage = rhi::MemoryUsage::cpuToGpu,
 				.debugName = "ddgi-raytrace-uniforms",
 			});
-			m_relocationTables[i] = device.createArgumentTable(m_relocationLayout);
+			m_relocationTables[i] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_relocationLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			const std::array<rhi::ArgumentWrite, 2> relocationWrites{
 				{
 					rhi::ArgumentWrite{
@@ -257,14 +256,12 @@ namespace demo
 					},
 				}
 			};
-			device.updateArgumentTable(m_relocationTables[i],
-			                           static_cast<uint32_t>(relocationWrites.size()),
-			                           relocationWrites.data());
+			device.updateArgumentTable(m_relocationTables[i], relocationWrites);
 
 			for (uint32_t parity = 0; parity < 2u; ++parity)
 			{
 				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
-				table = device.createArgumentTable(m_layout);
+				table = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_layout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 				const std::array<rhi::ArgumentWrite, 6> writes{
 					{
 						rhi::ArgumentWrite{
@@ -311,37 +308,37 @@ namespace demo
 						},
 					}
 				};
-				device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
+				device.updateArgumentTable(table, writes);
 			}
 		}
 
 #ifdef USE_SLANG
 		const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{m_layout}};
+		const rhi::PipelineBindingSchemaStorage bindingSchema{layouts};
 		const rhi::ComputePipelineDesc desc{
 			.shaderStage =
-			rhi::PipelineShaderStageDesc{
+			rhi::ShaderEntry{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = ddgi_gi_sdf_rays_slang,
-				.spirvSize = std::size(ddgi_gi_sdf_rays_slang) * sizeof(uint32_t),
+				.library = loadEmbeddedSpirvLibrary(
+					device, ddgi_gi_sdf_rays_slang, "ddgi-ray-trace"),
 				.entryPoint = "kernelDDGIRayTrace",
 			},
-			.argumentLayouts = layouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(layouts.size()),
+			.bindingSchema = bindingSchema.view(),
 			.specializationVariant = 0x7404u,
 		};
 		m_pipeline = device.createComputePipeline(desc);
 
 		const std::array<rhi::ArgumentLayoutHandle, 1> relocationLayouts{{m_relocationLayout}};
+		const rhi::PipelineBindingSchemaStorage relocationBindingSchema{relocationLayouts};
 		const rhi::ComputePipelineDesc relocationDesc{
 			.shaderStage =
-			rhi::PipelineShaderStageDesc{
+			rhi::ShaderEntry{
 				.stage = rhi::ShaderStage::compute,
-				.spirvCode = ddgi_probe_relocate_slang,
-				.spirvSize = std::size(ddgi_probe_relocate_slang) * sizeof(uint32_t),
+				.library = loadEmbeddedSpirvLibrary(
+					device, ddgi_probe_relocate_slang, "ddgi-probe-relocate"),
 				.entryPoint = "kernelDDGIProbeRelocate",
 			},
-			.argumentLayouts = relocationLayouts.data(),
-			.argumentLayoutCount = static_cast<uint32_t>(relocationLayouts.size()),
+			.bindingSchema = relocationBindingSchema.view(),
 			.specializationVariant = 0x7409u,
 		};
 		m_relocationPipeline = device.createComputePipeline(relocationDesc);
@@ -570,8 +567,7 @@ namespace demo
 					makeInitBarrier(probeVolume.getDepthAtlasHistory()),
 				}
 			};
-			cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()),
-			                    nullptr, 0);
+			cmd.resourceBarrier(initBarriers, {});
 			m_radianceLayoutInitialized = true;
 		}
 

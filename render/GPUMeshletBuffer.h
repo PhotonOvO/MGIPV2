@@ -53,11 +53,11 @@ namespace demo
 			const std::vector<shaderio::GPUCullObject>& meshletCullObjects,
 			MetadataUploadMode metadataUploadMode = MetadataUploadMode::incremental);
 
-		[[nodiscard]] uint64_t getMeshletDataAddress() const { return m_meshletDataAddress.value; }
+		[[nodiscard]] rhi::GpuPtr getMeshletDataAddress() const { return m_meshletDataAddress; }
 
 		[[nodiscard]] rhi::BufferHandle getMeshletDataBuffer() const { return m_meshletDataBuffer; }
 
-		[[nodiscard]] uint64_t getMeshletCullObjectAddress() const { return m_meshletCullObjectAddress.value; }
+		[[nodiscard]] rhi::GpuPtr getMeshletCullObjectAddress() const { return m_meshletCullObjectAddress; }
 
 		[[nodiscard]] rhi::BufferHandle getMeshletCullObjectBuffer() const { return m_meshletCullObjectBuffer; }
 

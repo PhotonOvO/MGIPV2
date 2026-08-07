@@ -23,6 +23,8 @@
 #include "../scene/ParallelSceneLoader.h"
 #include "../scene/SceneUploadPlanner.h"
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
+#include <imgui_internal.h>
+#include <backends/imgui_impl_glfw.h>
 
 #include <memory>
 #include <optional>
@@ -35,6 +37,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -52,6 +56,7 @@ public:
 
   struct AutomationOptions
   {
+    demo::rhi::BackendType backend{demo::rhi::defaultBackend()};
     AutomationMode mode{AutomationMode::none};
     float fixedDeltaSeconds{1.0f / 60.0f};
     uint32_t warmupFrames{60u};
@@ -64,11 +69,13 @@ public:
     bool autoExit{false};
     bool captureControlFrame{false};
     std::filesystem::path captureSyncDirectory{};
+    std::filesystem::path metricsOutputPath{};
     uint32_t captureSyncTimeoutMilliseconds{30000u};
   };
 
   MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080}, AutomationOptions automationOptions = {})
       : m_windowSize(size)
+      , m_renderer(automationOptions.backend)
       , m_automationOptions(automationOptions)
   {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -82,6 +89,15 @@ public:
     m_renderer.init(m_window, *m_surface, m_vSync);
     m_selectedMaterial = m_renderer.getMaterialHandle(0);
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
+
+    const demo::clipspace::BackendConvention projectionBackend =
+        m_automationOptions.backend == demo::rhi::BackendType::d3d12
+            ? demo::clipspace::BackendConvention::d3d12
+            : m_automationOptions.backend == demo::rhi::BackendType::metal
+                ? demo::clipspace::BackendConvention::metal
+                : demo::clipspace::BackendConvention::vulkan;
+    m_camera.setClipSpaceConvention(projectionBackend);
+    m_sceneCameraNavigation.setClipSpaceConvention(projectionBackend);
 
     // Initialize camera
     m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
@@ -999,7 +1015,9 @@ public:
         waitForAutomationCaptureHandshake();
         framePhase = "RendererFacadeRender";
         demo::profiling::ScopedCpuRange rendererFacadeRange("App.RendererFacadeRender");
+        beginAutomationMetricsWindow();
         m_renderer.render(frameParams);
+        recordAutomationMetricsFrame();
         ++m_gpuSmokeFrameCount;
         if(!m_loggedFirstFrame)
         {
@@ -1091,6 +1109,9 @@ private:
   uint64_t m_automationFrame{0u};
   AutomationPose m_automationCurrentPose{};
   AutomationPose m_automationPreviousPose{};
+  bool m_automationMetricsWindowStarted{false};
+  std::vector<double> m_automationCpuFrameMs;
+  std::vector<double> m_automationGpuFrameMs;
 
   // glTF model loading
   std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
@@ -1217,6 +1238,9 @@ private:
   void applyAutomationCameraPose();
   void waitForAutomationCaptureHandshake();
   void onAutomationFrameRendered();
+  void beginAutomationMetricsWindow();
+  void recordAutomationMetricsFrame();
+  void writeAutomationMetrics() const;
   void logAutomationMarker(const char* marker) const;
   void resetSceneCameraNavigation();
   [[nodiscard]] bool populateActiveSceneCameraUniforms(shaderio::CameraUniforms& uniforms) const;
@@ -1620,6 +1644,192 @@ inline void MinimalLatestApp::logAutomationMarker(const char* marker) const
        m_automationPreviousPose.pitchDegrees);
 }
 
+inline void MinimalLatestApp::beginAutomationMetricsWindow()
+{
+  if(m_automationOptions.metricsOutputPath.empty() ||
+     m_automationMetricsWindowStarted ||
+     !m_automationStarted ||
+     m_automationFrame < m_automationOptions.warmupFrames)
+  {
+    return;
+  }
+
+  m_renderer.resetRhiHotPathCounters();
+  m_automationCpuFrameMs.clear();
+  m_automationGpuFrameMs.clear();
+  m_automationMetricsWindowStarted = true;
+  LOGI("[RHI_METRICS] marker=window-start backend=%s frame=%llu",
+       m_automationOptions.backend == demo::rhi::BackendType::d3d12
+         ? "d3d12" : "vulkan",
+       static_cast<unsigned long long>(m_automationFrame));
+}
+
+inline void MinimalLatestApp::recordAutomationMetricsFrame()
+{
+  if(!m_automationMetricsWindowStarted)
+  {
+    return;
+  }
+
+  const demo::RuntimeProfileSnapshot snapshot =
+    m_renderer.getRuntimeProfileSnapshot();
+  if(!snapshot.cpuPassDurationsMs.empty())
+  {
+    const double cpuMs = std::accumulate(
+      snapshot.cpuPassDurationsMs.begin(),
+      snapshot.cpuPassDurationsMs.end(), 0.0,
+      [](double total, double value) {
+        return total + std::max(0.0, value);
+      });
+    m_automationCpuFrameMs.push_back(cpuMs);
+  }
+  if(snapshot.gpuValid && !snapshot.gpuPassDurationsMs.empty())
+  {
+    const double gpuMs = std::accumulate(
+      snapshot.gpuPassDurationsMs.begin(),
+      snapshot.gpuPassDurationsMs.end(), 0.0,
+      [](double total, double value) {
+        return total + std::max(0.0, value);
+      });
+    m_automationGpuFrameMs.push_back(gpuMs);
+  }
+}
+
+inline void MinimalLatestApp::writeAutomationMetrics() const
+{
+  if(!m_automationMetricsWindowStarted ||
+     m_automationOptions.metricsOutputPath.empty())
+  {
+    return;
+  }
+
+  struct MetricSummary
+  {
+    size_t count{0};
+    double average{0.0};
+    double minimum{0.0};
+    double maximum{0.0};
+    double p95{0.0};
+  };
+  const auto summarize = [](const std::vector<double>& values) {
+    MetricSummary summary{};
+    summary.count = values.size();
+    if(values.empty())
+    {
+      return summary;
+    }
+    summary.average =
+      std::accumulate(values.begin(), values.end(), 0.0) /
+      static_cast<double>(values.size());
+    const auto [minimum, maximum] =
+      std::minmax_element(values.begin(), values.end());
+    summary.minimum = *minimum;
+    summary.maximum = *maximum;
+    std::vector<double> sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    const size_t p95Index = static_cast<size_t>(
+      std::ceil(static_cast<double>(sorted.size()) * 0.95)) - 1u;
+    summary.p95 = sorted[std::min(p95Index, sorted.size() - 1u)];
+    return summary;
+  };
+
+  const MetricSummary cpu = summarize(m_automationCpuFrameMs);
+  const MetricSummary gpu = summarize(m_automationGpuFrameMs);
+  const demo::rhi::RHIHotPathCounters counters =
+    m_renderer.getRhiHotPathCounters();
+  const char* backend =
+    m_automationOptions.backend == demo::rhi::BackendType::d3d12
+      ? "d3d12" : "vulkan";
+
+  std::error_code filesystemError;
+  const std::filesystem::path parent =
+    m_automationOptions.metricsOutputPath.parent_path();
+  if(!parent.empty())
+  {
+    std::filesystem::create_directories(parent, filesystemError);
+    if(filesystemError)
+    {
+      throw std::runtime_error(
+        "Could not create metrics output directory: " +
+        filesystemError.message());
+    }
+  }
+
+  std::ofstream output(
+    m_automationOptions.metricsOutputPath,
+    std::ios::out | std::ios::trunc);
+  if(!output)
+  {
+    throw std::runtime_error(
+      "Could not open metrics output: " +
+      m_automationOptions.metricsOutputPath.string());
+  }
+  const auto writeSummary = [&output](
+    const char* name, const MetricSummary& summary, bool comma) {
+    output << "    " << std::quoted(name) << ": {"
+           << std::quoted("samples") << ": " << summary.count
+           << ", " << std::quoted("average_ms") << ": " << summary.average
+           << ", " << std::quoted("min_ms") << ": " << summary.minimum
+           << ", " << std::quoted("max_ms") << ": " << summary.maximum
+           << ", " << std::quoted("p95_ms") << ": " << summary.p95 << "}"
+           << (comma ? "," : "") << std::endl;
+  };
+
+  output << std::fixed << std::setprecision(6)
+         << '{' << std::endl
+         << "  " << std::quoted("schema") << ": "
+         << std::quoted("mgif-rhi-stable-window-v1") << ',' << std::endl
+         << "  " << std::quoted("backend") << ": "
+         << std::quoted(backend) << ',' << std::endl
+         << "  " << std::quoted("automation_mode") << ": "
+         << std::quoted(automationModeName()) << ',' << std::endl
+         << "  " << std::quoted("warmup_frames") << ": "
+         << m_automationOptions.warmupFrames << ',' << std::endl
+         << "  " << std::quoted("timings") << ": {" << std::endl;
+  writeSummary("cpu_pass_sum", cpu, true);
+  writeSummary("gpu_pass_sum", gpu, false);
+  output << "  }," << std::endl
+         << "  " << std::quoted("hot_path_counters") << ": {" << std::endl
+         << "    " << std::quoted("command_buffer_begins") << ": "
+         << counters.commandBufferBegins << ',' << std::endl
+         << "    " << std::quoted("encoder_begins") << ": "
+         << counters.encoderBegins << ',' << std::endl
+         << "    " << std::quoted("queue_submits") << ": "
+         << counters.queueSubmits << ',' << std::endl
+         << "    " << std::quoted("submitted_command_buffers") << ": "
+         << counters.submittedCommandBuffers << ',' << std::endl
+         << "    " << std::quoted("descriptor_updates") << ": "
+         << counters.descriptorUpdates << ',' << std::endl
+         << "    " << std::quoted("descriptor_allocations") << ": "
+         << counters.descriptorAllocations << ',' << std::endl
+         << "    " << std::quoted("table_version_allocations") << ": "
+         << counters.tableVersionAllocations << ',' << std::endl
+         << "    " << std::quoted("pipeline_creations") << ": "
+         << counters.pipelineCreations << ',' << std::endl
+         << "    " << std::quoted("argument_layout_creations") << ": "
+         << counters.argumentLayoutCreations << ',' << std::endl
+         << "    " << std::quoted("texture_view_creations") << ": "
+         << counters.textureViewCreations << ',' << std::endl
+         << "    " << std::quoted("command_recording_heap_allocations") << ": "
+         << counters.commandRecordingHeapAllocations << ',' << std::endl
+         << "    " << std::quoted("command_recording_native_object_creations") << ": "
+         << counters.commandRecordingNativeObjectCreations << std::endl
+         << "  }," << std::endl
+         << "  " << std::quoted("stable_recording_budget_met") << ": "
+         << (counters.stableRecordingBudgetMet() ? "true" : "false")
+         << std::endl
+         << '}' << std::endl;
+  output.flush();
+  if(!output)
+  {
+    throw std::runtime_error(
+      "Could not write metrics output: " +
+      m_automationOptions.metricsOutputPath.string());
+  }
+  LOGI("[RHI_METRICS] marker=written backend=%s output=%s",
+       backend, m_automationOptions.metricsOutputPath.string().c_str());
+}
+
 inline void MinimalLatestApp::onAutomationFrameRendered()
 {
   if(!isAutomationEnabled())
@@ -1654,6 +1864,7 @@ inline void MinimalLatestApp::onAutomationFrameRendered()
   if(m_automationFrame == automationTotalFrames() - 1u)
   {
     m_automationComplete = true;
+    writeAutomationMetrics();
     LOGI("[CSM_AUTOMATION] marker=complete mode=%s frames=%llu",
          automationModeName(),
          static_cast<unsigned long long>(automationTotalFrames()));
@@ -1675,7 +1886,8 @@ inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::Camera
         m_sceneAsset->nodes,
         std::span<const demo::GltfNodeData>{},
         m_camera.getProjectionMatrix(),
-        uniforms);
+        uniforms,
+        m_camera.getProjectionConvention());
   }
   if(m_sceneModel.has_value())
   {
@@ -1684,7 +1896,8 @@ inline bool MinimalLatestApp::populateActiveSceneCameraUniforms(shaderio::Camera
         std::span<const demo::SceneNode>{},
         m_sceneModel->nodes,
         m_camera.getProjectionMatrix(),
-        uniforms);
+        uniforms,
+        m_camera.getProjectionConvention());
   }
 
   return false;

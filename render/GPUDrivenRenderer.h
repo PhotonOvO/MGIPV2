@@ -285,6 +285,11 @@ namespace demo
 	class GPUDrivenRenderer
 	{
 	public:
+		explicit GPUDrivenRenderer(rhi::BackendType backend = rhi::defaultBackend())
+			: m_renderer(backend)
+		{
+		}
+
 		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const { return m_renderer.createSurface(); }
 		void init(void* window, rhi::Surface& surface, bool vSync);
 		void shutdown(rhi::Surface& surface);
@@ -425,6 +430,14 @@ namespace demo
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const
 		{
 			return m_renderer.getRuntimeProfileSnapshot();
+		}
+		[[nodiscard]] rhi::RHIHotPathCounters getRhiHotPathCounters() const noexcept
+		{
+			return m_renderer.getRhiHotPathCounters();
+		}
+		void resetRhiHotPathCounters() noexcept
+		{
+			m_renderer.resetRhiHotPathCounters();
 		}
 
 		[[nodiscard]] const std::vector<shaderio::DebugLineVertex>& getDebugLineVertices() const
@@ -650,10 +663,10 @@ namespace demo
 			return m_clusteredLightCullingPipeline;
 		}
 
-		[[nodiscard]] uint64_t getClusterStatsBufferOpaque(uint32_t frameIndex) const
+		[[nodiscard]] rhi::BufferHandle getClusterStatsReadbackBufferHandle(
+			uint32_t frameIndex) const
 		{
-			const rhi::BufferHandle handle = m_lightResources.getClusterStatsBuffer(frameIndex);
-			return (static_cast<uint64_t>(handle.generation) << 32u) | handle.index;
+			return m_lightResources.getClusterStatsReadbackBuffer(frameIndex);
 		}
 
 		// Stats buffer (binding 8) registered as owned=false handle alongside the coarse-culling table.
@@ -670,20 +683,9 @@ namespace demo
 			return rhi::Extent2D{m_phase7HalfExtent.width, m_phase7HalfExtent.height};
 		}
 
-		[[nodiscard]] uint64_t getSceneViewOutputImageOpaque() const
-		{
-			return (static_cast<uint64_t>(m_sceneView.outputImage.generation) << 32u) | m_sceneView.outputImage.index;
-		}
-
 		[[nodiscard]] rhi::Extent2D getSceneViewDepthExtent() const { return m_sceneView.sceneDepthExtent; }
-		[[nodiscard]] uint64_t getAOTracePipelineOpaque() const { return m_gtaoPipelineHandle.isNull() ? 0ull : 1ull; }
-		[[nodiscard]] uint64_t getAODenoisePipelineOpaque() const { return m_aoDenoisePipelineHandle.isNull() ? 0ull : 1ull; }
-		[[nodiscard]] uint64_t getAORawImageOpaque() const { return m_aoRawImage.isNull() ? 0ull : 1ull; }
-
-		[[nodiscard]] uint64_t getAODenoisedImageOpaque() const
-		{
-			return m_aoDenoisedImage.isNull() ? 0ull : 1ull;
-		}
+		[[nodiscard]] rhi::TextureHandle getAORawImageHandle() const { return m_aoRawImage; }
+		[[nodiscard]] rhi::TextureHandle getAODenoisedImageHandle() const { return m_aoDenoisedImage; }
 
 		[[nodiscard]] PipelineHandle getAOTracePipelineHandle() const { return m_gtaoPipelineHandle; }
 		[[nodiscard]] PipelineHandle getAODenoisePipelineHandle() const { return m_aoDenoisePipelineHandle; }
@@ -700,11 +702,10 @@ namespace demo
 				       : rhi::ArgumentTableHandle{};
 		}
 
-		[[nodiscard]] uint64_t getSSRTracePipelineOpaque() const { return m_ssrTracePipelineHandle.isNull() ? 0ull : 1ull; }
-		[[nodiscard]] uint64_t getSSRRawImageOpaque() const { return m_ssrRawImage.isNull() ? 0ull : 1ull; }
+		[[nodiscard]] rhi::TextureHandle getSSRRawImageHandle() const { return m_ssrRawImage; }
+		[[nodiscard]] rhi::TextureHandle getSSRDenoisedImageHandle() const { return m_ssrDenoisedImage; }
+
 		[[nodiscard]] PipelineHandle getSSRTracePipelineHandle() const { return m_ssrTracePipelineHandle; }
-		[[nodiscard]] uint64_t getSSRDenoisePipelineOpaque() const { return m_ssrDenoisePipelineHandle.isNull() ? 0ull : 1ull; }
-		[[nodiscard]] uint64_t getSSRDenoisedImageOpaque() const { return m_ssrDenoisedImage.isNull() ? 0ull : 1ull; }
 		[[nodiscard]] PipelineHandle getSSRDenoisePipelineHandle() const { return m_ssrDenoisePipelineHandle; }
 
 		[[nodiscard]] rhi::ArgumentTableHandle getSSRDenoiseArgumentTable(uint32_t frameIndex) const
@@ -717,7 +718,7 @@ namespace demo
 		// sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
 		// frame-lifetime handle; do not cache it across frames.
 		[[nodiscard]] rhi::ArgumentTableHandle
-		acquireSSRTempArgumentTable(uint64_t cameraBuffer, uint32_t cameraOffset);
+		acquireSSRTempArgumentTable(rhi::BufferHandle cameraBuffer, uint32_t cameraOffset);
 
 		// Opaque snapshot of the per-frame bitonic visibility-sort resources, so the
 		// visibility-sort pass can record without reaching into renderer internals.
@@ -795,8 +796,6 @@ namespace demo
 		// frame was recorded for the current scene topology generation.
 		struct PreviousRawCullingBootstrap
 		{
-			uint64_t indirectBufferHandle{0};
-			uint64_t countBufferHandle{0};
 			rhi::BufferHandle indirectBuffer{};
 			rhi::BufferHandle countBuffer{};
 			uint32_t objectCount{0};
@@ -804,17 +803,6 @@ namespace demo
 		};
 
 		[[nodiscard]] PreviousRawCullingBootstrap getPreviousRawCullingBootstrap(uint32_t frameIndex) const;
-
-		[[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
-		{
-			return m_renderer.getPreviousGPUCullingIndirectBufferOpaque(frameIndex);
-		}
-
-		[[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
-		{
-			return m_renderer.getPreviousGPUCullingDrawCountBufferOpaque(frameIndex);
-		}
-
 		[[nodiscard]] rhi::BufferHandle getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
 		{
 			return m_renderer.getPreviousGPUCullingIndirectBufferRHIHandle(frameIndex);
@@ -829,17 +817,6 @@ namespace demo
 		{
 			return m_renderer.getPreviousGPUCullingObjectCount(frameIndex, nullptr);
 		}
-
-		[[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const
-		{
-			return m_renderer.getGPUCullingIndirectBufferOpaque(frameIndex);
-		}
-
-		[[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const
-		{
-			return m_renderer.getGPUCullingDrawCountBufferOpaque(frameIndex);
-		}
-
 		[[nodiscard]] rhi::BufferHandle getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
 		{
 			return m_renderer.getGPUCullingIndirectBufferRHIHandle(frameIndex);
@@ -849,12 +826,6 @@ namespace demo
 		{
 			return m_renderer.getGPUCullingDrawCountBufferRHIHandle(frameIndex);
 		}
-
-		[[nodiscard]] uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const
-		{
-			return m_renderer.getShadowCullingIndirectBufferOpaque(frameIndex);
-		}
-
 		[[nodiscard]] rhi::BufferHandle getShadowCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
 		{
 			return m_renderer.getShadowCullingIndirectBufferRHIHandle(frameIndex);
@@ -867,16 +838,7 @@ namespace demo
 
 		[[nodiscard]] uint32_t getSafePersistentObjectCount() const;
 
-		[[nodiscard]] uint64_t getShadowAtlasImageOpaque() const
-		{
-			return m_shadowAtlasImage.isNull() ? 0ull : 1ull;
-		}
-
-		[[nodiscard]] uint64_t getShadowAtlasViewOpaque() const
-		{
-			return m_shadowAtlasView.isNull() ? 0ull : 1ull;
-		}
-
+		[[nodiscard]] rhi::TextureHandle getShadowAtlasImageHandle() const { return m_shadowAtlasImage; }
 		[[nodiscard]] rhi::TextureViewHandle getShadowAtlasViewHandle() const { return m_shadowAtlasView; }
 
 		[[nodiscard]] rhi::Extent2D getShadowAtlasExtent() const
@@ -887,12 +849,12 @@ namespace demo
 		[[nodiscard]] uint32_t getShadowAtlasTileSize() const { return m_shadowAtlasTileSize; }
 		void setShadowAtlasAllocatedTiles(uint32_t tiles) { m_shadowAtlasAllocatedTiles = tiles; }
 
-		[[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
+		[[nodiscard]] rhi::GpuPtr getGPUCullingObjectBufferAddress(uint32_t frameIndex) const
 		{
 			return m_renderer.getGPUCullingObjectBufferAddress(frameIndex);
 		}
 
-		[[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const
+		[[nodiscard]] rhi::GpuPtr getGPUCullingResultBufferAddress(uint32_t frameIndex) const
 		{
 			return m_renderer.getGPUCullingResultBufferAddress(frameIndex);
 		}
@@ -912,22 +874,10 @@ namespace demo
 		{
 			return m_renderer.getGPUCullingIndirectCommandStride();
 		}
-
-		[[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
-		{
-			return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(frameIndex);
-		}
-
 		[[nodiscard]] rhi::BufferHandle getGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const
 		{
 			return m_renderer.getGPUDrivenPersistentIndirectStreamBufferRHIHandle(frameIndex);
 		}
-
-		[[nodiscard]] uint64_t getPreviousGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const
-		{
-			return m_renderer.getGPUDrivenPersistentIndirectStreamBuffer(getPreviousFrameIndex(frameIndex));
-		}
-
 		[[nodiscard]] rhi::BufferHandle getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(
 			uint32_t frameIndex) const
 		{
@@ -955,12 +905,6 @@ namespace demo
 		                                        uint32_t alphaMaxDrawCount);
 		void recordGBufferVisibilityPatch(bool patched, uint32_t opaqueCapacity, uint32_t alphaCapacity);
 		void recordForwardVisibilityPatch(bool patched, uint32_t transparentCapacity, uint32_t totalPersistentCapacity);
-
-		[[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const
-		{
-			return m_renderer.getForwardMDIIndirectBuffer(frameIndex);
-		}
-
 		[[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
 		[[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_lightResources.getActiveSpotLightCount(); }
 		[[nodiscard]] rhi::Extent2D getSceneExtent() const { return m_renderer.getSceneExtent(); }
@@ -1163,13 +1107,17 @@ namespace demo
 				       : rhi::ArgumentTableHandle{};
 		}
 
+		[[nodiscard]] rhi::ArgumentTableHandle getFinalColorInputArgumentTable(uint32_t frameIndex) const
+		{
+			return frameIndex < m_finalColorInputArgumentTables.size()
+			       ? m_finalColorInputArgumentTables[frameIndex]
+			       : getLightingInputArgumentTable(frameIndex);
+		}
 		// rhi-typed render targets for the fullscreen screen-space passes (skybox, etc.),
-		// so passes never name a Vulkan type. Native handles are read from m_sceneView here.
+		// so passes consume only public RHI handles from m_sceneView.
 		struct ScreenPassTargets
 		{
-			uint64_t colorImage{0};
 			rhi::TextureViewHandle colorView{};
-			uint64_t depthImage{0};
 			rhi::TextureViewHandle depthView{};
 			rhi::TextureAspect depthAspect{rhi::TextureAspect::depth};
 			rhi::Extent2D extent{};
@@ -1186,11 +1134,7 @@ namespace demo
 			{
 				return targets;
 			}
-			targets.colorImage = (static_cast<uint64_t>(m_sceneView.sceneColorHdrImage.generation) << 32u)
-				| m_sceneView.sceneColorHdrImage.index;
 			targets.colorView = m_sceneView.sceneColorHdrView;
-			targets.depthImage = (static_cast<uint64_t>(m_sceneView.sceneDepthImage.generation) << 32u)
-				| m_sceneView.sceneDepthImage.index;
 			targets.depthView = m_sceneView.sceneDepthView;
 			targets.depthAspect = depthAspectForFormat(m_sceneView.sceneDepthFormat);
 			targets.extent = {m_sceneView.sceneDepthExtent.width, m_sceneView.sceneDepthExtent.height};
@@ -1247,7 +1191,7 @@ namespace demo
 
 		bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
 		                                       uint32_t frameIndex,
-		                                       uint64_t targetIndirectBufferHandle,
+		                                       rhi::BufferHandle targetIndirectBuffer,
 		                                       uint32_t categoryValue,
 		                                       uint32_t outputOffset);
 
@@ -1293,8 +1237,8 @@ namespace demo
 			std::array<rhi::BufferHandle, 2> targetIndirectBufferHandles{};
 			std::array<rhi::BufferHandle, 2> boundSortKeyHandles{};
 			std::array<rhi::BufferHandle, 2> boundSortValueHandles{};
-			std::array<uint64_t, 2> boundSourceIndirectHandles{0, 0};
-			std::array<uint64_t, 2> boundTargetIndirectHandles{0, 0};
+			std::array<rhi::BufferHandle, 2> boundSourceIndirectHandles{};
+			std::array<rhi::BufferHandle, 2> boundTargetIndirectHandles{};
 			std::array<rhi::BufferHandle, 2> boundPrefixAHandles{};
 			std::array<rhi::BufferHandle, 2> boundPrefixBHandles{};
 			uint32_t prefixCapacity{0};
@@ -1337,8 +1281,8 @@ namespace demo
 		void updateTransparentVisibilityPatchArgumentTable(uint32_t frameIndex,
 		                                                   rhi::BufferHandle sortKeyBuffer,
 		                                                   rhi::BufferHandle sortValueBuffer,
-		                                                   uint64_t sourceIndirectBufferHandle,
-		                                                   uint64_t targetIndirectBufferHandle);
+		                                                   rhi::BufferHandle sourceIndirectBuffer,
+		                                                   rhi::BufferHandle targetIndirectBuffer);
 		[[nodiscard]] uint32_t getPreviousFrameIndex(uint32_t frameIndex) const;
 		void rebuildGPUDrivenScene(const GltfModel& model, const GltfUploadResult& uploadResult,
 		                           rhi::CommandBuffer& cmd);
@@ -1533,11 +1477,14 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_lightCoarseCullingArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
+		rhi::ArgumentLayoutHandle m_finalColorInputArgumentLayout{};
+		std::vector<rhi::ArgumentTableHandle> m_finalColorInputArgumentTables;
 		rhi::SamplerHandle m_linearClampSamplerHandle{};
 		rhi::SamplerHandle m_shadowPointClampSamplerHandle{};
 		rhi::SamplerHandle m_iblCubeSamplerHandle{};
 		rhi::SamplerHandle m_iblLutSamplerHandle{};
 		std::array<rhi::ArgumentLayoutHandle, 2> m_lightPipelineArgumentLayouts{};
+		std::array<rhi::ArgumentLayoutHandle, 2> m_finalColorPipelineArgumentLayouts{};
 		PipelineHandle m_pointLightCoarseCullingPipeline{};
 		PipelineHandle m_spotLightCoarseCullingPipeline{};
 		// Fullscreen graphics pipelines now live in the device pipeline registry; only
@@ -1553,10 +1500,7 @@ namespace demo
 		PipelineHandle m_clusteredLightCullingPipeline{};
 		// Wave 9: AO/SSR sets are RHI ArgumentLayouts + owned/temporary ArgumentTables.
 		rhi::ArgumentLayoutHandle m_aoArgumentLayout{};
-		// Phase 6: RHI handles for the Phase-7 compute pipelines + adopted bind groups,
-		// so the AO/SSR passes record through CommandBuffer verbs instead of raw vkCmd*. AO uses
-		// persistent adopted sets; SSR builds a per-frame temporary bind group from
-		// m_ssrLayoutHandle (see acquireSSRTempArgumentTable).
+		// AO uses persistent argument tables; SSR builds frame-local tables.
 		PipelineHandle m_gtaoPipelineHandle{};
 		PipelineHandle m_aoDenoisePipelineHandle{};
 		PipelineHandle m_ssrTracePipelineHandle{};

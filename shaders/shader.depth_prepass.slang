@@ -28,8 +28,20 @@ ConstantBuffer<DrawUniforms> draw;
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
 StructuredBuffer<DrawUniforms> drawData;
 
+#ifdef DEMO_D3D12
+[[vk::push_constant]]
+ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool alphaTestEnabled = (DEMO_SPECIALIZATION_0 != 0);
+#else
 [[vk::constant_id(0)]]
 const bool alphaTestEnabled = false;
+#endif
 
 [shader("vertex")]
 VertexOutput vertexMain(VertexInput input)
@@ -49,8 +61,14 @@ struct VertexOutputMdi
 };
 
 [shader("vertex")]
-VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+#ifdef DEMO_D3D12
+VertexOutputMdi vertexMdiMain(VertexInput input)
 {
+    const uint drawIndex = mdiDrawIndex.drawIndex;
+#else
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
+{
+#endif
     const DrawUniforms mdiDraw = drawData[drawIndex];
     VertexOutputMdi output;
     float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));

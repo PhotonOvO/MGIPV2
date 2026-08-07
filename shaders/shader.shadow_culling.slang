@@ -35,6 +35,9 @@ void shadowCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const ShadowCullObject objectData = shadowCullObjects[objectIndex];
     GPUCullIndirectCommand command;
+#ifdef DEMO_D3D12
+    command.drawIndex = objectData.firstInstance;
+#endif
     command.indexCount = objectData.indexCount;
     command.instanceCount = 0u;
     command.firstIndex = objectData.firstIndex;

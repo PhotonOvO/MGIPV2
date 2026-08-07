@@ -1,5 +1,7 @@
 #include "VulkanSwapchain.h"
 #include "../../common/ProfilerMarkers.h"
+#include "VulkanQueue.h"
+#include "VulkanResourceTable.h"
 #include "rhi/vulkan/VulkanFormatUtils.h"
 
 #include <algorithm>
@@ -41,10 +43,6 @@ typedef struct VkSurfaceFullScreenExclusiveWin32InfoEXT {
 namespace demo::rhi::vulkan {
 namespace {
 
-uint64_t toNativeU64(uintptr_t value)
-{
-  return static_cast<uint64_t>(value);
-}
 
 void ensure(bool condition, const char* message)
 {
@@ -85,21 +83,23 @@ PFN_vkReleaseFullScreenExclusiveModeEXT getReleaseFullScreenExclusiveModeFn(VkDe
 
 }  // namespace
 
-void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeCmdPool, bool vSync)
+void VulkanSwapchain::init(void* nativePhysicalDevice, void* nativeDevice, void* nativeQueue, void* nativeSurface, VulkanQueueSyncRegistry* syncRegistry, VulkanResourceTable* resourceTable, bool vSync)
 {
   VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Init");
   m_physicalDevice = static_cast<VkPhysicalDevice>(nativePhysicalDevice);
   m_device         = static_cast<VkDevice>(nativeDevice);
   m_queue          = static_cast<VkQueue>(nativeQueue);
   m_surface        = static_cast<VkSurfaceKHR>(nativeSurface);
-  m_cmdPool        = static_cast<VkCommandPool>(nativeCmdPool);
+  m_syncRegistry   = syncRegistry;
+  m_resourceTable  = resourceTable;
   m_vSync          = vSync;
 
   ensure(m_physicalDevice != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkPhysicalDevice");
   ensure(m_device != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkDevice");
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkQueue");
   ensure(m_surface != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkSurfaceKHR");
-  ensure(m_cmdPool != VK_NULL_HANDLE, "VulkanSwapchain::init requires VkCommandPool");
+  ensure(m_syncRegistry != nullptr, "VulkanSwapchain::init requires queue sync registry");
+  ensure(m_resourceTable != nullptr, "VulkanSwapchain::init requires a resource table");
   m_hasAcquiredImage = false;
 }
 
@@ -111,7 +111,8 @@ void VulkanSwapchain::deinit()
   m_device         = VK_NULL_HANDLE;
   m_queue          = VK_NULL_HANDLE;
   m_surface        = VK_NULL_HANDLE;
-  m_cmdPool        = VK_NULL_HANDLE;
+  m_syncRegistry   = nullptr;
+  m_resourceTable  = nullptr;
   m_imageFormat    = VK_FORMAT_UNDEFINED;
   m_extent         = {};
   m_hasAcquiredImage = false;
@@ -181,6 +182,20 @@ void VulkanSwapchain::rebuild()
 {
   VKDEMO_CPU_SCOPE("RHI.Vulkan.Swapchain.Rebuild");
   ensure(m_queue != VK_NULL_HANDLE, "VulkanSwapchain::rebuild requires VkQueue");
+
+  VkSurfaceCapabilitiesKHR surfaceCapabilities{};
+  checkVk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            m_physicalDevice, m_surface, &surfaceCapabilities),
+          "VulkanSwapchain::rebuild failed querying surface capabilities");
+  const VkExtent2D nextExtent = surfaceCapabilities.currentExtent;
+  if(nextExtent.width == 0 || nextExtent.height == 0)
+  {
+    // A minimized Win32 window has no presentable extent. Preserve the live
+    // swapchain and retry after restore instead of creating an invalid 0x0 one.
+    m_needsRebuild = true;
+    return;
+  }
+
   vkQueueWaitIdle(m_queue);
   m_frameResourceIndex = 0;
   m_frameImageIndex    = 0;
@@ -232,9 +247,22 @@ AcquireResult VulkanSwapchain::acquireNextImage()
 #endif
   m_hasAcquiredImage = true;
   ensure(m_frameImageIndex < m_images.size(), "VulkanSwapchain::acquireNextImage invalid image index");
-  return AcquireResult{.texture    = m_images[m_frameImageIndex].texture,
-                       .imageIndex = m_frameImageIndex,
-                       .status = result == VK_SUBOPTIMAL_KHR ? AcquireResult::Status::suboptimal : AcquireResult::Status::success};
+  return AcquireResult{
+    .texture = m_images[m_frameImageIndex].texture,
+    .imageIndex = m_frameImageIndex,
+    .status = result == VK_SUBOPTIMAL_KHR
+      ? AcquireResult::Status::suboptimal
+      : AcquireResult::Status::success,
+    .waitPoint = SubmitWaitPoint{
+      .external = QueueSyncPoint{frame.imageAvailableSync, 0},
+      .stage = SubmitStage::colorOutput,
+    },
+    .signalPoint = SubmitSignalPoint{
+      .external = QueueSyncPoint{
+        m_images[m_frameImageIndex].renderFinishedSync, 0
+      },
+    },
+  };
 }
 
 PresentResult VulkanSwapchain::present()
@@ -308,6 +336,10 @@ TextureHandle VulkanSwapchain::currentTexture() const
   return m_images[m_frameImageIndex].texture;
 }
 
+TextureViewHandle VulkanSwapchain::textureView(uint32_t imageIndex) const
+{
+  return imageIndex < m_images.size() ? m_images[imageIndex].view : TextureViewHandle{};
+}
 Extent2D VulkanSwapchain::getExtent() const
 {
   return m_extent;
@@ -460,13 +492,39 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
 
   for(uint32_t i = 0; i < imageCount; ++i)
   {
-    m_images[i].image         = swapImages[i];
-    m_images[i].texture       = TextureHandle{.index = i + 1, .generation = 1};
+    m_images[i].image = swapImages[i];
+    m_images[i].texture = m_resourceTable->registerTexture(
+      m_images[i].image,
+      TextureColdRecord{
+        .desc = TextureDesc{
+          .dimension = TextureDimension::e2D,
+          .format = vulkan::toPortableTextureFormat(m_imageFormat),
+          .usage = TextureUsageFlags::colorAttachment | TextureUsageFlags::transferDst,
+          .extent = Extent3D{m_extent.width, m_extent.height, 1},
+        },
+        .debugName = "Swapchain image",
+        .owned = false,
+      });
     imageViewCreateInfo.image = m_images[i].image;
     checkVk(vkCreateImageView(m_device, &imageViewCreateInfo, nullptr, &m_images[i].imageView),
             "VulkanSwapchain::createResources failed creating image view");
+    m_images[i].view = m_resourceTable->registerTextureView(
+      m_images[i].imageView,
+      TextureViewColdRecord{
+        .desc = TextureViewCreateDesc{
+          .image = m_images[i].texture,
+          .format = vulkan::toPortableTextureFormat(m_imageFormat),
+          .viewType = ImageViewType::e2D,
+          .aspect = TextureAspect::color,
+        },
+        .parentTexture = m_images[i].texture,
+        .debugName = "Swapchain image view",
+        .owned = false,
+      });
     checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_images[i].renderFinishedSemaphore),
             "VulkanSwapchain::createResources failed creating render-finished semaphore");
+    m_images[i].renderFinishedSync =
+      m_syncRegistry->registerSemaphore(m_images[i].renderFinishedSemaphore);
   }
 
   m_frameResources.resize(m_requestedImageCount);
@@ -474,6 +532,8 @@ Extent2D VulkanSwapchain::createResources(bool vSync)
   {
     checkVk(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &frame.imageAvailableSemaphore),
             "VulkanSwapchain::createResources failed creating image-available semaphore");
+    frame.imageAvailableSync =
+      m_syncRegistry->registerSemaphore(frame.imageAvailableSemaphore);
   }
 
   return m_extent;
@@ -496,6 +556,8 @@ void VulkanSwapchain::destroyResources()
   {
     if(frame.imageAvailableSemaphore != VK_NULL_HANDLE)
     {
+      m_syncRegistry->unregisterSemaphore(frame.imageAvailableSync);
+      frame.imageAvailableSync = {};
       vkDestroySemaphore(m_device, frame.imageAvailableSemaphore, nullptr);
       frame.imageAvailableSemaphore = VK_NULL_HANDLE;
     }
@@ -505,16 +567,27 @@ void VulkanSwapchain::destroyResources()
   {
     if(image.renderFinishedSemaphore != VK_NULL_HANDLE)
     {
+      m_syncRegistry->unregisterSemaphore(image.renderFinishedSync);
+      image.renderFinishedSync = {};
       vkDestroySemaphore(m_device, image.renderFinishedSemaphore, nullptr);
       image.renderFinishedSemaphore = VK_NULL_HANDLE;
+    }
+    if(!image.view.isNull())
+    {
+      m_resourceTable->removeTextureView(image.view);
+      image.view = {};
+    }
+    if(!image.texture.isNull())
+    {
+      m_resourceTable->removeTexture(image.texture);
+      image.texture = {};
     }
     if(image.imageView != VK_NULL_HANDLE)
     {
       vkDestroyImageView(m_device, image.imageView, nullptr);
       image.imageView = VK_NULL_HANDLE;
     }
-    image.image   = VK_NULL_HANDLE;
-    image.texture = {};
+    image.image = VK_NULL_HANDLE;
   }
 
   if(m_swapchain != VK_NULL_HANDLE)

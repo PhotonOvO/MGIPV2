@@ -33,16 +33,15 @@ def function_source(source: str, signature: str) -> str:
 
 
 class RenderDeviceShutdownContractTests(unittest.TestCase):
-    def test_frame_context_outlives_resource_retirement_and_is_detached(self) -> None:
+    def test_frame_scheduler_outlives_resource_retirement(self) -> None:
         shutdown = function_source(
             RENDER_DEVICE,
             "void RenderDevice::shutdown(",
         )
 
         final_wait_idle = shutdown.rindex("m_device.device->waitIdle();")
-        detach_frame_context = shutdown.index("setFrameContext(nullptr);")
-        deinit_frame_context = shutdown.index("m_perFrame.frameContext->deinit();")
-        reset_frame_context = shutdown.index("m_perFrame.frameContext.reset();")
+        shutdown_uploads = shutdown.index("m_perFrame.uploadManager.shutdown();")
+        shutdown_scheduler = shutdown.index("m_perFrame.frameScheduler.shutdown();")
         deinit_surface = shutdown.index("surface.deinit();")
         deinit_device = shutdown.index("m_device.device->deinit();")
 
@@ -64,26 +63,20 @@ class RenderDeviceShutdownContractTests(unittest.TestCase):
                 retirement_producer,
             )
 
-        self.assertLess(final_wait_idle, detach_frame_context)
-        self.assertLess(detach_frame_context, deinit_frame_context)
-        self.assertLess(deinit_frame_context, reset_frame_context)
-        self.assertLess(reset_frame_context, deinit_surface)
+        self.assertLess(final_wait_idle, shutdown_uploads)
+        self.assertLess(shutdown_uploads, shutdown_scheduler)
+        self.assertLess(shutdown_scheduler, deinit_surface)
         self.assertLess(deinit_surface, deinit_device)
-        self.assertEqual(shutdown.count("m_perFrame.frameContext->deinit();"), 1)
-        self.assertIn("drained all pending native retirements", shutdown)
+        self.assertNotIn("frameContext", shutdown)
 
-    def test_vulkan_device_raw_frame_context_pointer_is_rewired_on_reinit(self) -> None:
-        create_frame_context = function_source(
+    def test_vulkan_device_retirement_uses_public_queue_progress(self) -> None:
+        retirement_dependencies = function_source(
             VULKAN_DEVICE,
-            "std::unique_ptr<FrameContext> VulkanDevice::createFrameContext(",
+            "SubmissionTokenSet VulkanDevice::retirementDependencies() const",
         )
-        retirement_timeline = function_source(
+        retirement_complete = function_source(
             VULKAN_DEVICE,
-            "uint64_t VulkanDevice::retirementTimelineValue() const",
-        )
-        device_deinit = function_source(
-            VULKAN_DEVICE,
-            "void VulkanDevice::deinit()",
+            "bool VulkanDevice::isRetirementComplete(",
         )
         renderer_init = function_source(
             RENDER_DEVICE,
@@ -94,23 +87,17 @@ class RenderDeviceShutdownContractTests(unittest.TestCase):
             "void RenderDevice::createFrameSubmission(",
         )
 
-        self.assertIn("m_frameContext = frameContext.get();", create_frame_context)
-        self.assertIn("if (m_frameContext == nullptr)", retirement_timeline)
-        self.assertIn("m_frameContext->getCurrentFrameValue()", retirement_timeline)
-        self.assertIn("m_frameContext = nullptr;", device_deinit)
+        self.assertIn("queue->lastSubmittedToken()", retirement_dependencies)
+        self.assertIn("queue->completedValue()", retirement_complete)
+        self.assertNotIn("FrameContext", VULKAN_DEVICE_HEADER)
         self.assertIn(
-            "void setFrameContext(VulkanFrameContext* frameContext)",
-            VULKAN_DEVICE_HEADER,
-        )
-        self.assertIn(
-            "m_device.device->createFrameContext(",
+            "m_perFrame.frameScheduler.init(*m_device.device, numFrames)",
             create_frame_submission,
         )
         self.assertLess(
             renderer_init.index("m_device.device->init(deviceCreateInfo);"),
             renderer_init.index("createFrameSubmission("),
         )
-
     def test_android_term_init_window_runs_full_shutdown_reinit_contract(self) -> None:
         handle_command = function_source(
             ANDROID_APP,

@@ -26,18 +26,12 @@
 namespace demo
 {
 	struct SceneUploadResult;
-
-	using OpaqueGpuBufferHandle = uintptr_t;
-
 	struct UploadBufferRecord
 	{
-		uintptr_t buffer{0};
-		uintptr_t allocation{0};
-		uintptr_t address{0};
-		void* mapped{nullptr};
-		rhi::BufferHandle rhiHandle{};
+		rhi::BufferHandle buffer{};
+		rhi::GpuPtr address{};
 
-		[[nodiscard]] bool isNull() const { return buffer == 0; }
+		[[nodiscard]] bool isNull() const { return buffer.isNull(); }
 	};
 
 	struct DirectionalLightSettings
@@ -239,9 +233,9 @@ namespace demo
 	struct GPUDrivenSceneView
 	{
 		// Future phases will promote this buffer to be the authoritative scene-object source.
-		uint64_t gpuSceneObjectBufferAddress{0};
+		rhi::GpuPtr gpuSceneObjectBufferAddress{};
 		// Phase 1 authoritative object source for GPU culling and indirect command generation.
-		uint64_t gpuCullObjectBufferAddress{0};
+		rhi::GpuPtr gpuCullObjectBufferAddress{};
 		rhi::BufferHandle gpuCullObjectBuffer{};
 		rhi::BufferHandle gpuCullMeshletBuffer{};
 		rhi::BufferHandle gpuCullSceneObjectBuffer{};
@@ -258,8 +252,8 @@ namespace demo
 		uint32_t drawMeshHandleCount{0};
 		const size_t* shadowCasterMeshIndices{nullptr};
 		uint32_t shadowCasterCount{0};
-		OpaqueGpuBufferHandle shadowPackedVertexBuffer{0};
-		OpaqueGpuBufferHandle shadowPackedIndexBuffer{0};
+		rhi::BufferHandle shadowPackedVertexBuffer{};
+		rhi::BufferHandle shadowPackedIndexBuffer{};
 		const ShadowPackedMesh* shadowPackedMeshes{nullptr};
 		uint32_t shadowPackedMeshCount{0};
 		glm::vec3 sceneBoundsMin{0.0f};

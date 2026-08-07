@@ -376,7 +376,7 @@ namespace demo
 				.range = {.aspect = rhi::TextureAspect::color, .levelCount = 1, .layerCount = 1},
 			};
 			// Upload layout boundary: initialize the LUT image for the staging copy.
-			cmdBuffer.resourceBarrier(&lutUploadBarrier, 1, nullptr, 0);
+			cmdBuffer.resourceBarrier(std::span{&lutUploadBarrier, 1}, {});
 			BatchUploadContext upload;
 			upload.init(*m_rhiDevice, static_cast<uint64_t>(lutPixels.size()) + 16u);
 			const BatchUploadContext::Slice slice = upload.allocate(lutPixels.size(), 16);
@@ -398,7 +398,7 @@ namespace demo
 				.range = {.aspect = rhi::TextureAspect::color, .levelCount = 1, .layerCount = 1},
 			};
 			// Upload layout boundary: make the LUT image shader-readable after copy.
-			cmdBuffer.resourceBarrier(&lutReadyBarrier, 1, nullptr, 0);
+			cmdBuffer.resourceBarrier(std::span{&lutReadyBarrier, 1}, {});
 		}
 
 		// Create fixed-resolution shadow map
@@ -464,7 +464,7 @@ namespace demo
 				.after = rhi::ResourceState::General,
 				.range = range,
 			};
-			cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
+			cmdBuffer.resourceBarrier(std::span{&barrier, 1}, {});
 			cmdBuffer.clearColorTexture(m_resources.colorImages[c].image, range,
 			                            rhi::ClearColorValue{0.F, 0.F, 0.F, 0.F});
 		}
@@ -481,7 +481,7 @@ namespace demo
 				.after = rhi::ResourceState::General,
 				.range = outputRange,
 			};
-			cmdBuffer.resourceBarrier(&barrier, 1, nullptr, 0);
+			cmdBuffer.resourceBarrier(std::span{&barrier, 1}, {});
 			cmdBuffer.clearColorTexture(image, outputRange, clearValue);
 		};
 		const rhi::ClearColorValue outputClearValue{0.0f, 0.0f, 0.0f, 1.0f};
@@ -520,7 +520,7 @@ namespace demo
 					},
 				}
 			};
-			cmdBuffer.resourceBarrier(depthBarriers.data(), static_cast<uint32_t>(depthBarriers.size()), nullptr, 0);
+			cmdBuffer.resourceBarrier(depthBarriers, {});
 			const rhi::TextureBarrier pyramidBarrier{
 				.texture = m_resources.depthPyramidImage.image,
 				.before = rhi::ResourceState::Undefined,
@@ -529,7 +529,7 @@ namespace demo
 					.aspect = rhi::TextureAspect::color, .levelCount = m_resources.depthPyramidMipCount, .layerCount = 1
 				},
 			};
-			cmdBuffer.resourceBarrier(&pyramidBarrier, 1, nullptr, 0);
+			cmdBuffer.resourceBarrier(std::span{&pyramidBarrier, 1}, {});
 		}
 
 		if (m_imguiRenderer != nullptr && m_imguiRenderer->isInitialized())

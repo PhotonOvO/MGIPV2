@@ -35,6 +35,7 @@ namespace demo
 		// Getters for rendering
 		const glm::mat4& getViewMatrix() const { return m_view; }
 		const glm::mat4& getProjectionMatrix() const { return m_projection; }
+		const clipspace::ProjectionConvention& getProjectionConvention() const { return m_projectionConvention; }
 		const glm::mat4& getViewProjectionMatrix() const { return m_viewProjection; }
 		const glm::vec3& getPosition() const { return m_position; }
 

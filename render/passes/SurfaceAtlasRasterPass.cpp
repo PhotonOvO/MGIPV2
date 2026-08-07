@@ -199,7 +199,7 @@ void SurfaceAtlasRasterPass::renderDirtyTiles(rhi::CommandBuffer& cmd,
       rhi::DepthTargetDesc depthTarget{
         .texture = atlasPass.getAtlasDepth(),
         .view = {},
-        .state = rhi::ResourceState::depthAttachment,
+        .state = rhi::ResourceState::DepthStencilAttachment,
         .loadOp = rhi::LoadOp::clear,
         .storeOp = rhi::StoreOp::store,
         .clearValue = {1.0f, 0},
@@ -207,8 +207,7 @@ void SurfaceAtlasRasterPass::renderDirtyTiles(rhi::CommandBuffer& cmd,
 
       rhi::RenderPassDesc renderPassDesc{};
       renderPassDesc.renderArea = {{0, 0}, {tileRes, tileRes}};
-      renderPassDesc.colorTargets = colorTargets.data();
-      renderPassDesc.colorTargetCount = 2;
+      renderPassDesc.colorTargets = colorTargets;
       renderPassDesc.depthTarget = &depthTarget;
 
       rhi::RenderEncoder* enc = cmd.beginRenderPass(renderPassDesc);

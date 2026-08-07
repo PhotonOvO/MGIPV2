@@ -76,6 +76,7 @@ namespace demo
 		[[nodiscard]] rhi::BufferHandle getClusterCountsBuffer(uint32_t frameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getClusterIndicesBuffer(uint32_t frameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getClusterStatsBuffer(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getClusterStatsReadbackBuffer(uint32_t frameIndex) const;
 		[[nodiscard]] uint32_t getActivePointLightCount() const { return m_activePointLights; }
 		[[nodiscard]] uint32_t getActiveSpotLightCount() const { return m_activeSpotLights; }
 		[[nodiscard]] uint32_t getMaxPointLights() const { return m_maxPointLights; }
@@ -97,6 +98,7 @@ namespace demo
 			rhi::BufferHandle clusterCountsBuffer{};
 			rhi::BufferHandle clusterIndicesBuffer{};
 			rhi::BufferHandle clusterStatsBuffer{};
+			rhi::BufferHandle clusterStatsReadbackBuffer{};
 		};
 
 		[[nodiscard]] rhi::BufferHandle createStorageBuffer(uint64_t size, rhi::MemoryUsage usage) const;

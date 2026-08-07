@@ -81,15 +81,15 @@ namespace demo
 			.clearValue = {0.0f, 0},
 		};
 
-		uint64_t sortedIndirectBufferHandle = 0;
-		uint64_t sortedCountBufferHandle = 0;
+		rhi::BufferHandle sortedIndirectBuffer{};
+		rhi::BufferHandle sortedCountBuffer{};
 		uint32_t sortedOpaqueCapacity = 0;
 		uint32_t sortedAlphaCapacity = 0;
 		const uint32_t currentIndirectObjectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
-		const uint64_t currentRawIndirectBufferHandle =
-			m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
-		const uint64_t currentRawCountBufferHandle =
-			m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
+		const rhi::BufferHandle currentRawIndirectBuffer =
+			m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex);
+		const rhi::BufferHandle currentRawCountBuffer =
+			m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex);
 		// Keep this predicate aligned with GPUDrivenCullingPass::execute. Publishing
 		// is CPU metadata for the next frame, so it is valid only when this command
 		// buffer actually records the current topology's culling dispatch.
@@ -98,8 +98,8 @@ namespace demo
 			&& !m_renderer->getGPUCullingPipelineHandle().isNull()
 			&& !m_renderer->getGPUCullingArgumentTable(context.frameIndex).isNull()
 			&& currentIndirectObjectCount > 0u
-			&& currentRawIndirectBufferHandle != 0u
-			&& currentRawCountBufferHandle != 0u;
+			&& !currentRawIndirectBuffer.isNull()
+			&& !currentRawCountBuffer.isNull();
 		if (currentRawCullingProduced)
 		{
 			m_renderer->publishRawCullingBootstrapStateForFrame(context.frameIndex, currentIndirectObjectCount);
@@ -107,47 +107,46 @@ namespace demo
 
 		if (context.drawStream != nullptr && currentRawCullingProduced)
 		{
-			sortedCountBufferHandle = currentRawCountBufferHandle;
+			sortedCountBuffer = currentRawCountBuffer;
 			sortedOpaqueCapacity = static_cast<uint32_t>(m_renderer->getOpaqueDrawIndices().size());
 			sortedAlphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
 			const uint32_t transparentCapacity = static_cast<uint32_t>(m_renderer->getTransparentDrawIndices().size());
 			const uint32_t totalSortedCapacity = sortedOpaqueCapacity + sortedAlphaCapacity + transparentCapacity;
-			if (sortedCountBufferHandle != 0 && totalSortedCapacity > 0u)
+			if (!sortedCountBuffer.isNull() && totalSortedCapacity > 0u)
 			{
 				m_renderer->ensureGPUDrivenPersistentIndirectStream(context.frameIndex, totalSortedCapacity);
-				const uint64_t persistentIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(
+				const rhi::BufferHandle persistentIndirectBuffer = m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(
 					context.frameIndex);
-				if (persistentIndirectBufferHandle != 0)
+				if (!persistentIndirectBuffer.isNull())
 				{
 					const bool opaquePatched = sortedOpaqueCapacity == 0u
 						|| m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 						                                                 context.frameIndex,
-						                                                 persistentIndirectBufferHandle,
+						                                                 persistentIndirectBuffer,
 						                                                 0x00000000u,
 						                                                 0u);
 					const bool alphaPatched = sortedAlphaCapacity == 0u
 						|| m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 						                                                 context.frameIndex,
-						                                                 persistentIndirectBufferHandle,
+						                                                 persistentIndirectBuffer,
 						                                                 0x40000000u,
 						                                                 sortedOpaqueCapacity);
 					if (opaquePatched && alphaPatched)
 					{
-						sortedIndirectBufferHandle = persistentIndirectBufferHandle;
+						sortedIndirectBuffer = persistentIndirectBuffer;
 						m_renderer->publishSortedBootstrapStateForFrame(context.frameIndex, sortedOpaqueCapacity,
 						                                                sortedAlphaCapacity);
 					}
 				}
 			}
-			m_renderer->recordGBufferVisibilityPatch(sortedIndirectBufferHandle != 0,
+			m_renderer->recordGBufferVisibilityPatch(!sortedIndirectBuffer.isNull(),
 			                                         sortedOpaqueCapacity,
 			                                         sortedAlphaCapacity);
 		}
 
 		const rhi::RenderPassDesc passDesc{
 			.renderArea = {{0, 0}, extent},
-			.colorTargets = colorTargets.data(),
-			.colorTargetCount = static_cast<uint32_t>(colorTargets.size()),
+			.colorTargets = colorTargets,
 			.depthTarget = &depthTarget,
 		};
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);
@@ -159,16 +158,16 @@ namespace demo
 		if (context.drawStream != nullptr)
 		{
 			MeshPool& meshPool = m_renderer->getMeshPool();
-			const uint64_t indirectBufferHandle = sortedIndirectBufferHandle != 0
-				                                      ? sortedIndirectBufferHandle
+			const rhi::BufferHandle indirectBuffer = !sortedIndirectBuffer.isNull()
+				                                         ? sortedIndirectBuffer
+				                                         : (currentRawCullingProduced
+					                                         ? currentRawIndirectBuffer
+					                                         : rhi::BufferHandle{});
+			const rhi::BufferHandle countBuffer = !sortedCountBuffer.isNull()
+				                                      ? sortedCountBuffer
 				                                      : (currentRawCullingProduced
-					                                      ? currentRawIndirectBufferHandle
-					                                      : 0u);
-			const uint64_t countBufferHandle = sortedCountBufferHandle != 0
-				                                   ? sortedCountBufferHandle
-				                                   : (currentRawCullingProduced
-					                                   ? currentRawCountBufferHandle
-					                                   : 0u);
+					                                      ? currentRawCountBuffer
+					                                      : rhi::BufferHandle{});
 			const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
 
 			if (!context.cameraAllocValid)
@@ -182,9 +181,9 @@ namespace demo
 			const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(context.frameIndex);
 			const rhi::ArgumentTableHandle drawTable = m_renderer->getDrawArgumentTable(context.frameIndex);
 
-			if (indirectBufferHandle != 0 && !drawTable.isNull())
+			if (!indirectBuffer.isNull() && !drawTable.isNull())
 			{
-				const bool useMdi = indirectBufferHandle != 0 && !m_renderer->getGBufferMDIDrawArgumentTable(
+				const bool useMdi = !indirectBuffer.isNull() && !m_renderer->getGBufferMDIDrawArgumentTable(
 					context.frameIndex).isNull();
 				if (useMdi)
 				{
@@ -237,39 +236,31 @@ namespace demo
 						return;
 					}
 					const uint64_t vertexOffset = 0;
-					enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
-					enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
-					const uint64_t opaqueCommandOffset = sortedIndirectBufferHandle != 0
+					const uint64_t opaqueCommandOffset = !sortedIndirectBuffer.isNull()
 						                                     ? 0u
 						                                     : static_cast<uint64_t>(currentIndirectObjectCount) *
 						                                     indirectCommandStride;
-					const uint64_t alphaCommandOffset = sortedIndirectBufferHandle != 0
+					const uint64_t alphaCommandOffset = !sortedIndirectBuffer.isNull()
 						                                    ? static_cast<uint64_t>(sortedOpaqueCapacity) *
 						                                    indirectCommandStride
 						                                    : opaqueCommandOffset * 2u;
 					const uint64_t opaqueCountOffset = offsetof(shaderio::GPUCullDrawCounts, opaqueCount);
 					const uint64_t alphaCountOffset = offsetof(shaderio::GPUCullDrawCounts, alphaTestCount);
-					const uint32_t opaqueMaxDrawCount = sortedIndirectBufferHandle != 0
+					const uint32_t opaqueMaxDrawCount = !sortedIndirectBuffer.isNull()
 						                                    ? sortedOpaqueCapacity
 						                                    : currentIndirectObjectCount;
-					const uint32_t alphaMaxDrawCount = sortedIndirectBufferHandle != 0
+					const uint32_t alphaMaxDrawCount = !sortedIndirectBuffer.isNull()
 						                                   ? sortedAlphaCapacity
 						                                   : currentIndirectObjectCount;
 
 					// args = sorted persistent stream (when bootstrapped) else culling output; count is the culling draw-count buffer.
-					const rhi::BufferHandle indirectBufferRHI =
-						sortedIndirectBufferHandle != 0
-							? m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex)
-							: (currentRawCullingProduced
-								? m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex)
-								: rhi::BufferHandle{});
-					const rhi::BufferHandle countBufferRHI =
-						currentRawCullingProduced
-							? m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex)
-							: rhi::BufferHandle{};
+					const rhi::BufferHandle indirectBufferRHI = indirectBuffer;
+					const rhi::BufferHandle countBufferRHI = countBuffer;
 
 					enc->setPipeline(m_renderer->getGBufferOpaqueMDIPipelineHandle());
+					enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
+					enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 					const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
 					enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
 					if (!cameraTable.isNull())

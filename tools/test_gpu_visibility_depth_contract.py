@@ -231,10 +231,11 @@ class GPUVisibilityDepthContractTests(unittest.TestCase):
         generation_check = previous.index(
             "frameState.sceneTopologyVersion != m_sceneTopologyVersion"
         )
-        native_handle_lookup = previous.index(
-            "m_renderer.getPreviousGPUCullingIndirectBufferOpaque"
+        rhi_handle_lookup = previous.index(
+            "m_renderer.getPreviousGPUCullingIndirectBufferRHIHandle"
         )
-        self.assertLess(generation_check, native_handle_lookup)
+        self.assertLess(generation_check, rhi_handle_lookup)
+        self.assertNotIn("Opaque", previous)
         self.assertIn("!frameState.valid || frameState.objectCount == 0u", previous)
         self.assertIn(".objectCount = frameState.objectCount", previous)
         self.assertIn(".valid = true", previous)
@@ -316,7 +317,7 @@ class GPUVisibilityDepthContractTests(unittest.TestCase):
         )
         reset_position = draw_frame.index(
             "recordGPUCullingDrawCountReset("
-            "cmdBuffer, frameUserData.gpuCullingDrawCountBufferRHI);"
+            "cmdBuffer, frameUserData.gpuCullingStatsBufferRHI,"
         )
         shadow_position = draw_frame.index(
             "updateShadowCullingBuffers(currentFrameIndex, params);"
@@ -334,7 +335,7 @@ class GPUVisibilityDepthContractTests(unittest.TestCase):
         self,
     ) -> None:
         stage_header = read("rhi/RHIStageBarrier.h")
-        mapping = read("rhi/vulkan/VulkanCommandBuffer.cpp")
+        mapping = read("rhi/vulkan/VulkanBarrierConversions.h")
 
         self.assertIn(
             "storageBufferReadWrite = 1u << 6u",
@@ -373,44 +374,37 @@ class GPUVisibilityDepthContractTests(unittest.TestCase):
             ".dstAccessMask = inferConsumerAccess(hazards, consumer)",
             make_barrier,
         )
-
-        contract_start = mapping.index(
-            "constexpr VkMemoryBarrier2 "
-            "kTransferToStorageReadWriteAndIndirectBarrierContract"
-        )
-        contract_end = mapping.index(
-            "[[nodiscard]] VkImageLayout toVkImageLayout",
-            contract_start,
-        )
-        contract = " ".join(mapping[contract_start:contract_end].split())
-        self.assertIn(
-            "HazardFlags::bufferWrites | "
-            "HazardFlags::storageBufferReadWrite | HazardFlags::drawArguments",
-            contract,
-        )
-        self.assertNotIn("HazardFlags::readBeforeWrite", contract)
-        self.assertIn(
-            "srcStageMask == VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT",
-            contract,
+        conversion_test = " ".join(
+            read("tests/vulkan_conversion_tests.cpp").split()
         )
         self.assertIn(
-            "srcAccessMask == VK_ACCESS_2_TRANSFER_WRITE_BIT",
-            contract,
+            "HazardFlags::bufferWrites | HazardFlags::storageBufferReadWrite | "
+            "HazardFlags::drawArguments",
+            conversion_test,
+        )
+        self.assertNotIn("HazardFlags::readBeforeWrite", conversion_test)
+        self.assertIn(
+            "barrier.srcStageMask == VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT",
+            conversion_test,
         )
         self.assertIn(
-            "dstStageMask == (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | "
-            "VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)",
-            contract,
+            "barrier.srcAccessMask == VK_ACCESS_2_TRANSFER_WRITE_BIT",
+            conversion_test,
         )
         self.assertIn(
-            "dstAccessMask == (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | "
+            "VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | "
+            "VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT",
+            conversion_test,
+        )
+        self.assertIn(
+            "VK_ACCESS_2_SHADER_STORAGE_READ_BIT | "
             "VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | "
-            "VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT)",
-            contract,
+            "VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT",
+            conversion_test,
         )
 
         runtime_barrier = function_source(
-            mapping,
+            read("rhi/vulkan/VulkanCommandBuffer.cpp"),
             "void VulkanCommandBuffer::barrier",
         )
         self.assertIn(

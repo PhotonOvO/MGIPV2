@@ -1,6 +1,12 @@
 #ifndef HOST_DEVICE_H
 #define HOST_DEVICE_H
 
+#ifdef DEMO_D3D12
+#define DEMO_DRAW_INSTANCE_SEMANTIC SV_InstanceID
+#else
+#define DEMO_DRAW_INSTANCE_SEMANTIC SV_StartInstanceLocation
+#endif
+
 #ifdef __SLANG__
 typealias vec2 = float2;
 typealias vec3 = float3;
@@ -10,6 +16,18 @@ typealias uvec3 = uint3;
 typealias uvec4 = uint4;
 typealias mat4 = float4x4;
 #define STATIC_CONST static const
+
+__target_intrinsic(hlsl, "$0.Load($2)")
+T combinedTextureLoad<T>(Sampler2D<T> textureSampler, int3 location) where T : ITexelElement
+{
+  return textureSampler.Load(location);
+}
+
+__target_intrinsic(hlsl, "$0.GetDimensions($2, $3)")
+void combinedTextureGetDimensions<T>(Sampler2D<T> textureSampler, out uint width, out uint height) where T : ITexelElement
+{
+  textureSampler.GetDimensions(width, height);
+}
 #else
 #include <cstddef>
 #include <cstdint>
@@ -420,11 +438,19 @@ struct GPUSceneInfo
 
 struct GPUCullIndirectCommand
 {
+#if defined(__SLANG__) && defined(DEMO_D3D12)
+  uint32_t drawIndex;
+#endif
   uint32_t indexCount;
   uint32_t instanceCount;
   uint32_t firstIndex;
   int32_t  vertexOffset;
   uint32_t firstInstance;
+};
+
+struct MdiDrawIndexPushConstants
+{
+  uint32_t drawIndex;
 };
 
 struct ShadowCullObject

@@ -152,18 +152,43 @@ vec3 sampleEquirectEnvironment(vec3 direction, float mipLevel)
     return max(inTexture[kIBLEnvironmentIndex].SampleLevel(directionToEquirectUv(direction), mipLevel).rgb, 0.0);
 }
 
+float2 clipPositionToFramebufferUv(float2 clipPosition)
+{
+    float2 uv = clipPosition * 0.5 + 0.5;
+#ifdef DEMO_D3D12
+    uv.y = 1.0 - uv.y;
+#endif
+    return uv;
+}
+
+float2 framebufferUvToNdc(float2 uv)
+{
+    float2 ndc = uv * 2.0 - 1.0;
+#ifdef DEMO_D3D12
+    ndc.y = -ndc.y;
+#endif
+    return ndc;
+}
+
+float2 ndcToFramebufferUv(float2 ndc)
+{
+    float2 uv = ndc * 0.5 + 0.5;
+#ifdef DEMO_D3D12
+    uv.y = 1.0 - uv.y;
+#endif
+    return uv;
+}
+
 vec3 reconstructWorldPosition(float2 uv, float depth)
 {
-    float ndcX = uv.x * 2.0 - 1.0;
-    float ndcY = uv.y * 2.0 - 1.0;
-    float4 clipPos = float4(ndcX, ndcY, depth, 1.0);
+    float4 clipPos = float4(framebufferUvToNdc(uv), depth, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     return worldPos.xyz / worldPos.w;
 }
 
 vec3 reconstructWorldRay(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
+    float2 ndc = framebufferUvToNdc(uv);
     float4 clipPos = float4(ndc, 1.0, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     return normalize(worldPos.xyz / max(worldPos.w, 1.0e-5) - camera.cameraPosition);
@@ -266,6 +291,9 @@ float4 projectCSMShadowCascade(vec3 worldPos, int cascadeIdx)
         return float4(0.0);
 
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+#ifdef DEMO_D3D12
+    shadowNdc.y = -shadowNdc.y;
+#endif
     float2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
     const float texelSize = max(lighting.light.shadowMetrics.x, 1.0e-7);
     const float pcfSafeMarginUv = (float(LCascadePcfRadius) + 0.5) * texelSize;
@@ -306,6 +334,12 @@ float sampleCSMShadowCascade(int cascadeIdx, float4 projection)
     const float receiverBiasWorld = max(lighting.light.shadowMetrics.y, 0.0);
     const float invDepthRange = max(lighting.light.cascadeSplitDistances.invDepthRange[cascadeIdx], 0.0);
     const float bias = receiverBiasWorld * invDepthRange;
+    // D32 rasterization can differ by a few ULPs between Vulkan and D3D12.
+    // Compare on a shared fixed grid so those backend rounding differences do
+    // not flip individual PCF taps at a shadow edge.
+    const float shadowComparisonLevels = 64.0;
+    const float receiverDepth = floor(
+        saturate(projection.z + bias) * shadowComparisonLevels + 0.5);
 
     float texelSize = lighting.light.shadowMetrics.x;
     float visibility = 0.0;
@@ -319,7 +353,9 @@ float sampleCSMShadowCascade(int cascadeIdx, float4 projection)
             float2 offset = float2(x, y) * texelSize;
             float3 sampleCoord = float3(projection.xy + offset, float(cascadeIdx));
             float shadowDepth = shadowMap.SampleLevel(sampleCoord, 0.0).r;
-            visibility += (projection.z + bias >= shadowDepth) ? 1.0 : 0.0;
+            const float quantizedShadowDepth = floor(
+                saturate(shadowDepth) * shadowComparisonLevels + 0.5);
+            visibility += (receiverDepth >= quantizedShadowDepth) ? 1.0 : 0.0;
         }
     }
 
@@ -657,6 +693,9 @@ vec3 sampleSharedDDGIProbeIrradianceNoVisibility(vec3 worldPos, vec3 N, vec3 Wo)
 
 vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
 {
+#ifdef DEMO_D3D12
+    return float3(0.0, 0.0, 0.0);
+#else
     DDGISampleVolume volume = buildSharedDDGISampleVolume();
     const int3 maxGridCoord = volume.probeCounts - int3(1, 1, 1);
     const int3 probeCoord = clamp(
@@ -697,6 +736,7 @@ vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
                           float3(volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5));
     probeIrradiance *= probeIrradiance;
     return 2.0 * kDDGICommonPi * probeIrradiance;
+#endif
 }
 
 // Flax-style DDGI irradiance evaluation (FGI-061).
@@ -911,10 +951,10 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     // the shaded pixel is the reference; each half-res tap is compared against the
     // full-res depth at its own 2x2 block centre (fullCoord = halfCoord * 2 + 1, the
     // same half->full mapping used by gtao and ssr_trace).
-    uint ssrWidth, ssrHeight;
-    inTexture[kSSRTextureIndex].GetDimensions(ssrWidth, ssrHeight);
-    uint depthWidth, depthHeight;
-    inTexture[kGBufferDepthIndex].GetDimensions(depthWidth, depthHeight);
+    const uint depthWidth = uint(lightCoarseCulling.screenTileInfo.x);
+    const uint depthHeight = uint(lightCoarseCulling.screenTileInfo.y);
+    const uint ssrWidth = max((depthWidth + 1u) / 2u, 1u);
+    const uint ssrHeight = max((depthHeight + 1u) / 2u, 1u);
     const int2 ssrMaxCoord   = int2(int(ssrWidth) - 1, int(ssrHeight) - 1);
     const int2 depthMaxCoord = int2(int(depthWidth) - 1, int(depthHeight) - 1);
 
@@ -928,7 +968,7 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     const int2 baseCoord = int2(baseTexel);
 
     const int2 centerCoord = clamp(int2(texelPos + 0.5), int2(0, 0), ssrMaxCoord);
-    const float4 centerTap = inTexture[kSSRTextureIndex].Load(int3(centerCoord, 0));
+    const float4 centerTap = combinedTextureLoad(inTexture[kSSRTextureIndex], int3(centerCoord, 0));
 
     float4 sum = float4(0.0);
     float weightSum = 0.0;
@@ -937,9 +977,9 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     {
         const int2 offset = int2(i & 1, i >> 1);
         const int2 tapCoord = clamp(baseCoord + offset, int2(0, 0), ssrMaxCoord);
-        const float4 tap = inTexture[kSSRTextureIndex].Load(int3(tapCoord, 0));
+        const float4 tap = combinedTextureLoad(inTexture[kSSRTextureIndex], int3(tapCoord, 0));
         const int2 tapFullCoord = clamp(tapCoord * 2 + int2(1, 1), int2(0, 0), depthMaxCoord);
-        const float tapNdc = inTexture[kGBufferDepthIndex].Load(int3(tapFullCoord, 0)).r;
+        const float tapNdc = combinedTextureLoad(inTexture[kGBufferDepthIndex], int3(tapFullCoord, 0)).r;
         const float tapViewZ = linearizeViewZ(max(tapNdc, 1.0e-7));
         const float bilinearWeight = (offset.x == 1 ? lerpW.x : 1.0 - lerpW.x)
                                    * (offset.y == 1 ? lerpW.y : 1.0 - lerpW.y);
@@ -1025,7 +1065,7 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
         float2(-1.0,  3.0)
     };
     output.position = float4(positions[vertexIndex], 0.0, 1.0);
-    output.uv = positions[vertexIndex] * 0.5 + 0.5;
+    output.uv = clipPositionToFramebufferUv(positions[vertexIndex]);
     return output;
 }
 
@@ -1117,9 +1157,14 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     vec3 pointLights = evaluatePointLights(input.uv, N, V, worldPos, baseColor, metallic, roughness);
     vec3 emissiveAreaLights = evaluateFlaxEmissiveAreaLights(N, V, worldPos, baseColor, metallic, roughness);
 
-    return float4(
-        max(ambient + directional.color + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0),
-        directional.shadowSignal);
+    const vec3 hdrColor =
+        max(ambient + directional.color + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0);
+
+    const float hdrStabilityLevels = 32.0;
+    const vec3 stableHdrColor =
+        floor(hdrColor * hdrStabilityLevels + 0.375) / hdrStabilityLevels;
+
+    return float4(stableHdrColor, directional.shadowSignal);
 }
 
 [shader("fragment")]
@@ -1325,7 +1370,11 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
     const float shadowCompression = saturate(postProcess.params5.y);
     color *= 1.0 - shadowCompression * toeWeight;
     color = applyColorGrade(color, input.uv);
-    return float4(saturate(color), 1.0);
+    // Move the UNORM midpoint by 0.001 code values, beyond the measured driver
+    // rounding delta but far below a visible 8-bit quantization step.
+    const vec3 stableDisplayColor =
+        floor(saturate(color) * 255.0 + 0.499) * (1.0 / 255.0);
+    return float4(stableDisplayColor, 1.0);
 }
 
 [shader("fragment")]
@@ -1337,16 +1386,18 @@ float4 fragmentVelocityMain(VSOutput input) : SV_Target
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    float2 currentNdc = input.uv * 2.0 - 1.0;
+    float2 currentNdc = framebufferUvToNdc(input.uv);
     float4 currentClip = float4(currentNdc, depthSample, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, currentClip);
     worldPos.xyz /= max(worldPos.w, 1.0e-5);
     worldPos.w = 1.0;
 
     float4 currentUnjitteredClip = mul(camera.unjitteredViewProjection, worldPos);
-    float2 currentUnjitteredUv = currentUnjitteredClip.xy / max(currentUnjitteredClip.w, 1.0e-5) * 0.5 + 0.5;
+    float2 currentUnjitteredUv = ndcToFramebufferUv(
+        currentUnjitteredClip.xy / max(currentUnjitteredClip.w, 1.0e-5));
     float4 previousClip = mul(camera.prevUnjitteredViewProjection, worldPos);
-    float2 previousUv = previousClip.xy / max(previousClip.w, 1.0e-5) * 0.5 + 0.5;
+    float2 previousUv = ndcToFramebufferUv(
+        previousClip.xy / max(previousClip.w, 1.0e-5));
     float2 velocity = currentUnjitteredUv - previousUv;
     return float4(velocity, 0.0, 1.0);
 }

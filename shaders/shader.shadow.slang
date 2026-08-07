@@ -28,6 +28,11 @@ ConstantBuffer<DrawUniforms> draw;
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
 StructuredBuffer<DrawUniforms> drawData;
 
+#ifdef DEMO_D3D12
+[[vk::push_constant]]
+ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
 float3 safeNormalizeShadowVector(float3 value, float3 fallback)
 {
     const float lengthSquared = dot(value, value);
@@ -114,8 +119,14 @@ struct VertexOutputMdi
 };
 
 [shader("vertex")]
-VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+#ifdef DEMO_D3D12
+VertexOutputMdi vertexMdiMain(VertexInput input)
 {
+    const uint drawIndex = mdiDrawIndex.drawIndex;
+#else
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
+{
+#endif
     const DrawUniforms mdiDraw = drawData[drawIndex];
 
     VertexOutputMdi output;

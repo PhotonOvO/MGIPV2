@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RHIHandles.h"
+#include "RHIQueue.h"
 #include "RHITypes.h"
 
 #include <cstdint>
@@ -95,8 +96,8 @@ struct TextureBarrier
   ResourceState           before{ResourceState::Undefined};
   ResourceState           after{ResourceState::Undefined};
   TextureSubresourceRange range{};
-  QueueType               srcQueue{QueueType::graphics};
-  QueueType               dstQueue{QueueType::graphics};
+  QueueClass               srcQueue{QueueClass::graphics};
+  QueueClass               dstQueue{QueueClass::graphics};
 };
 
 struct BufferBarrier
@@ -106,8 +107,54 @@ struct BufferBarrier
   ResourceState after{ResourceState::Undefined};
   uint64_t      offset{0};
   uint64_t      size{0};  // 0 = whole buffer
-  QueueType     srcQueue{QueueType::graphics};
-  QueueType     dstQueue{QueueType::graphics};
+  QueueClass     srcQueue{QueueClass::graphics};
+  QueueClass     dstQueue{QueueClass::graphics};
+};
+
+enum class AliasingResourceKind : uint8_t
+{
+  none = 0,
+  buffer,
+  texture,
+};
+
+struct AliasingResource
+{
+  AliasingResourceKind kind{AliasingResourceKind::none};
+  BufferHandle         buffer{};
+  TextureHandle        texture{};
+
+  [[nodiscard]] constexpr bool isValid() const noexcept
+  {
+    switch(kind)
+    {
+    case AliasingResourceKind::none:
+      return true;
+    case AliasingResourceKind::buffer:
+      return buffer.isValid() && texture.isNull();
+    case AliasingResourceKind::texture:
+      return texture.isValid() && buffer.isNull();
+    }
+    return false;
+  }
+
+  [[nodiscard]] static constexpr AliasingResource fromBuffer(BufferHandle handle) noexcept
+  {
+    return AliasingResource{.kind = AliasingResourceKind::buffer, .buffer = handle};
+  }
+
+  [[nodiscard]] static constexpr AliasingResource fromTexture(TextureHandle handle) noexcept
+  {
+    return AliasingResource{.kind = AliasingResourceKind::texture, .texture = handle};
+  }
+};
+
+// `before` may be empty when no previous resource object is known. `after`
+// must identify the resource that becomes active in the aliased memory range.
+struct AliasingBarrier
+{
+  AliasingResource before{};
+  AliasingResource after{};
 };
 
 }  // namespace demo::rhi

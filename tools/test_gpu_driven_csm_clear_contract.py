@@ -52,8 +52,10 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
             r"for\s*\(\s*uint32_t\s+cascadeIndex\s*=\s*0\s*;"
             r"\s*cascadeIndex\s*<\s*cascadeCount\s*;",
         )
+        self.assertIn(".texture = cascadeTexture", begin_body)
+        self.assertNotIn("rhi::TextureHandle{kPassCSMShadowHandle", begin_body)
         self.assertIn(
-            "beginCascadeDepthPass(commandBuffer, renderer, extent, cascadeIndex)",
+            "beginCascadeDepthPass(commandBuffer, renderer, cascadeTexture, extent, cascadeIndex)",
             clear_body,
         )
         self.assertIn("commandBuffer.endEncoding()", clear_body)
@@ -80,9 +82,10 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
             execute_body,
             r"\bif\s*\(\s*!canDrawShadows\s*\)",
         )
+        self.assertEqual(1, fallback_body.count("recordClearOnlyCascades("))
         self.assertIn(
-            "recordClearOnlyCascades(*context.commandBuffer, *m_renderer, "
-            "cascadeExtent, cascadeCount)",
+            "*context.commandBuffer, *m_renderer, csm.getCascadeImage(), "
+            "cascadeExtent, cascadeCount",
             fallback_body,
         )
         self.assertIn("context.commandBuffer->endEvent()", fallback_body)
@@ -146,6 +149,10 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
         self.assertIn("rhi::HazardFlags::drawArguments", cascade_loop)
         self.assertIn("beginCascadeDepthPass", cascade_loop)
         self.assertIn("DrawStreamRecorder::recordIndexedIndirect", cascade_loop)
+        self.assertIn(
+            ".stride = m_renderer->getGPUCullingIndirectCommandStride()",
+            cascade_loop,
+        )
         self.assertLess(
             cascade_loop.index("rhi::HazardFlags::readBeforeWrite"),
             cascade_loop.index("cenc->dispatch"),

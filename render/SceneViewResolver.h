@@ -26,7 +26,9 @@ void populateNavigatedSceneCameraUniforms(
     std::span<const SceneNode> sceneNodes,
     std::span<const GltfNodeData> gltfNodes,
     const glm::mat4& flightCameraProjection,
-    shaderio::CameraUniforms& uniforms);
+    shaderio::CameraUniforms& uniforms,
+    const clipspace::ProjectionConvention& projectionConvention =
+        clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan));
 
 // Returns true when the scene declares lights. In that case the scene is
 // authoritative even when it has no enabled directional light.

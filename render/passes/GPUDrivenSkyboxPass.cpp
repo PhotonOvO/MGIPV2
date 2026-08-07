@@ -64,8 +64,7 @@ namespace demo
 
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 			.renderArea = {{0, 0}, targets.extent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = &depthTarget,
 		});
 		enc->setViewport(rhi::Viewport{

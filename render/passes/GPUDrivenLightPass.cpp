@@ -77,8 +77,7 @@ namespace demo
 
 		const rhi::RenderPassDesc passDesc{
 			.renderArea = {{0, 0}, extent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = nullptr,
 		};
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);

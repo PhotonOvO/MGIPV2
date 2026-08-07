@@ -2,17 +2,42 @@
 
 #include "Handles.h"
 
+#include <atomic>
 #include <cstdint>
 #include <utility>
 #include <vector>
 
 namespace demo {
 
+namespace detail {
+
+inline std::atomic<uint32_t> g_nextHandlePoolOwner{1};
+
+[[nodiscard]] inline uint16_t acquireHandlePoolOwner() noexcept
+{
+  uint32_t owner = g_nextHandlePoolOwner.fetch_add(1, std::memory_order_relaxed);
+  owner &= 0xFFFFu;
+  return static_cast<uint16_t>(owner == 0 ? 1u : owner);
+}
+
+[[nodiscard]] constexpr uint32_t encodeHandleGeneration(
+  uint16_t owner, uint16_t generation) noexcept
+{
+  return (static_cast<uint32_t>(owner) << 16u) | generation;
+}
+
+}  // namespace detail
+
 template <typename Handle, typename Value>
 class HandlePool
 {
 public:
-  HandlePool() { m_slots.push_back(Slot{}); }
+  HandlePool() : m_owner(detail::acquireHandlePoolOwner()) { m_slots.push_back(Slot{}); }
+
+  HandlePool(const HandlePool&) = delete;
+  HandlePool& operator=(const HandlePool&) = delete;
+  HandlePool(HandlePool&&) noexcept = default;
+  HandlePool& operator=(HandlePool&&) noexcept = default;
 
   template <typename... Args>
   Handle emplace(Args&&... args)
@@ -22,7 +47,7 @@ public:
     slot.value               = Value{std::forward<Args>(args)...};
     slot.occupied            = true;
     ++m_liveCount;
-    return Handle{slotIndex, slot.generation};
+    return Handle{slotIndex, encodedGeneration(slot)};
   }
 
   bool destroy(Handle handle)
@@ -37,7 +62,9 @@ public:
     slot->occupied   = false;
     slot->nextFree   = m_freeHead;
     m_freeHead       = handle.index;
-    slot->generation = nextGeneration(slot->generation);
+    ++slot->generation;
+    if(slot->generation == 0)
+      slot->generation = 1;
     --m_liveCount;
     return true;
   }
@@ -64,7 +91,7 @@ public:
       Slot& slot = m_slots[index];
       if(slot.occupied)
       {
-        std::forward<Fn>(fn)(Handle{index, slot.generation}, slot.value);
+        std::forward<Fn>(fn)(Handle{index, encodedGeneration(slot)}, slot.value);
       }
     }
   }
@@ -75,20 +102,10 @@ private:
   struct Slot
   {
     Value    value{};
-    uint32_t generation{1};
+    uint16_t generation{1};
     uint32_t nextFree{0};
     bool     occupied{false};
   };
-
-  [[nodiscard]] static uint32_t nextGeneration(uint32_t generation)
-  {
-    uint32_t next = generation + 1;
-    if(next == 0)
-    {
-      next = 1;
-    }
-    return next;
-  }
 
   [[nodiscard]] uint32_t acquireSlot()
   {
@@ -112,7 +129,7 @@ private:
     }
 
     Slot& slot = m_slots[handle.index];
-    if(!slot.occupied || slot.generation != handle.generation)
+    if(!slot.occupied || encodedGeneration(slot) != handle.generation)
     {
       return nullptr;
     }
@@ -128,7 +145,7 @@ private:
     }
 
     const Slot& slot = m_slots[handle.index];
-    if(!slot.occupied || slot.generation != handle.generation)
+    if(!slot.occupied || encodedGeneration(slot) != handle.generation)
     {
       return nullptr;
     }
@@ -136,9 +153,15 @@ private:
     return &slot;
   }
 
+  [[nodiscard]] uint32_t encodedGeneration(const Slot& slot) const noexcept
+  {
+    return detail::encodeHandleGeneration(m_owner, slot.generation);
+  }
+
   std::vector<Slot> m_slots;
   uint32_t          m_freeHead{0};
   uint32_t          m_liveCount{0};
+  uint16_t          m_owner{0};
 };
 
 }  // namespace demo

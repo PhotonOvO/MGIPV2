@@ -15,7 +15,7 @@ def read(relative_path: str) -> str:
 SCENE_RESOURCES = read("render/SceneResources.cpp")
 GPU_DRIVEN_RENDERER = read("render/GPUDrivenRenderer.cpp")
 RHI_ARGUMENT_TABLE = read("rhi/RHIArgumentTable.h")
-VULKAN_COMMAND_BUFFER = read("rhi/vulkan/VulkanCommandBuffer.cpp")
+VULKAN_BARRIER_CONVERSIONS = read("rhi/vulkan/VulkanBarrierConversions.h")
 VULKAN_DEVICE = read("rhi/vulkan/VulkanDevice.cpp")
 
 
@@ -79,7 +79,7 @@ class ColorGradingLutLayoutContractTests(unittest.TestCase):
         self.assertNotIn("ResourceState::General", ready_barrier)
 
         upload_transition = SCENE_RESOURCES.index(
-            "cmdBuffer.resourceBarrier(&lutUploadBarrier"
+            "cmdBuffer.resourceBarrier(std::span{&lutUploadBarrier, 1}"
         )
         upload_copy = SCENE_RESOURCES.index(
             "upload.recordTextureUpload("
@@ -90,7 +90,7 @@ class ColorGradingLutLayoutContractTests(unittest.TestCase):
             upload_copy,
         )
         ready_transition = SCENE_RESOURCES.index(
-            "cmdBuffer.resourceBarrier(&lutReadyBarrier",
+            "cmdBuffer.resourceBarrier(std::span{&lutReadyBarrier, 1}",
             upload_execution,
         )
         self.assertLess(upload_transition, upload_copy)
@@ -155,8 +155,8 @@ class ColorGradingLutLayoutContractTests(unittest.TestCase):
         )
 
         layout_mapping = extract_braced_block(
-            VULKAN_COMMAND_BUFFER,
-            "[[nodiscard]] VkImageLayout toVkImageLayout(ResourceState state)",
+            VULKAN_BARRIER_CONVERSIONS,
+            "[[nodiscard]] constexpr VkImageLayout toVkImageLayout(ResourceState state)",
         )
         self.assertIn(
             "case ResourceState::ShaderRead: "

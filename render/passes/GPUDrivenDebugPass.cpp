@@ -67,8 +67,8 @@ namespace demo
 		const bool hasGPUCullingDebug =
 			context.params->debugOptions.showGPUCullingOverlay && safeObjectCount > 0u
 			&& !m_renderer->getGPUCullingDebugPipelineHandle().isNull()
-			&& m_renderer->getGPUCullingObjectBufferAddress(context.frameIndex) != 0
-			&& m_renderer->getGPUCullingResultBufferAddress(context.frameIndex) != 0;
+			&& m_renderer->getGPUCullingObjectBufferAddress(context.frameIndex).isValid()
+			&& m_renderer->getGPUCullingResultBufferAddress(context.frameIndex).isValid();
 		if (!hasLineDebug && !hasGPUCullingDebug)
 		{
 			return;
@@ -93,8 +93,7 @@ namespace demo
 
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 			.renderArea = {{0, 0}, extent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = nullptr,
 		});
 		enc->setViewport(
@@ -141,7 +140,7 @@ namespace demo
 			context.transientAllocator->flushAllocation(vertexAlloc, vertexDataSize);
 
 			const uint64_t vertexOffset = vertexAlloc.offset;
-			enc->bindVertexBuffers(0, &transientBuffer, &vertexOffset, 1);
+			enc->bindVertexBuffer(0, transientBuffer, vertexOffset);
 			enc->draw(rhi::DrawDesc{
 				.vertexCount = static_cast<uint32_t>(debugVertices.size()), .instanceCount = 1, .firstVertex = 0,
 				.firstInstance = 0
@@ -161,14 +160,14 @@ namespace demo
 			}
 
 			const shaderio::PushConstantGPUCullDebug pushValues{
-				.objectBufferAddress = m_renderer->getGPUCullingObjectBufferAddress(context.frameIndex),
-				.resultBufferAddress = m_renderer->getGPUCullingResultBufferAddress(context.frameIndex),
+				.objectBufferAddress = m_renderer->getGPUCullingObjectBufferAddress(context.frameIndex).value,
+				.resultBufferAddress = m_renderer->getGPUCullingResultBufferAddress(context.frameIndex).value,
 				.objectCount = safeObjectCount,
 				.segmentCount = kDebugCullSegmentCount,
 				._padding0 = 0u,
 				._padding1 = 0u,
 			};
-			enc->setRootConstants(rhi::ShaderStage::vertex, kPrimaryRootConstantsSlot, &pushValues, sizeof(pushValues));
+			enc->setRootConstants(rhi::ShaderStage::vertex, kPrimaryRootConstantsSlot, std::as_bytes(std::span{&pushValues, 1}));
 			enc->draw(rhi::DrawDesc{
 				.vertexCount = pushValues.segmentCount * 2u * 3u, .instanceCount = pushValues.objectCount,
 				.firstVertex = 0, .firstInstance = 0

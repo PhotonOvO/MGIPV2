@@ -36,7 +36,7 @@ namespace demo
 		};
 
 		// Wave 7: map the declarative ShaderStage mask to the StageFlags used by the
-		// stage-barrier main path (CommandBuffer::barrier -> VkMemoryBarrier2).
+		// stage-barrier main path (CommandBuffer::barrier -> backend memory barrier).
 		rhi::StageFlags toStageFlags(demo::rhi::ShaderStage stageMask)
 		{
 			const uint32_t mask = static_cast<uint32_t>(stageMask);
@@ -134,45 +134,8 @@ namespace demo
 		return binding != nullptr ? binding->rhiTexture : rhi::TextureHandle{};
 	}
 
-	rhi::TextureHandle PassExecutor::resolveBarrierTexture(uint64_t backendImageToken) const
-	{
-		if (backendImageToken == 0 || m_device == nullptr)
-		{
-			return rhi::TextureHandle{};
-		}
-		for (const auto& [image, handle] : m_barrierTextureCache)
-		{
-			if (image == backendImageToken)
-			{
-				return handle;
-			}
-		}
-		const rhi::TextureHandle handle = m_device->registerExternalTexture(backendImageToken);
-		m_barrierTextureCache.emplace_back(backendImageToken, handle);
-		return handle;
-	}
-
 	void PassExecutor::clearResourceBindings()
 	{
-		if (m_device != nullptr)
-		{
-			for (TextureBinding& binding : m_textureBindings)
-			{
-				if (!binding.rhiTexture.isNull())
-				{
-					m_device->destroyImage(binding.rhiTexture);
-				}
-			}
-			for (const auto& [image, handle] : m_barrierTextureCache)
-			{
-				(void)image;
-				if (!handle.isNull())
-				{
-					m_device->destroyImage(handle);
-				}
-			}
-		}
-		m_barrierTextureCache.clear();
 		m_textureBindings.clear();
 		m_bufferBindings.clear();
 		m_executionTextureStates.clear();
@@ -181,23 +144,10 @@ namespace demo
 
 	void PassExecutor::bindTexture(TextureBinding binding)
 	{
-		// Mirror the externally owned image into the backend registry so explicit resourceBarrier
-		// boundaries can resolve this attachment as a TextureHandle. SceneResources owns
-		// the allocation lifetime; the registry only mirrors the backend token.
-		if (m_device != nullptr && binding.backendImageToken != 0)
-		{
-			binding.rhiTexture = m_device->registerExternalTexture(binding.backendImageToken);
-		}
-
-		// Update existing binding if handle already bound, otherwise add new
 		for (TextureBinding& existing : m_textureBindings)
 		{
 			if (existing.handle == binding.handle)
 			{
-				if (m_device != nullptr && !existing.rhiTexture.isNull())
-				{
-					m_device->destroyImage(existing.rhiTexture);
-				}
 				existing = binding;
 				return;
 			}
@@ -315,7 +265,7 @@ namespace demo
 				if (dependency.type == PassResourceType::buffer)
 				{
 					const BufferBinding* binding = findBufferBinding(dependency.bufferHandle);
-					if (binding == nullptr || binding->backendBufferToken == 0)
+					if (binding == nullptr || binding->rhiBuffer.isNull())
 					{
 						continue;
 					}
@@ -326,7 +276,7 @@ namespace demo
 						.commandBuffer != nullptr)
 					{
 						// Wave 7 dual-barrier model: buffer producer->consumer sync goes through the
-						// stage-barrier main path (global VkMemoryBarrier2). Buffers carry no image
+						// stage-barrier main path (global backend memory barrier). Buffers carry no image
 						// layout, so a memory barrier is sufficient; the hazard covers both shader
 						// buffer writes and indirect-argument reads.
 						context.commandBuffer->barrier(previousState->stages,
@@ -346,7 +296,7 @@ namespace demo
 				}
 
 				const TextureBinding* binding = findTextureBinding(dependency.textureHandle);
-				if (binding == nullptr || binding->backendImageToken == 0)
+				if (binding == nullptr || binding->rhiTexture.isNull())
 				{
 					continue;
 				}
@@ -394,7 +344,7 @@ namespace demo
 								.layerCount = ~0u
 							},
 						};
-						context.commandBuffer->resourceBarrier(&textureBarrier, 1, nullptr, 0);
+						context.commandBuffer->resourceBarrier(std::span{&textureBarrier, 1}, {});
 					}
 					else
 					{
@@ -416,7 +366,9 @@ namespace demo
 
 			demo::profiling::ScopedCpuRange passCpuRange(pass->getName());
 			ScopedCommandEvent passCommandEvent(context.commandBuffer, pass->getName());
+			std::fflush(stderr);
 			pass->execute(scopedContext);
+			std::fflush(stderr);
 
 			if (hooks != nullptr)
 			{

@@ -1,7 +1,11 @@
 #pragma once
 
+#include "RHIQueue.h"
+
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace demo {
@@ -48,7 +52,7 @@ struct ResourceHandle
   uint32_t     index{0};
   uint32_t     generation{0};
 
-  [[nodiscard]] constexpr bool isValid() const noexcept { return index != 0 || generation != 0; }
+  [[nodiscard]] constexpr bool isValid() const noexcept { return index != 0 && generation != 0; }
 
   constexpr bool operator==(const ResourceHandle& rhs) const noexcept
   {
@@ -56,10 +60,58 @@ struct ResourceHandle
   }
 };
 
+struct SubmissionTokenSet
+{
+  static constexpr uint32_t capacity = 3;
+  std::array<SubmissionToken, capacity> tokens{};
+  uint32_t count{0};
+
+  [[nodiscard]] constexpr bool record(SubmissionToken token) noexcept
+  {
+    if(!token.isValid())
+      return true;
+    for(uint32_t index = 0; index < count; ++index)
+    {
+      if(tokens[index].queue == token.queue)
+      {
+        if(token.value > tokens[index].value)
+          tokens[index] = token;
+        return true;
+      }
+    }
+    if(count == capacity)
+      return false;
+    tokens[count++] = token;
+    return true;
+  }
+
+  [[nodiscard]] constexpr bool isSatisfiedBy(
+    std::span<const SubmissionToken> completed) const noexcept
+  {
+    for(uint32_t dependencyIndex = 0; dependencyIndex < count; ++dependencyIndex)
+    {
+      const SubmissionToken dependency = tokens[dependencyIndex];
+      bool satisfied = false;
+      for(const SubmissionToken completion : completed)
+      {
+        if(completion.queue == dependency.queue &&
+           completion.value >= dependency.value)
+        {
+          satisfied = true;
+          break;
+        }
+      }
+      if(!satisfied)
+        return false;
+    }
+    return true;
+  }
+};
+
 struct ResourceRetirement
 {
   ResourceHandle resource{};
-  uint64_t       retireTimelineValue{0};
+  SubmissionTokenSet dependencies{};
 };
 
 struct RetirementPolicy
@@ -105,7 +157,7 @@ public:
   virtual ~DeferredDestructionQueue() = default;
 
   virtual void                                                 enqueue(ResourceRetirement retirement) = 0;
-  virtual uint32_t                                             process(uint64_t currentTimelineValue) = 0;
+  virtual uint32_t                                             process(std::span<const SubmissionToken> completed) = 0;
   virtual void                                                 clear()                                = 0;
   [[nodiscard]] virtual bool                                   empty() const                          = 0;
   [[nodiscard]] virtual const std::vector<ResourceHandle>&     drainedResources() const               = 0;
@@ -117,12 +169,12 @@ class InlineDeferredDestructionQueue final : public DeferredDestructionQueue
 public:
   void enqueue(ResourceRetirement retirement) override { m_pending.push_back(retirement); }
 
-  uint32_t process(uint64_t currentTimelineValue) override
+  uint32_t process(std::span<const SubmissionToken> completed) override
   {
     m_drained.clear();
 
-    auto it = std::remove_if(m_pending.begin(), m_pending.end(), [this, currentTimelineValue](const ResourceRetirement& retirement) {
-      if(!hasReachedRetirementPoint(currentTimelineValue, retirement.retireTimelineValue))
+    auto it = std::remove_if(m_pending.begin(), m_pending.end(), [this, completed](const ResourceRetirement& retirement) {
+      if(!retirement.dependencies.isSatisfiedBy(completed))
       {
         return false;
       }

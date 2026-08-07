@@ -11,7 +11,7 @@ RENDER_DEVICE = (REPO_ROOT / "render" / "RenderDevice.cpp").read_text(
 )
 RHI_TYPES = (REPO_ROOT / "rhi" / "RHITypes.h").read_text(encoding="utf-8")
 VULKAN_PIPELINES = (
-    REPO_ROOT / "rhi" / "vulkan" / "VulkanPipelines.cpp"
+    REPO_ROOT / "rhi" / "vulkan" / "VulkanPipelineConversions.h"
 ).read_text(encoding="utf-8")
 
 
@@ -74,13 +74,13 @@ class ShadowReactiveForwardAlphaContractTests(unittest.TestCase):
             "// Create Forward pipeline for transparent objects",
         )
 
-        self.assertIn(".blendStates = &forwardBlend", forward_pipeline)
+        self.assertIn(".blendStates = std::span{&forwardBlend, 1}", forward_pipeline)
         self.assertIn(
             "rhi::GraphicsPipelineDesc forwardMdiGraphicsDesc = forwardGraphicsDesc;",
             forward_pipeline,
         )
         self.assertIn(
-            "forwardMdiGraphicsDesc.renderingInfo.colorFormats = &hdrSceneColorFormat;",
+            "forwardMdiGraphicsDesc.renderingInfo.colorFormats = std::span{&hdrSceneColorFormat, 1};",
             forward_pipeline,
         )
         self.assertNotIn("forwardMdiGraphicsDesc.blendStates", forward_pipeline)

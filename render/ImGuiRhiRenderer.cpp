@@ -1,4 +1,5 @@
 #include "ImGuiRhiRenderer.h"
+#include "EmbeddedShaderLibrary.h"
 
 #include "ArgumentTables.h"
 
@@ -38,6 +39,8 @@ namespace demo
       rhi::BufferHandle index{};
       uint64_t vertexCapacity{0};
       uint64_t indexCapacity{0};
+      std::array<rhi::BufferHandle, 64> uploadStaging{};
+      uint32_t uploadStagingCount{0};
     };
 
     struct TextureEntry
@@ -75,7 +78,7 @@ namespace demo
       rhi::SamplerHandle sampler,
       rhi::ArgumentAccessIntent accessIntent) const
     {
-      const rhi::ArgumentTableHandle table = device->createArgumentTable(textureLayout);
+      const rhi::ArgumentTableHandle table = device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = textureLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
       const rhi::ArgumentWrite write{
         .binding = 0,
         .type = rhi::ArgumentType::combinedImageSampler,
@@ -83,7 +86,7 @@ namespace demo
         .sampler = sampler,
         .accessIntent = accessIntent,
       };
-      device->updateArgumentTable(table, 1, &write);
+      device->updateArgumentTable(table, rhi::ArgumentWriteBatch{&write, 1});
       return table;
     }
 
@@ -234,7 +237,9 @@ namespace demo
       device->unmapBuffer(buffers.index);
     }
 
-    void uploadTexture(rhi::CommandBuffer& commandBuffer, ImTextureData& textureData)
+    void uploadTexture(rhi::CommandBuffer& commandBuffer,
+                       ImTextureData& textureData,
+                       FrameBuffers& buffers)
     {
       const bool create = textureData.Status == ImTextureStatus_WantCreate;
       ASSERT(textureData.Format == ImTextureFormat_RGBA32,
@@ -316,7 +321,7 @@ namespace demo
         .before = entry->state,
         .after = rhi::ResourceState::TransferDst,
       };
-      commandBuffer.resourceBarrier(&beginBarrier, 1, nullptr, 0);
+      commandBuffer.resourceBarrier(std::span{&beginBarrier, 1}, {});
       rhi::ComputeEncoder* copy = commandBuffer.beginComputePass();
       ASSERT(copy != nullptr, "ImGui texture upload requires a compute/copy encoder");
       copy->copyBufferToTexture(rhi::BufferTextureCopyDesc{
@@ -333,9 +338,11 @@ namespace demo
         .before = rhi::ResourceState::TransferDst,
         .after = rhi::ResourceState::ShaderRead,
       };
-      commandBuffer.resourceBarrier(&endBarrier, 1, nullptr, 0);
+      commandBuffer.resourceBarrier(std::span{&endBarrier, 1}, {});
       entry->state = rhi::ResourceState::ShaderRead;
-      device->destroyBuffer(staging);
+      ASSERT(buffers.uploadStagingCount < buffers.uploadStaging.size(),
+             "ImGui texture upload staging capacity exceeded");
+      buffers.uploadStaging[buffers.uploadStagingCount++] = staging;
       textureData.SetStatus(ImTextureStatus_OK);
     }
 
@@ -351,7 +358,9 @@ namespace demo
       textureData.SetStatus(ImTextureStatus_Destroyed);
     }
 
-    void updateTextures(rhi::CommandBuffer& commandBuffer, ImDrawData& drawData)
+    void updateTextures(rhi::CommandBuffer& commandBuffer,
+                        ImDrawData& drawData,
+                        FrameBuffers& buffers)
     {
       if (drawData.Textures == nullptr)
       {
@@ -367,7 +376,7 @@ namespace demo
         if (texture->Status == ImTextureStatus_WantCreate ||
             texture->Status == ImTextureStatus_WantUpdates)
         {
-          uploadTexture(commandBuffer, *texture);
+          uploadTexture(commandBuffer, *texture, buffers);
         }
         else if (texture->Status == ImTextureStatus_WantDestroy &&
                  texture->UnusedFrames >= static_cast<int>(frameCount))
@@ -391,7 +400,7 @@ namespace demo
       });
       const rhi::BufferHandle vertexBuffer = buffers.vertex;
       const uint64_t vertexOffset = 0;
-      encoder.bindVertexBuffers(0, &vertexBuffer, &vertexOffset, 1);
+      encoder.bindVertexBuffer(0, vertexBuffer, vertexOffset);
       encoder.bindIndexBuffer(
         buffers.index,
         0,
@@ -402,11 +411,7 @@ namespace demo
       const ui::Projection projection = ui::makeProjection(
         {drawData.DisplayPos.x, drawData.DisplayPos.y},
         {drawData.DisplaySize.x, drawData.DisplaySize.y});
-      encoder.setRootConstants(
-        rhi::ShaderStage::vertex,
-        kProjectionRootSlot,
-        &projection,
-        sizeof(projection));
+      encoder.setRootConstants(rhi::ShaderStage::vertex, kProjectionRootSlot, std::as_bytes(std::span{&projection, 1}));
     }
 
     void draw(
@@ -515,6 +520,13 @@ namespace demo
 
       for (FrameBuffers& buffers : frameBuffers)
       {
+        for (uint32_t index = 0; index < buffers.uploadStagingCount; ++index)
+        {
+          if (!buffers.uploadStaging[index].isNull())
+          {
+            device->destroyBuffer(buffers.uploadStaging[index]);
+          }
+        }
         if (!buffers.vertex.isNull())
         {
           device->destroyBuffer(buffers.vertex);
@@ -583,8 +595,7 @@ namespace demo
       .debugName = "ImGuiEmptyLayout",
     });
     impl.textureLayout = impl.device->createArgumentLayout(rhi::ArgumentLayoutDesc{
-      .bindings = &textureBinding,
-      .bindingCount = 1,
+      .bindings = std::span{&textureBinding, 1},
       .debugName = "ImGuiTextureLayout",
     });
     impl.linearSampler = impl.device->createSampler(rhi::SamplerDesc{
@@ -606,17 +617,17 @@ namespace demo
       .debugName = "ImGuiNearestSampler",
     });
 
-    const std::array<rhi::PipelineShaderStageDesc, 2> stages{
-      rhi::PipelineShaderStageDesc{
+    const rhi::ShaderLibraryHandle shaderLibrary = loadEmbeddedSpirvLibrary(
+      *impl.device, imgui_slang, "imgui");
+    const std::array<rhi::ShaderEntry, 2> stages{
+      rhi::ShaderEntry{
         .stage = rhi::ShaderStage::vertex,
-        .spirvCode = imgui_slang,
-        .spirvSize = std::size(imgui_slang) * sizeof(uint32_t),
+        .library = shaderLibrary,
         .entryPoint = "vertexMain",
       },
-      rhi::PipelineShaderStageDesc{
+      rhi::ShaderEntry{
         .stage = rhi::ShaderStage::fragment,
-        .spirvCode = imgui_slang,
-        .spirvSize = std::size(imgui_slang) * sizeof(uint32_t),
+        .library = shaderLibrary,
         .entryPoint = "fragmentMain",
       },
     };
@@ -678,13 +689,10 @@ namespace demo
       .debugName = "ImGuiProjection",
     };
     impl.pipeline = impl.device->createGraphicsPipeline(rhi::GraphicsPipelineDesc{
-      .shaderStages = stages.data(),
-      .shaderStageCount = static_cast<uint32_t>(stages.size()),
+      .shaderStages = stages,
       .vertexInput = {
-        .bindings = &vertexBinding,
-        .bindingCount = 1,
-        .attributes = attributes.data(),
-        .attributeCount = static_cast<uint32_t>(attributes.size()),
+        .bindings = std::span{&vertexBinding, 1},
+        .attributes = attributes,
       },
       .rasterState = {
         .topology = rhi::PrimitiveTopology::triangleList,
@@ -697,19 +705,14 @@ namespace demo
         .depthTestEnable = false,
         .depthWriteEnable = false,
       },
-      .blendStates = &blend,
-      .blendStateCount = 1,
-      .dynamicStates = dynamicStates.data(),
-      .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+      .blendStates = std::span{&blend, 1},
+      .dynamicStates = dynamicStates,
       .renderingInfo = {
-        .colorFormats = &info.swapchainFormat,
-        .colorFormatCount = 1,
+        .colorFormats = std::span{&info.swapchainFormat, 1},
       },
       .bindingSchema = {
-        .argumentSlots = argumentSlots.data(),
-        .argumentSlotCount = static_cast<uint32_t>(argumentSlots.size()),
-        .rootBindings = &rootBinding,
-        .rootBindingCount = 1,
+        .argumentSlots = argumentSlots,
+        .rootBindings = std::span{&rootBinding, 1},
       },
     });
 
@@ -809,8 +812,17 @@ namespace demo
     const uint32_t framebufferHeight = static_cast<uint32_t>(
       drawData->DisplaySize.y * drawData->FramebufferScale.y);
 
-    impl.updateTextures(commandBuffer, *drawData);
     FrameBuffers& buffers = impl.frameBuffers[frameIndex % impl.frameBuffers.size()];
+    for (uint32_t index = 0; index < buffers.uploadStagingCount; ++index)
+    {
+      if (!buffers.uploadStaging[index].isNull())
+      {
+        impl.device->destroyBuffer(buffers.uploadStaging[index]);
+      }
+    }
+    buffers.uploadStaging.fill({});
+    buffers.uploadStagingCount = 0;
+    impl.updateTextures(commandBuffer, *drawData, buffers);
     impl.uploadDrawData(*drawData, buffers);
 
     const rhi::TextureBarrier beginBarrier{
@@ -818,7 +830,7 @@ namespace demo
       .before = rhi::ResourceState::General,
       .after = rhi::ResourceState::ColorAttachment,
     };
-    commandBuffer.resourceBarrier(&beginBarrier, 1, nullptr, 0);
+    commandBuffer.resourceBarrier(std::span{&beginBarrier, 1}, {});
     const rhi::RenderTargetDesc colorTarget{
       .texture = target,
       .view = targetView,
@@ -828,8 +840,7 @@ namespace demo
     };
     const rhi::RenderPassDesc pass{
       .renderArea = {.extent = targetExtent},
-      .colorTargets = &colorTarget,
-      .colorTargetCount = 1,
+      .colorTargets = std::span{&colorTarget, 1},
     };
     rhi::RenderEncoder* encoder = commandBuffer.beginRenderPass(pass);
     if (encoder != nullptr && framebufferWidth > 0 && framebufferHeight > 0 &&
@@ -852,7 +863,7 @@ namespace demo
       .before = rhi::ResourceState::ColorAttachment,
       .after = rhi::ResourceState::Present,
     };
-    commandBuffer.resourceBarrier(&endBarrier, 1, nullptr, 0);
+    commandBuffer.resourceBarrier(std::span{&endBarrier, 1}, {});
   }
 
   bool ImGuiRhiRenderer::isInitialized() const

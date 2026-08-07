@@ -150,7 +150,7 @@ namespace demo
 			};
 			// Each substep consumes sampled descriptors in ShaderRead, writes one
 			// color target, then publishes that level for the next sampled read.
-			context.commandBuffer->resourceBarrier(&barrier, 1, nullptr, 0);
+			context.commandBuffer->resourceBarrier(std::span{&barrier, 1}, {});
 		};
 		const auto renderStep = [&](const BloomStep& step)
 		{
@@ -167,8 +167,7 @@ namespace demo
 			const rhi::Extent2D extent{step.extent.width, step.extent.height};
 			rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 				.renderArea = {{0, 0}, extent},
-				.colorTargets = &colorTarget,
-				.colorTargetCount = 1,
+				.colorTargets = std::span{&colorTarget, 1},
 				.depthTarget = nullptr,
 			});
 			enc->setViewport(rhi::Viewport{

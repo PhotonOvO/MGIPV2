@@ -180,7 +180,7 @@ namespace demo
 				},
 			}
 		};
-		cmd.resourceBarrier(uploadBeginBarriers.data(), static_cast<uint32_t>(uploadBeginBarriers.size()), nullptr, 0);
+		cmd.resourceBarrier(uploadBeginBarriers, {});
 
 		const std::span<const std::byte> payload(
 			reinterpret_cast<const std::byte*>(fileData.halfTexels.data()),
@@ -239,7 +239,7 @@ namespace demo
 				},
 			}
 		};
-		cmd.resourceBarrier(uploadEndBarriers.data(), static_cast<uint32_t>(uploadEndBarriers.size()), nullptr, 0);
+		cmd.resourceBarrier(uploadEndBarriers, {});
 
 		// Caller retires the staging buffer after the command buffer is submitted.
 		outStagingBuffers.push_back(stagingBuffer);

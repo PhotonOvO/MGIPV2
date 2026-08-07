@@ -120,51 +120,46 @@ class GPUSceneRegistryContractTests(unittest.TestCase):
         self.assertIn("m_gpuBuffersInitialized = false", ensure_capacity)
 
     def test_transfer_war_lowering_uses_transfer_write_access(self) -> None:
-        source = read("rhi/vulkan/VulkanCommandBuffer.cpp")
+        source = read("rhi/vulkan/VulkanBarrierConversions.h")
         consumer_access = braced_source(
             source,
             r"VkAccessFlags2\s+inferConsumerAccess\s*\(",
         )
 
         self.assertIn("StageFlags consumerStages", consumer_access)
-        self.assertIn("hasStage(StageFlags::transfer)", consumer_access)
+        self.assertIn("hasStage(consumerStages, StageFlags::transfer)", consumer_access)
         self.assertIn("VK_ACCESS_2_TRANSFER_WRITE_BIT", consumer_access)
         self.assertIn("VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT", consumer_access)
         self.assertIn("inferConsumerAccess(hazards, consumer)", source)
 
-    def test_immediate_upload_and_frames_submit_to_the_same_graphics_queue(self) -> None:
+    def test_uploads_and_frames_submit_through_the_public_queue_contract(self) -> None:
         device_contract = read("rhi/RHIDevice.h")
-        vulkan_device = read("rhi/vulkan/VulkanDevice.cpp")
-        frame_context = read("rhi/vulkan/VulkanFrameContext.cpp")
+        queue_contract = read("rhi/RHIQueue.h")
+        vulkan_queue = read("rhi/vulkan/VulkanQueue.cpp")
+        frame_scheduler = read("render/FrameScheduler.cpp")
+        upload_manager = read("render/UploadManager.cpp")
         renderer = read("render/GPUDrivenRenderer.cpp")
 
-        immediate = braced_source(
-            vulkan_device,
-            r"void\s+VulkanDevice::executeImmediateUpload\s*\(",
-        )
-        frame_init = braced_source(
-            frame_context,
-            r"void\s+VulkanFrameContext::init\s*\(",
-        )
-        frame_submit = braced_source(
-            frame_context,
-            r"SubmissionReceipt\s+VulkanFrameContext::submitCurrentFrame\s*\(",
-        )
         flush_scene = braced_source(
             renderer,
             r"void\s+GPUDrivenRenderer::flushPendingSceneUploads\s*\(",
         )
 
-        self.assertIn("one-shot upload command to the graphics queue", device_contract)
-        self.assertIn("vkQueueSubmit2(m_graphicsQueue.queue", immediate)
-        self.assertRegex(
-            frame_init,
-            r"vkGetDeviceQueue\s*\(\s*m_device\s*,\s*m_queueFamilyIndex\s*,\s*0\s*,\s*&m_graphicsQueue\s*\)",
-        )
-        self.assertIn("vkQueueSubmit2(m_graphicsQueue", frame_submit)
+        self.assertNotIn("executeImmediateUpload", device_contract)
+        self.assertIn("virtual SubmissionToken submit", queue_contract)
+        self.assertIn("device.getQueue(rhi::QueueClass::graphics)", frame_scheduler)
+        self.assertIn("device.getQueue(rhi::QueueClass::graphics)", upload_manager)
+        self.assertIn("device.getQueue(rhi::QueueClass::transfer)", upload_manager)
+        self.assertIn("device.createCommandAllocator(rhi::QueueClass::graphics)", frame_scheduler)
+        self.assertIn("device.createCommandAllocator(queueClass)", upload_manager)
+        self.assertIn("rhi::QueueClass::graphics, slotCount", upload_manager)
+        self.assertIn("rhi::QueueClass::transfer, slotCount", upload_manager)
+        self.assertIn("m_queue->submit", frame_scheduler)
+        self.assertIn("channel.queue->submit", upload_manager)
+        self.assertIn("!transfer->info().dedicated", upload_manager)
+        self.assertIn("vkQueueSubmit2(m_queue", vulkan_queue)
         self.assertIn("m_renderer.executeUploadCommand", flush_scene)
         self.assertNotIn("waitForIdle", flush_scene)
-
     def test_model_covers_non_contiguous_descendant_dirty_ranges(self) -> None:
         model = read("tests/gpu_scene_registry_model_tests.cpp")
         cmake = read("CMakeLists.txt")

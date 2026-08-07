@@ -2,37 +2,51 @@
 
 #include "../RHIPipeline.h"
 
+#include <cstdint>
+#include <filesystem>
+#include <span>
+#include <string>
+#include <vector>
+
 namespace demo::rhi::d3d12 {
 
-enum class PipelineShaderIdentity : uint32_t
+enum class D3D12ShaderBindingKind : uint8_t
 {
-  raster = 0,
-  compute,
+  constantBuffer = 0,
+  shaderResource,
+  unorderedAccess,
+  sampler,
+  pushConstants,
 };
 
-struct PipelineKey
+struct D3D12ShaderBinding
 {
-  PipelineShaderIdentity shaderIdentity{PipelineShaderIdentity::raster};
-  uint32_t               specializationVariant{0};
+  std::string name;
+  uint32_t logicalSet{0};
+  uint32_t logicalBinding{0};
+  D3D12ShaderBindingKind kind{D3D12ShaderBindingKind::shaderResource};
+  uint32_t shaderRegister{0};
+  uint32_t registerSpace{0};
+  uint32_t descriptorCount{1};
+  bool unbounded{false};
 };
 
-struct GraphicsPipelineCreateInfo
+struct D3D12VertexInput
 {
-  PipelineKey          key{};
-  GraphicsPipelineDesc desc{};
+  uint32_t location{0};
+  std::string semanticName;
+  uint32_t semanticIndex{0};
 };
 
-struct ComputePipelineCreateInfo
+struct D3D12CompiledShader
 {
-  PipelineKey         key{};
-  ComputePipelineDesc desc{};
+  std::vector<uint8_t> bytecode;
+  std::vector<D3D12ShaderBinding> bindings;
+  std::vector<D3D12VertexInput> vertexInputs;
+  std::filesystem::path sourcePath;
 };
 
-// Stub helpers consume the public RHI pipeline descriptors. A future D3D12
-// implementation will lower PipelineBindingSchemaDesc to descriptor tables,
-// root constants, root descriptors/GPU virtual addresses, and dynamic-buffer
-// bindings inside the backend. No public layout object is part of this contract.
-void* createGraphicsPipeline(void* nativeDevice, const GraphicsPipelineCreateInfo& createInfo);
-void* createComputePipeline(void* nativeDevice, const ComputePipelineCreateInfo& createInfo);
+[[nodiscard]] D3D12CompiledShader compileShaderToDxil(
+  const ShaderEntry& stage, std::span<const uint8_t> shaderBytes);
 
 }  // namespace demo::rhi::d3d12

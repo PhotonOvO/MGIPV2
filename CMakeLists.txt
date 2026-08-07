@@ -6,6 +6,43 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(DEMO_RHI_CONTRACT_ONLY "Build only dependency-free public/backend RHI contract targets" OFF)
+if(DEMO_RHI_CONTRACT_ONLY)
+  add_executable(rhi_public_contract_tests tests/rhi_public_contract_tests.cpp)
+  target_include_directories(rhi_public_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+  add_test(NAME rhi_public_contract COMMAND rhi_public_contract_tests)
+
+  if(WIN32)
+    add_library(rhi_d3d12_contract OBJECT
+      rhi/d3d12/D3D12Device.cpp
+      rhi/d3d12/D3D12Queue.cpp
+      rhi/d3d12/D3D12CommandAllocator.cpp
+      rhi/d3d12/D3D12CommandBuffer.cpp
+      rhi/d3d12/D3D12PipelineDevice.cpp
+      rhi/d3d12/D3D12Swapchain.cpp
+    )
+    target_include_directories(rhi_d3d12_contract PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+    target_compile_definitions(rhi_d3d12_contract PRIVATE DEMO_HAS_D3D12=1)
+  endif()
+
+  if(APPLE)
+    enable_language(OBJCXX)
+    find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
+    find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    add_executable(metal4_contract_tests
+      tests/metal4_contract_tests.mm
+      rhi/metal/Metal4Availability.mm
+      rhi/metal/Metal4Contract.mm
+    )
+    target_include_directories(metal4_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+    target_link_libraries(metal4_contract_tests PRIVATE
+      "${DEMO_METAL_FRAMEWORK}"
+      "${DEMO_FOUNDATION_FRAMEWORK}"
+    )
+    add_test(NAME metal4_contract COMMAND metal4_contract_tests)
+  endif()
+  return()
+endif()
 #====================================================================================
 # SHADER AUTHORITY POLICY
 #====================================================================================
@@ -40,6 +77,14 @@ else()
 endif()
 
 option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
+if(WIN32)
+  option(DEMO_ENABLE_D3D12 "Build the Direct3D 12 RHI foundation on Windows" ON)
+else()
+  option(DEMO_ENABLE_D3D12 "Build the Direct3D 12 RHI foundation on Windows" OFF)
+endif()
+if(DEMO_ENABLE_D3D12 AND NOT WIN32)
+  message(FATAL_ERROR "DEMO_ENABLE_D3D12 is supported only on Windows")
+endif()
 
 if(MSVC)
     add_compile_options(/utf-8)
@@ -223,6 +268,76 @@ else()
   set(GENERATED_SHADER_SPV_BINARIES "")
 endif()
 
+# The Windows Vulkan final-color pass uses the same DXC downstream as D3D12 so
+# UNORM quantization follows identical floating-point code generation. DXC emits
+# separate image/sampler arrays; the renderer supplies a Vulkan-only public RHI
+# layout for those two bindings while every other pass keeps the authoritative
+# Slang SPIR-V module.
+if(WIN32 AND USE_SLANG)
+  get_filename_component(_VULKAN_TOOL_DIR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}" DIRECTORY)
+  find_program(DEMO_DXC_SPIRV_EXECUTABLE
+    NAMES dxc
+    HINTS "${_VULKAN_TOOL_DIR}"
+    REQUIRED
+  )
+
+  set(DEMO_DXC_FINAL_HLSL "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.hlsl")
+  set(DEMO_DXC_FINAL_SPV "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv")
+  set(DEMO_DXC_FINAL_HEADER "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv.h")
+  set(DEMO_DXC_FINAL_DEPFILE "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.dep")
+  add_custom_command(
+    OUTPUT
+      "${DEMO_DXC_FINAL_HLSL}"
+      "${DEMO_DXC_FINAL_SPV}"
+      "${DEMO_DXC_FINAL_HEADER}"
+    COMMAND "${Slang_SLANGC_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang"
+      -depfile "${DEMO_DXC_FINAL_DEPFILE}"
+      -lang slang
+      -matrix-layout-column-major
+      -O0
+      -g1
+      -entry fragmentFinalColorMain
+      -stage fragment
+      -I "${CMAKE_CURRENT_LIST_DIR}"
+      -DDEMO_D3D12=1
+      -target hlsl
+      -profile sm_6_6
+      -o "${DEMO_DXC_FINAL_HLSL}"
+    COMMAND "${DEMO_DXC_SPIRV_EXECUTABLE}"
+      -spirv
+      -T ps_6_6
+      -E fragmentFinalColorMain
+      -Od
+      -enable-16bit-types
+      -HV 2021
+      -fspv-target-env=vulkan1.3
+      -fvk-use-scalar-layout
+      -fspv-preserve-interface
+      -fvk-bind-register t0 1 0 0
+      -fvk-bind-register s0 2 12 0
+      -fvk-bind-register b4 0 4 1
+      -Fo "${DEMO_DXC_FINAL_SPV}"
+      "${DEMO_DXC_FINAL_HLSL}"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DINPUT_FILE=${DEMO_DXC_FINAL_SPV}"
+      "-DOUTPUT_FILE=${DEMO_DXC_FINAL_HEADER}"
+      "-DVARIABLE_NAME=shader_light_final_dxc_spv"
+      -P "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedSpirv.cmake"
+    DEPENDS
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang"
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light.slang"
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader_io.h"
+      "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedSpirv.cmake"
+    DEPFILE "${DEMO_DXC_FINAL_DEPFILE}"
+    COMMENT "Compiling DXC SPIR-V final-color shader"
+    VERBATIM
+  )
+  list(APPEND GENERATED_SHADER_SLANG_HEADERS "${DEMO_DXC_FINAL_HEADER}")
+  list(APPEND GENERATED_SHADER_SPV_BINARIES "${DEMO_DXC_FINAL_SPV}")
+  set(DEMO_HAS_DXC_FINAL_SPIRV TRUE)
+endif()
+
 compile_glsl(
   "${SHADER_GLSL_FILES}"
   "${SHADER_OUTPUT_DIR}"
@@ -233,40 +348,44 @@ compile_glsl(
 add_library(demo_core STATIC
   rhi/RHITypes.h
   rhi/RHIHandles.h
+  rhi/RHIResult.h
+  rhi/RHIResidency.h
+  rhi/RHIDebugCounters.h
+  rhi/RHIDebugValidation.h
   rhi/RHIBindlessTypes.h
   rhi/RHIStageBarrier.h
   rhi/RHIArgumentTable.h
   rhi/RHIEncoder.h
   rhi/RHICommandBuffer.h
-  rhi/RHICommandPool.h
-  rhi/RHISynchronization.h
+  rhi/RHICommandAllocator.h
   rhi/RHISwapchain.h
   rhi/RHIDevice.h
   rhi/RHIFactory.h
   rhi/RHIFactory.cpp
   rhi/RHISurface.h
   rhi/RHIQueue.h
-  rhi/RHIFrameContext.h
   rhi/RHIResourceLifetime.h
   rhi/RHIShaderReflection.h
   rhi/RHIPipeline.h
   # vulkan backend
+  rhi/vulkan/VulkanFormatUtils.h
+  rhi/vulkan/VulkanResourceConversions.h
+  rhi/vulkan/VulkanShaderConversions.h
+  rhi/vulkan/VulkanBarrierConversions.h
+  rhi/vulkan/VulkanPipelineConversions.h
+  rhi/vulkan/VulkanQueueConversions.h
   rhi/vulkan/VulkanSurface.h
   rhi/vulkan/VulkanSurface.cpp
   rhi/vulkan/VulkanDevice.h
   rhi/vulkan/VulkanDevice.cpp
-  rhi/vulkan/VulkanFrameContext.h
-  rhi/vulkan/VulkanFrameContext.cpp
   rhi/vulkan/VulkanCommandBuffer.h
   rhi/vulkan/VulkanCommandBuffer.cpp
+  rhi/vulkan/VulkanCommandAllocator.h
+  rhi/vulkan/VulkanCommandAllocator.cpp
+  rhi/vulkan/VulkanQueue.h
+  rhi/vulkan/VulkanQueue.cpp
   rhi/vulkan/VulkanResourceTable.h
   rhi/vulkan/VulkanResourceTable.cpp
-  rhi/vulkan/VulkanCommandPool.h
-  rhi/vulkan/VulkanCommandPool.cpp
-  rhi/vulkan/VulkanSynchronization.h
-  rhi/vulkan/VulkanSynchronization.cpp
-  rhi/vulkan/VulkanFrameOps.h
-  rhi/vulkan/VulkanFrameOps.cpp
   rhi/vulkan/VulkanPipelines.h
   rhi/vulkan/VulkanPipelines.cpp
   rhi/vulkan/VulkanSwapchain.h
@@ -370,8 +489,10 @@ add_library(demo_core STATIC
   render/TransientAllocator.h
   render/PassExecutor.cpp
   render/PassExecutor.h
-  render/FrameSubmission.cpp
-  render/FrameSubmission.h
+  render/FrameScheduler.h
+  render/FrameScheduler.cpp
+  render/UploadManager.h
+  render/UploadManager.cpp
   render/SceneResources.cpp
   render/SceneResources.h
   render/LightResources.cpp
@@ -441,19 +562,51 @@ if(NOT ANDROID)
     rhi/metal/MetalSwapchain.cpp
     rhi/metal/MetalPipelines.h
     rhi/metal/MetalPipelines.cpp
-    rhi/metal/MetalFrameContext.h
-    rhi/metal/MetalFrameContext.cpp
+  )
+endif()
+
+if(APPLE)
+  enable_language(OBJCXX)
+  target_sources(demo_core PRIVATE
+    rhi/metal/Metal4Availability.h
+    rhi/metal/Metal4Availability.mm
+    rhi/metal/Metal4Contract.h
+    rhi/metal/Metal4Contract.mm
+  )
+  find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
+  find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(demo_core PUBLIC
+    "${DEMO_METAL_FRAMEWORK}"
+    "${DEMO_FOUNDATION_FRAMEWORK}"
+  )
+endif()
+
+if(WIN32 AND DEMO_ENABLE_D3D12)
+  target_sources(demo_core PRIVATE
     rhi/d3d12/D3D12Device.h
     rhi/d3d12/D3D12Device.cpp
+    rhi/d3d12/D3D12Surface.h
+    rhi/d3d12/D3D12Surface.cpp
     rhi/d3d12/D3D12Swapchain.h
     rhi/d3d12/D3D12Swapchain.cpp
     rhi/d3d12/D3D12Pipelines.h
     rhi/d3d12/D3D12Pipelines.cpp
-    rhi/d3d12/D3D12FrameContext.h
-    rhi/d3d12/D3D12FrameContext.cpp
+    rhi/d3d12/D3D12PipelineDevice.cpp
+    rhi/d3d12/D3D12CommandBuffer.h
+    rhi/d3d12/D3D12CommandBuffer.cpp
+    rhi/d3d12/D3D12CommandAllocator.h
+    rhi/d3d12/D3D12CommandAllocator.cpp
+    rhi/d3d12/D3D12Queue.h
+    rhi/d3d12/D3D12Queue.cpp
   )
+  target_compile_definitions(demo_core PRIVATE
+    DEMO_SLANGC_PATH="${Slang_SLANGC_EXECUTABLE}"
+    DEMO_DXC_PATH="${DEMO_DXC_SPIRV_EXECUTABLE}"
+    DEMO_SHADER_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/shaders"
+    DEMO_SHADER_AUTOGEN_DIR="${SHADER_OUTPUT_DIR}"
+  )
+  target_compile_definitions(demo_core PUBLIC DEMO_HAS_D3D12=1)
 endif()
-
 if(ANDROID)
   add_library(native_app_glue STATIC
     ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
@@ -466,6 +619,9 @@ endif()
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
+endif()
+if(DEMO_HAS_DXC_FINAL_SPIRV)
+  target_compile_definitions(demo_core PRIVATE DEMO_HAS_DXC_FINAL_SPIRV=1)
 endif()
 if(VK_SEMAPHORE_DEBUG)
   target_compile_definitions(demo_core PUBLIC NVVK_SEMAPHORE_DEBUG=1)
@@ -536,6 +692,9 @@ endif()
 
 if(WIN32)
   target_link_libraries(demo_core PUBLIC winmm.lib)
+  if(DEMO_ENABLE_D3D12)
+    target_link_libraries(demo_core PUBLIC d3d12.lib dxgi.lib dxguid.lib)
+  endif()
 endif()
 
 if(ANDROID)
@@ -587,6 +746,39 @@ if(BUILD_TESTING AND NOT ANDROID)
     tests/gpu_visibility_depth_model_tests.cpp
   )
   add_test(NAME gpu_visibility_depth_model COMMAND gpu_visibility_depth_model_tests)
+
+  add_executable(rhi_public_contract_tests
+    tests/rhi_public_contract_tests.cpp
+  )
+  target_include_directories(rhi_public_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+  add_test(NAME rhi_public_contract COMMAND rhi_public_contract_tests)
+
+  add_executable(vulkan_conversion_tests
+    tests/vulkan_conversion_tests.cpp
+  )
+  target_link_libraries(vulkan_conversion_tests PRIVATE demo_core)
+  add_test(NAME vulkan_conversion COMMAND vulkan_conversion_tests)
+
+  add_executable(rhi_backend_factory_tests
+    tests/rhi_backend_factory_tests.cpp
+  )
+  target_link_libraries(rhi_backend_factory_tests PRIVATE demo_core)
+  add_test(NAME rhi_backend_factory COMMAND rhi_backend_factory_tests)
+
+  if(WIN32 AND DEMO_ENABLE_D3D12)
+    add_executable(d3d12_device_smoke_tests
+      tests/d3d12_device_smoke_tests.cpp
+    )
+    target_link_libraries(d3d12_device_smoke_tests PRIVATE demo_core)
+    add_test(NAME d3d12_device_smoke COMMAND d3d12_device_smoke_tests)
+    set_tests_properties(d3d12_device_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(d3d12_clear_present_tests
+      tests/d3d12_clear_present_tests.cpp
+    )
+    target_link_libraries(d3d12_clear_present_tests PRIVATE demo_core)
+    add_test(NAME d3d12_clear_present COMMAND d3d12_clear_present_tests)
+  endif()
 endif()
 
 

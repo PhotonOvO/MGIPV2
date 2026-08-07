@@ -59,8 +59,15 @@ ConstantBuffer<PushConstant> pushConst;
 
 // Specialization constant - can be set at pipeline creation time
 // Note: This is equivalent to GLSL's layout(constant_id = X)
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool useTexture = (DEMO_SPECIALIZATION_0 != 0);
+#else
 [[vk::constant_id(0)]]
 const bool useTexture = false; // Controls whether texture sampling is enabled
+#endif
 
 //------------------------------------------------------------------------------
 // Vertex Shader

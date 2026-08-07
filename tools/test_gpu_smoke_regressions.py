@@ -120,7 +120,7 @@ class GpuSmokeRegressionTests(unittest.TestCase):
 
         sampler_creation = init.index("m_fallbackSampler = device.createSampler")
         sampler_selection = init.index("rhi::SamplerHandle sdfSampler")
-        first_table = init.index("table = device.createArgumentTable(m_initArgsLayout)")
+        first_table = init.index("table = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_initArgsLayout")
         self.assertLess(sampler_creation, sampler_selection)
         self.assertLess(sampler_selection, first_table)
         self.assertIn("if(sdfSampler.isNull())", init[sampler_selection:first_table])
@@ -337,16 +337,16 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertIn("RWTexture2D<float2> probesDistance", distance)
         self.assertNotIn("RWTexture2D<float4> probesDistance", distance)
 
-    def test_frame_timeline_uses_cpu_monotonic_signal_value(self) -> None:
-        source = read("rhi/vulkan/VulkanFrameContext.cpp")
-        submit = source[source.index("SubmissionReceipt VulkanFrameContext::submitCurrentFrame") :]
+    def test_frame_timeline_uses_queue_owned_monotonic_submission_tokens(self) -> None:
+        source = read("rhi/vulkan/VulkanQueue.cpp")
+        submit = source[source.index("SubmissionToken VulkanQueue::submit") :]
 
-        self.assertIn("Timeline semaphore near overflow", submit)
-        self.assertIn("m_timelineSemaphore->getCurrentValue()", submit)
-        self.assertIn("m_frameCounter > currentTimelineValue", submit)
-        self.assertIn("m_frameCounter = signalValue", submit)
-        self.assertIn("m_timelineSemaphore->init(m_device, 0)", submit)
-
+        self.assertIn("m_lastSubmittedValue + 1u", submit)
+        self.assertIn("m_lastSubmittedValue = signalValue", submit)
+        self.assertIn("SubmissionToken token{m_identity, signalValue}", submit)
+        self.assertIn("vkQueueSubmit2(m_queue", submit)
+        self.assertIn("recreateExhaustedTimeline()", submit)
+        self.assertIn("createTimeline(0)", source)
     def test_render_device_frame_slot_callback_runs_after_prepare_before_recording(self) -> None:
         source = read("render/RenderDevice.cpp")
         render = braced_source(
@@ -1259,16 +1259,18 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertLess(runtime_draw_bounds, static_shadow_bounds)
         self.assertIn("drawRecord.boundsSphere = boundsSphere;", update)
 
-    def test_shadow_upload_reacquires_registry_record_after_staging_allocation(self) -> None:
+    def test_shadow_upload_records_through_public_buffer_handle(self) -> None:
         render_device = read("render/RenderDevice.cpp")
         upload = render_device[render_device.index("RenderDevice::createShadowPackedUploadBuffer") :]
         upload = upload[: upload.index("RenderDevice::rebuildShadowPackedBuffers")]
 
+        buffer_create = upload.index("m_device.device->createBuffer")
         staging_allocation = upload.index("upload.init(")
-        record_lookup = upload.index("tryGetBuffer(buffer)")
+        handle_upload = upload.index("upload.recordBufferUpload(slice, buffer")
 
-        self.assertGreater(record_lookup, staging_allocation)
-
+        self.assertLess(buffer_create, staging_allocation)
+        self.assertLess(staging_allocation, handle_upload)
+        self.assertNotIn("tryGetBuffer", upload)
     def test_flax_partial_updates_mirror_both_history_atlases(self) -> None:
         pass_source = read("render/passes/FlaxDDGIPass.cpp")
         distance = read("shaders/ddgi_flax_update_distance.slang")
@@ -1480,7 +1482,7 @@ class GpuSmokeRegressionTests(unittest.TestCase):
 
     def test_flax_cross_frame_fragment_read_before_compute_write_is_barriered(self) -> None:
         stage_barrier = read("rhi/RHIStageBarrier.h")
-        vulkan = read("rhi/vulkan/VulkanCommandBuffer.cpp")
+        vulkan = read("rhi/vulkan/VulkanBarrierConversions.h")
         pass_source = read("render/passes/FlaxDDGIPass.cpp")
 
         self.assertIn("readBeforeWrite", stage_barrier)

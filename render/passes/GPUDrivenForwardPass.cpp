@@ -61,9 +61,9 @@ namespace demo
 
 		MeshPool& meshPool = m_renderer->getMeshPool();
 		const uint32_t objectCount = m_renderer->getGPUCullingObjectCount(context.frameIndex);
-		const uint64_t indirectBufferHandle = m_renderer->getGPUCullingIndirectBufferOpaque(context.frameIndex);
-		const uint64_t countBufferHandle = m_renderer->getGPUCullingDrawCountBufferOpaque(context.frameIndex);
-		if (objectCount == 0 || indirectBufferHandle == 0 || countBufferHandle == 0)
+		const rhi::BufferHandle indirectBuffer = m_renderer->getGPUCullingIndirectBufferRHIHandle(context.frameIndex);
+		const rhi::BufferHandle countBuffer = m_renderer->getGPUCullingDrawCountBufferRHIHandle(context.frameIndex);
+		if (objectCount == 0 || indirectBuffer.isNull() || countBuffer.isNull())
 		{
 			context.commandBuffer->endEvent();
 			return;
@@ -119,13 +119,13 @@ namespace demo
 		const uint32_t alphaCapacity = static_cast<uint32_t>(m_renderer->getAlphaTestDrawIndices().size());
 		const uint32_t totalPersistentCapacity = opaqueCapacity + alphaCapacity + transparentCapacity;
 		m_renderer->ensureGPUDrivenPersistentIndirectStream(context.frameIndex, totalPersistentCapacity);
-		const uint64_t forwardIndirectBufferHandle = m_renderer->getGPUDrivenPersistentIndirectStreamBuffer(
+		const rhi::BufferHandle forwardIndirectBuffer = m_renderer->getGPUDrivenPersistentIndirectStreamBufferRHIHandle(
 			context.frameIndex);
 		const bool transparentPatched =
-			forwardIndirectBufferHandle != 0
+			!forwardIndirectBuffer.isNull()
 			&& m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 			                                                 context.frameIndex,
-			                                                 forwardIndirectBufferHandle,
+			                                                 forwardIndirectBuffer,
 			                                                 0x80000000u,
 			                                                 opaqueCapacity + alphaCapacity);
 		m_renderer->recordForwardVisibilityPatch(transparentPatched, transparentCapacity, totalPersistentCapacity);
@@ -137,8 +137,7 @@ namespace demo
 
 		const rhi::RenderPassDesc passDesc{
 			.renderArea = {{0, 0}, renderExtent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = &depthTarget,
 		};
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);
@@ -191,7 +190,7 @@ namespace demo
 			const uint64_t transparentCommandOffset =
 				static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * m_renderer->
 				getGPUCullingIndirectCommandStride();
-			enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+			enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
 			enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
 			// Transparent pass uses the current-frame persistent indirect stream + culling counts.

@@ -12,7 +12,7 @@ class VulkanSurface final : public demo::rhi::Surface
 public:
   VulkanSurface() = default;
 
-  void                init(void* nativeInstance, void* nativePhysicalDevice, const WindowHandle& window) override;
+  void                initVulkan(VkInstance instance, VkPhysicalDevice physicalDevice, const WindowHandle& window);
   void                deinit() override;
   SurfaceCapabilities queryCapabilities() const override;
 

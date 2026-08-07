@@ -1,9 +1,8 @@
 #pragma once
 
-// Backend-neutral construction entry points (RDEV init sink). The render layer
-// creates Device/Surface through these factories instead of naming backend
-// classes; backend selection lives entirely inside the RHI layer.
-// Currently Vulkan-only; D3D12/Metal become selectable here once implemented.
+// Backend-neutral construction entry points. Backend selection stays inside RHI.
+
+#include "RHIBackend.h"
 
 #include <memory>
 
@@ -12,6 +11,14 @@ namespace demo::rhi
 	class Device;
 	class Surface;
 
-	[[nodiscard]] std::unique_ptr<Device> createDevice();
-	[[nodiscard]] std::unique_ptr<Surface> createSurface();
+
+	[[nodiscard]] constexpr BackendType defaultBackend()
+	{
+		return BackendType::vulkan;
+	}
+
+	[[nodiscard]] const char* toString(BackendType backend);
+	[[nodiscard]] bool isBackendAvailable(BackendType backend);
+	[[nodiscard]] std::unique_ptr<Device> createDevice(BackendType backend = defaultBackend());
+	[[nodiscard]] std::unique_ptr<Surface> createSurface(BackendType backend = defaultBackend());
 } // namespace demo::rhi

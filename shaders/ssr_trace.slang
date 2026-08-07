@@ -44,9 +44,27 @@ float3 decodeNormalOct(float2 encoded)
     return normalize(n);
 }
 
+float2 framebufferUvToNdc(float2 uv)
+{
+    float2 ndc = uv * 2.0 - 1.0;
+#ifdef DEMO_D3D12
+    ndc.y = -ndc.y;
+#endif
+    return ndc;
+}
+
+float2 ndcToFramebufferUv(float2 ndc)
+{
+    float2 uv = ndc * 0.5 + 0.5;
+#ifdef DEMO_D3D12
+    uv.y = 1.0 - uv.y;
+#endif
+    return uv;
+}
+
 float3 reconstructWorldPosition(float2 uv, float depth)
 {
-    float4 clipPos = float4(uv * 2.0 - 1.0, depth, 1.0);
+    float4 clipPos = float4(framebufferUvToNdc(uv), depth, 1.0);
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     return worldPos.xyz / max(worldPos.w, 1.0e-5);
 }
@@ -361,7 +379,7 @@ void kernelSSRTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
     float3 endNdc = endClip.xyz / endClip.w;
-    endUv = endNdc.xy * 0.5 + 0.5;
+    endUv = ndcToFramebufferUv(endNdc.xy);
     endRayDepth = endNdc.z;
 
     // Clamp end UV so the DDA does not exit the screen immediately.

@@ -5,7 +5,10 @@
 #include "RHIShaderReflection.h"
 #include "RHITypes.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace demo::rhi {
@@ -32,13 +35,6 @@ inline constexpr ShaderStage toShaderStageMask(ShaderStageFlagBits flags)
   }
   return stages;
 }
-
-struct PipelinePushConstantRange
-{
-  ShaderStage stages{ShaderStage::none};
-  uint32_t    offset{0};
-  uint32_t    size{0};
-};
 
 enum class RootBindingKind : uint8_t
 {
@@ -76,16 +72,50 @@ struct PipelineBindingSchemaDesc
 {
   // Canonical Phase 6 contract: these are logical renderer-facing table
   // slots, not backend set/root-signature/native pipeline-layout objects.
-  const PipelineArgumentSlotDesc* argumentSlots{nullptr};
-  uint32_t                        argumentSlotCount{0};
+  std::span<const PipelineArgumentSlotDesc> argumentSlots{};
+
 
   // Root binding slots are logical slots consumed by setRootConstants,
   // setRootPointer, and dynamic-buffer metadata. Byte offsets, root
   // parameters, and argument/root indices are backend-private lowering details.
-  const RootBindingDesc* rootBindings{nullptr};
-  uint32_t               rootBindingCount{0};
+  std::span<const RootBindingDesc> rootBindings{};
+
 };
 
+class PipelineBindingSchemaStorage
+{
+public:
+  PipelineBindingSchemaStorage(
+    std::span<const ArgumentLayoutHandle> layouts = {},
+    std::span<const RootBindingDesc> rootBindings = {},
+    ShaderStage argumentVisibility = ShaderStage::all)
+    : m_rootBindings(rootBindings.begin(), rootBindings.end())
+  {
+    m_argumentSlots.reserve(layouts.size());
+    for(uint32_t slot = 0; slot < layouts.size(); ++slot)
+    {
+      m_argumentSlots.push_back(PipelineArgumentSlotDesc{
+        .slot = slot,
+        .layout = layouts[slot],
+        .visibility = argumentVisibility,
+      });
+    }
+  }
+
+  [[nodiscard]] PipelineBindingSchemaDesc view() const
+  {
+    return {
+      .argumentSlots = m_argumentSlots,
+
+      .rootBindings = m_rootBindings,
+
+    };
+  }
+
+private:
+  std::vector<PipelineArgumentSlotDesc> m_argumentSlots;
+  std::vector<RootBindingDesc> m_rootBindings;
+};
 enum class PipelineBindingSchemaValidationError : uint8_t
 {
   none = 0,
@@ -98,6 +128,7 @@ enum class PipelineBindingSchemaValidationError : uint8_t
   zeroSizedRootConstants,
   unsupportedGpuPointerSize,
   dynamicBufferWithoutIdentity,
+  invalidRootBindingAlignment,
   rootBindingTooLarge,
 };
 
@@ -115,16 +146,7 @@ inline constexpr uint32_t kInvalidRootDynamicBufferField = 0xFFFFFFFFu;
 
 [[nodiscard]] inline constexpr PipelineBindingSchemaValidationResult validatePipelineBindingSchema(const PipelineBindingSchemaDesc& schema)
 {
-  if(schema.argumentSlotCount > 0 && schema.argumentSlots == nullptr)
-  {
-    return {PipelineBindingSchemaValidationError::argumentSlotArrayMissing, 0};
-  }
-  if(schema.rootBindingCount > 0 && schema.rootBindings == nullptr)
-  {
-    return {PipelineBindingSchemaValidationError::rootBindingArrayMissing, 0};
-  }
-
-  for(uint32_t i = 0; i < schema.argumentSlotCount; ++i)
+  for(uint32_t i = 0; i < schema.argumentSlots.size(); ++i)
   {
     const PipelineArgumentSlotDesc& slot = schema.argumentSlots[i];
     if(slot.visibility == ShaderStage::none)
@@ -132,7 +154,7 @@ inline constexpr uint32_t kInvalidRootDynamicBufferField = 0xFFFFFFFFu;
       return {PipelineBindingSchemaValidationError::argumentSlotWithoutVisibility, i};
     }
 
-    for(uint32_t j = i + 1; j < schema.argumentSlotCount; ++j)
+    for(uint32_t j = i + 1; j < schema.argumentSlots.size(); ++j)
     {
       if(slot.slot == schema.argumentSlots[j].slot)
       {
@@ -141,12 +163,17 @@ inline constexpr uint32_t kInvalidRootDynamicBufferField = 0xFFFFFFFFu;
     }
   }
 
-  for(uint32_t i = 0; i < schema.rootBindingCount; ++i)
+  for(uint32_t i = 0; i < schema.rootBindings.size(); ++i)
   {
     const RootBindingDesc& binding = schema.rootBindings[i];
     if(binding.visibility == ShaderStage::none)
     {
       return {PipelineBindingSchemaValidationError::rootBindingWithoutVisibility, i};
+    }
+
+    if(binding.alignment != 0 && (binding.alignment & (binding.alignment - 1u)) != 0)
+    {
+      return {PipelineBindingSchemaValidationError::invalidRootBindingAlignment, i};
     }
 
     if(binding.size > kMaxRootBindingSizeBytes)
@@ -177,7 +204,7 @@ inline constexpr uint32_t kInvalidRootDynamicBufferField = 0xFFFFFFFFu;
         break;
     }
 
-    for(uint32_t j = i + 1; j < schema.rootBindingCount; ++j)
+    for(uint32_t j = i + 1; j < schema.rootBindings.size(); ++j)
     {
       if(binding.slot == schema.rootBindings[j].slot)
       {
@@ -189,84 +216,25 @@ inline constexpr uint32_t kInvalidRootDynamicBufferField = 0xFFFFFFFFu;
   return {};
 }
 
-inline std::vector<PipelinePushConstantRange> derivePipelinePushConstantRanges(const ShaderReflectionData& reflection)
+inline std::vector<RootBindingDesc> derivePipelineRootBindings(const ShaderReflectionData& reflection)
 {
-  std::vector<PipelinePushConstantRange> ranges;
-  ranges.reserve(reflection.pushConstantRanges.size());
+  std::vector<RootBindingDesc> bindings;
+  bindings.reserve(reflection.pushConstantRanges.size());
   for(const PushConstantRange& range : reflection.pushConstantRanges)
   {
-    ranges.push_back(PipelinePushConstantRange{
-        .stages = toShaderStageMask(range.stageFlags),
-        .offset = range.offset,
-        .size   = range.size,
+    bindings.push_back(RootBindingDesc{
+        .slot = range.offset,
+        .kind = RootBindingKind::constants,
+        .visibility = toShaderStageMask(range.stageFlags),
+        .size = range.size,
     });
   }
-  return ranges;
+  return bindings;
 }
 
 struct SpecializationData
 {
-  const void* data{nullptr};
-  uint32_t    size{0};
-};
-
-struct PipelineShaderStageDesc
-{
-  ShaderStage     stage{ShaderStage::none};
-  // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module。
-  // spirvSize 单位为字节（非元素数）：std::size(arr) * sizeof(uint32_t)。
-  const uint32_t* spirvCode{nullptr};
-  size_t          spirvSize{0};
-  const char*     entryPoint{"main"};
-  uint32_t                      specializationVariant{0};
-  SpecializationData            specializationData{};
-  const SpecializationConstant* specializationConstants{nullptr};
-  uint32_t                      specializationConstantCount{0};
-};
-
-struct PipelineRenderingInfo
-{
-  const TextureFormat* colorFormats{nullptr};
-  uint32_t             colorFormatCount{0};
-  TextureFormat        depthFormat{TextureFormat::undefined};
-};
-
-struct GraphicsPipelineDesc
-{
-  const PipelineShaderStageDesc* shaderStages{nullptr};
-  uint32_t                       shaderStageCount{0};
-  VertexInputLayoutDesc          vertexInput{};
-  RasterState                    rasterState{};
-  DepthState                     depthState{};
-  const BlendAttachmentState*    blendStates{nullptr};
-  uint32_t                       blendStateCount{0};
-  const DynamicState*            dynamicStates{nullptr};
-  uint32_t                       dynamicStateCount{0};
-  PipelineRenderingInfo          renderingInfo{};
-
-  // Canonical binding/root schema. The older argumentLayouts and
-  // pushConstantRanges fields below are legacy compatibility inputs consumed
-  // only by backend lowering while renderer call sites migrate to schema slots.
-  PipelineBindingSchemaDesc bindingSchema{};
-
-  // Transitional argument layouts: array index equals logical table slot.
-  const ArgumentLayoutHandle*     argumentLayouts{nullptr};
-  uint32_t                        argumentLayoutCount{0};
-  const PipelinePushConstantRange* pushConstantRanges{nullptr};
-  uint32_t                         pushConstantRangeCount{0};
-  uint32_t                         specializationVariant{0};
-};
-
-struct ComputePipelineDesc
-{
-  PipelineShaderStageDesc         shaderStage{};
-  PipelineBindingSchemaDesc       bindingSchema{};
-  const ArgumentLayoutHandle*     argumentLayouts{nullptr};
-  uint32_t                        argumentLayoutCount{0};
-  const PipelinePushConstantRange* pushConstantRanges{nullptr};
-  uint32_t                        pushConstantRangeCount{0};
-  uint32_t                        specializationVariant{0};
-  uint64_t                        pipelineFlags{0};
+  std::span<const std::byte> bytes{};
 };
 
 enum class ShaderIRFormat : uint8_t
@@ -280,9 +248,51 @@ enum class ShaderIRFormat : uint8_t
 struct ShaderLibraryDesc
 {
   ShaderIRFormat format{ShaderIRFormat::unknown};
-  const void*    data{nullptr};
-  uint64_t       size{0};
-  const char*    debugName{nullptr};
+  std::span<const std::byte> data{};
+  const char* debugName{nullptr};
+};
+
+struct ShaderEntry
+{
+  ShaderStage         stage{ShaderStage::none};
+  ShaderLibraryHandle library{};
+  std::string_view    entryPoint{"main"};
+  uint32_t                      specializationVariant{0};
+  SpecializationData            specializationData{};
+  std::span<const SpecializationConstant> specializationConstants{};
+
+};
+
+struct PipelineRenderingInfo
+{
+  std::span<const TextureFormat> colorFormats{};
+
+  TextureFormat        depthFormat{TextureFormat::undefined};
+};
+
+struct GraphicsPipelineDesc
+{
+  std::span<const ShaderEntry>          shaderStages{};
+
+  VertexInputLayoutDesc          vertexInput{};
+  RasterState                    rasterState{};
+  DepthState                     depthState{};
+  std::span<const BlendAttachmentState> blendStates{};
+
+  std::span<const DynamicState>         dynamicStates{};
+
+  PipelineRenderingInfo          renderingInfo{};
+
+  PipelineBindingSchemaDesc bindingSchema{};
+  uint32_t                  specializationVariant{0};
+};
+
+struct ComputePipelineDesc
+{
+  ShaderEntry               shaderStage{};
+  PipelineBindingSchemaDesc bindingSchema{};
+  uint32_t                  specializationVariant{0};
+  uint64_t                        pipelineFlags{0};
 };
 
 struct PipelineCompileOptions

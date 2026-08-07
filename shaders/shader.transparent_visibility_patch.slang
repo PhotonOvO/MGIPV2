@@ -102,6 +102,9 @@ void transparentVisibilityPatchMain(uint3 dispatchThreadId : SV_DispatchThreadID
 
     const uint drawIndex = sortedDrawIndices[index];
     GPUCullIndirectCommand command = gpuCullingIndirectCommands[drawIndex];
+#ifdef DEMO_D3D12
+    command.drawIndex = drawIndex;
+#endif
     command.firstInstance = drawIndex;
     forwardIndirectCommands[pushConstants.outputOffset + outputIndex - 1u] = command;
 }

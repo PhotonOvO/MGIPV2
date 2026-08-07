@@ -4,6 +4,13 @@
 
 namespace demo::rhi {
 
+enum class ExplicitResidencyLevel : uint8_t
+{
+  unsupported = 0,
+  validatedNoOp,
+  managed,
+};
+
 // Capability tiers are backend-neutral contracts consumed by the renderer.
 // Core is the v1 mandatory floor; extension tiers are optional opt-ins.
 enum class CapabilityTier : uint8_t
@@ -32,7 +39,7 @@ struct CapabilityReport
   bool extensionMeshShader{false};
   bool extensionRayTracing{false};
   bool descriptorHeap{false};
-  bool residency{false};
+  ExplicitResidencyLevel explicitResidency{ExplicitResidencyLevel::unsupported};
   bool pipelineCompiler{false};
   bool multiQueue{false};
 };
@@ -86,7 +93,7 @@ constexpr bool supportsTier(const CapabilityReport& report, CapabilityTier tier)
     case CapabilityTier::DescriptorHeap:
       return report.descriptorHeap;
     case CapabilityTier::Residency:
-      return report.residency;
+      return report.explicitResidency != ExplicitResidencyLevel::unsupported;
     case CapabilityTier::PipelineCompiler:
       return report.pipelineCompiler;
     case CapabilityTier::MultiQueue:
@@ -126,7 +133,8 @@ constexpr RHICapabilityError evaluateCapabilityRequirements(const CapabilityRepo
   {
     return RHICapabilityError::MissingDescriptorHeap;
   }
-  if(requirements.requireResidency && !report.residency)
+  if(requirements.requireResidency &&
+     report.explicitResidency == ExplicitResidencyLevel::unsupported)
   {
     return RHICapabilityError::MissingResidency;
   }

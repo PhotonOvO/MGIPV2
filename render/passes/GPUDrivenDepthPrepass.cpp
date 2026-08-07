@@ -59,8 +59,7 @@ namespace demo
 
 		const rhi::RenderPassDesc passDesc{
 			.renderArea = {{0, 0}, extent},
-			.colorTargets = nullptr,
-			.colorTargetCount = 0,
+			.colorTargets = {},
 			.depthTarget = &depthTarget,
 		};
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(passDesc);
@@ -96,18 +95,18 @@ namespace demo
 			previousRawBootstrap.valid
 			&& m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity,
 			                                               previousAlphaCapacity);
-		const uint64_t previousBootstrapIndirectBufferHandle = previousSortedBootstrapValid
-			                                                       ? m_renderer->
-			                                                       getPreviousGPUDrivenPersistentIndirectStreamBuffer(
-				                                                       context.frameIndex)
-			                                                       : 0;
-		const uint64_t indirectBufferHandle = previousBootstrapIndirectBufferHandle != 0
-			                                      ? previousBootstrapIndirectBufferHandle
-			                                      : previousRawBootstrap.indirectBufferHandle;
-		const uint64_t countBufferHandle = previousRawBootstrap.countBufferHandle;
+		const rhi::BufferHandle previousBootstrapIndirectBuffer = previousSortedBootstrapValid
+			                                                             ? m_renderer->
+			                                                             getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(
+				                                                             context.frameIndex)
+			                                                             : rhi::BufferHandle{};
+		const rhi::BufferHandle indirectBuffer = !previousBootstrapIndirectBuffer.isNull()
+			                                         ? previousBootstrapIndirectBuffer
+			                                         : previousRawBootstrap.indirectBuffer;
+		const rhi::BufferHandle countBuffer = previousRawBootstrap.countBuffer;
 		const uint32_t previousIndirectObjectCount = previousRawBootstrap.objectCount;
 		const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
-		if (previousRawBootstrap.valid && indirectBufferHandle != 0 && countBufferHandle != 0
+		if (previousRawBootstrap.valid && !indirectBuffer.isNull() && !countBuffer.isNull()
 			&& previousIndirectObjectCount > 0u && !drawTable.isNull())
 		{
 			const rhi::ArgumentTableHandle mdiDrawTable = m_renderer->getDepthMDIDrawArgumentTable(context.frameIndex);
@@ -161,25 +160,23 @@ namespace demo
 					return;
 				}
 				const uint64_t vertexOffset = 0;
-				enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
-				enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
-				const uint64_t opaqueCommandOffset = previousBootstrapIndirectBufferHandle != 0
+				const uint64_t opaqueCommandOffset = !previousBootstrapIndirectBuffer.isNull()
 					                                     ? 0u
 					                                     : static_cast<uint64_t>(previousIndirectObjectCount) *
 					                                     indirectCommandStride;
-				const uint64_t alphaCommandOffset = previousBootstrapIndirectBufferHandle != 0
+				const uint64_t alphaCommandOffset = !previousBootstrapIndirectBuffer.isNull()
 					                                    ? static_cast<uint64_t>(previousOpaqueCapacity) *
 					                                    indirectCommandStride
 					                                    : opaqueCommandOffset * 2u;
 				const uint64_t opaqueCountOffset = offsetof(shaderio::GPUCullDrawCounts, opaqueCount);
 				const uint64_t alphaCountOffset = offsetof(shaderio::GPUCullDrawCounts, alphaTestCount);
 				const uint32_t opaqueMaxDrawCount =
-					previousBootstrapIndirectBufferHandle != 0 ? previousOpaqueCapacity : previousIndirectObjectCount;
+					!previousBootstrapIndirectBuffer.isNull() ? previousOpaqueCapacity : previousIndirectObjectCount;
 				const uint32_t alphaMaxDrawCount =
-					previousBootstrapIndirectBufferHandle != 0 ? previousAlphaCapacity : previousIndirectObjectCount;
+					!previousBootstrapIndirectBuffer.isNull() ? previousAlphaCapacity : previousIndirectObjectCount;
 				m_renderer->recordDepthPrepassVisibilitySource(true,
-				                                               previousBootstrapIndirectBufferHandle != 0,
+				                                               !previousBootstrapIndirectBuffer.isNull(),
 				                                               previousIndirectObjectCount,
 				                                               opaqueMaxDrawCount,
 				                                               alphaMaxDrawCount);
@@ -187,13 +184,12 @@ namespace demo
 				// Indirect args + count buffers as stable RHI handles (previous-frame ring),
 				// selecting the bootstrap persistent stream or the culling output to match the
 				// uint64 path above.
-				const rhi::BufferHandle indirectBufferRHI =
-					previousBootstrapIndirectBufferHandle != 0
-						? m_renderer->getPreviousGPUDrivenPersistentIndirectStreamBufferRHIHandle(context.frameIndex)
-						: previousRawBootstrap.indirectBuffer;
-				const rhi::BufferHandle countBufferRHI = previousRawBootstrap.countBuffer;
+				const rhi::BufferHandle indirectBufferRHI = indirectBuffer;
+				const rhi::BufferHandle countBufferRHI = countBuffer;
 
 				enc->setPipeline(m_renderer->getDepthPrepassOpaqueMDIPipelineHandle());
+				enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
+				enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 				const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
 				enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
 				if (!cameraTable.isNull())

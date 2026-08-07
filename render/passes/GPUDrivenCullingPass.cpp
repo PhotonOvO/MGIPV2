@@ -55,9 +55,9 @@ namespace demo
 					? safeObjectCount
 					: (params.gltfModel != nullptr ? static_cast<uint32_t>(params.gltfModel->meshes.size()) : 0u);
 			const rhi::ArgumentTableHandle argumentTable = m_renderer->getGPUCullingArgumentTable(currentFrameIndex);
-			const uint64_t indirectBuffer = m_renderer->getGPUCullingIndirectBufferOpaque(currentFrameIndex);
-			const uint64_t drawCountBuffer = m_renderer->getGPUCullingDrawCountBufferOpaque(currentFrameIndex);
-			if (objectCount != 0u && !argumentTable.isNull() && indirectBuffer != 0 && drawCountBuffer != 0)
+			const rhi::BufferHandle indirectBuffer = m_renderer->getGPUCullingIndirectBufferRHIHandle(currentFrameIndex);
+			const rhi::BufferHandle drawCountBuffer = m_renderer->getGPUCullingDrawCountBufferRHIHandle(currentFrameIndex);
+			if (objectCount != 0u && !argumentTable.isNull() && !indirectBuffer.isNull() && !drawCountBuffer.isNull())
 			{
 				rhi::ComputeEncoder* enc = cmdBuffer->beginComputePass();
 				enc->setPipeline(m_renderer->getGPUCullingPipelineHandle());

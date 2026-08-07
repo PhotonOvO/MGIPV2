@@ -15,11 +15,12 @@ namespace demo
 	{
 		rhi::RenderEncoder* beginCascadeDepthPass(rhi::CommandBuffer& commandBuffer,
 		                                          const GPUDrivenRenderer& renderer,
+		                                          const rhi::TextureHandle cascadeTexture,
 		                                          const rhi::Extent2D extent,
 		                                          const uint32_t cascadeIndex)
 		{
 			const rhi::DepthTargetDesc depthTarget{
-				.texture = rhi::TextureHandle{kPassCSMShadowHandle.index, kPassCSMShadowHandle.generation},
+				.texture = cascadeTexture,
 				.view = renderer.getCSMCascadeViewHandle(cascadeIndex),
 				.state = rhi::ResourceState::DepthStencilAttachment,
 				.loadOp = rhi::LoadOp::clear,
@@ -29,8 +30,7 @@ namespace demo
 
 			const rhi::RenderPassDesc passDesc{
 				.renderArea = {{0, 0}, extent},
-				.colorTargets = nullptr,
-				.colorTargetCount = 0,
+				.colorTargets = {},
 				.depthTarget = &depthTarget,
 			};
 			return commandBuffer.beginRenderPass(passDesc);
@@ -38,12 +38,13 @@ namespace demo
 
 		void recordClearOnlyCascades(rhi::CommandBuffer& commandBuffer,
 		                             const GPUDrivenRenderer& renderer,
+		                             const rhi::TextureHandle cascadeTexture,
 		                             const rhi::Extent2D extent,
 		                             const uint32_t cascadeCount)
 		{
 			for (uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
 			{
-				beginCascadeDepthPass(commandBuffer, renderer, extent, cascadeIndex);
+				beginCascadeDepthPass(commandBuffer, renderer, cascadeTexture, extent, cascadeIndex);
 				commandBuffer.endEncoding();
 			}
 		}
@@ -82,14 +83,13 @@ namespace demo
 			&& context.executor != nullptr;
 		const bool hasShadowCasters = sceneView != nullptr && sceneView->usePersistentCullingObjects
 			&& sceneView->shadowPackedMeshes != nullptr && shadowMeshCount > 0u
-			&& sceneView->shadowPackedVertexBuffer != 0 && sceneView->shadowPackedIndexBuffer != 0;
+			&& !sceneView->shadowPackedVertexBuffer.isNull() && !sceneView->shadowPackedIndexBuffer.isNull();
 		shaderio::ShadowUniforms* shadowData = m_renderer->getShadowUniformsData();
 		const PipelineHandle csmPipeline = m_renderer->getCSMShadowPipelineHandle();
 		const PipelineHandle computePipeline = m_renderer->getShadowCullingPipelineHandle();
 		const rhi::ArgumentTableHandle computeTable = m_renderer->getShadowCullingArgumentTable(frameIndex);
 		const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
 		const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(frameIndex);
-		const uint64_t shadowIndirectBuffer = m_renderer->getShadowCullingIndirectBufferOpaque(frameIndex);
 		const rhi::BufferHandle shadowIndirectBufferRHI =
 			m_renderer->getShadowCullingIndirectBufferRHIHandle(frameIndex);
 		const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
@@ -103,7 +103,7 @@ namespace demo
 			hasDrawArgumentTables = hasDrawArgumentTables && !drawTables[cascadeIndex].isNull();
 		}
 
-		const bool hasShadowIndirectBuffer = shadowIndirectBuffer != 0 && shadowIndirectBufferRHI.isValid();
+		const bool hasShadowIndirectBuffer = shadowIndirectBufferRHI.isValid();
 		const bool hasGeometryBuffers = vertexBufferRHI.isValid() && indexBufferRHI.isValid();
 		const bool canDrawShadows = hasPassInputs && hasShadowCasters && shadowData != nullptr
 			&& !csmPipeline.isNull() && !computePipeline.isNull() && !computeTable.isNull()
@@ -130,7 +130,8 @@ namespace demo
 			{
 				LOGW("Clearing GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
 			}
-			recordClearOnlyCascades(*context.commandBuffer, *m_renderer, cascadeExtent, cascadeCount);
+			recordClearOnlyCascades(
+				*context.commandBuffer, *m_renderer, csm.getCascadeImage(), cascadeExtent, cascadeCount);
 			if (hasAutomationDebugMarker)
 			{
 				context.commandBuffer->endEvent();
@@ -146,7 +147,7 @@ namespace demo
 			{
 				// The previous cascade consumed this frame's indirect arguments at commandInput;
 				// wait before current compute overwrites them. The Vulkan readBeforeWrite source
-				// access mask also contains shader reads; VkMemoryBarrier2 VUIDs 03905/03906
+				// access mask also contains shader reads; validation requirements for mixed depth and shader access
 				// require a shader source stage, so include the already-completed producer compute.
 				// The preceding compute->commandInput barrier already orders it before the draw.
 				context.commandBuffer->barrier(rhi::StageFlags::commandInput | rhi::StageFlags::compute,
@@ -159,7 +160,7 @@ namespace demo
 			rhi::ComputeEncoder* cenc = context.commandBuffer->beginComputePass();
 			cenc->setPipeline(computePipeline);
 			cenc->setArgumentTable(0, computeTable);
-			cenc->setRootConstants(kPrimaryRootConstantsSlot, &pushConstants, sizeof(pushConstants));
+			cenc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&pushConstants, 1}));
 			cenc->dispatch(rhi::DispatchDesc{
 				(shadowMeshCount + shaderio::LGPUCullingThreadCount - 1u) / shaderio::LGPUCullingThreadCount,
 				1u, 1u
@@ -172,7 +173,8 @@ namespace demo
 			                               rhi::HazardFlags::drawArguments);
 
 			rhi::RenderEncoder* enc =
-				beginCascadeDepthPass(*context.commandBuffer, *m_renderer, cascadeExtent, cascadeIndex);
+				beginCascadeDepthPass(
+					*context.commandBuffer, *m_renderer, csm.getCascadeImage(), cascadeExtent, cascadeIndex);
 			enc->setViewport(
 				rhi::Viewport{
 					0.0f, 0.0f, static_cast<float>(cascadeExtent.width), static_cast<float>(cascadeExtent.height),
@@ -212,13 +214,13 @@ namespace demo
 			enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw, drawTable);
 
 			constexpr uint64_t vertexOffset = 0;
-			enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+			enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
 			enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 			DrawStreamRecorder::recordIndexedIndirect(*enc, DrawStreamRecorder::IndexedIndirectRecordDesc{
 				                                          .argsBuffer = shadowIndirectBufferRHI,
 				                                          .offset = 0,
 				                                          .drawCount = shadowMeshCount,
-				                                          .stride = 0,
+				                                          .stride = m_renderer->getGPUCullingIndirectCommandStride(),
 			                                          });
 
 			context.commandBuffer->endEncoding();

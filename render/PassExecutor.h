@@ -38,19 +38,16 @@ namespace demo
 		struct TextureBinding
 		{
 			TextureHandle handle{};
-			uint64_t backendImageToken{0};
-			rhi::TextureAspect aspect{rhi::TextureAspect::color};
-			rhi::ResourceState initialState{rhi::ResourceState::general};
-			bool isSwapchain{false};
-			// Backend registry handle mirroring backendImageToken, so explicit resourceBarrier
-			// boundaries can resolve pass attachments by RHI handle.
 			rhi::TextureHandle rhiTexture{};
+			rhi::TextureAspect aspect{rhi::TextureAspect::color};
+			rhi::ResourceState initialState{rhi::ResourceState::General};
+			bool isSwapchain{false};
 		};
 
 		struct BufferBinding
 		{
 			BufferHandle handle{};
-			uint64_t backendBufferToken{0};
+			rhi::BufferHandle rhiBuffer{};
 		};
 
 		void clear();
@@ -66,11 +63,7 @@ namespace demo
 		// Resolvable RHI handle mirroring a bound pass attachment (null if unbound
 		// or no resource table was set). Used by present to blit through the registry.
 		[[nodiscard]] rhi::TextureHandle getTextureRHIHandle(TextureHandle handle) const;
-		// Mirror an externally owned backend image into the registry and return a cached
-		// resolvable TextureHandle. Lets passes express explicit layout boundaries through
-		// cmdBuffer->resourceBarrier without holding native handles. Cache is keyed by backend
-		// image and cleared with the other resource bindings (rebuilt on resize).
-		[[nodiscard]] rhi::TextureHandle resolveBarrierTexture(uint64_t backendImageToken) const;
+
 		void execute(const PassContext& context, const ExecutionHooks* hooks = nullptr) const;
 
 	private:
@@ -112,7 +105,6 @@ namespace demo
 		rhi::Device* m_device{nullptr};
 		// owned=false native-image -> handle cache for pass-driven resourceBarrier. Small
 		// (a handful of attachments); linear scan avoids a hashmap on the recording path.
-		mutable std::vector<std::pair<uint64_t, rhi::TextureHandle>> m_barrierTextureCache;
 		// Per-execute dependency records used only to translate pass declarations into
 		// barriers. These are not a legacy per-draw resource-state tracker.
 		mutable std::vector<BufferExecutionState> m_executionBufferStates;

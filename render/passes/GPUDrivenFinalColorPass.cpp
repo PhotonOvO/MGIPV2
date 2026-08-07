@@ -66,8 +66,7 @@ namespace demo
 
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 			.renderArea = {{0, 0}, outputExtent},
-			.colorTargets = &colorTarget,
-			.colorTargetCount = 1,
+			.colorTargets = std::span{&colorTarget, 1},
 			.depthTarget = nullptr,
 		});
 		enc->setViewport(rhi::Viewport{
@@ -82,7 +81,7 @@ namespace demo
 			context.commandBuffer->endEvent();
 			return;
 		}
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getFinalColorInputArgumentTable(context.frameIndex);
 		if (!pipelineHandle.isNull() && !inputTable.isNull())
 		{
 			enc->setPipeline(pipelineHandle);

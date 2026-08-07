@@ -85,7 +85,8 @@ bool populatePrimarySceneCameraUniforms(
     std::span<const SceneNode> sceneNodes,
     std::span<const GltfNodeData> gltfNodes,
     const glm::mat4& flightCameraProjection,
-    shaderio::CameraUniforms& uniforms)
+    shaderio::CameraUniforms& uniforms,
+    const clipspace::ProjectionConvention& projectionConvention)
 {
   if(cameras.empty()) {
     return false;
@@ -113,15 +114,14 @@ bool populatePrimarySceneCameraUniforms(
     return false;
   }
 
-  const clipspace::ProjectionConvention convention =
-      clipspace::getProjectionConvention(clipspace::BackendConvention::vulkan);
+
   const float fallbackAspect =
       std::abs(flightCameraProjection[0][0]) > 1.0e-6f
           ? std::abs(flightCameraProjection[1][1] / flightCameraProjection[0][0])
           : 1.0f;
   const float nearPlane = std::max(camera.nearPlane, 1.0e-3f);
   const float fallbackFar = std::max(
-      std::abs(clipspace::extractFarPlane(flightCameraProjection, convention)),
+      std::abs(clipspace::extractFarPlane(flightCameraProjection, projectionConvention)),
       nearPlane + 1.0f);
   const float farPlane =
       camera.farPlane > nearPlane ? camera.farPlane : fallbackFar;
@@ -131,14 +131,14 @@ bool populatePrimarySceneCameraUniforms(
     const float halfHeight = std::max(camera.verticalMagnification, 1.0e-3f);
     projection = clipspace::makeOrthographicProjection(
         -halfWidth, halfWidth, -halfHeight, halfHeight,
-        nearPlane, farPlane, convention);
+        nearPlane, farPlane, projectionConvention);
   } else {
     const float aspect =
         camera.aspectRatio > 1.0e-3f ? camera.aspectRatio : std::max(fallbackAspect, 1.0e-3f);
     const float verticalFov =
         std::clamp(camera.verticalFieldOfViewRadians, glm::radians(1.0f), glm::radians(179.0f));
     projection = clipspace::makePerspectiveProjection(
-        verticalFov, aspect, nearPlane, farPlane, convention);
+        verticalFov, aspect, nearPlane, farPlane, projectionConvention);
   }
 
   populateCameraUniforms(view, projection, position, uniforms);

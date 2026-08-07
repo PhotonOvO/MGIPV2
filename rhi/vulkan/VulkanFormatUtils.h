@@ -45,10 +45,11 @@ namespace demo::rhi::vulkan
 
 // Maps a portable rhi::TextureFormat to VkFormat.
 // Unknown formats return VK_FORMAT_UNDEFINED.
-[[nodiscard]] inline VkFormat toNativeFormat(rhi::TextureFormat fmt)
+[[nodiscard]] constexpr VkFormat toNativeFormat(rhi::TextureFormat fmt)
 {
     switch (fmt)
     {
+    case rhi::TextureFormat::undefined:       return VK_FORMAT_UNDEFINED;
     case rhi::TextureFormat::rgba8Unorm:      return VK_FORMAT_R8G8B8A8_UNORM;
     case rhi::TextureFormat::rgba8Srgb:       return VK_FORMAT_R8G8B8A8_SRGB;
     case rhi::TextureFormat::bgra8Unorm:      return VK_FORMAT_B8G8R8A8_UNORM;
@@ -66,9 +67,8 @@ namespace demo::rhi::vulkan
     case rhi::TextureFormat::bc6hSfloatBlock: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
     case rhi::TextureFormat::bc7UnormBlock:   return VK_FORMAT_BC7_UNORM_BLOCK;
     case rhi::TextureFormat::bc7SrgbBlock:    return VK_FORMAT_BC7_SRGB_BLOCK;
-    default:
-        return VK_FORMAT_UNDEFINED;
     }
+    return VK_FORMAT_UNDEFINED;
 }
 
 }  // namespace demo::rhi::vulkan

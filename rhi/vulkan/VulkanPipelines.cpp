@@ -1,286 +1,14 @@
 #include "VulkanPipelines.h"
 
+#include "VulkanPipelineConversions.h"
+#include "VulkanShaderConversions.h"
+
 #include <algorithm>
 #include <array>
 
 namespace demo::rhi::vulkan {
 
-namespace {
 
-VkShaderStageFlagBits toVkShaderStage(ShaderStage stage)
-{
-  switch(stage)
-  {
-    case ShaderStage::vertex:
-      return VK_SHADER_STAGE_VERTEX_BIT;
-    case ShaderStage::fragment:
-      return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case ShaderStage::compute:
-      return VK_SHADER_STAGE_COMPUTE_BIT;
-    case ShaderStage::geometry:
-      return VK_SHADER_STAGE_GEOMETRY_BIT;
-    case ShaderStage::tessControl:
-      return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-    case ShaderStage::tessEval:
-      return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    default:
-      return VK_SHADER_STAGE_ALL;
-  }
-}
-
-VkShaderStageFlags toVkShaderStageMask(ShaderStage stageMask)
-{
-  VkShaderStageFlags flags = 0;
-  const uint32_t     mask  = static_cast<uint32_t>(stageMask);
-  if((mask & static_cast<uint32_t>(ShaderStage::vertex)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_VERTEX_BIT;
-  }
-  if((mask & static_cast<uint32_t>(ShaderStage::fragment)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
-  }
-  if((mask & static_cast<uint32_t>(ShaderStage::compute)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_COMPUTE_BIT;
-  }
-  if((mask & static_cast<uint32_t>(ShaderStage::geometry)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_GEOMETRY_BIT;
-  }
-  if((mask & static_cast<uint32_t>(ShaderStage::tessControl)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-  }
-  if((mask & static_cast<uint32_t>(ShaderStage::tessEval)) != 0)
-  {
-    flags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-  }
-  return flags;
-}
-
-VkFormat toVkFormat(TextureFormat format)
-{
-  switch(format)
-  {
-    case TextureFormat::rgba8Unorm:
-      return VK_FORMAT_R8G8B8A8_UNORM;
-    case TextureFormat::rgba8Srgb:
-      return VK_FORMAT_R8G8B8A8_SRGB;
-    case TextureFormat::bgra8Unorm:
-      return VK_FORMAT_B8G8R8A8_UNORM;
-    case TextureFormat::rgba16Sfloat:
-      return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case TextureFormat::d16Unorm:
-      return VK_FORMAT_D16_UNORM;
-    case TextureFormat::d32Sfloat:
-      return VK_FORMAT_D32_SFLOAT;
-    case TextureFormat::d24UnormS8:
-      return VK_FORMAT_D24_UNORM_S8_UINT;
-    case TextureFormat::d32SfloatS8:
-      return VK_FORMAT_D32_SFLOAT_S8_UINT;
-    case TextureFormat::rg16Sfloat:
-      return VK_FORMAT_R16G16_SFLOAT;
-    case TextureFormat::r32Sfloat:
-      return VK_FORMAT_R32_SFLOAT;
-    default:
-      return VK_FORMAT_UNDEFINED;
-  }
-}
-
-VkPrimitiveTopology toVkTopology(PrimitiveTopology topology)
-{
-  switch(topology)
-  {
-    case PrimitiveTopology::pointList:
-      return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-    case PrimitiveTopology::lineList:
-      return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-    case PrimitiveTopology::lineStrip:
-      return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
-    case PrimitiveTopology::triangleStrip:
-      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-    default:
-      return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-  }
-}
-
-VkPolygonMode toVkPolygonMode(PolygonMode mode)
-{
-  switch(mode)
-  {
-    case PolygonMode::line:
-      return VK_POLYGON_MODE_LINE;
-    case PolygonMode::point:
-      return VK_POLYGON_MODE_POINT;
-    default:
-      return VK_POLYGON_MODE_FILL;
-  }
-}
-
-VkCullModeFlags toVkCullMode(CullMode mode)
-{
-  switch(mode)
-  {
-    case CullMode::front:
-      return VK_CULL_MODE_FRONT_BIT;
-    case CullMode::back:
-      return VK_CULL_MODE_BACK_BIT;
-    case CullMode::frontAndBack:
-      return VK_CULL_MODE_FRONT_AND_BACK;
-    default:
-      return VK_CULL_MODE_NONE;
-  }
-}
-
-VkFrontFace toVkFrontFace(FrontFace frontFace)
-{
-  return frontFace == FrontFace::clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-}
-
-VkCompareOp toVkCompareOp(CompareOp op)
-{
-  switch(op)
-  {
-    case CompareOp::never:
-      return VK_COMPARE_OP_NEVER;
-    case CompareOp::less:
-      return VK_COMPARE_OP_LESS;
-    case CompareOp::equal:
-      return VK_COMPARE_OP_EQUAL;
-    case CompareOp::greater:
-      return VK_COMPARE_OP_GREATER;
-    case CompareOp::notEqual:
-      return VK_COMPARE_OP_NOT_EQUAL;
-    case CompareOp::greaterOrEqual:
-      return VK_COMPARE_OP_GREATER_OR_EQUAL;
-    case CompareOp::always:
-      return VK_COMPARE_OP_ALWAYS;
-    default:
-      return VK_COMPARE_OP_LESS_OR_EQUAL;
-  }
-}
-
-VkBlendFactor toVkBlendFactor(BlendFactor factor)
-{
-  switch(factor)
-  {
-    case BlendFactor::zero:
-      return VK_BLEND_FACTOR_ZERO;
-    case BlendFactor::srcColor:
-      return VK_BLEND_FACTOR_SRC_COLOR;
-    case BlendFactor::oneMinusSrcColor:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-    case BlendFactor::dstColor:
-      return VK_BLEND_FACTOR_DST_COLOR;
-    case BlendFactor::oneMinusDstColor:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-    case BlendFactor::srcAlpha:
-      return VK_BLEND_FACTOR_SRC_ALPHA;
-    case BlendFactor::oneMinusSrcAlpha:
-      return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    case BlendFactor::dstAlpha:
-      return VK_BLEND_FACTOR_DST_ALPHA;
-    case BlendFactor::oneMinusDstAlpha:
-      return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-    default:
-      return VK_BLEND_FACTOR_ONE;
-  }
-}
-
-VkBlendOp toVkBlendOp(BlendOp op)
-{
-  switch(op)
-  {
-    case BlendOp::subtract:
-      return VK_BLEND_OP_SUBTRACT;
-    case BlendOp::reverseSubtract:
-      return VK_BLEND_OP_REVERSE_SUBTRACT;
-    case BlendOp::min:
-      return VK_BLEND_OP_MIN;
-    case BlendOp::max:
-      return VK_BLEND_OP_MAX;
-    default:
-      return VK_BLEND_OP_ADD;
-  }
-}
-
-VkColorComponentFlags toVkColorMask(ColorComponentFlags mask)
-{
-  const uint32_t        bits = static_cast<uint32_t>(mask);
-  VkColorComponentFlags vkMask{0};
-  if((bits & static_cast<uint32_t>(ColorComponentFlags::r)) != 0)
-  {
-    vkMask |= VK_COLOR_COMPONENT_R_BIT;
-  }
-  if((bits & static_cast<uint32_t>(ColorComponentFlags::g)) != 0)
-  {
-    vkMask |= VK_COLOR_COMPONENT_G_BIT;
-  }
-  if((bits & static_cast<uint32_t>(ColorComponentFlags::b)) != 0)
-  {
-    vkMask |= VK_COLOR_COMPONENT_B_BIT;
-  }
-  if((bits & static_cast<uint32_t>(ColorComponentFlags::a)) != 0)
-  {
-    vkMask |= VK_COLOR_COMPONENT_A_BIT;
-  }
-  return vkMask;
-}
-
-VkSampleCountFlagBits toVkSampleCount(SampleCount count)
-{
-  switch(count)
-  {
-    case SampleCount::count2:
-      return VK_SAMPLE_COUNT_2_BIT;
-    case SampleCount::count4:
-      return VK_SAMPLE_COUNT_4_BIT;
-    case SampleCount::count8:
-      return VK_SAMPLE_COUNT_8_BIT;
-    default:
-      return VK_SAMPLE_COUNT_1_BIT;
-  }
-}
-
-VkVertexInputRate toVkVertexInputRate(VertexInputRate rate)
-{
-  return rate == VertexInputRate::perInstance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-}
-
-VkFormat toVkVertexFormat(VertexFormat format)
-{
-  switch(format)
-  {
-    case VertexFormat::r32Sfloat:
-      return VK_FORMAT_R32_SFLOAT;
-    case VertexFormat::r32g32Sfloat:
-      return VK_FORMAT_R32G32_SFLOAT;
-    case VertexFormat::r32g32b32Sfloat:
-      return VK_FORMAT_R32G32B32_SFLOAT;
-    case VertexFormat::r32g32b32a32Sfloat:
-      return VK_FORMAT_R32G32B32A32_SFLOAT;
-    case VertexFormat::r8g8b8a8Unorm:
-      return VK_FORMAT_R8G8B8A8_UNORM;
-    default:
-      return VK_FORMAT_UNDEFINED;
-  }
-}
-
-VkDynamicState toVkDynamicState(DynamicState dynamicState)
-{
-  switch(dynamicState)
-  {
-    case DynamicState::scissor:
-      return VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT;
-    case DynamicState::depthBias:
-      return VK_DYNAMIC_STATE_DEPTH_BIAS;
-    default:
-      return VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT;
-  }
-}
-
-}  // namespace
 
 VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateInfo& createInfo)
 {
@@ -289,39 +17,21 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   const GraphicsPipelineDesc& desc = *createInfo.desc;
   const VkPipelineLayout layout = createInfo.layout;
 
-  // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
-  // spirvCode 现为唯一来源（兼容期 shaderModule 字段已移除）；空字节码由下方守卫拒绝，
-  // 压入的 VK_NULL_HANDLE 在析构里被跳过，不会 double-free。
-  struct ScopedModuleList
-  {
-    VkDevice                    device;
-    std::vector<VkShaderModule> modules;
-    ~ScopedModuleList()
-    {
-      for(VkShaderModule m : modules)
-      {
-        if(m != VK_NULL_HANDLE)
-          vkDestroyShaderModule(device, m, nullptr);
-      }
-    }
-  } scopedModules{device, {}};
-  scopedModules.modules.reserve(desc.shaderStageCount);
-
   std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-  shaderStages.reserve(desc.shaderStageCount);
+  shaderStages.reserve(static_cast<uint32_t>(desc.shaderStages.size()));
 
   std::vector<VkSpecializationMapEntry> mapEntries{};
   std::vector<VkSpecializationInfo>     specializationInfos{};
-  specializationInfos.resize(desc.shaderStageCount);
-  for(uint32_t stageIndex = 0; stageIndex < desc.shaderStageCount; ++stageIndex)
+  specializationInfos.resize(static_cast<uint32_t>(desc.shaderStages.size()));
+  for(uint32_t stageIndex = 0; stageIndex < static_cast<uint32_t>(desc.shaderStages.size()); ++stageIndex)
   {
-    const PipelineShaderStageDesc& stageDesc = desc.shaderStages[stageIndex];
+    const ShaderEntry& stageDesc = desc.shaderStages[stageIndex];
 
-    if(stageDesc.specializationConstantCount > 0)
+    if(static_cast<uint32_t>(stageDesc.specializationConstants.size()) > 0)
     {
       const uint32_t baseOffset = static_cast<uint32_t>(mapEntries.size());
-      mapEntries.reserve(mapEntries.size() + stageDesc.specializationConstantCount);
-      for(uint32_t i = 0; i < stageDesc.specializationConstantCount; ++i)
+      mapEntries.reserve(mapEntries.size() + static_cast<uint32_t>(stageDesc.specializationConstants.size()));
+      for(uint32_t i = 0; i < static_cast<uint32_t>(stageDesc.specializationConstants.size()); ++i)
       {
         const SpecializationConstant& constant = stageDesc.specializationConstants[i];
         mapEntries.push_back(VkSpecializationMapEntry{
@@ -332,37 +42,33 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
       }
 
       specializationInfos[stageIndex] = VkSpecializationInfo{
-          .mapEntryCount = stageDesc.specializationConstantCount,
+          .mapEntryCount = static_cast<uint32_t>(stageDesc.specializationConstants.size()),
           .pMapEntries   = mapEntries.data() + baseOffset,
-          .dataSize      = stageDesc.specializationData.size,
-          .pData         = stageDesc.specializationData.data,
+          .dataSize      = stageDesc.specializationData.bytes.size(),
+          .pData         = stageDesc.specializationData.bytes.data(),
       };
     }
-
-    // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理，pipeline 创后 scope 退出自动销毁）。
-    // 拒绝空字节码：spirvSize=0 会向 vkCreateShaderModule 传 codeSize=0（违反 spec），spirvCode=nullptr 则解引用越界。
-    ASSERT(stageDesc.spirvCode != nullptr && stageDesc.spirvSize >= sizeof(uint32_t),
-           "Graphics pipeline shader stage requires non-empty spirvCode/spirvSize");
-    VkShaderModule stageModule = VK_NULL_HANDLE;
-    if(stageDesc.spirvCode != nullptr && stageDesc.spirvSize >= sizeof(uint32_t))
-    {
-      stageModule = utils::createShaderModule(device,
-          std::span<const uint32_t>{stageDesc.spirvCode, stageDesc.spirvSize / sizeof(uint32_t)});
-    }
-    scopedModules.modules.push_back(stageModule);
-
+    ASSERT(createInfo.shaderModules != nullptr
+           && createInfo.shaderModuleCount == static_cast<uint32_t>(desc.shaderStages.size()),
+           "Graphics pipeline shader modules must match shader entries");
+    const VkShaderModule stageModule =
+      createInfo.shaderModules != nullptr && stageIndex < createInfo.shaderModuleCount
+        ? createInfo.shaderModules[stageIndex]
+        : VK_NULL_HANDLE;
+    ASSERT(stageModule != VK_NULL_HANDLE,
+           "Graphics pipeline shader entry requires a valid backend module");
     shaderStages.push_back(VkPipelineShaderStageCreateInfo{
         .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage               = toVkShaderStage(stageDesc.stage),
         .module              = stageModule,
-        .pName               = stageDesc.entryPoint,
-        .pSpecializationInfo = stageDesc.specializationConstantCount > 0 ? &specializationInfos[stageIndex] : nullptr,
+        .pName               = stageDesc.entryPoint.data(),
+        .pSpecializationInfo = static_cast<uint32_t>(stageDesc.specializationConstants.size()) > 0 ? &specializationInfos[stageIndex] : nullptr,
     });
   }
 
   std::vector<VkVertexInputBindingDescription> vertexBindings;
-  vertexBindings.reserve(desc.vertexInput.bindingCount);
-  for(uint32_t i = 0; i < desc.vertexInput.bindingCount; ++i)
+  vertexBindings.reserve(static_cast<uint32_t>(desc.vertexInput.bindings.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.vertexInput.bindings.size()); ++i)
   {
     const VertexBindingDesc& binding = desc.vertexInput.bindings[i];
     vertexBindings.push_back(VkVertexInputBindingDescription{
@@ -373,8 +79,8 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   }
 
   std::vector<VkVertexInputAttributeDescription> vertexAttributes;
-  vertexAttributes.reserve(desc.vertexInput.attributeCount);
-  for(uint32_t i = 0; i < desc.vertexInput.attributeCount; ++i)
+  vertexAttributes.reserve(static_cast<uint32_t>(desc.vertexInput.attributes.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.vertexInput.attributes.size()); ++i)
   {
     const VertexAttributeDesc& attribute = desc.vertexInput.attributes[i];
     vertexAttributes.push_back(VkVertexInputAttributeDescription{
@@ -386,15 +92,15 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   }
 
   std::vector<VkDynamicState> dynamicStates;
-  dynamicStates.reserve(desc.dynamicStateCount);
-  for(uint32_t i = 0; i < desc.dynamicStateCount; ++i)
+  dynamicStates.reserve(static_cast<uint32_t>(desc.dynamicStates.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.dynamicStates.size()); ++i)
   {
     dynamicStates.push_back(toVkDynamicState(desc.dynamicStates[i]));
   }
 
   std::vector<VkPipelineColorBlendAttachmentState> blendAttachments;
-  blendAttachments.reserve(desc.blendStateCount);
-  for(uint32_t i = 0; i < desc.blendStateCount; ++i)
+  blendAttachments.reserve(static_cast<uint32_t>(desc.blendStates.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.blendStates.size()); ++i)
   {
     const BlendAttachmentState& blendState = desc.blendStates[i];
     blendAttachments.push_back(VkPipelineColorBlendAttachmentState{
@@ -410,8 +116,8 @@ VkPipeline createGraphicsPipeline(VkDevice device, const GraphicsPipelineCreateI
   }
 
   std::vector<VkFormat> colorFormats;
-  colorFormats.reserve(desc.renderingInfo.colorFormatCount);
-  for(uint32_t i = 0; i < desc.renderingInfo.colorFormatCount; ++i)
+  colorFormats.reserve(static_cast<uint32_t>(desc.renderingInfo.colorFormats.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.renderingInfo.colorFormats.size()); ++i)
   {
     colorFormats.push_back(toVkFormat(desc.renderingInfo.colorFormats[i]));
   }
@@ -503,39 +209,12 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   ASSERT(createInfo.layout != VK_NULL_HANDLE, "Compute pipeline creation requires a backend-private layout");
   const ComputePipelineDesc& desc = *createInfo.desc;
   const VkPipelineLayout layout = createInfo.layout;
-
-  // RDEV-02: RAII 守卫，确保函数退出时（正常或错误路径）均销毁 spirvCode 路径的临时 module。
-  // spirvCode 现为唯一来源（兼容期 shaderModule 字段已移除）；空字节码由下方守卫拒绝，
-  // 压入的 VK_NULL_HANDLE 在析构里被跳过，不会 double-free。
-  struct ScopedModuleList
-  {
-    VkDevice                    device;
-    std::vector<VkShaderModule> modules;
-    ~ScopedModuleList()
-    {
-      for(VkShaderModule m : modules)
-      {
-        if(m != VK_NULL_HANDLE)
-          vkDestroyShaderModule(device, m, nullptr);
-      }
-    }
-  } scopedModules{device, {}};
-
-  // RDEV-02: renderer 侧传 SPIR-V 字节码；backend 内建/销毁 shader module（RAII 管理）。
-  // 拒绝空字节码：spirvSize=0 会向 vkCreateShaderModule 传 codeSize=0（违反 spec），spirvCode=nullptr 则解引用越界。
-  ASSERT(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize >= sizeof(uint32_t),
-         "Compute pipeline shader stage requires non-empty spirvCode/spirvSize");
-  VkShaderModule computeModule = VK_NULL_HANDLE;
-  if(desc.shaderStage.spirvCode != nullptr && desc.shaderStage.spirvSize >= sizeof(uint32_t))
-  {
-    computeModule = utils::createShaderModule(device,
-        std::span<const uint32_t>{desc.shaderStage.spirvCode, desc.shaderStage.spirvSize / sizeof(uint32_t)});
-  }
-  scopedModules.modules.push_back(computeModule);
-
+  const VkShaderModule computeModule = createInfo.shaderModule;
+  ASSERT(computeModule != VK_NULL_HANDLE,
+         "Compute pipeline shader entry requires a valid backend module");
   std::vector<VkSpecializationMapEntry> mapEntries;
-  mapEntries.reserve(desc.shaderStage.specializationConstantCount);
-  for(uint32_t i = 0; i < desc.shaderStage.specializationConstantCount; ++i)
+  mapEntries.reserve(static_cast<uint32_t>(desc.shaderStage.specializationConstants.size()));
+  for(uint32_t i = 0; i < static_cast<uint32_t>(desc.shaderStage.specializationConstants.size()); ++i)
   {
     const SpecializationConstant& constant = desc.shaderStage.specializationConstants[i];
     mapEntries.push_back(VkSpecializationMapEntry{
@@ -548,15 +227,15 @@ VkPipeline createComputePipeline(VkDevice device, const ComputePipelineCreateInf
   const VkSpecializationInfo specializationInfo{
       .mapEntryCount = static_cast<uint32_t>(mapEntries.size()),
       .pMapEntries   = mapEntries.data(),
-      .dataSize      = desc.shaderStage.specializationData.size,
-      .pData         = desc.shaderStage.specializationData.data,
+      .dataSize      = desc.shaderStage.specializationData.bytes.size(),
+      .pData         = desc.shaderStage.specializationData.bytes.data(),
   };
 
   const VkPipelineShaderStageCreateInfo shaderStageInfo{
       .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage               = toVkShaderStage(desc.shaderStage.stage),
       .module              = computeModule,
-      .pName               = desc.shaderStage.entryPoint,
+      .pName               = desc.shaderStage.entryPoint.data(),
       .pSpecializationInfo = mapEntries.empty() ? nullptr : &specializationInfo,
   };
 

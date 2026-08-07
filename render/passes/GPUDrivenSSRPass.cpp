@@ -45,12 +45,10 @@ namespace demo
 			return;
 		}
 
-		const rhi::BufferHandle cameraBufferHandle = context.transientAllocator->getBufferHandle();
-		const uint64_t cameraBuffer = (static_cast<uint64_t>(cameraBufferHandle.generation) << 32u) | cameraBufferHandle
-			.index;
+		const rhi::BufferHandle cameraBuffer = context.transientAllocator->getBufferHandle();
 		const uint32_t cameraOffset = context.cameraAlloc.offset;
-		if (!context.params->debugOptions.enableSSR || m_renderer->getSSRTracePipelineOpaque() == 0
-			|| m_renderer->getSSRRawImageOpaque() == 0 || cameraBuffer == 0)
+		if (!context.params->debugOptions.enableSSR || m_renderer->getSSRTracePipelineHandle().isNull()
+			|| m_renderer->getSSRRawImageHandle().isNull() || cameraBuffer.isNull())
 		{
 			return;
 		}
@@ -79,7 +77,7 @@ namespace demo
 		rhi::ComputeEncoder* enc = context.commandBuffer->beginComputePass();
 		enc->setPipeline(ssrPipeline);
 		enc->setArgumentTable(0, ssrTable);
-		enc->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+		enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 		enc->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		context.commandBuffer->endEncoding();
 
@@ -93,7 +91,7 @@ namespace demo
 		const PipelineHandle ssrDenoisePipeline = m_renderer->getSSRDenoisePipelineHandle();
 		const rhi::ArgumentTableHandle ssrDenoiseTable = m_renderer->getSSRDenoiseArgumentTable(context.frameIndex);
 		if (ssrDenoisePipeline.isNull() || ssrDenoiseTable.isNull()
-			|| m_renderer->getSSRDenoisedImageOpaque() == 0)
+			|| m_renderer->getSSRDenoisedImageHandle().isNull())
 		{
 			return;
 		}
@@ -101,7 +99,7 @@ namespace demo
 		rhi::ComputeEncoder* denoise = context.commandBuffer->beginComputePass();
 		denoise->setPipeline(ssrDenoisePipeline);
 		denoise->setArgumentTable(0, ssrDenoiseTable);
-		denoise->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+		denoise->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 		denoise->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		context.commandBuffer->endEncoding();
 		// Local output barrier: SSR denoise writes a renderer-private texture sampled by

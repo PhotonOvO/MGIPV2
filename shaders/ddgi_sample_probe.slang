@@ -83,6 +83,9 @@ float2 ddgiTextureCoordFromDirection(float3 dir, int probeIndex, int2 atlasSize,
 float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
                              Sampler2D irradianceAtlas, Sampler2D depthAtlas)
 {
+#ifdef DEMO_D3D12
+    return float3(0.0, 0.0, 0.0);
+#else
     // Probe origins through the position-buffer BDA (same pattern as
     // ddgi_gi_sdf_rays.slang rayTraceUniforms.probePositionAddress).
     float4* probePositions = (float4*)volume.probePositionAddress;
@@ -163,11 +166,15 @@ float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 
     netIrradiance *= netIrradiance;
 
     return 2.0 * kDDGICommonPi * netIrradiance;
+#endif
 }
 
 float3 sampleDDGIIrradianceNoVisibility(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
                                          Sampler2D irradianceAtlas)
 {
+#ifdef DEMO_D3D12
+    return float3(0.0, 0.0, 0.0);
+#else
     float4* probePositions = (float4*)volume.probePositionAddress;
 
     const int3 maxGridCoord = volume.probeCounts - int3(1, 1, 1);
@@ -212,6 +219,7 @@ float3 sampleDDGIIrradianceNoVisibility(DDGISampleVolume volume, float3 P, float
     float3 netIrradiance = sumIrradiance / max(sumWeight, 0.000001);
     netIrradiance *= netIrradiance;
     return 2.0 * kDDGICommonPi * netIrradiance;
+#endif
 }
 
 #endif // DDGI_SAMPLE_PROBE_SLANG

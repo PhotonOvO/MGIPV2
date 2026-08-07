@@ -44,13 +44,25 @@ ConstantBuffer<DrawUniforms> draw;
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
 StructuredBuffer<DrawUniforms> drawData;
 
+#ifdef DEMO_D3D12
+[[vk::push_constant]]
+ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
 //------------------------------------------------------------------------------
 // Specialization Constants
 //------------------------------------------------------------------------------
 
 // Alpha test enabled (set at pipeline creation time)
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool alphaTestEnabled = (DEMO_SPECIALIZATION_0 != 0);
+#else
 [[vk::constant_id(0)]]
 const bool alphaTestEnabled = false;
+#endif
 
 //------------------------------------------------------------------------------
 // Vertex Shader
@@ -91,8 +103,14 @@ struct VertexOutputMdi
 };
 
 [shader("vertex")]
-VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+#ifdef DEMO_D3D12
+VertexOutputMdi vertexMdiMain(VertexInput input)
 {
+    const uint drawIndex = mdiDrawIndex.drawIndex;
+#else
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
+{
+#endif
     const DrawUniforms mdiDraw = drawData[drawIndex];
     VertexOutputMdi output;
 
@@ -136,8 +154,13 @@ float filterRoughness(float perceptualRoughness, float3 worldNormal)
 {
     const float kSpecularAAVariance  = 0.25;  // 上调：jitter 欠采样法线变化幅度更大，需更强折算
     const float kSpecularAAThreshold = 0.4;   // 上调：允许更大的 kernelRoughness 上限以覆盖 13° 摆动
+#ifdef DEMO_D3D12
+    const float3 du = ddx_fine(worldNormal);
+    const float3 dv = ddy_fine(worldNormal);
+#else
     const float3 du = ddx(worldNormal);
     const float3 dv = ddy(worldNormal);
+#endif
     const float variance = kSpecularAAVariance * (dot(du, du) + dot(dv, dv));
     const float roughness = perceptualRoughness * perceptualRoughness;
     const float kernelRoughness = min(2.0 * variance, kSpecularAAThreshold);

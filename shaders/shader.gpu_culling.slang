@@ -426,6 +426,9 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         // a topology rebuild. Clear their raw command before any classification
         // or counter update so first-frame and recycled-buffer contents fail closed.
         GPUCullIndirectCommand tombstoneCommand;
+#ifdef DEMO_D3D12
+        tombstoneCommand.drawIndex = 0u;
+#endif
         tombstoneCommand.indexCount = 0u;
         tombstoneCommand.instanceCount = 0u;
         tombstoneCommand.firstIndex = 0u;
@@ -451,6 +454,9 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     GPUCullIndirectCommand command;
+#ifdef DEMO_D3D12
+    command.drawIndex = objectIndex;
+#endif
     command.indexCount = objectData.indexCount;
     command.instanceCount = 0u;
     command.firstIndex = objectData.firstIndex;

@@ -1,29 +1,28 @@
 #pragma once
 
 #include "RHIArgumentTable.h"
+#include "RHIBackend.h"
 #include "RHIBindlessTypes.h"
 #include "RHICapabilities.h"
-#include "RHIFrameContext.h"
+#include "RHICommandAllocator.h"
+#include "RHIDebugCounters.h"
 #include "RHIHandles.h"
 #include "RHIPipeline.h"
 #include "RHIQueue.h"
+#include "RHIResidency.h"
 #include "RHISurface.h"
 #include "RHISwapchain.h"
 #include "RHITypes.h"
 
 #include <cassert>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "RHIBoundary.h"
 
 namespace demo::rhi
 {
-	// Forward-declared for executeImmediateUpload's std::function signature (used by reference only).
-	class CommandBuffer;
 
 	// Vulkan-specific fields have been moved to VulkanDeviceCreateInfo (D-08).
 	// D3D12/Metal paths use only these backend-neutral fields.
@@ -36,7 +35,7 @@ namespace demo::rhi
 	struct PhysicalDeviceInfo
 	{
 		std::string deviceName;
-		uint32_t apiVersion{0};
+		uint32_t nativeApiVersion{0};
 		uint32_t driverVersion{0};
 		uint32_t vendorId{0};
 		uint32_t deviceId{0};
@@ -70,31 +69,6 @@ namespace demo::rhi
 		std::vector<MemoryHeapInfo> memoryHeaps;
 	};
 
-	enum class DescriptorHeapType : uint8_t
-	{
-		resource = 0,
-		sampler,
-	};
-
-	struct DescriptorHeapDesc
-	{
-		DescriptorHeapType type{DescriptorHeapType::resource};
-		uint32_t descriptorCapacity{0};
-		bool shaderVisible{true};
-	};
-
-	struct DescriptorAllocation
-	{
-		DescriptorHeapHandle heap{};
-		ResourceIndex firstIndex{kInvalidResourceIndex};
-		uint32_t count{0};
-
-		[[nodiscard]] bool isValid() const
-		{
-			return heap.isValid() && firstIndex != kInvalidResourceIndex && count > 0;
-		}
-	};
-
 	class Device
 	{
 	public:
@@ -103,7 +77,7 @@ namespace demo::rhi
 		virtual void init(const DeviceCreateInfo& createInfo) = 0;
 		virtual void deinit() = 0;
 
-		virtual uint32_t getApiVersion() const = 0;
+		virtual BackendInfo getBackendInfo() const = 0;
 		virtual const char* getDeviceName() const = 0;
 		virtual const PhysicalDeviceInfo& getPhysicalDeviceInfo() const = 0;
 		virtual const DeviceFeatureInfo& getEnabledFeatureInfo() const = 0;
@@ -111,41 +85,30 @@ namespace demo::rhi
 		virtual bool supports(CapabilityTier tier) const = 0;
 		virtual const MemoryProperties& getPhysicalMemoryProperties() const = 0;
 
-		virtual QueueInfo getGraphicsQueue() const = 0;
-		virtual QueueInfo getComputeQueue() const = 0;
-		virtual QueueInfo getTransferQueue() const = 0;
+
+		virtual Queue* getQueue(QueueClass queueClass) = 0;
+		virtual std::unique_ptr<CommandAllocator> createCommandAllocator(QueueClass queueClass) = 0;
+		virtual void collectGarbage() {}
+		[[nodiscard]] virtual RHIHotPathCounters getHotPathCounters() const noexcept
+		{
+			return snapshotHotPathCounters(getBackendInfo().type);
+		}
+		virtual void resetHotPathCounters() noexcept
+		{
+			demo::rhi::resetHotPathCounters(getBackendInfo().type);
+		}
 
 		// --- Backend object factories (init sink, RDEV-06) ---
 		// initSurface initializes the WSI surface from the backend-internal
 		// instance/physicalDevice; the render layer never touches the natives.
-		virtual void initSurface(Surface& /*surface*/, const WindowHandle& /*window*/)
-		{
-			RHI_UNIMPLEMENTED("initSurface");
-		}
+		virtual void initSurface(Surface& surface, const WindowHandle& window) = 0;
 
 		// createSwapchain builds the backend swapchain for an initialized surface.
 		// All native handles (device/queue/surface/cmd pool) stay backend-internal.
-		virtual std::unique_ptr<Swapchain> createSwapchain(Surface& /*surface*/, bool /*vSync*/)
-		{
-			RHI_UNIMPLEMENTED("createSwapchain");
-			return nullptr;
-		}
-
-		// createFrameContext builds the per-frame submission context, wires it to this
-		// device and to the given swapchain. Returned object is owned by the caller.
-		virtual std::unique_ptr<FrameContext> createFrameContext(Swapchain* /*swapchain*/, uint32_t /*frameCount*/)
-		{
-			RHI_UNIMPLEMENTED("createFrameContext");
-			return nullptr;
-		}
+		virtual std::unique_ptr<Swapchain> createSwapchain(Surface& surface, bool vSync) = 0;
 
 		// GPU timestamp tick period in nanoseconds (for GPU profiling). 0 when unknown.
 		virtual float getTimestampPeriodNs() const { return 0.0f; }
-
-		// D3D12/Metal do not have extension-query APIs — defaults to false.
-		// Vulkan backend overrides to query m_availableInstanceExtensions/m_availableDeviceExtensions.
-		virtual bool isInstanceExtensionSupported(const char* /*name*/) const { return false; }
-		virtual bool isDeviceExtensionSupported(const char* /*name*/) const { return false; }
 
 		// D3D12/Metal: conservative default — no capability assumed until backend overrides.
 		// Vulkan backend queries vkGetPhysicalDeviceFormatProperties with optimalTilingFeatures.
@@ -153,241 +116,100 @@ namespace demo::rhi
 
 		virtual void waitIdle() = 0;
 
-		// --- Immediate upload seam (UPL-02) ---
-		// executeImmediateUpload submits a one-shot upload command to the graphics queue.
-		// The backend (VulkanDevice) owns the upload cmd pool, fence lifecycle, and per-frame
-		// pending queue. D3D12/Metal stubs abort until backend support is added.
-		// Callers must not escape the VkCommandBuffer or fence; use rhi::CommandBuffer& only.
-		virtual void executeImmediateUpload(std::function<void(rhi::CommandBuffer&)> uploadFn)
-		{
-			RHI_UNIMPLEMENTED("executeImmediateUpload");
-		}
-
-		// flushUploadRetirements polls (waitForCompletion=false) or blocks (true) on all
-		// pending upload fences and recycles their cmd buffers and fences.
-		// Staging buffer retirement (rhiStagingBuffers) stays in the render layer.
-		virtual void flushUploadRetirements(bool waitForCompletion)
-		{
-			RHI_UNIMPLEMENTED("flushUploadRetirements");
-		}
-
 		// --- Texture views ---
 		// createTextureView builds a backend view from the desc and registers an owned handle.
-		// registerExternalTextureView adopts an externally-owned backend view (e.g. swapchain)
-		// without taking ownership. destroyTextureView frees owned views.
-		// Native handle resolution is backend-internal: cast to VulkanDeviceInterop::resolveTextureView.
 		virtual TextureViewHandle createTextureView(const TextureViewCreateDesc& desc) = 0;
-		virtual TextureViewHandle registerExternalTextureView(uint64_t externalView) = 0;
 		virtual void destroyTextureView(TextureViewHandle handle) = 0;
 
 		// --- Textures (images) ---
-		// createTexture creates an RHI-owned texture. registerExternalTexture adopts an
-		// externally-owned backend texture (e.g. swapchain) without taking ownership.
-		// destroyTexture frees owned images; destroyImage is kept as the legacy alias
-		// while renderer call sites migrate.
-		virtual TextureHandle createTexture(const TextureDesc&)
-		{
-			RHI_UNIMPLEMENTED("createTexture");
-			return {};
-		}
+		// createTexture creates an RHI-owned texture.
+		// destroyTexture invalidates the logical handle and retires owned storage.
+		virtual TextureHandle createTexture(const TextureDesc&) = 0;
 
-		virtual void destroyTexture(TextureHandle handle) { destroyImage(handle); }
-		// registerExternalTexture adopts an externally-owned backend texture (e.g. swapchain)
-		// without taking ownership. destroyImage frees owned images.
-		// Native handle resolution is backend-internal: cast to VulkanDeviceInterop::resolveTexture.
-		virtual TextureHandle registerExternalTexture(uint64_t externalImage) = 0;
-		virtual void destroyImage(TextureHandle handle) = 0;
+		virtual void destroyTexture(TextureHandle handle) = 0;
 
 		// ----- Modern GPU interface (Wave 0 contract) ----------------------------
-		// Default bodies assert: backends opt in by overriding. Vulkan implements
-		// these in Wave 1; D3D12/Metal stay asserting stubs until later milestones.
 		// destroy* invalidates the logical handle immediately. For owned resources,
-		// physical backend destruction is delayed until the backend retirement point;
-		// adopted/external resources are only unregistered from the handle table.
+		// physical backend destruction is delayed until the backend retirement point.
 
-		// --- Buffer (wraps the existing device-address path) ---
-		virtual BufferHandle createBuffer(const BufferDesc&)
+		// --- Buffers ---
+		virtual BufferHandle createBuffer(const BufferDesc&) = 0;
+
+		virtual void destroyBuffer(BufferHandle) = 0;
+
+		virtual GpuPtr getBufferGpuAddress(BufferHandle) const = 0;
+
+		virtual void* mapBuffer(BufferHandle) = 0;
+
+		virtual void unmapBuffer(BufferHandle) = 0;
+
+		virtual Result<MappedBufferRange> mapBufferRange(BufferHandle, const BufferMapDesc&)
 		{
-			RHI_UNIMPLEMENTED("createBuffer");
-			return {};
+			return Result<MappedBufferRange>::fail(RHIErrorCode::unsupported, "Explicit buffer mapping is unsupported" );
 		}
-
-		virtual void destroyBuffer(BufferHandle)
+		virtual RHIResult flushMappedBufferRange(BufferHandle, uint64_t, uint64_t)
 		{
-			RHI_UNIMPLEMENTED("destroyBuffer");
+			return RHIResult::fail(RHIErrorCode::unsupported, "Mapped-range flush is unsupported" );
 		}
-
-		// Adopt an externally-owned backend buffer (owned=false): the registry only mirrors it so
-		// it can be addressed by handle. updateBufferBinding rebinds the handle to a reallocated
-		// backend buffer. destroyBuffer on an owned=false handle only unregisters.
-		virtual BufferHandle registerExternalBuffer(uint64_t /*externalBuffer*/)
+		virtual RHIResult invalidateMappedBufferRange(BufferHandle, uint64_t, uint64_t)
 		{
-			RHI_UNIMPLEMENTED("registerExternalBuffer");
-			return {};
-		}
-
-		virtual void updateBufferBinding(BufferHandle, uint64_t /*externalBuffer*/)
-		{
-			RHI_UNIMPLEMENTED("updateBufferBinding");
-		}
-
-		virtual GpuPtr getBufferGpuAddress(BufferHandle) const
-		{
-			RHI_UNIMPLEMENTED("getBufferGpuAddress");
-			return {};
-		}
-
-		virtual void* mapBuffer(BufferHandle)
-		{
-			RHI_UNIMPLEMENTED("mapBuffer");
-			return nullptr;
-		}
-
-		virtual void unmapBuffer(BufferHandle)
-		{
-			RHI_UNIMPLEMENTED("unmapBuffer");
+			return RHIResult::fail(RHIErrorCode::unsupported, "Mapped-range invalidate is unsupported" );
 		}
 
 		// --- Sampler ---
-		virtual SamplerHandle createSampler(const SamplerDesc&)
-		{
-			RHI_UNIMPLEMENTED("createSampler");
-			return {};
-		}
+		virtual SamplerHandle createSampler(const SamplerDesc&) = 0;
 
-		virtual void destroySampler(SamplerHandle)
-		{
-			RHI_UNIMPLEMENTED("destroySampler");
-		}
+		virtual void destroySampler(SamplerHandle) = 0;
 
 		// --- Argument layout / table ---
-		virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc&)
-		{
-			RHI_UNIMPLEMENTED("createArgumentLayout");
-			return {};
-		}
+		virtual ArgumentLayoutHandle createArgumentLayout(const ArgumentLayoutDesc&) = 0;
 
-		virtual void destroyArgumentLayout(ArgumentLayoutHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyArgumentLayout");
-		}
+		virtual void destroyArgumentLayout(ArgumentLayoutHandle) = 0;
 
-		virtual ArgumentTableHandle createArgumentTable(ArgumentLayoutHandle)
-		{
-			RHI_UNIMPLEMENTED("createArgumentTable");
-			return {};
-		}
+		virtual ArgumentTableHandle createArgumentTable(const ArgumentTableCreateDesc&) = 0;
 
-		virtual void destroyArgumentTable(ArgumentTableHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyArgumentTable");
-		}
+		virtual void destroyArgumentTable(ArgumentTableHandle) = 0;
 
-		virtual void updateArgumentTable(ArgumentTableHandle, uint32_t /*writeCount*/, const ArgumentWrite*)
-		{
-			RHI_UNIMPLEMENTED("updateArgumentTable");
-		}
+		virtual void updateArgumentTable(ArgumentTableHandle, ArgumentWriteBatch writes) = 0;
+
+		virtual ArgumentLayoutHandle getArgumentTableLayout(ArgumentTableHandle) const = 0;
 
 		// --- Pipeline ---
-		virtual PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc&)
-		{
-			RHI_UNIMPLEMENTED("createGraphicsPipeline");
-			return {};
-		}
+		virtual PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc&) = 0;
 
-		virtual PipelineHandle createComputePipeline(const ComputePipelineDesc&)
-		{
-			RHI_UNIMPLEMENTED("createComputePipeline");
-			return {};
-		}
+		virtual PipelineHandle createComputePipeline(const ComputePipelineDesc&) = 0;
 
-		virtual void destroyPipeline(PipelineHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyPipeline");
-		}
+		virtual void destroyPipeline(PipelineHandle) = 0;
 
 		// --- Query pool ---
-		virtual QueryPoolHandle createQueryPool(uint32_t /*queryCount*/)
-		{
-			RHI_UNIMPLEMENTED("createQueryPool");
-			return {};
-		}
+		virtual QueryPoolHandle createQueryPool(uint32_t queryCount) = 0;
 
-		virtual void destroyQueryPool(QueryPoolHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyQueryPool");
-		}
+		virtual void destroyQueryPool(QueryPoolHandle) = 0;
 
-		virtual uint64_t getQueryPoolResult(QueryPoolHandle, uint32_t /*queryIndex*/)
-		{
-			RHI_UNIMPLEMENTED("getQueryPoolResult");
-			return 0;
-		}
+		virtual uint64_t getQueryPoolResult(QueryPoolHandle, uint32_t queryIndex) = 0;
 
 		// Non-blocking batch read. Writes queryCount (value, availability) pairs into outPairs
 		// (size >= queryCount*2). availability==0 means the result is not yet ready. Returns
 		// false if the whole batch could not be read.
-		virtual bool getQueryPoolResultsWithAvailability(QueryPoolHandle, uint32_t /*firstQuery*/,
-		                                                 uint32_t /*queryCount*/, uint64_t* /*outPairs*/)
+		virtual bool getQueryPoolResultsWithAvailability(QueryPoolHandle, uint32_t firstQuery,
+		                                                 std::span<uint64_t> outValueAvailabilityPairs) = 0;
+
+		virtual ShaderLibraryHandle createShaderLibrary(const ShaderLibraryDesc&) = 0;
+
+		virtual void destroyShaderLibrary(ShaderLibraryHandle) = 0;
+
+		virtual Result<ResidencySetHandle> createResidencySet(const ResidencySetDesc&)
 		{
-			RHI_UNIMPLEMENTED("getQueryPoolResultsWithAvailability");
-			return false;
+			return Result<ResidencySetHandle>::fail(RHIErrorCode::unsupported, "Explicit residency is unsupported" );
+		}
+		virtual RHIResult destroyResidencySet(ResidencySetHandle)
+		{
+			return RHIResult::fail(RHIErrorCode::unsupported, "Explicit residency is unsupported" );
+		}
+		virtual RHIResult updateResidencySet(ResidencySetHandle, const ResidencyUpdateBatch&)
+		{
+			return RHIResult::fail(RHIErrorCode::unsupported, "Explicit residency is unsupported" );
 		}
 
-		// --- Future RHI features (capability-gated) ---
-		virtual DescriptorHeapHandle allocateDescriptorHeap(const DescriptorHeapDesc&)
-		{
-			RHI_UNIMPLEMENTED("allocateDescriptorHeap");
-			return {};
-		}
-
-		virtual void freeDescriptorHeap(DescriptorHeapHandle)
-		{
-			RHI_UNIMPLEMENTED("freeDescriptorHeap");
-		}
-
-		virtual DescriptorAllocation allocateDescriptors(DescriptorHeapHandle, uint32_t /*count*/)
-		{
-			RHI_UNIMPLEMENTED("allocateDescriptors");
-			return {};
-		}
-
-		virtual void freeDescriptors(const DescriptorAllocation&)
-		{
-			RHI_UNIMPLEMENTED("freeDescriptors");
-		}
-
-		virtual ResidencySetHandle createResidencySet()
-		{
-			RHI_UNIMPLEMENTED("createResidencySet");
-			return {};
-		}
-
-		virtual void destroyResidencySet(ResidencySetHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyResidencySet");
-		}
-
-		virtual ShaderLibraryHandle createShaderLibrary(const ShaderLibraryDesc&)
-		{
-			RHI_UNIMPLEMENTED("createShaderLibrary");
-			return {};
-		}
-
-		virtual void destroyShaderLibrary(ShaderLibraryHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyShaderLibrary");
-		}
-
-		virtual PipelineCompilerHandle createPipelineCompiler(const PipelineCompileOptions&)
-		{
-			RHI_UNIMPLEMENTED("createPipelineCompiler");
-			return {};
-		}
-
-		virtual void destroyPipelineCompiler(PipelineCompilerHandle)
-		{
-			RHI_UNIMPLEMENTED("destroyPipelineCompiler");
-		}
 	};
 } // namespace demo::rhi

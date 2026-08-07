@@ -1,4 +1,5 @@
 #include "DDGIProbeUpdatePass.h"
+#include "../EmbeddedShaderLibrary.h"
 
 #include "../ArgumentTables.h"
 #include "../DDGIProbeVolume.h"
@@ -101,8 +102,7 @@ namespace demo
 			}
 		};
 		m_updateLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = updateBindings.data(),
-			.bindingCount = static_cast<uint32_t>(updateBindings.size()),
+			.bindings = updateBindings,
 			.debugName = "ddgi-probe-update",
 		});
 
@@ -115,8 +115,7 @@ namespace demo
 			}
 		};
 		m_borderLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
-			.bindings = borderBindings.data(),
-			.bindingCount = static_cast<uint32_t>(borderBindings.size()),
+			.bindings = borderBindings,
 			.debugName = "ddgi-border-update",
 		});
 
@@ -144,7 +143,7 @@ namespace demo
 					},
 				}
 			};
-			device.updateArgumentTable(table, static_cast<uint32_t>(writes.size()), writes.data());
+			device.updateArgumentTable(table, writes);
 		};
 
 		const auto writeBorderTable = [&](rhi::ArgumentTableHandle table, rhi::TextureViewHandle view)
@@ -154,7 +153,7 @@ namespace demo
 				.textureView = view,
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
-			device.updateArgumentTable(table, 1, &write);
+			device.updateArgumentTable(table, rhi::ArgumentWriteBatch{&write, 1});
 		};
 
 		// Prebuilt parity pairs (DDGIProbeVolume contract): parity 0 writes
@@ -167,14 +166,14 @@ namespace demo
 			const rhi::TextureViewHandle depthOut = parity == 0u ? m_depthViewA : m_depthViewB;
 			const rhi::TextureViewHandle depthHistory = parity == 0u ? m_depthViewB : m_depthViewA;
 
-			m_irradianceUpdateTables[parity] = device.createArgumentTable(m_updateLayout);
+			m_irradianceUpdateTables[parity] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_updateLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			writeUpdateTable(m_irradianceUpdateTables[parity], irradianceOut, irradianceHistory);
-			m_depthUpdateTables[parity] = device.createArgumentTable(m_updateLayout);
+			m_depthUpdateTables[parity] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_updateLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			writeUpdateTable(m_depthUpdateTables[parity], depthOut, depthHistory);
 
-			m_irradianceBorderTables[parity] = device.createArgumentTable(m_borderLayout);
+			m_irradianceBorderTables[parity] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_borderLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			writeBorderTable(m_irradianceBorderTables[parity], irradianceOut);
-			m_depthBorderTables[parity] = device.createArgumentTable(m_borderLayout);
+			m_depthBorderTables[parity] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_borderLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
 			writeBorderTable(m_depthBorderTables[parity], depthOut);
 		}
 
@@ -185,25 +184,27 @@ namespace demo
 		                                uint32_t variant)
 		{
 			const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{layout}};
-			const std::array<rhi::PipelinePushConstantRange, 1> pushRanges{
-				{
-					rhi::PipelinePushConstantRange{
-						.stages = rhi::ShaderStage::compute, .offset = 0, .size = pushSize
-					},
-				}
-			};
+			const std::array<rhi::RootBindingDesc, 1> rootBindings{{
+				rhi::RootBindingDesc{
+					.slot = 0,
+					.kind = rhi::RootBindingKind::constants,
+					.visibility = rhi::ShaderStage::compute,
+					.size = pushSize,
+					.alignment = 4,
+				},
+			}};
+			const std::span<const rhi::RootBindingDesc> activeRootBindings{
+				rootBindings.data(), pushSize > 0u ? rootBindings.size() : 0u};
+			const rhi::PipelineBindingSchemaStorage bindingSchema{layouts, activeRootBindings};
 			const rhi::ComputePipelineDesc desc{
 				.shaderStage =
-				rhi::PipelineShaderStageDesc{
+				rhi::ShaderEntry{
 					.stage = rhi::ShaderStage::compute,
-					.spirvCode = spirv,
-					.spirvSize = wordCount * sizeof(uint32_t),
+					.library = loadEmbeddedSpirvLibrary(
+						device, spirv, wordCount * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
 				},
-				.argumentLayouts = layouts.data(),
-				.argumentLayoutCount = static_cast<uint32_t>(layouts.size()),
-				.pushConstantRanges = pushSize > 0u ? pushRanges.data() : nullptr,
-				.pushConstantRangeCount = pushSize > 0u ? static_cast<uint32_t>(pushRanges.size()) : 0u,
+				.bindingSchema = bindingSchema.view(),
 				.specializationVariant = variant,
 			};
 			return device.createComputePipeline(desc);
@@ -367,8 +368,7 @@ namespace demo
 					makeInitBarrier(probeVolume.getDepthAtlasHistory()),
 				}
 			};
-			cmd.resourceBarrier(initBarriers.data(), static_cast<uint32_t>(initBarriers.size()),
-			                    nullptr, 0);
+			cmd.resourceBarrier(initBarriers, {});
 			m_atlasLayoutInitialized = true;
 		}
 
@@ -406,7 +406,7 @@ namespace demo
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_irradianceUpdatePipeline);
 			encoder->setArgumentTable(0, m_irradianceUpdateTables[parity]);
-			encoder->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+			encoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
 		}
@@ -417,7 +417,7 @@ namespace demo
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->setPipeline(m_depthUpdatePipeline);
 			encoder->setArgumentTable(0, m_depthUpdateTables[parity]);
-			encoder->setRootConstants(kPrimaryRootConstantsSlot, &push, sizeof(push));
+			encoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&push, 1}));
 			encoder->dispatch(probeDispatch);
 			cmd.endEncoding();
 		}

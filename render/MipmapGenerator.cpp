@@ -62,7 +62,7 @@ namespace demo
 					},
 				}
 			};
-			cmd.resourceBarrier(toBlit.data(), static_cast<uint32_t>(toBlit.size()), nullptr, 0);
+			cmd.resourceBarrier(toBlit, {});
 
 			rhi::ComputeEncoder* encoder = cmd.beginComputePass();
 			encoder->blitTexture(rhi::TextureBlitDesc{
@@ -97,7 +97,7 @@ namespace demo
 					},
 				}
 			};
-			cmd.resourceBarrier(fromBlit.data(), static_cast<uint32_t>(fromBlit.size()), nullptr, 0);
+			cmd.resourceBarrier(fromBlit, {});
 
 			mipWidth = std::max(1, mipWidth / 2);
 			mipHeight = std::max(1, mipHeight / 2);

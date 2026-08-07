@@ -140,11 +140,11 @@ void GlobalSurfaceAtlasPass::deinit()
 {
   if (!m_device) return;
 
-  m_device->destroyImage(m_atlasDepth);
-  m_device->destroyImage(m_atlasEmissive);
-  m_device->destroyImage(m_atlasGBuffer0);
-  m_device->destroyImage(m_atlasGBuffer1);
-  m_device->destroyImage(m_atlasLighting);
+  m_device->destroyTexture(m_atlasDepth);
+  m_device->destroyTexture(m_atlasEmissive);
+  m_device->destroyTexture(m_atlasGBuffer0);
+  m_device->destroyTexture(m_atlasGBuffer1);
+  m_device->destroyTexture(m_atlasLighting);
   m_device->destroyBuffer(m_chunksBuffer);
   m_device->destroyBuffer(m_culledObjectsBuffer);
   m_device->destroyBuffer(m_objectsBuffer);

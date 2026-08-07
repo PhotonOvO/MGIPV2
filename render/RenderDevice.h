@@ -1,13 +1,11 @@
 #pragma once
 
 #include "ImGuiRhiRenderer.h"
-#include "../rhi/vulkan/internal/VulkanCommon.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
 #include "ArgumentTables.h"
 #include "DrawStream.h"
 #include "DrawStreamDecoder.h"
-#include <memory>
 #include "PassExecutor.h"
 #include "MeshPool.h"
 #include "LightResources.h"
@@ -20,45 +18,27 @@
 #include "TransientAllocator.h"
 #include "UploadUtils.h"
 #include "RenderTypes.h"
-#include "../rhi/RHIFrameContext.h"
+#include "FrameScheduler.h"
+#include "UploadManager.h"
 #include "../rhi/RHIDevice.h"
+#include "../rhi/RHIFactory.h"
 #include "../rhi/RHIBindlessTypes.h"
 #include "../rhi/RHIPipeline.h"
 #include "../rhi/RHISwapchain.h"
 #include "../rhi/RHISurface.h"
+
 #include <array>
-#include <functional>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
-
-#ifndef DEMO_RHI_VULKAN_NS
-#define DEMO_RHI_VULKAN_NS vulkan
-#endif
-#ifndef DEMO_RHI_VULKAN_TYPE
-#define DEMO_RHI_VULKAN_TYPE(name) Vulkan##name
-#endif
-#ifndef DEMO_RENDER_JOIN3
-#define DEMO_RENDER_JOIN3(a, b, c) a##b##c
-#endif
-#ifndef DEMO_RENDER_JOIN4
-#define DEMO_RENDER_JOIN4(a, b, c, d) a##b##c##d
-#endif
-#include "../rhi/vulkan/VulkanResourceTable.h"
+#include <vector>
 
 namespace demo
-{
-	namespace rhi
-	{
-		namespace
-		DEMO_RHI_VULKAN_NS
-		{
-		}
-	}
-
-	class RenderDevice
+{	class RenderDevice
 	{
 	public:
 		struct StaticPassTextureStates
@@ -77,7 +57,10 @@ namespace demo
 		// Bindless slots 0/1 are renderer-owned defaults; glTF textures start at slot 2.
 		static constexpr uint32_t kDemoMaterialSlotCount = 2;
 
-		RenderDevice() = default;
+		explicit RenderDevice(rhi::BackendType backend = rhi::defaultBackend())
+			: m_backend(backend)
+		{
+		}
 
 		void init(void* window, rhi::Surface& surface, bool vSync);
 		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const;
@@ -124,12 +107,6 @@ namespace demo
 
 		MeshPool& getMeshPool() { return m_meshPool; }
 		const MeshPool& getMeshPool() const { return m_meshPool; }
-
-		rhi::DEMO_RHI_VULKAN_NS::DEMO_RHI_VULKAN_TYPE(ResourceTable)* getResourceTable()
-		{
-			return &m_device.resourceTable;
-		}
-
 		SceneResources& getSceneResources() { return m_swapchainDependent.sceneResources; }
 		void bindStaticPassResources(PassExecutor& passExecutor,
 		                             const StaticPassTextureStates& textureStates) const;
@@ -178,15 +155,8 @@ namespace demo
 				       ? m_device.shadowCullingArgumentTables[frameIndex]
 				       : rhi::ArgumentTableHandle{};
 		}
-
-		uint64_t getShadowCullingIndirectBufferOpaque(uint32_t frameIndex) const;
 		[[nodiscard]] uint32_t getShadowCullingMeshCapacity(uint32_t frameIndex) const;
-		[[nodiscard]] uint64_t getGPUCullingIndirectBufferOpaque(uint32_t frameIndex) const;
-		[[nodiscard]] uint64_t getGPUCullingDrawCountBufferOpaque(uint32_t frameIndex) const;
 		[[nodiscard]] uint32_t getGPUCullingObjectCount(uint32_t frameIndex) const;
-		[[nodiscard]] uint64_t getPreviousGPUCullingIndirectBufferOpaque(uint32_t currentFrameIndex) const;
-		[[nodiscard]] uint64_t getPreviousGPUCullingDrawCountBufferOpaque(uint32_t currentFrameIndex) const;
-		[[nodiscard]] uint64_t getGPUDrivenPersistentIndirectStreamBuffer(uint32_t frameIndex) const;
 		// RHI handle variants of the per-frame culling buffers (Option B). Consumed by
 		// RenderEncoder-based geometry passes; previous-frame variants index the same
 		// stable handle ring at (frameIndex + frameCount - 1) % frameCount.
@@ -203,7 +173,11 @@ namespace demo
 
 		[[nodiscard]] uint32_t getGPUCullingIndirectCommandStride() const
 		{
-			return static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand));
+			const uint32_t drawArgumentSize =
+				static_cast<uint32_t>(sizeof(shaderio::GPUCullIndirectCommand));
+			return m_backend == rhi::BackendType::d3d12
+				       ? drawArgumentSize + static_cast<uint32_t>(sizeof(uint32_t))
+				       : drawArgumentSize;
 		}
 
 		[[nodiscard]] uint32_t getCurrentFrameIndexHint() const;
@@ -220,6 +194,19 @@ namespace demo
 		}
 
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
+		[[nodiscard]] rhi::RHIHotPathCounters getRhiHotPathCounters() const noexcept
+		{
+			return m_device.device != nullptr
+				       ? m_device.device->getHotPathCounters()
+				       : rhi::RHIHotPathCounters{};
+		}
+		void resetRhiHotPathCounters() noexcept
+		{
+			if (m_device.device != nullptr)
+			{
+				m_device.device->resetHotPathCounters();
+			}
+		}
 
 		// DDGI (Wave D1-2): master config access for the DDGI / Global SDF passes.
 		// enabled defaults to false so default rendering behavior is unchanged.
@@ -253,8 +240,8 @@ namespace demo
 		[[nodiscard]] const std::string& getIBLEnvironmentStatus() const;
 		void updateLightCoarseCullingResources(uint32_t frameIndex,
 		                                       const shaderio::LightCoarseCullingUniforms& uniforms);
-		[[nodiscard]] uint64_t getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
-		[[nodiscard]] uint64_t getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::GpuPtr getGPUCullingObjectBufferAddress(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::GpuPtr getGPUCullingResultBufferAddress(uint32_t frameIndex) const;
 
 		// Per-frame argument table accessors for dynamic uniform buffers.
 		rhi::ArgumentTableHandle getCameraArgumentTable(uint32_t frameIndex) const;
@@ -263,8 +250,6 @@ namespace demo
 		rhi::ArgumentTableHandle getGBufferMDIDrawArgumentTable(uint32_t frameIndex) const;
 		rhi::ArgumentTableHandle getDepthMDIDrawArgumentTable(uint32_t frameIndex) const;
 		rhi::ArgumentTableHandle getCSMShadowMDIDrawArgumentTable(uint32_t frameIndex, uint32_t cascadeIndex) const;
-		// Legacy compatibility accessors.
-		[[nodiscard]] uint64_t getForwardMDIIndirectBuffer(uint32_t frameIndex) const;
 		void ensureGPUDrivenPersistentIndirectStream(uint32_t frameIndex, uint32_t requiredDrawCount);
 		void uploadMDIDrawData(uint32_t frameIndex, std::span<const shaderio::DrawUniforms> drawData);
 		void uploadMDIDrawDataRange(uint32_t frameIndex, uint32_t firstDrawIndex,
@@ -288,7 +273,6 @@ namespace demo
 		// --- Texture views as RHI handles (the only thing business/pass code should hold) ---
 		// Texture views are exposed to renderer/pass code only as RHI handles.
 		rhi::TextureViewHandle createTextureView(const rhi::TextureViewCreateDesc& desc);
-		rhi::TextureViewHandle registerExternalTextureView(uint64_t externalView);
 		void destroyTextureView(rhi::TextureViewHandle handle);
 
 		// Frame-lifetime argument table. Allocates a fresh
@@ -345,13 +329,6 @@ namespace demo
 		uint32_t getSwapchainImageCount() const { return m_swapchainDependent.swapchain->getRequestedImageCount(); }
 		rhi::TextureHandle getCurrentSwapchainTextureHandle() const;
 		rhi::TextureViewHandle getOrRegisterSwapchainViewHandle(uint32_t idx) const;
-		// Per-image-index registry handles mirroring the swapchain backbuffers into the
-		// device resource table (lazily (re)registered by getCurrentSwapchainTextureHandle).
-		mutable std::vector<rhi::TextureHandle> m_swapchainTextureHandles;
-		mutable std::vector<uint64_t> m_swapchainTextureNatives;
-		// Per-image-index view handle cache for the present pass (lazily registered, cleared on swapchain rebuild).
-		mutable std::vector<rhi::TextureViewHandle> m_swapchainViewHandles;
-		mutable std::vector<uint64_t>               m_swapchainViewNatives;
 		rhi::TextureFormat getSceneDepthFormat() const { return m_swapchainDependent.sceneResources.getDepthFormat(); }
 		rhi::TextureHandle getSceneDepthImage() const { return m_swapchainDependent.sceneResources.getDepthImage(); }
 
@@ -598,7 +575,7 @@ namespace demo
 			rhi::BufferHandle vertexBuffer;
 			rhi::BufferHandle pointsBuffer;
 			// descriptorPool removed (D-05): ArgumentTable backend lazy-pool now handles all
-			// descriptor set allocation; renderer main path no longer holds VkDescriptorPool.
+			// descriptor set allocation; renderer main path no longer holds backend descriptor pool.
 			// ImGui descriptors are owned by the backend-neutral ImGui RHI renderer.
 			rhi::TextureFormat iblEnvironmentFormat{rhi::TextureFormat::undefined};
 			rhi::Extent2D iblEnvironmentExtent{};
@@ -616,7 +593,6 @@ namespace demo
 			std::array<rhi::ArgumentLayoutHandle, 3> csmShadowMdiArgumentLayouts{};
 			std::array<rhi::ArgumentLayoutHandle, 2> debugArgumentLayouts{};
 			std::array<rhi::ArgumentLayoutHandle, 2> fullscreenArgumentLayouts{};
-			rhi::DEMO_RHI_VULKAN_NS::DEMO_RHI_VULKAN_TYPE(ResourceTable) resourceTable;
 
 			struct PrebuiltPipelineVariants
 			{
@@ -637,6 +613,8 @@ namespace demo
 			rhi::TextureFormat swapchainImageFormat{rhi::TextureFormat::bgra8Unorm};
 			uint32_t currentImageIndex{0};
 			bool hasAcquiredImage{false};
+			rhi::SubmitWaitPoint acquireWaitPoint{};
+			rhi::SubmitSignalPoint renderCompleteSignal{};
 			std::vector<rhi::ResourceState> imageStates; // Track per-image layout state
 			bool vSync{true};
 		};
@@ -646,7 +624,9 @@ namespace demo
 		// Recreated only if frame-count policy changes (future task) or full renderer re-init.
 		struct PerFrameResources
 		{
-			std::unique_ptr<rhi::FrameContext> frameContext;
+			FrameScheduler frameScheduler;
+			UploadManager uploadManager;
+			rhi::CommandBuffer* activeCommandBuffer{nullptr};
 
 			struct FrameUserData
 			{
@@ -666,7 +646,7 @@ namespace demo
 				rhi::BufferHandle gpuCullingStatsBuffer{};
 				rhi::BufferHandle gpuCullingUniformBuffer{};
 				rhi::BufferHandle gpuCullingResultBuffer{};
-				uint64_t externalGPUCullingObjectBufferAddress{0};
+				rhi::GpuPtr externalGPUCullingObjectBufferAddress{};
 				bool useExternalGPUCullingObjectBuffer{false};
 				bool useExternalGPUCullingMeshletData{false};
 				const SceneUploadResult* gpuCullingSourceModel{nullptr};
@@ -886,10 +866,7 @@ namespace demo
 
 			HandlePool<TextureHandle, TextureRecord> texturePool;
 			HandlePool<MaterialHandle, MaterialRecord> materialPool;
-			// Wave 8: a bind group is an ArgumentTable. Track all device-created tables and the
-			// layouts they were built from so destroyArgumentTablesAndLayouts() can release them. Adopted
-			// external tables (owned=false) are tracked here too and unregistered on teardown
-			// (their native descriptor set is freed by whoever owns the external pool).
+			// Track device-created tables and their layouts for deterministic teardown.
 			std::vector<rhi::ArgumentTableHandle> ownedArgumentTables;
 			std::vector<rhi::ArgumentLayoutHandle> ownedArgumentLayouts;
 			MaterialHandle sampleMaterials[kDemoMaterialSlotCount]{};
@@ -897,8 +874,7 @@ namespace demo
 			rhi::ArgumentTableHandle materialArgumentTable{};
 			rhi::SamplerHandle materialSamplerHandle{}; // Wave 8: shared sampler for combinedImageSampler ArgumentWrite
 			std::vector<rhi::ArgumentTableHandle> materialArgumentTables;
-			// Wave 8: per-slot adopted view handles for the bindless material array. The shared
-			// sampler is materialSamplerHandle; writes go through combinedImageSampler ArgumentWrites.
+			// Per-slot view handles for the bindless material array.
 			std::vector<rhi::TextureViewHandle> materialDescriptorViews;
 			std::vector<uint8_t> materialDescriptorValid;
 			std::vector<uint64_t> materialArgumentTableGenerations;
@@ -1038,6 +1014,7 @@ namespace demo
 		};
 
 		DeviceLifetimeResources m_device;
+		rhi::BackendType m_backend{rhi::defaultBackend()};
 		SwapchainDependentResources m_swapchainDependent;
 		PerFrameResources m_perFrame;
 		PerPassResources m_perPass;

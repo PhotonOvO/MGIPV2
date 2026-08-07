@@ -7,8 +7,15 @@
 // Specialization constant (consistent with GBuffer, but not used)
 //------------------------------------------------------------------------------
 
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool alphaTestEnabled = (DEMO_SPECIALIZATION_0 != 0);
+#else
 [[vk::constant_id(0)]]
 const bool alphaTestEnabled = false;
+#endif
 
 //------------------------------------------------------------------------------
 // Input Structures
@@ -53,6 +60,11 @@ ConstantBuffer<DrawUniforms> draw;
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
 StructuredBuffer<DrawUniforms> drawData;
 
+#ifdef DEMO_D3D12
+[[vk::push_constant]]
+ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
 //------------------------------------------------------------------------------
 // Vertex Shader
 //------------------------------------------------------------------------------
@@ -76,8 +88,14 @@ VertexOutput vertexMain(VertexInput input)
 }
 
 [shader("vertex")]
-VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : SV_StartInstanceLocation)
+#ifdef DEMO_D3D12
+VertexOutputMdi vertexMdiMain(VertexInput input)
 {
+    const uint drawIndex = mdiDrawIndex.drawIndex;
+#else
+VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
+{
+#endif
     VertexOutputMdi output;
     const DrawUniforms mdiDraw = drawData[drawIndex];
 

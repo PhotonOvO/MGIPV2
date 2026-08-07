@@ -42,8 +42,8 @@ namespace demo
 			|| !context.params->debugOptions.enableShadowAtlas || sceneView == nullptr || !sceneView->
 			usePersistentCullingObjects
 			|| sceneView->shadowPackedMeshes == nullptr || sceneView->shadowPackedMeshCount == 0
-			|| sceneView->shadowPackedVertexBuffer == 0 || sceneView->shadowPackedIndexBuffer == 0
-			|| m_renderer->getShadowAtlasImageOpaque() == 0 || m_renderer->getShadowAtlasViewOpaque() == 0)
+			|| sceneView->shadowPackedVertexBuffer.isNull() || sceneView->shadowPackedIndexBuffer.isNull()
+			|| m_renderer->getShadowAtlasImageHandle().isNull() || m_renderer->getShadowAtlasViewHandle().isNull())
 		{
 			return;
 		}
@@ -89,9 +89,7 @@ namespace demo
 
 		context.commandBuffer->beginEvent("GPUDrivenShadowAtlas");
 		const rhi::DepthTargetDesc depthTarget{
-			.texture = rhi::TextureHandle{
-				kPassGPUDrivenShadowAtlasHandle.index, kPassGPUDrivenShadowAtlasHandle.generation
-			},
+			.texture = m_renderer->getShadowAtlasImageHandle(),
 			.view = m_renderer->getShadowAtlasViewHandle(),
 			.state = rhi::ResourceState::DepthStencilAttachment,
 			.loadOp = rhi::LoadOp::clear,
@@ -101,8 +99,7 @@ namespace demo
 		const rhi::Extent2D atlasExtent{atlasFullExtent.width, atlasFullExtent.height};
 		rhi::RenderEncoder* enc = context.commandBuffer->beginRenderPass(rhi::RenderPassDesc{
 			.renderArea = {{0, 0}, atlasExtent},
-			.colorTargets = nullptr,
-			.colorTargetCount = 0,
+			.colorTargets = {},
 			.depthTarget = &depthTarget,
 		});
 
@@ -113,7 +110,7 @@ namespace demo
 		const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
 		const rhi::BufferHandle indexBufferRHI = m_renderer->getShadowPackedIndexBufferRHIHandle();
 		constexpr uint64_t vertexOffset = 0;
-		enc->bindVertexBuffers(0, &vertexBufferRHI, &vertexOffset, 1);
+		enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
 		enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
 
 		for (uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)

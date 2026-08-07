@@ -4,6 +4,7 @@
 #include "RHITypes.h"
 
 #include <cstdint>
+#include <span>
 
 namespace demo::rhi {
 
@@ -17,8 +18,19 @@ enum class ArgumentType : uint8_t
   storageTexture,
   sampler,
   combinedImageSampler,
-  accelerationStructure,
-  indirectCommandBuffer,
+};
+
+enum class ArgumentTableLifetime : uint8_t
+{
+  persistent = 0,
+  frameLocal,
+};
+
+struct ArgumentTableCreateDesc
+{
+  ArgumentLayoutHandle  layout{};
+  ArgumentTableLifetime lifetime{ArgumentTableLifetime::persistent};
+  const char*           debugName{nullptr};
 };
 
 enum class ArgumentAccessIntent : uint8_t
@@ -39,8 +51,8 @@ struct ArgumentBinding
 
 struct ArgumentLayoutDesc
 {
-  const ArgumentBinding* bindings{nullptr};
-  uint32_t               bindingCount{0};
+  std::span<const ArgumentBinding> bindings{};
+
   const char*            debugName{nullptr};
 };
 
@@ -56,5 +68,25 @@ struct ArgumentWrite
   uint64_t          size{0};  // 0 = entire buffer
   ArgumentAccessIntent accessIntent{ArgumentAccessIntent::sampledRead};
 };
+
+enum class ArgumentTableUseState : uint8_t
+{
+  idle = 0,
+  executableUnsubmitted,
+  pendingGpuWork,
+};
+
+[[nodiscard]] constexpr bool canUpdateArgumentTable(
+  ArgumentTableUseState useState, bool completionSynchronized,
+  bool concurrentWrite = false) noexcept
+{
+  if(concurrentWrite)
+    return false;
+  return useState != ArgumentTableUseState::pendingGpuWork || completionSynchronized;
+}
+
+// Updates are live for later encoding and executable, unsubmitted command
+// buffers. Pending GPU use requires completion synchronization.
+using ArgumentWriteBatch = std::span<const ArgumentWrite>;
 
 }  // namespace demo::rhi

@@ -2132,6 +2132,12 @@ def _d_texture_readback_contract(
         elif "D24" in compact_format:
             bytes_per_pixel = 4
             packed_decode = "D24_UNORM_X8"
+        elif compact_format == "R32TYPELESS":
+            # D3D12 depth resources commonly expose a typeless resource format
+            # with D32_FLOAT DSV and R32_FLOAT SRV views. The caller has already
+            # established the depth role, so the tight payload is one float32.
+            bytes_per_pixel = 4
+            packed_decode = "D32_FLOAT"
         elif "D32" in compact_format:
             bytes_per_pixel = 4
             packed_decode = "D32_FLOAT"
@@ -7438,34 +7444,56 @@ def _extract_capture(
             stage=f"rdc script for {capture}",
             cleanup_reserve=CAPTURE_CLEANUP_RESERVE_SECONDS,
         )
-        result = _run_command(
-            base
-            + [
-                "script",
-                str(Path(__file__).resolve()),
-                "--arg",
-                f"output={output_dir}",
-                "--arg",
-                f"release_gate={int(release_gate)}",
-                "--arg",
-                f"release_render_mode={release_render_mode or 'diagnostic'}",
-                "--arg",
-                f"export_budget_bytes={COMPARATOR_EXTRACT_BYTES_PER_CAPTURE}",
-                "--arg",
-                f"single_readback_cap_bytes={COMPARATOR_MAX_READBACK_BYTES}",
-                "--arg",
-                f"export_safety_margin_bytes={DISK_SAFETY_MIN_BYTES}",
-                "--json",
-            ],
-            timeout=script_timeout,
+        credentials = _load_exact_host_shutdown_credentials(
+            state_path,
+            expected_record=state_after_open,
         )
+        from rdc.daemon_client import send_request
+        from rdc.protocol import _request
+
+        payload = _request(
+            "script",
+            1,
+            {
+                "_token": credentials["token"],
+                "path": str(Path(__file__).resolve()),
+                "args": {
+                    "output": str(output_dir),
+                    "script_path": str(Path(__file__).resolve()),
+                    "release_gate": str(int(release_gate)),
+                    "release_render_mode": release_render_mode or "diagnostic",
+                    "export_budget_bytes": str(
+                        COMPARATOR_EXTRACT_BYTES_PER_CAPTURE
+                    ),
+                    "single_readback_cap_bytes": str(
+                        COMPARATOR_MAX_READBACK_BYTES
+                    ),
+                    "export_safety_margin_bytes": str(DISK_SAFETY_MIN_BYTES),
+                },
+            },
+        ).to_dict()
         try:
-            envelope = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
+            response = send_request(
+                credentials["host"],
+                credentials["port"],
+                payload,
+                timeout=script_timeout,
+            )
+        except (OSError, ValueError) as exc:
             raise ComparatorError(
-                f"rdc script returned invalid JSON for {capture}: "
-                f"{result.stdout[-4000:]}"
+                f"rdc script RPC failed for {capture}: {exc}"
             ) from exc
+        error = response.get("error")
+        if error is not None:
+            message = error.get("message") if isinstance(error, dict) else error
+            raise ComparatorError(
+                f"rdc script error for {capture}: {message}"
+            )
+        envelope = response.get("result")
+        if not isinstance(envelope, dict):
+            raise ComparatorError(
+                f"rdc script returned no result object for {capture}"
+            )
         if envelope.get("stderr"):
             raise ComparatorError(
                 f"rdc script error for {capture}: {envelope['stderr']}"
@@ -13987,6 +14015,53 @@ def _run_self_tests() -> int:
         )
         assert decoded.shape == (1, 2, 4)
         assert str(decoded.dtype) == "float32"
+
+        class FakeTypelessDepthFormat:
+            type = "Typeless"
+            compType = "Typeless"
+            compCount = 1
+            compByteWidth = 4
+
+            @staticmethod
+            def Name() -> str:
+                return "R32_TYPELESS"
+
+            @staticmethod
+            def BGRAOrder() -> bool:
+                return False
+
+        class FakeTypelessDepthTexture(FakeTexture):
+            format = FakeTypelessDepthFormat()
+
+        typeless_depth = FakeTypelessDepthTexture()
+        depth_contract = _d_texture_readback_contract(
+            typeless_depth,
+            subresource,
+            depth=True,
+        )
+        assert depth_contract["bytes_per_pixel"] == 4
+        assert depth_contract["packed_decode"] == "D32_FLOAT"
+        assert depth_contract["expected_raw_bytes"] == 8
+        decoded_depth = _d_decode_regular_texture(
+            typeless_depth,
+            bytes.fromhex("0000003e0000403f"),
+            depth=True,
+            contract=depth_contract,
+        )
+        assert decoded_depth.shape == (1, 2)
+        assert float(decoded_depth[0, 0]) == 0.125
+        assert float(decoded_depth[0, 1]) == 0.75
+        try:
+            _d_texture_readback_contract(
+                typeless_depth,
+                subresource,
+                depth=False,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("non-depth R32_TYPELESS unexpectedly passed")
+
         for payload in (bytes(7), bytes(9)):
             try:
                 _d_validate_raw_texture_bytes(payload, dict(contract))
@@ -15102,6 +15177,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 if "controller" in globals() and "state" in globals() and "rd" in globals():
+    if "__file__" not in globals():
+        script_path = args.get("script_path") if isinstance(args, dict) else None
+        if not isinstance(script_path, str) or not script_path:
+            raise ComparatorError("rdc script did not provide its source path")
+        __file__ = script_path
     result = _d_extract_main()
 elif __name__ == "__main__":
     raise SystemExit(main())

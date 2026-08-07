@@ -1,6 +1,5 @@
 #include "Ktx2Loader.h"
 #include "../common/ProfilerMarkers.h"
-#include "../render/RHIFormatBridge.h"  // toPortableTextureFormat()
 
 #include <array>
 #include <cstring>
@@ -11,6 +10,30 @@
 namespace demo {
 
 namespace {
+// KTX2 stores Vulkan registry format IDs on disk. Keep the serialization
+// mapping local to the loader so no Vulkan type leaks into the public RHI.
+[[nodiscard]] constexpr rhi::TextureFormat textureFormatFromKtx2VkFormat(uint32_t format)
+{
+  switch(format)
+  {
+  case 37u: return rhi::TextureFormat::rgba8Unorm;
+  case 43u: return rhi::TextureFormat::rgba8Srgb;
+  case 44u: return rhi::TextureFormat::bgra8Unorm;
+  case 76u: return rhi::TextureFormat::r16Sfloat;
+  case 83u: return rhi::TextureFormat::rg16Sfloat;
+  case 97u: return rhi::TextureFormat::rgba16Sfloat;
+  case 100u: return rhi::TextureFormat::r32Sfloat;
+  case 124u: return rhi::TextureFormat::d16Unorm;
+  case 126u: return rhi::TextureFormat::d32Sfloat;
+  case 129u: return rhi::TextureFormat::d24UnormS8;
+  case 130u: return rhi::TextureFormat::d32SfloatS8;
+  case 143u: return rhi::TextureFormat::bc6hUfloatBlock;
+  case 144u: return rhi::TextureFormat::bc6hSfloatBlock;
+  case 145u: return rhi::TextureFormat::bc7UnormBlock;
+  case 146u: return rhi::TextureFormat::bc7SrgbBlock;
+  default: return rhi::TextureFormat::undefined;
+  }
+}
 
 constexpr std::array<uint8_t, 12> kKtx2Identifier{
     0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
@@ -158,7 +181,7 @@ bool Ktx2Loader::loadFromMemory(const uint8_t* data, size_t size, Ktx2Texture& o
     return false;
   }
 
-  outTexture.format = toPortableTextureFormat(header.vkFormat);
+  outTexture.format = textureFormatFromKtx2VkFormat(header.vkFormat);
   if (outTexture.format == rhi::TextureFormat::undefined)
   {
     // ASTC 格式值域：[151, 213]（Vulkan 规范 Table 65，DEFER-04 待支持）

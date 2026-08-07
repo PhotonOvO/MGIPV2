@@ -198,6 +198,16 @@ namespace demo
 		return gpuDriven().getRuntimeProfileSnapshot();
 	}
 
+	rhi::RHIHotPathCounters RendererFacade::getRhiHotPathCounters() const noexcept
+	{
+		return gpuDriven().getRhiHotPathCounters();
+	}
+
+	void RendererFacade::resetRhiHotPathCounters() noexcept
+	{
+		gpuDriven().resetRhiHotPathCounters();
+	}
+
 	shaderio::ShadowUniforms* RendererFacade::getShadowUniformsData()
 	{
 		return gpuDriven().getShadowUniformsData();
