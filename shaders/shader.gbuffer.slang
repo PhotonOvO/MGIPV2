@@ -30,8 +30,20 @@ struct VertexOutput
 //------------------------------------------------------------------------------
 
 // Set 0: Bindless textures (for material sampling)
+#ifdef DEMO_METAL
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[];
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+float4 sampleBindlessTexture(uint index, float2 uv)
+{
+    return inTextureResources[index].Sample(inTextureSampler, uv);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define sampleBindlessTexture(index, uv) inTexture[index].Sample(uv)
+#endif
 
 // Set 1: Scene-level camera uniform buffer
 [[vk::binding(LBindCamera, LSetScene)]]
@@ -154,7 +166,7 @@ float filterRoughness(float perceptualRoughness, float3 worldNormal)
 {
     const float kSpecularAAVariance  = 0.25;  // 上调：jitter 欠采样法线变化幅度更大，需更强折算
     const float kSpecularAAThreshold = 0.4;   // 上调：允许更大的 kernelRoughness 上限以覆盖 13° 摆动
-#ifdef DEMO_D3D12
+#if defined(DEMO_D3D12) && !defined(DEMO_METAL)
     const float3 du = ddx_fine(worldNormal);
     const float3 dv = ddy_fine(worldNormal);
 #else
@@ -168,20 +180,24 @@ float filterRoughness(float perceptualRoughness, float3 worldNormal)
     return sqrt(sqrt(squareRoughness));
 }
 
+struct GBufferOutput
+{
+    float4 gbuffer0 : SV_Target0;
+    float4 gbuffer1 : SV_Target1;
+    float4 gbuffer2 : SV_Target2;
+};
+
 [shader("fragment")]
-void fragmentMain(
+GBufferOutput fragmentMain(
     VertexOutput input,
-    bool isFrontFace : SV_IsFrontFace,
-    out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1,
-    out float4 outGBuffer2 : SV_Target2
+    bool isFrontFace : SV_IsFrontFace
 ) {
     // 1. BaseColor: sample texture if available, otherwise use factor
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
+        float4 texColor = sampleBindlessTexture(baseColorTextureIndex, input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
     // 2. Alpha test (specialization constant controlled)
@@ -189,7 +205,7 @@ void fragmentMain(
     {
         if (color.a < draw.alphaCutoff)
         { 
-            discard;
+            DEMO_DISCARD_FRAGMENT();
         }
     }
 
@@ -199,8 +215,8 @@ void fragmentMain(
     if(draw.normalTextureIndex >= 0)
     {
         // Sample normal map (tangent space)
-        uint normalTextureIndex = NonUniformResourceIndex(uint(draw.normalTextureIndex));
-        float3 tangentNormal = inTexture[normalTextureIndex].Sample(input.uv).rgb;
+        uint normalTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.normalTextureIndex));
+        float3 tangentNormal = sampleBindlessTexture(normalTextureIndex, input.uv).rgb;
         // Convert from [0,1] to [-1,1]
         tangentNormal = tangentNormal * 2.0 - 1.0;
         tangentNormal.xy *= draw.normalScale;
@@ -231,8 +247,8 @@ void fragmentMain(
     // Sample metallic-roughness texture (glTF: G=roughness, B=metallic)
     if(draw.metallicRoughnessTextureIndex >= 0)
     {
-        uint metallicRoughnessTextureIndex = NonUniformResourceIndex(uint(draw.metallicRoughnessTextureIndex));
-        float4 mrSample = inTexture[metallicRoughnessTextureIndex].Sample(input.uv);
+        uint metallicRoughnessTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.metallicRoughnessTextureIndex));
+        float4 mrSample = sampleBindlessTexture(metallicRoughnessTextureIndex, input.uv);
         if(draw.materialWorkflow == 1)
         {
             metallic = 0.0;
@@ -248,38 +264,37 @@ void fragmentMain(
     // Sample occlusion texture
     if(draw.occlusionTextureIndex >= 0)
     {
-        uint occlusionTextureIndex = NonUniformResourceIndex(uint(draw.occlusionTextureIndex));
-        float sampledAo = inTexture[occlusionTextureIndex].Sample(input.uv).r;
+        uint occlusionTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.occlusionTextureIndex));
+        float sampledAo = sampleBindlessTexture(occlusionTextureIndex, input.uv).r;
         ao = lerp(1.0, sampledAo, draw.occlusionStrength);
     }
 
     float3 emissive = draw.emissiveFactor.rgb;
     if(draw.emissiveTextureIndex >= 0)
     {
-        uint emissiveTextureIndex = NonUniformResourceIndex(uint(draw.emissiveTextureIndex));
-        emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
+        uint emissiveTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.emissiveTextureIndex));
+        emissive *= sampleBindlessTexture(emissiveTextureIndex, input.uv).rgb;
     }
 
     // Pack outputs（roughness 经 Geometric Specular AA 调制）
-    outGBuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
-    outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
-    outGBuffer2 = float4(emissive, 0.0);
+    GBufferOutput output;
+    output.gbuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
+    output.gbuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
+    output.gbuffer2 = float4(emissive, 0.0);
+    return output;
 }
 
 [shader("fragment")]
-void fragmentMdiMain(
+GBufferOutput fragmentMdiMain(
     VertexOutputMdi input,
-    bool isFrontFace : SV_IsFrontFace,
-    out float4 outGBuffer0 : SV_Target0,
-    out float4 outGBuffer1 : SV_Target1,
-    out float4 outGBuffer2 : SV_Target2
+    bool isFrontFace : SV_IsFrontFace
 ) {
     const DrawUniforms draw = drawData[input.drawIndex];
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
+        float4 texColor = sampleBindlessTexture(baseColorTextureIndex, input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
 
@@ -287,15 +302,15 @@ void fragmentMdiMain(
     {
         if (color.a < draw.alphaCutoff)
         {
-            discard;
+            DEMO_DISCARD_FRAGMENT();
         }
     }
 
     float3 worldNormal = normalize(input.worldNormal);
     if(draw.normalTextureIndex >= 0)
     {
-        uint normalTextureIndex = NonUniformResourceIndex(uint(draw.normalTextureIndex));
-        float3 tangentNormal = inTexture[normalTextureIndex].Sample(input.uv).rgb;
+        uint normalTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.normalTextureIndex));
+        float3 tangentNormal = sampleBindlessTexture(normalTextureIndex, input.uv).rgb;
         tangentNormal = tangentNormal * 2.0 - 1.0;
         tangentNormal.xy *= draw.normalScale;
         tangentNormal = normalize(tangentNormal);
@@ -314,8 +329,8 @@ void fragmentMdiMain(
     float ao = 1.0;
     if(draw.metallicRoughnessTextureIndex >= 0)
     {
-        uint metallicRoughnessTextureIndex = NonUniformResourceIndex(uint(draw.metallicRoughnessTextureIndex));
-        float4 mrSample = inTexture[metallicRoughnessTextureIndex].Sample(input.uv);
+        uint metallicRoughnessTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.metallicRoughnessTextureIndex));
+        float4 mrSample = sampleBindlessTexture(metallicRoughnessTextureIndex, input.uv);
         if(draw.materialWorkflow == 1)
         {
             metallic = 0.0;
@@ -329,19 +344,21 @@ void fragmentMdiMain(
     }
     if(draw.occlusionTextureIndex >= 0)
     {
-        uint occlusionTextureIndex = NonUniformResourceIndex(uint(draw.occlusionTextureIndex));
-        float sampledAo = inTexture[occlusionTextureIndex].Sample(input.uv).r;
+        uint occlusionTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.occlusionTextureIndex));
+        float sampledAo = sampleBindlessTexture(occlusionTextureIndex, input.uv).r;
         ao = lerp(1.0, sampledAo, draw.occlusionStrength);
     }
 
     float3 emissive = draw.emissiveFactor.rgb;
     if(draw.emissiveTextureIndex >= 0)
     {
-        uint emissiveTextureIndex = NonUniformResourceIndex(uint(draw.emissiveTextureIndex));
-        emissive *= inTexture[emissiveTextureIndex].Sample(input.uv).rgb;
+        uint emissiveTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.emissiveTextureIndex));
+        emissive *= sampleBindlessTexture(emissiveTextureIndex, input.uv).rgb;
     }
 
-    outGBuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
-    outGBuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
-    outGBuffer2 = float4(emissive, 0.0);
+    GBufferOutput output;
+    output.gbuffer0 = float4(color.rgb, filterRoughness(roughness, worldNormal));
+    output.gbuffer1 = float4(encodeNormalOct(worldNormal), metallic, ao);
+    output.gbuffer2 = float4(emissive, 0.0);
+    return output;
 }

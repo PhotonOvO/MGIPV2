@@ -4,16 +4,16 @@
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> debugAtlas         : register(u0);
-[[vk::binding(1, 0)]] Texture3D<float> globalSDF             : register(t0);
-[[vk::binding(2, 0)]] Texture3D<float4> globalAlbedo         : register(t1);
-[[vk::binding(3, 0)]] Texture2D<float4> probesData           : register(t2);
-[[vk::binding(4, 0)]] Texture2D<float4> probesTrace          : register(t3);
-[[vk::binding(5, 0)]] Texture2D<float2> probesDistance       : register(t4);
-[[vk::binding(6, 0)]] Texture2D<float4> probesIrradiance     : register(t5);
-[[vk::binding(7, 0)]] Texture2D<float4> surfaceAtlasLighting : register(t6);
-[[vk::binding(8, 0)]] SamplerState linearSampler             : register(s0);
-[[vk::binding(9, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t7);
+[[vk::binding(0, 0)]] RWTexture2D<float4> debugAtlas         DEMO_REGISTER(u0);
+[[vk::binding(1, 0)]] Texture3D<float> globalSDF             DEMO_REGISTER(t0);
+[[vk::binding(2, 0)]] Texture3D<float4> globalAlbedo         DEMO_REGISTER(t1);
+[[vk::binding(3, 0)]] Texture2D<float4> probesData           DEMO_REGISTER(t2);
+[[vk::binding(4, 0)]] Texture2D<float4> probesTrace          DEMO_REGISTER(t3);
+[[vk::binding(5, 0)]] Texture2D<float2> probesDistance       DEMO_REGISTER(t4);
+[[vk::binding(6, 0)]] Texture2D<float4> probesIrradiance     DEMO_REGISTER(t5);
+[[vk::binding(7, 0)]] Texture2D<float4> surfaceAtlasLighting DEMO_REGISTER(t6);
+[[vk::binding(8, 0)]] SamplerState linearSampler             DEMO_REGISTER(s0);
+[[vk::binding(9, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData DEMO_REGISTER(t7);
 
 struct FlaxGIDebugViewPush
 {
@@ -175,7 +175,7 @@ void CS_FlaxGIDebugViews(uint3 dispatchThreadId : SV_DispatchThreadID)
     else if (tileIndex == 6u)
     {
         const FlaxDDGIData ddgi = ddgiData[0];
-        const uint cascadeCount = max(ddgi.cascadesCount, 1u);
+        const uint cascadeCount = max(ddgi.probesCounts.w, 1u);
         const uint probesPerCascade =
             ddgi.probesCounts.x * ddgi.probesCounts.y * ddgi.probesCounts.z;
         const uint totalProbeCount = probesPerCascade * cascadeCount;

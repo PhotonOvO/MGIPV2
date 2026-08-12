@@ -46,20 +46,12 @@ float3 decodeNormalOct(float2 encoded)
 
 float2 framebufferUvToNdc(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-#ifdef DEMO_D3D12
-    ndc.y = -ndc.y;
-#endif
-    return ndc;
+    return demoFramebufferUvToNdc(uv);
 }
 
 float2 ndcToFramebufferUv(float2 ndc)
 {
-    float2 uv = ndc * 0.5 + 0.5;
-#ifdef DEMO_D3D12
-    uv.y = 1.0 - uv.y;
-#endif
-    return uv;
+    return demoNdcToFramebufferUv(ndc);
 }
 
 float3 reconstructWorldPosition(float2 uv, float depth)

@@ -6,12 +6,12 @@
 #include "flax_ddgi_common.slang"
 #include "ddgi_common.slang"
 
-[[vk::binding(0, 0)]] Texture2D<float4> probesTrace         : register(t0);
-[[vk::binding(1, 0)]] Texture2D<float4> probesData          : register(t1);
-[[vk::binding(2, 0)]] RWTexture2D<float2> probesDistance    : register(u0);
-[[vk::binding(3, 0)]] RWStructuredBuffer<uint> activeProbes : register(u1); // counter + indices
-[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t2);
-[[vk::binding(5, 0)]] RWTexture2D<float2> probesDistanceHist : register(u2);
+[[vk::binding(0, 0)]] Texture2D<float4> probesTrace         DEMO_REGISTER(t0);
+[[vk::binding(1, 0)]] Texture2D<float4> probesData          DEMO_REGISTER(t1);
+[[vk::binding(2, 0)]] RWTexture2D<float2> probesDistance    DEMO_REGISTER(u0);
+[[vk::binding(3, 0)]] RWStructuredBuffer<uint> activeProbes DEMO_REGISTER(u1); // counter + indices
+[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData DEMO_REGISTER(t2);
+[[vk::binding(5, 0)]] RWTexture2D<float2> probesDistanceHist DEMO_REGISTER(u2);
 static FlaxDDGIData ddgi = ddgiData[0];
 struct FlaxDDGICascadePush
 {
@@ -25,7 +25,7 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     static const uint kTileSize = 16;
     static const uint kGroupsPerTileAxis = 2;
     static const uint kGroupsPerProbe = kGroupsPerTileAxis * kGroupsPerTileAxis;
-    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.probesCounts.w - 1u);
 
     uint activeSlot = groupId.x / kGroupsPerProbe;
     uint tileGroup = groupId.x % kGroupsPerProbe;
@@ -57,7 +57,8 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
          / float(kDDGIProbeDistanceResolution)) * 2.0f - 1.0f;
     float3 texelDirection = flaxOctahedralDecode(octahedralCoord);
 
-    for (uint r = 0; r < ddgi.raysCount; r++)
+    const uint raysCount = uint(ddgi.viewPos.w);
+    for (uint r = 0; r < raysCount; r++)
     {
         float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
         // Trace writes the finite distance horizon for misses. Clamp here as
@@ -65,7 +66,7 @@ void CS_UpdateDistance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
         // conditional-on-hit distance estimator.
         float rayDistance = traceData.w < 0.0f
             ? distanceLimit : min(traceData.w, distanceLimit);
-        float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
+        float3 rayDirection = flaxSphericalFibonacci(float(r), float(raysCount));
         float rayWeight = saturate(dot(texelDirection, rayDirection));
         // Flax sharpens the directional lobe to preserve depth discontinuities.
         rayWeight = pow(rayWeight, 10.0f);

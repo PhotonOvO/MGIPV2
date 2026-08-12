@@ -7,10 +7,10 @@
 #include "shader_io.h"
 #include "surface_atlas_common.slang"
 
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint>  objectsList    : register(u0); // object indices
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint>  chunks         : register(u1); // per-chunk atomics
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint>  culledObjects  : register(u2); // packed addresses
-[[vk::binding(3, 0)]] RWStructuredBuffer<float4> objects       : register(u3); // object data
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint>  objectsList    DEMO_REGISTER(u0); // object indices
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint>  chunks         DEMO_REGISTER(u1); // per-chunk atomics
+[[vk::binding(2, 0)]] RWStructuredBuffer<uint>  culledObjects  DEMO_REGISTER(u2); // packed addresses
+[[vk::binding(3, 0)]] RWStructuredBuffer<float4> objects       DEMO_REGISTER(u3); // object data
 
 [[vk::push_constant]] ConstantBuffer<SurfaceAtlasCullPush> pc;
 

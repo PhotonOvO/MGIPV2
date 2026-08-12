@@ -16,8 +16,20 @@ struct VertexOutput
     float2 uv       : TEXCOORD0;
 };
 
+#ifdef DEMO_METAL
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[];
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -89,12 +101,12 @@ void fragmentMain(VertexOutput input)
     float alpha = draw.baseColorFactor.a;
     if(draw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-        alpha *= inTexture[baseColorTextureIndex].Sample(input.uv).a;
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
+        alpha *= getBindlessTexture(baseColorTextureIndex).Sample(input.uv).a;
     }
     if(alpha < draw.alphaCutoff)
     {
-        discard;
+        DEMO_DISCARD_FRAGMENT();
     }
 }
 
@@ -110,11 +122,11 @@ void fragmentMdiMain(VertexOutputMdi input)
     float alpha = mdiDraw.baseColorFactor.a;
     if(mdiDraw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(mdiDraw.baseColorTextureIndex));
-        alpha *= inTexture[baseColorTextureIndex].Sample(input.uv).a;
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(mdiDraw.baseColorTextureIndex));
+        alpha *= getBindlessTexture(baseColorTextureIndex).Sample(input.uv).a;
     }
     if(alpha < mdiDraw.alphaCutoff)
     {
-        discard;
+        DEMO_DISCARD_FRAGMENT();
     }
 }

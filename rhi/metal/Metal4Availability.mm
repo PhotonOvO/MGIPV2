@@ -1,26 +1,34 @@
 #include "Metal4Availability.h"
 
-#import <AvailabilityMacros.h>
-#import <Foundation/Foundation.h>
-#import <Metal/Metal.h>
+#include <Availability.h>
+#include <Metal/MTL4CommandAllocator.hpp>
+#include <Metal/MTL4CommandBuffer.hpp>
+#include <Metal/MTL4CommandQueue.hpp>
+#include <Metal/MTL4ComputeCommandEncoder.hpp>
+#include <Metal/MTL4RenderCommandEncoder.hpp>
+#include <Metal/MTLDevice.hpp>
+#include <Metal/MTLResidencySet.hpp>
+#include <Metal/MTLTextureViewPool.hpp>
+
+#include <objc/runtime.h>
 
 namespace demo::rhi::metal {
 
 Metal4Availability queryMetal4Availability() noexcept
 {
-  @autoreleasepool
-  {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    Metal4Availability result{.deviceAvailable = device != nil};
+  MTL::Device* device = MTL::CreateSystemDefaultDevice();
+  Metal4Availability result{.deviceAvailable = device != nullptr};
+  if(device != nullptr)
+    device->release();
 
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
-    using CommandQueue = id<MTL4CommandQueue>;
-    using CommandAllocator = id<MTL4CommandAllocator>;
-    using CommandBuffer = id<MTL4CommandBuffer>;
-    using RenderEncoder = id<MTL4RenderCommandEncoder>;
-    using ComputeEncoder = id<MTL4ComputeCommandEncoder>;
-    using ResidencySet = id<MTLResidencySet>;
-    using TextureViewPool = id<MTLTextureViewPool>;
+    using CommandQueue = MTL4::CommandQueue*;
+    using CommandAllocator = MTL4::CommandAllocator*;
+    using CommandBuffer = MTL4::CommandBuffer*;
+    using RenderEncoder = MTL4::RenderCommandEncoder*;
+    using ComputeEncoder = MTL4::ComputeCommandEncoder*;
+    using ResidencySet = MTL::ResidencySet*;
+    using TextureViewPool = MTL::TextureViewPool*;
     (void)sizeof(CommandQueue);
     (void)sizeof(CommandAllocator);
     (void)sizeof(CommandBuffer);
@@ -29,21 +37,16 @@ Metal4Availability queryMetal4Availability() noexcept
     (void)sizeof(ResidencySet);
     (void)sizeof(TextureViewPool);
     result.sdkHasCoreApi = true;
-
-    if(@available(macOS 26.0, *))
-    {
-      result.runtimeHasCoreApi =
-        NSProtocolFromString(@"MTL4CommandQueue") != nil &&
-        NSProtocolFromString(@"MTL4CommandAllocator") != nil &&
-        NSProtocolFromString(@"MTL4CommandBuffer") != nil &&
-        NSProtocolFromString(@"MTL4RenderCommandEncoder") != nil &&
-        NSProtocolFromString(@"MTL4ComputeCommandEncoder") != nil &&
-        NSProtocolFromString(@"MTLResidencySet") != nil &&
-        NSProtocolFromString(@"MTLTextureViewPool") != nil;
-    }
+    result.runtimeHasCoreApi =
+      objc_getProtocol("MTL4CommandQueue") != nullptr &&
+      objc_getProtocol("MTL4CommandAllocator") != nullptr &&
+      objc_getProtocol("MTL4CommandBuffer") != nullptr &&
+      objc_getProtocol("MTL4RenderCommandEncoder") != nullptr &&
+      objc_getProtocol("MTL4ComputeCommandEncoder") != nullptr &&
+      objc_getProtocol("MTLResidencySet") != nullptr &&
+      objc_getProtocol("MTLTextureViewPool") != nullptr;
 #endif
-    return result;
-  }
+  return result;
 }
 
 }  // namespace demo::rhi::metal

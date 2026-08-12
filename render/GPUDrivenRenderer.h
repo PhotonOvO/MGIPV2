@@ -1191,9 +1191,10 @@ namespace demo
 
 		bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
 		                                       uint32_t frameIndex,
-		                                       rhi::BufferHandle targetIndirectBuffer,
-		                                       uint32_t categoryValue,
-		                                       uint32_t outputOffset);
+			                                       rhi::BufferHandle targetIndirectBuffer,
+			                                       uint32_t categoryValue,
+			                                       uint32_t outputOffset,
+			                                       uint32_t outputCapacity);
 
 	private:
 		struct DirtyRange

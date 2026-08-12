@@ -8,6 +8,11 @@
 #include "d3d12/D3D12Surface.h"
 #endif
 
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+#include "metal/MetalDevice.h"
+#include "metal/MetalSurface.h"
+#endif
+
 #include <stdexcept>
 #include <string>
 
@@ -37,7 +42,11 @@ namespace demo::rhi
 			return false;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return true;
+#else
 			return false;
+#endif
 		}
 		return false;
 	}
@@ -55,7 +64,11 @@ namespace demo::rhi
 			break;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return std::make_unique<metal::MetalDevice>();
+#else
 			break;
+#endif
 		}
 		throw std::runtime_error(std::string("RHI backend is not available in this build: ") + toString(backend));
 	}
@@ -73,7 +86,11 @@ namespace demo::rhi
 			break;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return std::make_unique<metal::MetalSurface>();
+#else
 			break;
+#endif
 		}
 		throw std::runtime_error(std::string("RHI backend is not available in this build: ") + toString(backend));
 	}

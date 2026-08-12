@@ -6,8 +6,12 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
+#endif
+
+#include <GLFW/glfw3.h>
+
+#ifdef _WIN32
 #include <GLFW/glfw3native.h>
 #endif
 
@@ -65,6 +69,7 @@ public:
     bool noUi{false};
     bool noPost{false};
     bool noDdgi{false};
+    bool ddgiSmoke{false};
     bool taa{false};
     bool autoExit{false};
     bool captureControlFrame{false};
@@ -73,7 +78,12 @@ public:
     uint32_t captureSyncTimeoutMilliseconds{30000u};
   };
 
-  MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080}, AutomationOptions automationOptions = {})
+  explicit MinimalLatestApp(demo::rhi::Extent2D size = {1920, 1080})
+      : MinimalLatestApp(size, AutomationOptions{})
+  {
+  }
+
+  MinimalLatestApp(demo::rhi::Extent2D size, AutomationOptions automationOptions)
       : m_windowSize(size)
       , m_renderer(automationOptions.backend)
       , m_automationOptions(automationOptions)
@@ -87,6 +97,27 @@ public:
     m_window  = glfwCreateWindow(m_windowSize.width, m_windowSize.height, windowTitle, nullptr, nullptr);
     m_surface = m_renderer.createSurface();
     m_renderer.init(m_window, *m_surface, m_vSync);
+    if(m_automationOptions.ddgiSmoke)
+    {
+      demo::DDGIConfig config = m_renderer.getDDGIConfig();
+      config.probeSpacing = 8.0f;
+      config.giDistance = 12.0f;
+      config.maxCascades = 2u;
+      config.raysPerProbe = 16u;
+      config.maxUpdatedProbesPerFrame = 64u;
+      config.surfaceAtlasResolution = 512u;
+      config.surfaceAtlasTileResolution = 64u;
+      config.surfaceAtlasCoverageDistance = 12.0f;
+      m_renderer.setDDGIConfig(config);
+      LOGI("DDGI smoke profile: spacing=%.1f distance=%.1f cascades=%u rays=%u update_budget=%u atlas=%u tile=%u",
+           config.probeSpacing,
+           config.giDistance,
+           config.maxCascades,
+           config.raysPerProbe,
+           config.maxUpdatedProbesPerFrame,
+           config.surfaceAtlasResolution,
+           config.surfaceAtlasTileResolution);
+    }
     m_selectedMaterial = m_renderer.getMaterialHandle(0);
     m_gltfLoader       = std::make_unique<demo::GltfLoader>();
 
@@ -130,7 +161,7 @@ public:
     if(isAutomationEnabled())
     {
       const std::string captureSyncDirectory = m_automationOptions.captureSyncDirectory.string();
-      LOGI("[CSM_AUTOMATION] marker=config mode=%s fixed_dt=%.9f warmup=%u motion=%u hold=%u no_ui=%d no_post=%d no_ddgi=%d taa=%d auto_exit=%d capture_sync=%d capture_control=%d capture_sync_timeout_ms=%u capture_sync_dir=%s",
+      LOGI("[CSM_AUTOMATION] marker=config mode=%s fixed_dt=%.9f warmup=%u motion=%u hold=%u no_ui=%d no_post=%d no_ddgi=%d ddgi_smoke=%d taa=%d auto_exit=%d capture_sync=%d capture_control=%d capture_sync_timeout_ms=%u capture_sync_dir=%s",
            automationModeName(),
            m_automationOptions.fixedDeltaSeconds,
            m_automationOptions.warmupFrames,
@@ -139,6 +170,7 @@ public:
            m_automationOptions.noUi ? 1 : 0,
            m_automationOptions.noPost ? 1 : 0,
            m_automationOptions.noDdgi ? 1 : 0,
+           m_automationOptions.ddgiSmoke ? 1 : 0,
            m_automationOptions.taa ? 1 : 0,
            m_automationOptions.autoExit ? 1 : 0,
            isAutomationCaptureSyncEnabled() ? 1 : 0,
@@ -1659,8 +1691,7 @@ inline void MinimalLatestApp::beginAutomationMetricsWindow()
   m_automationGpuFrameMs.clear();
   m_automationMetricsWindowStarted = true;
   LOGI("[RHI_METRICS] marker=window-start backend=%s frame=%llu",
-       m_automationOptions.backend == demo::rhi::BackendType::d3d12
-         ? "d3d12" : "vulkan",
+       demo::rhi::toString(m_automationOptions.backend),
        static_cast<unsigned long long>(m_automationFrame));
 }
 
@@ -1737,9 +1768,7 @@ inline void MinimalLatestApp::writeAutomationMetrics() const
   const MetricSummary gpu = summarize(m_automationGpuFrameMs);
   const demo::rhi::RHIHotPathCounters counters =
     m_renderer.getRhiHotPathCounters();
-  const char* backend =
-    m_automationOptions.backend == demo::rhi::BackendType::d3d12
-      ? "d3d12" : "vulkan";
+  const char* backend = demo::rhi::toString(m_automationOptions.backend);
 
   std::error_code filesystemError;
   const std::filesystem::path parent =

@@ -1,0 +1,9 @@
+#pragma once
+
+namespace demo::rhi::metal {
+
+inline constexpr const char kMetal4BlitSource[] = R"metal(
+@DEMO_METAL4_BLIT_SOURCE@
+)metal";
+
+}  // namespace demo::rhi::metal

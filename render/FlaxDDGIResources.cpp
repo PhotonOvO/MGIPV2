@@ -334,8 +334,23 @@ glm::uvec3 FlaxDDGIResources::computeProbesPerCascade(const DDGIConfig& config,
   const float extent = config.giDistance;
 
   uint32_t countPerAxis = static_cast<uint32_t>(std::ceil(extent / spacing)) * 2 + 1;
-  countPerAxis = std::min(countPerAxis, 32u); // hard cap at 32^3 = 32768 probes
+  countPerAxis = std::min(countPerAxis, 32u);
   countPerAxis = std::max(countPerAxis, 4u);
+
+  // ProbesTrace stores one probe per texture row. Keep the asymmetric
+  // x*(x/2+1)*x grid within the portable 2D texture dimension advertised by
+  // the RHI surface capabilities (16384). A nominal 32-wide grid has 17408
+  // probes and exceeds Metal's maximum texture height.
+  constexpr uint64_t kPortableMaxTexture2DDimension = 16384u;
+  while(countPerAxis > 4u)
+  {
+    const uint64_t y = countPerAxis / 2u + 1u;
+    const uint64_t probeCount =
+      static_cast<uint64_t>(countPerAxis) * y * countPerAxis;
+    if(probeCount <= kPortableMaxTexture2DDimension)
+      break;
+    --countPerAxis;
+  }
 
   return glm::uvec3(countPerAxis, countPerAxis / 2 + 1, countPerAxis);
 }

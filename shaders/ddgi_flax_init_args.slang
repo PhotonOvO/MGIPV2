@@ -2,8 +2,8 @@
 
 #include "shader_io.h"
 
-[[vk::binding(0, 0)]] RWStructuredBuffer<uint> activeProbes          : register(u0);
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> updateProbesInitArgs : register(u1);
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> activeProbes          DEMO_REGISTER(u0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> updateProbesInitArgs DEMO_REGISTER(u1);
 
 struct FlaxDDGIInitArgsPush
 {

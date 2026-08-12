@@ -76,6 +76,8 @@ namespace demo
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDataIndex = kPackedGBufferTargetCount + 20u;
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDistanceIndex = kPackedGBufferTargetCount + 21u;
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesIrradianceIndex = kPackedGBufferTargetCount + 22u;
+		static_assert(kGPUDrivenLightPassTextureCount == shaderio::LLightingTextureCapacity,
+		              "Metal lighting texture array must match the RHI lighting table");
 		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
@@ -4281,13 +4283,29 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				},
 			}
 		};
+		std::vector<ArgumentLayoutEntry> backendLightingEntries(
+			lightingEntries.begin(), lightingEntries.end());
+		if (getRHIDevice().getBackendInfo().type == rhi::BackendType::metal)
+		{
+			backendLightingEntries.front().type = rhi::BindlessResourceType::sampledImage;
+			backendLightingEntries.push_back(ArgumentLayoutEntry{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.visibility = rhi::ShaderStage::fragment,
+				.type = rhi::BindlessResourceType::sampler,
+				.count = 1,
+			});
+		}
 		m_lightingArgumentLayout = m_renderer.createArgumentLayout(
 			ArgumentLayoutDesc{
-				.entries = lightingEntries.data(), .entryCount = static_cast<uint32_t>(lightingEntries.size())
+				.entries = backendLightingEntries.data(),
+				.entryCount = static_cast<uint32_t>(backendLightingEntries.size())
 			});
 
-		// lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting/culling UBO.
-		const std::array<ArgumentLayoutEntry, 4> sceneEntries{
+		// lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting UBO.
+		// LightCoarseCullingUniforms belongs to set LSetTextures binding 4 above. Keeping
+		// an unused set-1 binding here shifts every later Metal buffer index away from
+		// Slang's declaration-order ABI.
+		const std::array<ArgumentLayoutEntry, 3> sceneEntries{
 			{
 				ArgumentLayoutEntry{
 					.binding = shaderio::LBindCamera, .visibility = rhi::ShaderStage::allGraphics,
@@ -4295,12 +4313,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				},
 				ArgumentLayoutEntry{
 					.binding = shaderio::LBindLighting, .visibility = rhi::ShaderStage::fragment,
-					.type = rhi::BindlessResourceType::uniformBuffer, .count = 1
-				},
-				ArgumentLayoutEntry{
-					.binding = shaderio::LBindLightCulling,
-					.visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(rhi::ShaderStage::fragment) |
-						static_cast<uint32_t>(rhi::ShaderStage::compute)),
 					.type = rhi::BindlessResourceType::uniformBuffer, .count = 1
 				},
 				ArgumentLayoutEntry{
@@ -4487,7 +4499,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		}
 
 		// Owned RHI ArgumentTables for the lighting-scene set (camera/postProcess dynamic UBO +
-		// lighting/culling UBO). Written once below from stable buffers; dynamic offsets supplied
+		// lighting UBO). Written once below from stable buffers; dynamic offsets supplied
 		// at bind time via setDynamicBuffer.
 		m_lightingSceneArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		for (uint32_t i = 0; i < frameCount; ++i)
@@ -4497,9 +4509,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 			const rhi::BufferHandle transientHandle = m_renderer.getTransientBufferHandle(i);
 			const rhi::BufferHandle lightingHandle = m_lightResources.getLightingUniformBuffer(i);
-			const rhi::BufferHandle coarseHandle = m_lightResources.getCoarseUniformBuffer(i);
 
-			const std::array<rhi::ArgumentWrite, 4> sceneWrites{
+			const std::array<rhi::ArgumentWrite, 3> sceneWrites{
 				{
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindCamera, .type = rhi::ArgumentType::uniformBuffer,
@@ -4508,10 +4519,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindLighting, .type = rhi::ArgumentType::uniformBuffer,
 						.buffer = lightingHandle, .size = sizeof(shaderio::LightingUniforms)
-					},
-					rhi::ArgumentWrite{
-						.binding = shaderio::LBindLightCulling, .type = rhi::ArgumentType::uniformBuffer,
-						.buffer = coarseHandle, .size = sizeof(shaderio::LightCoarseCullingUniforms)
 					},
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindPostProcess, .type = rhi::ArgumentType::uniformBuffer,
@@ -5013,10 +5020,11 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						getRHIDevice(), static_cast<const uint32_t*>(shaderData),
 						shaderSize * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
-				},
-			.bindingSchema = bindingSchema.view(),
-				.specializationVariant = variant,
-			};
+					},
+					.bindingSchema = bindingSchema.view(),
+					.threadgroupSize = {8, 8, 1},
+					.specializationVariant = variant,
+				};
 			return getRHIDevice().createComputePipeline(desc);
 		};
 
@@ -5650,13 +5658,30 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			                                         ? m_linearClampSamplerHandle
 			                                         : m_iblLutSamplerHandle;
 
+		const bool useSeparateSamplerBinding =
+			getRHIDevice().getBackendInfo().type == rhi::BackendType::metal;
 		std::vector<rhi::ArgumentWrite> writes;
-		writes.reserve(kGPUDrivenLightPassTextureCount + 4);
+		writes.reserve(kGPUDrivenLightPassTextureCount + 5);
 		for (uint32_t i = 0; i < kGPUDrivenLightPassTextureCount; ++i)
 		{
 			writes.push_back(rhi::ArgumentWrite{
-				.binding = shaderio::LBindTextures, .arrayElement = i, .type = rhi::ArgumentType::combinedImageSampler,
-				.textureView = texViews[i], .sampler = m_linearClampSamplerHandle
+				.binding = shaderio::LBindTextures,
+				.arrayElement = i,
+				.type = useSeparateSamplerBinding
+					? rhi::ArgumentType::sampledTexture
+					: rhi::ArgumentType::combinedImageSampler,
+				.textureView = texViews[i],
+				.sampler = useSeparateSamplerBinding
+					? rhi::SamplerHandle{}
+					: m_linearClampSamplerHandle,
+			});
+		}
+		if (useSeparateSamplerBinding)
+		{
+			writes.push_back(rhi::ArgumentWrite{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.type = rhi::ArgumentType::sampler,
+				.sampler = m_linearClampSamplerHandle,
 			});
 		}
 		// DDGI atlases live in the General resource state (the probe update
@@ -5853,10 +5878,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 						.stage = rhi::ShaderStage::compute,
 						.library = lightCullingLibrary,
 						.entryPoint = entryPoint,
-					},
-					.bindingSchema = cullingBindingSchema.view(),
-					.specializationVariant = variant,
-				};
+						},
+						.bindingSchema = cullingBindingSchema.view(),
+						.threadgroupSize = {64, 1, 1},
+						.specializationVariant = variant,
+					};
 				return getRHIDevice().createComputePipeline(desc);
 			};
 			m_pointLightCoarseCullingPipeline =
@@ -5871,10 +5897,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 					.library = loadEmbeddedSpirvLibrary(
 						getRHIDevice(), clustered_light_cull_slang, "clustered-light-culling"),
 					.entryPoint = "kernelClusteredLightCulling",
-				},
+					},
 					.bindingSchema = cullingBindingSchema.view(),
-				.specializationVariant = 0x6203u,
-			};
+					.threadgroupSize = {64, 1, 1},
+					.specializationVariant = 0x6203u,
+				};
 			m_clusteredLightCullingPipeline = getRHIDevice().createComputePipeline(clusteredDesc);
 		}
 #endif
@@ -6133,10 +6160,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 				.library = loadEmbeddedSpirvLibrary(
 					getRHIDevice(), shader_bitonic_sort_slang, "bitonic-sort"),
 				.entryPoint = "bitonicSortMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x6401u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x6401u,
+			};
 		m_visibilitySortPipelineHandle = getRHIDevice().createComputePipeline(desc);
 #endif
 
@@ -6212,10 +6240,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 					getRHIDevice(), shader_transparent_visibility_patch_slang,
 					"transparent-visibility-patch"),
 				.entryPoint = "transparentVisibilityPatchMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x7001u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x7001u,
+			};
 		m_transparentVisibilityPatchPipelineHandle = getRHIDevice().createComputePipeline(desc);
 #endif
 
@@ -6334,7 +6363,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 	                                                          uint32_t frameIndex,
 	                                                          rhi::BufferHandle targetIndirectBuffer,
 	                                                          uint32_t categoryValue,
-	                                                          uint32_t outputOffset)
+	                                                          uint32_t outputOffset,
+	                                                          uint32_t outputCapacity)
 	{
 		if (frameIndex >= m_transparentVisibilityPatchFrames.size()
 			|| frameIndex >= m_visibilitySortFrames.size()
@@ -6391,7 +6421,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.mode = 0u,
 			.scanOffset = 0u,
 			.scanBufferIndex = 0u,
-			._padding0 = 0u,
+				.outputCapacity = outputCapacity,
 		};
 
 		// Each dispatch records in its own compute-pass scope so the inter-dispatch barriers

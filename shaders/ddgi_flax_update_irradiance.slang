@@ -6,12 +6,12 @@
 #include "flax_ddgi_common.slang"
 #include "ddgi_common.slang"
 
-[[vk::binding(0, 0)]] Texture2D<float4> probesTrace                  : register(t0);
-[[vk::binding(1, 0)]] RWTexture2D<float4> probesData                 : register(u3);
-[[vk::binding(2, 0)]] RWTexture2D<float4> probesIrradianceOut        : register(u0);
-[[vk::binding(3, 0)]] RWTexture2D<float4> probesIrradianceHist       : register(u2);
-[[vk::binding(4, 0)]] RWStructuredBuffer<uint> activeProbes             : register(u1);
-[[vk::binding(5, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData            : register(t3);
+[[vk::binding(0, 0)]] Texture2D<float4> probesTrace                  DEMO_REGISTER(t0);
+[[vk::binding(1, 0)]] RWTexture2D<float4> probesData                 DEMO_REGISTER(u3);
+[[vk::binding(2, 0)]] RWTexture2D<float4> probesIrradianceOut        DEMO_REGISTER(u0);
+[[vk::binding(3, 0)]] RWTexture2D<float4> probesIrradianceHist       DEMO_REGISTER(u2);
+[[vk::binding(4, 0)]] RWStructuredBuffer<uint> activeProbes             DEMO_REGISTER(u1);
+[[vk::binding(5, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData            DEMO_REGISTER(t3);
 static FlaxDDGIData ddgi = ddgiData[0];
 struct FlaxDDGICascadePush
 {
@@ -23,7 +23,7 @@ struct FlaxDDGICascadePush
 void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
     static const uint kTileSize = 8;
-    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.probesCounts.w - 1u);
 
     uint activeSlot = groupId.x;
     uint probeIndex;
@@ -50,12 +50,13 @@ void CS_UpdateIrradiance(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Gr
         ((float2(interiorTexel - uint2(1u, 1u)) + 0.5f)
          / float(kDDGIProbeIrradianceResolution)) * 2.0f - 1.0f;
     float3 texelDirection = flaxOctahedralDecode(octahedralCoord);
-    for (uint r = 0; r < ddgi.raysCount; r++)
+    const uint raysCount = uint(ddgi.viewPos.w);
+    for (uint r = 0; r < raysCount; r++)
     {
         float4 traceData = probesTrace.Load(int3(uint2(r, activeSlot), 0));
         // Miss rays carry sky radiance and must participate in the directional
         // irradiance integral just like surface hits.
-        float3 rayDirection = flaxSphericalFibonacci(float(r), float(ddgi.raysCount));
+        float3 rayDirection = flaxSphericalFibonacci(float(r), float(raysCount));
         float rayWeight = saturate(dot(texelDirection, rayDirection));
         accumulated += traceData.rgb * rayWeight;
         accumulatedWeight += rayWeight;

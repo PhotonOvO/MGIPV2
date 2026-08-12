@@ -71,15 +71,17 @@ uint16_t4 projectSphereToTileBounds(float3 center, float radius)
     minNdc = clamp(minNdc, float2(-1.0, -1.0), float2(1.0, 1.0));
     maxNdc = clamp(maxNdc, float2(-1.0, -1.0), float2(1.0, 1.0));
 
-    const float minPixelX = (minNdc.x * 0.5 + 0.5) * float(screenWidth);
-    const float maxPixelX = (maxNdc.x * 0.5 + 0.5) * float(screenWidth);
-    const float minPixelY = (minNdc.y * 0.5 + 0.5) * float(screenHeight);
-    const float maxPixelY = (maxNdc.y * 0.5 + 0.5) * float(screenHeight);
+    const float2 framebufferCorner0 = demoNdcToFramebufferUv(minNdc);
+    const float2 framebufferCorner1 = demoNdcToFramebufferUv(maxNdc);
+    const float2 minPixel = min(framebufferCorner0, framebufferCorner1)
+        * float2(screenWidth, screenHeight);
+    const float2 maxPixel = max(framebufferCorner0, framebufferCorner1)
+        * float2(screenWidth, screenHeight);
 
-    const uint tileStartX = min(uint(floor(minPixelX)) / LTileSizeX, tileCountX);
-    const uint tileEndX = min((uint(ceil(maxPixelX)) + LTileSizeX - 1) / LTileSizeX, tileCountX);
-    const uint tileStartY = min(uint(floor(minPixelY)) / LTileSizeY, tileCountY);
-    const uint tileEndY = min((uint(ceil(maxPixelY)) + LTileSizeY - 1) / LTileSizeY, tileCountY);
+    const uint tileStartX = min(uint(floor(minPixel.x)) / LTileSizeX, tileCountX);
+    const uint tileEndX = min((uint(ceil(maxPixel.x)) + LTileSizeX - 1) / LTileSizeX, tileCountX);
+    const uint tileStartY = min(uint(floor(minPixel.y)) / LTileSizeY, tileCountY);
+    const uint tileEndY = min((uint(ceil(maxPixel.y)) + LTileSizeY - 1) / LTileSizeY, tileCountY);
 
     if(tileEndX <= tileStartX || tileEndY <= tileStartY)
     {

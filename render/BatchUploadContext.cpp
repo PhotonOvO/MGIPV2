@@ -4,7 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
-#if !defined(__ANDROID__) && !defined(ANDROID)
+#if !defined(__APPLE__) && !defined(__ANDROID__) && !defined(ANDROID)
 #include <execution>
 #endif
 #include <numeric>
@@ -106,7 +106,7 @@ namespace demo
 			}
 			std::memcpy(slice.cpuPtr, source.data(), source.size_bytes());
 		};
-#if defined(__ANDROID__) || defined(ANDROID)
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(ANDROID)
 		std::for_each(indices.begin(), indices.end(), copySlice);
 #else
 		std::for_each(std::execution::par, indices.begin(), indices.end(), copySlice);

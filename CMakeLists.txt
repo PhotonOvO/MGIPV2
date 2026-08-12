@@ -2,9 +2,113 @@ cmake_minimum_required(VERSION 3.21)
 project(Demo VERSION 1.0 LANGUAGES C CXX)
 
 include(CTest)
+include(FetchContent)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(APPLE)
+  option(DEMO_ENABLE_METAL4 "Build the Metal 4 RHI backend" ON)
+else()
+  option(DEMO_ENABLE_METAL4 "Build the Metal 4 RHI backend" OFF)
+endif()
+if(DEMO_ENABLE_METAL4 AND NOT APPLE)
+  message(FATAL_ERROR "DEMO_ENABLE_METAL4 is supported only on Apple platforms")
+endif()
+
+set(DEMO_METAL_CPP_COMMIT "9a8bc57c0318b84863bec2faf6605594877c5f5d")
+set(DEMO_METAL_CPP_SHA256 "46736574f7afd977d7d35a13aa781edb595a43650d437b50f5779ec750879530")
+
+if(APPLE AND DEMO_ENABLE_METAL4)
+  enable_language(OBJC)
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 20)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+
+  execute_process(
+    COMMAND xcrun --sdk macosx --show-sdk-version
+    OUTPUT_VARIABLE DEMO_MACOS_SDK_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE DEMO_MACOS_SDK_QUERY_RESULT
+  )
+  if(NOT DEMO_MACOS_SDK_QUERY_RESULT EQUAL 0 OR DEMO_MACOS_SDK_VERSION VERSION_LESS 26.0)
+    message(FATAL_ERROR
+      "The Metal 4 backend requires the macOS 26 SDK. "
+      "Configure with DEVELOPER_DIR pointing at Xcode 26 or newer.")
+  endif()
+
+  FetchContent_Declare(
+    metal_cpp
+    URL "https://github.com/bkaradzic/metal-cpp/archive/${DEMO_METAL_CPP_COMMIT}.tar.gz"
+    URL_HASH "SHA256=${DEMO_METAL_CPP_SHA256}"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_GetProperties(metal_cpp)
+  if(NOT metal_cpp_POPULATED)
+    FetchContent_Populate(metal_cpp)
+  endif()
+  add_library(metal_cpp_headers INTERFACE)
+  target_include_directories(metal_cpp_headers INTERFACE "${metal_cpp_SOURCE_DIR}")
+
+  find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
+  find_library(DEMO_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+  find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(DEMO_APPKIT_FRAMEWORK AppKit REQUIRED)
+
+  file(READ "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
+    DEMO_METAL4_BLIT_SOURCE)
+  set(DEMO_METAL4_GENERATED_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/_metal4")
+  file(MAKE_DIRECTORY "${DEMO_METAL4_GENERATED_INCLUDE_DIR}")
+  configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlitSource.h.in"
+    "${DEMO_METAL4_GENERATED_INCLUDE_DIR}/MetalBlitSource.h"
+    @ONLY)
+
+  set(DEMO_METAL4_SOURCES
+    rhi/metal/Metal4Availability.h
+    rhi/metal/Metal4Availability.mm
+    rhi/metal/Metal4Contract.h
+    rhi/metal/Metal4Contract.mm
+    rhi/metal/MetalCpp.cpp
+    rhi/metal/MetalCommon.h
+    rhi/metal/MetalResourceTable.h
+    rhi/metal/MetalResourceTable.cpp
+    rhi/metal/MetalQueue.h
+    rhi/metal/MetalQueue.cpp
+    rhi/metal/MetalCommandAllocator.h
+    rhi/metal/MetalCommandAllocator.cpp
+    rhi/metal/MetalCommandBuffer.h
+    rhi/metal/MetalCommandBuffer.cpp
+    rhi/metal/MetalSurface.h
+    rhi/metal/MetalSurface.mm
+    rhi/metal/MetalDevice.h
+    rhi/metal/MetalDevice.cpp
+    rhi/metal/MetalPipelines.h
+    rhi/metal/MetalPipelines.cpp
+    rhi/metal/MetalSwapchain.h
+    rhi/metal/MetalSwapchain.cpp
+  )
+
+  function(demo_configure_metal4_target target_name)
+    target_include_directories(${target_name} PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}"
+      "${metal_cpp_SOURCE_DIR}"
+      "${DEMO_METAL4_GENERATED_INCLUDE_DIR}"
+    )
+    target_compile_definitions(${target_name} PUBLIC DEMO_HAS_METAL4=1)
+    target_compile_options(${target_name} PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-fblocks>
+    )
+    target_link_libraries(${target_name} PUBLIC
+      metal_cpp_headers
+      "${DEMO_METAL_FRAMEWORK}"
+      "${DEMO_QUARTZCORE_FRAMEWORK}"
+      "${DEMO_FOUNDATION_FRAMEWORK}"
+      "${DEMO_APPKIT_FRAMEWORK}"
+    )
+  endfunction()
+endif()
 
 option(DEMO_RHI_CONTRACT_ONLY "Build only dependency-free public/backend RHI contract targets" OFF)
 if(DEMO_RHI_CONTRACT_ONLY)
@@ -89,8 +193,6 @@ endif()
 if(MSVC)
     add_compile_options(/utf-8)
 endif()
-
-include(FetchContent)
 
 set(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
 
@@ -261,11 +363,87 @@ if(USE_SLANG)
     SPVS_VAR GENERATED_SHADER_SPV_BINARIES
     EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
   )
+  if(APPLE AND DEMO_ENABLE_METAL4)
+    execute_process(
+      COMMAND xcodebuild -showComponent MetalToolchain -json
+      OUTPUT_VARIABLE DEMO_METAL_COMPONENT_JSON
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE DEMO_METAL_COMPONENT_RESULT)
+    if(DEMO_METAL_COMPONENT_RESULT EQUAL 0)
+      string(JSON DEMO_METAL_TOOLCHAIN_IDENTIFIER
+        ERROR_VARIABLE DEMO_METAL_JSON_ERROR
+        GET "${DEMO_METAL_COMPONENT_JSON}" toolchainIdentifier)
+    endif()
+    if(NOT DEMO_METAL_COMPONENT_RESULT EQUAL 0 OR
+       DEMO_METAL_JSON_ERROR OR
+       NOT DEMO_METAL_TOOLCHAIN_IDENTIFIER)
+      message(FATAL_ERROR
+        "Xcode 26's optional Metal Toolchain component is required. "
+        "Install it with: xcodebuild -downloadComponent MetalToolchain")
+    endif()
+
+    execute_process(
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metal --version
+      OUTPUT_QUIET ERROR_QUIET
+      RESULT_VARIABLE DEMO_METAL_COMPILER_RESULT)
+    execute_process(
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metallib --version
+      OUTPUT_QUIET ERROR_QUIET
+      RESULT_VARIABLE DEMO_METALLIB_TOOL_RESULT)
+    if(NOT DEMO_METAL_COMPILER_RESULT EQUAL 0 OR
+       NOT DEMO_METALLIB_TOOL_RESULT EQUAL 0)
+      message(FATAL_ERROR
+        "Xcode's Metal Toolchain component is installed but its tools could "
+        "not be executed through xcrun")
+    endif()
+    set(DEMO_METAL_TOOLCHAIN_IDENTIFIER
+      "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" CACHE STRING
+      "Xcode Metal toolchain used for Metal shader libraries" FORCE)
+
+    set(DEMO_METAL4_BLIT_AIR
+      "${SHADER_OUTPUT_DIR}/MetalBlit.air")
+    set(DEMO_METAL4_BLIT_LIBRARY
+      "${SHADER_OUTPUT_DIR}/MetalBlit.metallib")
+    add_custom_command(
+      OUTPUT "${DEMO_METAL4_BLIT_AIR}" "${DEMO_METAL4_BLIT_LIBRARY}"
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metal
+        -std=metal4.0
+        "-fmodules-cache-path=${SHADER_OUTPUT_DIR}/metal-module-cache"
+        -c "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
+        -o "${DEMO_METAL4_BLIT_AIR}"
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metallib
+        "${DEMO_METAL4_BLIT_AIR}"
+        -o "${DEMO_METAL4_BLIT_LIBRARY}"
+      DEPENDS "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
+      COMMENT "Validating the Metal 4 compute blit shader"
+      VERBATIM)
+    add_custom_target(metal4_builtin_shader_validation ALL
+      DEPENDS "${DEMO_METAL4_BLIT_AIR}" "${DEMO_METAL4_BLIT_LIBRARY}")
+
+    set(DEMO_METAL_SHADER_CATALOG
+      "${SHADER_OUTPUT_DIR}/MetalShaderCatalog.h")
+    compile_slang_metal(
+      "${SHADER_SLANG_FILES}"
+      "${SHADER_OUTPUT_DIR}"
+      HEADERS_VAR GENERATED_SHADER_METAL_HEADERS
+      CATALOG_HEADER "${DEMO_METAL_SHADER_CATALOG}"
+      METAL_TOOLCHAIN "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}"
+      EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
+    )
+  else()
+    set(GENERATED_SHADER_METAL_HEADERS "")
+  endif()
   # Reflection metadata will be extracted from SPIR-V at build time or runtime
   # For v1, we establish the contract structure; actual extraction is a follow-on task
 else()
   set(GENERATED_SHADER_SLANG_HEADERS "")
   set(GENERATED_SHADER_SPV_BINARIES "")
+  set(GENERATED_SHADER_METAL_HEADERS "")
 endif()
 
 # The Windows Vulkan final-color pass uses the same DXC downstream as D3D12 so
@@ -554,31 +732,12 @@ add_library(demo_core STATIC
 )
 
 if(NOT ANDROID)
-  target_sources(demo_core PRIVATE
-    app/MinimalLatestApp.h
-    rhi/metal/MetalDevice.h
-    rhi/metal/MetalDevice.cpp
-    rhi/metal/MetalSwapchain.h
-    rhi/metal/MetalSwapchain.cpp
-    rhi/metal/MetalPipelines.h
-    rhi/metal/MetalPipelines.cpp
-  )
+  target_sources(demo_core PRIVATE app/MinimalLatestApp.h)
 endif()
 
-if(APPLE)
-  enable_language(OBJCXX)
-  target_sources(demo_core PRIVATE
-    rhi/metal/Metal4Availability.h
-    rhi/metal/Metal4Availability.mm
-    rhi/metal/Metal4Contract.h
-    rhi/metal/Metal4Contract.mm
-  )
-  find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
-  find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
-  target_link_libraries(demo_core PUBLIC
-    "${DEMO_METAL_FRAMEWORK}"
-    "${DEMO_FOUNDATION_FRAMEWORK}"
-  )
+if(APPLE AND DEMO_ENABLE_METAL4)
+  target_sources(demo_core PRIVATE ${DEMO_METAL4_SOURCES})
+  demo_configure_metal4_target(demo_core)
 endif()
 
 if(WIN32 AND DEMO_ENABLE_D3D12)
@@ -619,6 +778,9 @@ endif()
 target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
+endif()
+if(APPLE AND DEMO_ENABLE_METAL4 AND USE_SLANG)
+  target_compile_definitions(demo_core PRIVATE DEMO_HAS_EMBEDDED_METAL_SHADERS=1)
 endif()
 if(DEMO_HAS_DXC_FINAL_SPIRV)
   target_compile_definitions(demo_core PRIVATE DEMO_HAS_DXC_FINAL_SPIRV=1)
@@ -666,6 +828,8 @@ target_sources(demo_core PRIVATE
   ${STB_IMAGE_PATH}
   ${GENERATED_SHADER_SLANG_HEADERS}
   ${GENERATED_SHADER_SPV_BINARIES}
+  ${GENERATED_SHADER_METAL_HEADERS}
+  ${DEMO_METAL_SHADER_CATALOG}
   ${GENERATED_SHADER_GLSL_HEADERS}
   ${SHADER_H_FILES}
 )
@@ -783,6 +947,7 @@ endif()
 
 
 if(NOT ANDROID)
+if(WIN32)
 add_executable(texture_converter  
   tools/texture_converter.cpp
 )
@@ -815,6 +980,7 @@ add_custom_command(TARGET texture_converter POST_BUILD
           "${NVTT_DLL}"
           "$<TARGET_FILE_DIR:texture_converter>/nvtt30205.dll"
 )
+endif()
 
 # --- Offline Mesh SDF baker (DDGI Wave D1-1) ---
 # Pure-CPU asset tool: no RHI/Vulkan/NVTT dependency.
@@ -871,7 +1037,11 @@ add_custom_target(copy_demo_resources
   COMMENT "Copying resources to build directory..."
 )
 
-add_dependencies(Demo texture_converter copy_demo_resources)
+if(WIN32)
+  add_dependencies(Demo texture_converter copy_demo_resources)
+else()
+  add_dependencies(Demo copy_demo_resources)
+endif()
 
 # --- RHI Boundary Guard (VER-01) ---
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

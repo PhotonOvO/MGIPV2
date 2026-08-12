@@ -33,6 +33,11 @@ constexpr uint32_t kFlaxGIHighPriorityBudgetDenominator = 4u;
 static_assert(kFlaxGIMaxPublishedCascades == FlaxDDGIResources::kMaxCascades);
 static_assert(kFlaxGIMaxPublishedCascades
   == static_cast<uint32_t>(shaderio::LFlaxDDGIMaxCascades));
+static_assert(sizeof(shaderio::FlaxDDGIData) == 1760u);
+static_assert(offsetof(shaderio::FlaxDDGIData, probesCounts) == 256u);
+static_assert(offsetof(shaderio::FlaxDDGIData, irradianceGamma) == 272u);
+static_assert(offsetof(shaderio::FlaxDDGIData, viewPos) == 288u);
+static_assert(offsetof(shaderio::FlaxDDGIData, fallbackIrradiance) == 304u);
 
 constexpr uint32_t computeFlaxGIHighPriorityUpdateBudget(uint32_t updateBudget)
 {
@@ -592,8 +597,9 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
 	}
 	// --- Pipelines ---
 #ifdef USE_SLANG
-  const auto createPipeline = [&](const uint32_t* spirv, size_t wordCount, const char* entryPoint,
-                                   rhi::ArgumentLayoutHandle layout, uint32_t pushSize, uint32_t variant)
+	  const auto createPipeline = [&](const uint32_t* spirv, size_t wordCount, const char* entryPoint,
+	                                   rhi::ArgumentLayoutHandle layout, uint32_t pushSize,
+	                                   rhi::Extent3D threadgroupSize, uint32_t variant)
   {
     const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{layout}};
     const std::array<rhi::RootBindingDesc, 1> rootBindings{{
@@ -614,23 +620,24 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
         .library = loadEmbeddedSpirvLibrary(
           device, spirv, wordCount * sizeof(uint32_t), entryPoint),
         .entryPoint = entryPoint,
-      },
-      .bindingSchema = bindingSchema.view(),
-      .specializationVariant = variant,
+	      },
+	      .bindingSchema = bindingSchema.view(),
+	      .threadgroupSize = threadgroupSize,
+	      .specializationVariant = variant,
     };
     return device.createComputePipeline(desc);
   };
 
   // Cascade-specific shaders use a uint push constant; InitArgs uses its argument block.
   const uint32_t initArgsPushSize = sizeof(FlaxDDGIInitArgsPush);
-  m_classifyPipeline = createPipeline(ddgi_flax_classify_slang, std::size(ddgi_flax_classify_slang), "CS_Classify", m_classifyLayout, sizeof(FlaxDDGICascadePush), 0x1001u);
-  m_compactPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_CompactActiveProbes", m_initArgsLayout, initArgsPushSize, 0x1002u);
-  m_initArgsPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_UpdateProbesInitArgs", m_initArgsLayout, initArgsPushSize, 0x1008u);
-  m_updateInactivePipeline = createPipeline(ddgi_flax_update_inactive_slang, std::size(ddgi_flax_update_inactive_slang), "CS_UpdateInactive", m_updateInactiveLayout, 0, 0x1003u);
-  m_traceRaysPipeline = createPipeline(ddgi_flax_trace_rays_slang, std::size(ddgi_flax_trace_rays_slang), "CS_TraceRays", m_traceRaysLayout, sizeof(FlaxDDGICascadePush), 0x1004u);
-  m_distancePipeline = createPipeline(ddgi_flax_update_distance_slang, std::size(ddgi_flax_update_distance_slang), "CS_UpdateDistance", m_distanceLayout, sizeof(FlaxDDGICascadePush), 0x1005u);
-  m_irradiancePipeline = createPipeline(ddgi_flax_update_irradiance_slang, std::size(ddgi_flax_update_irradiance_slang), "CS_UpdateIrradiance", m_irradianceLayout, sizeof(FlaxDDGICascadePush), 0x1006u);
-  m_debugViewsPipeline = createPipeline(ddgi_flax_debug_views_slang, std::size(ddgi_flax_debug_views_slang), "CS_FlaxGIDebugViews", m_debugViewsLayout, sizeof(FlaxGIDebugViewPush), 0x1007u);
+	  m_classifyPipeline = createPipeline(ddgi_flax_classify_slang, std::size(ddgi_flax_classify_slang), "CS_Classify", m_classifyLayout, sizeof(FlaxDDGICascadePush), {32, 1, 1}, 0x1001u);
+	  m_compactPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_CompactActiveProbes", m_initArgsLayout, initArgsPushSize, {256, 1, 1}, 0x1002u);
+	  m_initArgsPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_UpdateProbesInitArgs", m_initArgsLayout, initArgsPushSize, {1, 1, 1}, 0x1008u);
+	  m_updateInactivePipeline = createPipeline(ddgi_flax_update_inactive_slang, std::size(ddgi_flax_update_inactive_slang), "CS_UpdateInactive", m_updateInactiveLayout, 0, {8, 8, 1}, 0x1003u);
+	  m_traceRaysPipeline = createPipeline(ddgi_flax_trace_rays_slang, std::size(ddgi_flax_trace_rays_slang), "CS_TraceRays", m_traceRaysLayout, sizeof(FlaxDDGICascadePush), {64, 1, 1}, 0x1004u);
+	  m_distancePipeline = createPipeline(ddgi_flax_update_distance_slang, std::size(ddgi_flax_update_distance_slang), "CS_UpdateDistance", m_distanceLayout, sizeof(FlaxDDGICascadePush), {8, 8, 1}, 0x1005u);
+	  m_irradiancePipeline = createPipeline(ddgi_flax_update_irradiance_slang, std::size(ddgi_flax_update_irradiance_slang), "CS_UpdateIrradiance", m_irradianceLayout, sizeof(FlaxDDGICascadePush), {8, 8, 1}, 0x1006u);
+	  m_debugViewsPipeline = createPipeline(ddgi_flax_debug_views_slang, std::size(ddgi_flax_debug_views_slang), "CS_FlaxGIDebugViews", m_debugViewsLayout, sizeof(FlaxGIDebugViewPush), {8, 8, 1}, 0x1007u);
 #endif
 
   m_pipelinesCreated = true;
@@ -822,17 +829,17 @@ static shaderio::FlaxDDGIData buildFlaxDDGIData(
         spatialSnapshot.cascades[0].blendOrigin[2]};
 
   shaderio::FlaxDDGIData ddgi{};
-  ddgi.cascadesCount = spatialSnapshot.cascadeCount;
-  ddgi.probesCounts = shaderio::uvec3{
+  ddgi.probesCounts = shaderio::uvec4{
     spatialSnapshot.probeCounts[0],
     spatialSnapshot.probeCounts[1],
-    spatialSnapshot.probeCounts[2]};
+    spatialSnapshot.probeCounts[2],
+    spatialSnapshot.cascadeCount};
   ddgi.irradianceGamma = config.ddgiGamma;
   ddgi.probeHistoryWeight = config.probeHistoryWeight;
   ddgi.rayMaxDistance = config.maxDistance;
   ddgi.indirectLightingIntensity = config.indirectLightingIntensity;
-  ddgi.viewPos = shaderio::vec3{viewPos.x, viewPos.y, viewPos.z};
-  ddgi.raysCount = config.raysPerProbe;
+  ddgi.viewPos = shaderio::vec4{
+    viewPos.x, viewPos.y, viewPos.z, static_cast<float>(config.raysPerProbe)};
   ddgi.fallbackIrradiance = shaderio::vec4{config.fallbackIrradiance.x, config.fallbackIrradiance.y, config.fallbackIrradiance.z, config.fallbackIrradiance.w};
 
   ddgi.environmentParams = shaderio::vec4{
@@ -874,7 +881,7 @@ static shaderio::FlaxDDGIData buildFlaxDDGIData(
     ddgi.radianceSources[sourceIndex] = radianceSources[sourceIndex];
   }
 
-  for (uint32_t c = 0; c < ddgi.cascadesCount; ++c)
+  for (uint32_t c = 0; c < ddgi.probesCounts.w; ++c)
   {
     const FlaxGICascadeSpatialSnapshot& publishedCascade =
       spatialSnapshot.cascades[c];

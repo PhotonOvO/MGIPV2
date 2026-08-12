@@ -683,7 +683,8 @@ namespace demo
 		};
 		reflection.pushConstantSize = sizeof(shaderio::PushConstant);
 		reflection.specializationConstants = {
-			rhi::SpecializationConstant{0, 0, sizeof(uint32_t)},
+			rhi::SpecializationConstant{
+				0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean},
 		};
 		return reflection;
 	}
@@ -693,7 +694,7 @@ namespace demo
 		rhi::ShaderReflectionData reflection{};
 		reflection.name = "shader.comp";
 		reflection.entryPoints = {
-			rhi::ShaderEntryPoint{"main", rhi::ShaderStageFlagBits::compute},
+			rhi::ShaderEntryPoint{"computeMain", rhi::ShaderStageFlagBits::compute},
 		};
 		reflection.pushConstantRanges = {
 			rhi::PushConstantRange{rhi::ShaderStageFlagBits::compute, 0, sizeof(shaderio::PushConstantCompute)},
@@ -724,6 +725,12 @@ namespace demo
 		{
 			// Three frame-local tables must fit D3D12's 2048-entry shader-visible sampler heap.
 			m_materials.maxTextures = 512;
+		}
+		else if (m_backend == rhi::BackendType::metal)
+		{
+			// Metal shader functions expose at most 128 read-only texture arguments.
+			// A single shared sampler keeps this table below the independent sampler limit.
+			m_materials.maxTextures = shaderio::LMetalMaterialTextureCapacity;
 		}
 
 		// Backend-neutral device creation (RDEV-06): the Vulkan loader bootstrap, WSI /
@@ -1708,6 +1715,8 @@ namespace demo
 	}
 
 	static void recordGPUCullingDrawCountReset(rhi::CommandBuffer& cmdBuffer,
+	                                           rhi::BufferHandle indirectBuffer,
+	                                           uint64_t indirectBufferSize,
 	                                           rhi::BufferHandle statsBuffer,
 	                                           rhi::BufferHandle drawCountBuffer)
 	{
@@ -1724,6 +1733,12 @@ namespace demo
 		                  rhi::HazardFlags::readBeforeWrite);
 
 		rhi::ComputeEncoder* clear = cmdBuffer.beginComputePass();
+		if (!indirectBuffer.isNull() && indirectBufferSize != 0u)
+		{
+			// Metal 4 has no count-buffer indirect draw. Clearing the bounded
+			// command range guarantees that commands beyond the GPU count are no-ops.
+			clear->fillBuffer(indirectBuffer, 0, indirectBufferSize, 0u);
+		}
 		clear->fillBuffer(drawCountBuffer, 0, sizeof(shaderio::GPUCullDrawCounts), 0u);
 		if (!statsBuffer.isNull())
 		{
@@ -1775,6 +1790,7 @@ namespace demo
 		frameUserData.gpuCullingIndirectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = static_cast<uint64_t>(getGPUCullingIndirectCommandStride()) * requiredCapacity * 4u,
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
+			       | rhi::BufferUsageFlags::transferDst
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
@@ -3282,8 +3298,12 @@ namespace demo
 			                            shaderio::LightingUniforms{m_frameLightingState.lightParams});
 			updateLightCullingUniformBuffer(currentFrameIndex, buildLightCullingUniforms(params));
 			updateGPUCullingBuffers(currentFrameIndex, params);
-			recordGPUCullingDrawCountReset(cmdBuffer, frameUserData.gpuCullingStatsBufferRHI,
-			                                    frameUserData.gpuCullingDrawCountBufferRHI);
+			recordGPUCullingDrawCountReset(
+				cmdBuffer, frameUserData.gpuCullingIndirectBufferRHI,
+				static_cast<uint64_t>(getGPUCullingIndirectCommandStride())
+					* frameUserData.gpuCullingMeshCapacity * 4u,
+				frameUserData.gpuCullingStatsBufferRHI,
+				frameUserData.gpuCullingDrawCountBufferRHI);
 			updateShadowCullingBuffers(currentFrameIndex, params);
 
 			// Route through pass executor to orchestrate multi-pass rendering
@@ -3417,7 +3437,15 @@ namespace demo
 
 		{
 			demo::profiling::ScopedCpuRange presentRange("Present");
-			(void)m_swapchainDependent.swapchain->present();
+			const bool hadAcquiredImage = m_swapchainDependent.hasAcquiredImage;
+			const rhi::PresentResult presentResult = m_swapchainDependent.swapchain->present();
+			m_swapchainDependent.hasAcquiredImage = false;
+			if (hadAcquiredImage
+				&& (presentResult.status == rhi::PresentResult::Status::suboptimal
+					|| presentResult.status == rhi::PresentResult::Status::outOfDate))
+			{
+				m_swapchainDependent.swapchain->requestRebuild();
+			}
 		}
 		m_perFrame.frameCounter++;
 	}
@@ -4227,7 +4255,8 @@ namespace demo
 		// Specialization constants for useTexture (constant_id = 0)
 		// Textured variant: useTexture = true (uint32_t = 4 bytes; Specialization constant)
 		uint32_t useTextureTrue = uint32_t{1};
-		rhi::SpecializationConstant specConstantTrue(0, 0, sizeof(uint32_t));
+		rhi::SpecializationConstant specConstantTrue(
+			0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean);
 		rhi::SpecializationData specDataTrue{std::as_bytes(std::span{&useTextureTrue, 1})};
 		shaderStages[1].specializationData = specDataTrue;
 		shaderStages[1].specializationConstants = std::span{&specConstantTrue, 1};
@@ -4265,7 +4294,8 @@ namespace demo
 		shaderStages[1].specializationVariant = 0;
 		// Non-textured variant: useTexture = false (uint32_t = 4 bytes; Specialization constant)
 		uint32_t useTextureFalse = uint32_t{0};
-		rhi::SpecializationConstant specConstantFalse(0, 0, sizeof(uint32_t));
+		rhi::SpecializationConstant specConstantFalse(
+			0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean);
 		rhi::SpecializationData specDataFalse{std::as_bytes(std::span{&useTextureFalse, 1})};
 		shaderStages[1].specializationData = specDataFalse;
 		shaderStages[1].specializationConstants = std::span{&specConstantFalse, 1};
@@ -4292,6 +4322,16 @@ namespace demo
 			// the plain uniformBuffer type and updateArgumentTable emits the *_DYNAMIC descriptor.
 			const rhi::ArgumentLayoutHandle cameraLayout = createArgumentLayoutFromBindings(
 				cameraLayoutEntries, "gbuffer-camera");
+			const std::array<rhi::ArgumentBinding, 1> geometryCameraLayoutEntries{{
+				makeArgumentBinding(shaderio::LBindCamera,
+				                    rhi::BindlessResourceType::uniformBufferDynamic, 1,
+				                    rhi::ResourceVisibility::allGraphics),
+			}};
+			const rhi::ArgumentLayoutHandle geometryCameraLayout =
+				m_backend == rhi::BackendType::metal
+					? createArgumentLayoutFromBindings(
+						geometryCameraLayoutEntries, "metal-geometry-camera")
+					: cameraLayout;
 			for (uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
 			{
 				PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
@@ -4333,6 +4373,12 @@ namespace demo
 				makeArgumentBinding(shaderio::LBindDrawModel, rhi::BindlessResourceType::uniformBufferDynamic, 1,
 				                    rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment),
 			};
+			if (m_backend == rhi::BackendType::metal)
+			{
+				drawLayoutEntries.push_back(makeArgumentBinding(
+					shaderio::LBindDrawModelMdi, rhi::BindlessResourceType::storageBuffer, 1,
+					rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment));
+			}
 			const rhi::ArgumentLayoutHandle drawLayout = createArgumentLayoutFromBindings(
 				drawLayoutEntries, "gbuffer-draw");
 			for (uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
@@ -4346,41 +4392,80 @@ namespace demo
 					.primaryLogicalIndex = shaderio::LBindDrawModel,
 					.debugName = "gbuffer-draw",
 				});
-				const rhi::ArgumentWrite drawWrite{
-					.binding = shaderio::LBindDrawModel, .type = rhi::ArgumentType::uniformBuffer,
-					.buffer = fud.transientBufferRHI, .offset = 0, .size = sizeof(shaderio::DrawUniforms)
-				};
-				m_device.device->updateArgumentTable(drawTable, rhi::ArgumentWriteBatch{&drawWrite, 1});
+				const std::array<rhi::ArgumentWrite, 2> drawWrites{{
+					rhi::ArgumentWrite{
+						.binding = shaderio::LBindDrawModel, .type = rhi::ArgumentType::uniformBuffer,
+						.buffer = fud.transientBufferRHI, .offset = 0,
+						.size = sizeof(shaderio::DrawUniforms)
+					},
+					rhi::ArgumentWrite{
+						.binding = shaderio::LBindDrawModelMdi, .type = rhi::ArgumentType::storageBuffer,
+						.buffer = fud.transientBufferRHI, .offset = 0,
+						.size = sizeof(shaderio::DrawUniforms)
+					},
+				}};
+				const uint32_t drawWriteCount = m_backend == rhi::BackendType::metal ? 2u : 1u;
+				m_device.device->updateArgumentTable(
+					drawTable, rhi::ArgumentWriteBatch{drawWrites.data(), drawWriteCount});
 			}
 
 			// MDI draw-data: one shared storage-buffer ArgumentLayout for the three per-frame MDI
 			// variants and all CSM cascades. Descriptor sets are written lazily by the
 			// ensure*MdiDrawDataBuffer / updateShadowCullingDrawDataArgumentTable paths.
-			std::vector<rhi::ArgumentBinding> shadowMdiDrawLayoutEntries{
-				makeArgumentBinding(shaderio::LBindDrawModelMdi, rhi::BindlessResourceType::storageBuffer, 1,
-				                    rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment),
-			};
+			std::vector<rhi::ArgumentBinding> shadowMdiDrawLayoutEntries;
+			if (m_backend == rhi::BackendType::metal)
+			{
+				// Slang assigns draw and drawData to Metal buffer indices 1 and 2 for this
+				// shader module. Keep the unused draw binding in MDI pipelines so drawData
+				// retains the module ABI; the table below supplies a harmless dummy address.
+				shadowMdiDrawLayoutEntries.push_back(makeArgumentBinding(
+					shaderio::LBindDrawModel, rhi::BindlessResourceType::uniformBufferDynamic, 1,
+					rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment));
+			}
+			shadowMdiDrawLayoutEntries.push_back(makeArgumentBinding(
+				shaderio::LBindDrawModelMdi, rhi::BindlessResourceType::storageBuffer, 1,
+				rhi::ResourceVisibility::vertex | rhi::ResourceVisibility::fragment));
 			const rhi::ArgumentLayoutHandle mdiDrawLayout = createArgumentLayoutFromBindings(
 				shadowMdiDrawLayoutEntries, "mdi-draw");
-			const auto makeMdiTable = [&](const char* name)
+			const auto makeMdiTable = [&](const char* name, rhi::BufferHandle dummyBuffer)
 			{
-				return createArgumentTable(ArgumentTableDesc{
+				const rhi::ArgumentTableHandle table = createArgumentTable(ArgumentTableDesc{
 					.slot = ArgumentSlot::shaderSpecific,
 					.layout = mdiDrawLayout,
 					.table = m_device.device->createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = mdiDrawLayout, .lifetime = rhi::ArgumentTableLifetime::persistent}),
 					.primaryLogicalIndex = shaderio::LBindDrawModelMdi,
 					.debugName = name,
 				});
+				if (m_backend == rhi::BackendType::metal)
+				{
+					const std::array<rhi::ArgumentWrite, 2> dummyWrites{{
+						rhi::ArgumentWrite{
+							.binding = shaderio::LBindDrawModel,
+							.type = rhi::ArgumentType::uniformBuffer,
+							.buffer = dummyBuffer,
+							.size = sizeof(shaderio::DrawUniforms),
+						},
+						rhi::ArgumentWrite{
+							.binding = shaderio::LBindDrawModelMdi,
+							.type = rhi::ArgumentType::storageBuffer,
+							.buffer = dummyBuffer,
+							.size = sizeof(shaderio::DrawUniforms),
+						},
+					}};
+					m_device.device->updateArgumentTable(table, dummyWrites);
+				}
+				return table;
 			};
 			for (uint32_t i = 0; i < m_perFrame.frameUserData.size(); ++i)
 			{
 				PerFrameResources::FrameUserData& fud = m_perFrame.frameUserData[i];
-				fud.mdiDrawArgumentTable = makeMdiTable("mdi-draw");
-				fud.gbufferMdiDrawArgumentTable = makeMdiTable("gbuffer-mdi-draw");
-				fud.depthMdiDrawArgumentTable = makeMdiTable("depth-mdi-draw");
+				fud.mdiDrawArgumentTable = makeMdiTable("mdi-draw", fud.transientBufferRHI);
+				fud.gbufferMdiDrawArgumentTable = makeMdiTable("gbuffer-mdi-draw", fud.transientBufferRHI);
+				fud.depthMdiDrawArgumentTable = makeMdiTable("depth-mdi-draw", fud.transientBufferRHI);
 				for (uint32_t cascadeIndex = 0; cascadeIndex < shaderio::LCascadeCount; ++cascadeIndex)
 				{
-					fud.csmShadowMdiDrawArgumentTables[cascadeIndex] = makeMdiTable("csm-shadow-mdi-draw");
+					fud.csmShadowMdiDrawArgumentTables[cascadeIndex] =
+						makeMdiTable("csm-shadow-mdi-draw", fud.transientBufferRHI);
 				}
 
 				updateMdiDrawDataArgumentTable(i);
@@ -4392,10 +4477,10 @@ namespace demo
 			const rhi::ArgumentLayoutHandle materialLayout =
                 m_device.device->getArgumentTableLayout(m_materials.materialArgumentTable);
             ASSERT(materialLayout.isValid(), "Material argument table must exist before graphics pipelines");
-			m_device.gbufferArgumentLayouts = {materialLayout, cameraLayout, drawLayout};
-			m_device.mdiArgumentLayouts = {materialLayout, cameraLayout, mdiDrawLayout};
-			m_device.csmShadowMdiArgumentLayouts = {materialLayout, cameraLayout, mdiDrawLayout};
-			m_device.debugArgumentLayouts = {materialLayout, cameraLayout};
+			m_device.gbufferArgumentLayouts = {materialLayout, geometryCameraLayout, drawLayout};
+			m_device.mdiArgumentLayouts = {materialLayout, geometryCameraLayout, mdiDrawLayout};
+			m_device.csmShadowMdiArgumentLayouts = {materialLayout, geometryCameraLayout, mdiDrawLayout};
+			m_device.debugArgumentLayouts = {materialLayout, geometryCameraLayout};
 			m_device.fullscreenArgumentLayouts = {materialLayout, cameraLayout};
 		}
 
@@ -4504,7 +4589,8 @@ namespace demo
 			depthDesc.rasterState.frontFace = rhi::FrontFace::counterClockwise;
 			depthDesc.rasterState.sampleCount = rhi::SampleCount::count1;
 
-			rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
+			rhi::SpecializationConstant specConstantAlphaTest(
+				0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean);
 			std::array<rhi::ShaderEntry, 2> depthShaderStages = depthStages;
 			depthDesc.shaderStages = depthShaderStages;
 
@@ -4608,7 +4694,8 @@ namespace demo
 			};
 
 			// Specialization constant for alpha test (uint32_t = 4 bytes)
-			rhi::SpecializationConstant specConstantAlphaTest(0, 0, sizeof(uint32_t));
+			rhi::SpecializationConstant specConstantAlphaTest(
+				0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean);
 
 			std::array<rhi::ShaderEntry, 2> gbufferShaderStages{
 				{
@@ -5012,7 +5099,7 @@ namespace demo
 				},
 			}};
 			const rhi::PipelineBindingSchemaStorage debugBindingSchema{
-				m_device.gbufferArgumentLayouts, debugRootBindings};
+				m_device.debugArgumentLayouts, debugRootBindings};
 			const rhi::PipelineBindingSchemaStorage debugCullBindingSchema{
 				m_device.debugArgumentLayouts, debugRootBindings};
 			const rhi::TextureFormat outputFormat = rhi::TextureFormat::bgra8Unorm;
@@ -5130,10 +5217,31 @@ namespace demo
 	void RenderDevice::createMaterialArgumentTable()
 	{
 		// Create per-frame material bind groups early - needed for pipeline layout creation
-		std::vector<rhi::ArgumentBinding> layoutEntries{
-			makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
-			                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true)
-		};
+		std::vector<rhi::ArgumentBinding> layoutEntries;
+		if (m_backend == rhi::BackendType::metal)
+		{
+			layoutEntries = {
+				rhi::ArgumentBinding{
+					.binding = kMaterialBindlessTexturesIndex,
+					.type = rhi::ArgumentType::sampledTexture,
+					.visibility = rhi::ShaderStage::allGraphics,
+					.arrayCount = m_materials.maxTextures,
+					.bindless = true,
+				},
+				rhi::ArgumentBinding{
+					.binding = shaderio::LBindSharedTextureSampler,
+					.type = rhi::ArgumentType::sampler,
+					.visibility = rhi::ShaderStage::allGraphics,
+					.arrayCount = 1,
+				},
+			};
+		}
+		else
+		{
+			layoutEntries.push_back(makeArgumentBinding(
+				kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
+				m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true));
+		}
 
 		const uint32_t frameCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_perFrame.frameUserData.size()));
 		m_materials.materialArgumentTables.clear();
@@ -5166,10 +5274,31 @@ namespace demo
 	{
 		if (m_materials.materialArgumentTables.size() < m_perFrame.frameUserData.size())
 		{
-			std::vector<rhi::ArgumentBinding> layoutEntries{
-				makeArgumentBinding(kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
-				                    m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true)
-			};
+			std::vector<rhi::ArgumentBinding> layoutEntries;
+			if (m_backend == rhi::BackendType::metal)
+			{
+				layoutEntries = {
+					rhi::ArgumentBinding{
+						.binding = kMaterialBindlessTexturesIndex,
+						.type = rhi::ArgumentType::sampledTexture,
+						.visibility = rhi::ShaderStage::allGraphics,
+						.arrayCount = m_materials.maxTextures,
+						.bindless = true,
+					},
+					rhi::ArgumentBinding{
+						.binding = shaderio::LBindSharedTextureSampler,
+						.type = rhi::ArgumentType::sampler,
+						.visibility = rhi::ShaderStage::allGraphics,
+						.arrayCount = 1,
+					},
+				};
+			}
+			else
+			{
+				layoutEntries.push_back(makeArgumentBinding(
+					kMaterialBindlessTexturesIndex, rhi::BindlessResourceType::sampledTexture,
+					m_materials.maxTextures, rhi::ResourceVisibility::allGraphics, true));
+			}
 
 			const size_t existingCount = m_materials.materialArgumentTables.size();
 			m_materials.materialArgumentTables.reserve(m_perFrame.frameUserData.size());
@@ -5228,9 +5357,10 @@ namespace demo
 			});
 		}
 
-		// Demo material slots: cache the per-slot view handles and write them as
-		// combinedImageSampler ArgumentWrites (shared materialSamplerHandle).
-		std::array<rhi::ArgumentWrite, kDemoMaterialSlotCount> materialWrites{};
+		// Demo material slots: Metal binds the textures and one shared sampler
+		// separately; Vulkan and D3D12 retain their combined descriptor contract.
+		const bool useSeparateSamplerBinding = m_backend == rhi::BackendType::metal;
+		std::vector<rhi::ArgumentWrite> materialWrites(kDemoMaterialSlotCount);
 		for (uint32_t slot = 0; slot < kDemoMaterialSlotCount; ++slot)
 		{
 			const MaterialHandle materialHandle = m_materials.sampleMaterials[slot];
@@ -5249,10 +5379,22 @@ namespace demo
 			materialWrites[material->descriptorIndex] = rhi::ArgumentWrite{
 				.binding = kMaterialBindlessTexturesIndex,
 				.arrayElement = material->descriptorIndex,
-				.type = rhi::ArgumentType::combinedImageSampler,
+				.type = useSeparateSamplerBinding
+					? rhi::ArgumentType::sampledTexture
+					: rhi::ArgumentType::combinedImageSampler,
 				.textureView = textureHot->sampledViewHandle,
-				.sampler = m_materials.materialSamplerHandle,
+				.sampler = useSeparateSamplerBinding
+					? rhi::SamplerHandle{}
+					: m_materials.materialSamplerHandle,
 			};
+		}
+		if (useSeparateSamplerBinding)
+		{
+			materialWrites.push_back(rhi::ArgumentWrite{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.type = rhi::ArgumentType::sampler,
+				.sampler = m_materials.materialSamplerHandle,
+			});
 		}
 
 		for (uint32_t frameIndex = 0; frameIndex < m_materials.materialArgumentTables.size(); ++frameIndex)
@@ -5302,7 +5444,9 @@ namespace demo
 		}
 
 		std::vector<rhi::ArgumentWrite> writes;
-		writes.reserve(m_materials.materialDescriptorViews.size());
+		const bool useSeparateSamplerBinding = m_backend == rhi::BackendType::metal;
+		writes.reserve(m_materials.materialDescriptorViews.size() +
+		               (useSeparateSamplerBinding ? 1u : 0u));
 		for (uint32_t index = 0; index < m_materials.materialDescriptorViews.size(); ++index)
 		{
 			rhi::TextureViewHandle view;
@@ -5325,8 +5469,20 @@ namespace demo
 			writes.push_back(rhi::ArgumentWrite{
 				.binding = kMaterialBindlessTexturesIndex,
 				.arrayElement = index,
-				.type = rhi::ArgumentType::combinedImageSampler,
+				.type = useSeparateSamplerBinding
+					? rhi::ArgumentType::sampledTexture
+					: rhi::ArgumentType::combinedImageSampler,
 				.textureView = view,
+				.sampler = useSeparateSamplerBinding
+					? rhi::SamplerHandle{}
+					: m_materials.materialSamplerHandle,
+			});
+		}
+		if (useSeparateSamplerBinding)
+		{
+			writes.push_back(rhi::ArgumentWrite{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.type = rhi::ArgumentType::sampler,
 				.sampler = m_materials.materialSamplerHandle,
 			});
 		}
@@ -5620,9 +5776,11 @@ namespace demo
 #ifdef USE_SLANG
 		const uint32_t* computeSpirvCode = shader_comp_slang;
 		const size_t computeSpirvSize = std::size(shader_comp_slang) * sizeof(uint32_t);
+		const char* computeEntryPoint = "computeMain";
 #else
 		const uint32_t* computeSpirvCode = shader_comp_glsl;
 		const size_t computeSpirvSize = std::size(shader_comp_glsl) * sizeof(uint32_t);
+		const char* computeEntryPoint = "main";
 #endif
 		const rhi::ShaderLibraryHandle computeLibrary = loadEmbeddedSpirvLibrary(
 			*m_device.device, computeSpirvCode, computeSpirvSize, "prebuilt-compute");
@@ -5644,10 +5802,11 @@ namespace demo
 				.stage = rhi::ShaderStage::compute,
 				.library = computeLibrary,
 
-				.entryPoint = "main",
-			},
-			.bindingSchema = computeBindingSchema.view(),
-		};
+				.entryPoint = computeEntryPoint,
+				},
+				.bindingSchema = computeBindingSchema.view(),
+				.threadgroupSize = {256, 1, 1},
+			};
 		m_device.prebuiltPipelines.compute = m_device.device->createComputePipeline(computeDesc);
 	}
 
@@ -5673,10 +5832,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					*m_device.device, shader_gpu_culling_slang, "gpu-culling"),
 				.entryPoint = "gpuCullingMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 13,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {shaderio::LGPUCullingThreadCount, 1, 1},
+				.specializationVariant = 13,
+			};
 		m_gpuCullingPipeline = m_device.device->createComputePipeline(computeDesc);
 #endif
 	}
@@ -5711,10 +5871,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					*m_device.device, shader_shadow_culling_slang, "shadow-culling"),
 				.entryPoint = "shadowCullingMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 14,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {shaderio::LGPUCullingThreadCount, 1, 1},
+				.specializationVariant = 14,
+			};
 		m_shadowCullingPipeline = m_device.device->createComputePipeline(computeDesc);
 #endif
 	}

@@ -48,8 +48,20 @@ struct VertexOutputMdi
 // Resource Bindings (same as GBuffer)
 //------------------------------------------------------------------------------
 
+#ifdef DEMO_METAL
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[];
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -119,8 +131,8 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
+        float4 texColor = getBindlessTexture(baseColorTextureIndex).Sample(input.uv);
         color = float4(texColor.rgb * draw.baseColorFactor.rgb, texColor.a * draw.baseColorFactor.a);
     }
 
@@ -136,8 +148,8 @@ float4 fragmentMdiMain(VertexOutputMdi input) : SV_Target
     float4 color = mdiDraw.baseColorFactor;
     if(mdiDraw.baseColorTextureIndex >= 0)
     {
-        uint baseColorTextureIndex = NonUniformResourceIndex(uint(mdiDraw.baseColorTextureIndex));
-        float4 texColor = inTexture[baseColorTextureIndex].Sample(input.uv);
+        uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(mdiDraw.baseColorTextureIndex));
+        float4 texColor = getBindlessTexture(baseColorTextureIndex).Sample(input.uv);
         color = float4(texColor.rgb * mdiDraw.baseColorFactor.rgb, texColor.a * mdiDraw.baseColorFactor.a);
     }
 

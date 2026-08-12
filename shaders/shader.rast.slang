@@ -44,8 +44,20 @@ struct PixelOutput
 
 // Bind an array of textures
 // Note: [[vk::binding(x,y)]] specifies binding=x in descriptor set=y for Vulkan
+#ifdef DEMO_METAL
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[]; // Array of textures in descriptor set 0, binding 0
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity]; // Bindless material texture table
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 // Bind our scene information constant buffer
 // Note: ConstantBuffer is similar to Vulkan's UBO (Uniform Buffer Object)
@@ -133,8 +145,8 @@ PixelOutput fragmentMain(VertexOutput input)
     // Conditionally sample texture based on specialization constant
     if (useTexture)
     {
-        uint textureIndex = NonUniformResourceIndex(uint(sceneInfo.texId));
-        triangleColor *= inTexture[textureIndex].Sample(input.uv);
+        uint textureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(sceneInfo.texId));
+        triangleColor *= getBindlessTexture(textureIndex).Sample(input.uv);
     }
 
     // Blend between point and triangle color based on distance field

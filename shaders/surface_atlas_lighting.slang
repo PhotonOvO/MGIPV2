@@ -4,11 +4,11 @@
 
 #include "shader_io.h"
 
-[[vk::binding(0, 0)]] Texture2D<float>   gbufferDepth    : register(t0);
-[[vk::binding(1, 0)]] Texture2D<float4>  gbuffer0        : register(t1); // baseColor.rgb + AO
-[[vk::binding(2, 0)]] Texture2D<float4>  gbuffer1        : register(t2); // normal.xyz + roughness
-[[vk::binding(3, 0)]] RWTexture2D<float4> atlasLighting  : register(u0);
-[[vk::binding(4, 0)]] ConstantBuffer<LightParams> lightParams : register(b0);
+[[vk::binding(0, 0)]] Texture2D<float>   gbufferDepth    DEMO_REGISTER(t0);
+[[vk::binding(1, 0)]] Texture2D<float4>  gbuffer0        DEMO_REGISTER(t1); // baseColor.rgb + AO
+[[vk::binding(2, 0)]] Texture2D<float4>  gbuffer1        DEMO_REGISTER(t2); // normal.xyz + roughness
+[[vk::binding(3, 0)]] RWTexture2D<float4> atlasLighting  DEMO_REGISTER(u0);
+[[vk::binding(4, 0)]] ConstantBuffer<LightParams> lightParams DEMO_REGISTER(b0);
 
 [[vk::push_constant]] ConstantBuffer<SurfaceAtlasLightingPush> lightingPush;
 

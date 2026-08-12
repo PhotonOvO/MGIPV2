@@ -30,7 +30,7 @@ ConstantBuffer<PushConstantCompute> pushConst;
 // - 1 thread in Z dimension
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void main(uint3 threadIdx : SV_DispatchThreadID)  // SV_DispatchThreadID gives us the global thread ID
+void computeMain(uint3 threadIdx : SV_DispatchThreadID)  // SV_DispatchThreadID gives us the global thread ID
 {
     // Extract the x component which we use as our 1D index
     // Note: In a compute shader, each thread operates on one element

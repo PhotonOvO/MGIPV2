@@ -2,8 +2,20 @@
 
 #include "shader_io.h"
 
+#ifdef DEMO_METAL
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[];
+Texture2D<float4> inTextureResources[LLightingTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -47,20 +59,12 @@ struct VSOutput
 
 float2 clipPositionToFramebufferUv(float2 clipPosition)
 {
-    float2 uv = clipPosition * 0.5 + 0.5;
-#ifdef DEMO_D3D12
-    uv.y = 1.0 - uv.y;
-#endif
-    return uv;
+    return demoClipPositionToFramebufferUv(clipPosition);
 }
 
 float2 framebufferUvToNdc(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-#ifdef DEMO_D3D12
-    ndc.y = -ndc.y;
-#endif
-    return ndc;
+    return demoFramebufferUvToNdc(uv);
 }
 
 [shader("vertex")]
@@ -80,10 +84,10 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
 [shader("fragment")]
 float4 fragmentMain(VSOutput input) : SV_Target
 {
-    float depthSample = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    float depthSample = getBindlessTexture(kGBufferDepthIndex).Sample(input.uv).r;
     if(depthSample > 0.0001)
     {
-        discard;
+        DEMO_DISCARD_FRAGMENT();
     }
 
     float2 ndc = framebufferUvToNdc(input.uv);
@@ -91,7 +95,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
     float4 worldPos = mul(camera.inverseViewProjection, clipPos);
     vec3 direction = normalize(worldPos.xyz / worldPos.w - camera.cameraPosition);
 
-    vec3 hdrColor = inTexture[kIBLEnvironmentIndex].SampleLevel(directionToEquirectUv(direction), 0.0).rgb
+    vec3 hdrColor = getBindlessTexture(kIBLEnvironmentIndex).SampleLevel(directionToEquirectUv(direction), 0.0).rgb
         * lighting.light.iblParams.y;
     return float4(applyDisplayTransform(hdrColor), 1.0);
 }

@@ -5,11 +5,11 @@
 #include "shader_io.h"
 #include "flax_ddgi_common.slang"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> probesData        : register(u0);
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes   : register(u1);
-[[vk::binding(2, 0)]] Texture3D<float> globalSDFTex           : register(t0);
-[[vk::binding(3, 0)]] SamplerState linearSampler                 : register(s0);
-[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData   : register(t1);
+[[vk::binding(0, 0)]] RWTexture2D<float4> probesData        DEMO_REGISTER(u0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes   DEMO_REGISTER(u1);
+[[vk::binding(2, 0)]] Texture3D<float> globalSDFTex           DEMO_REGISTER(t0);
+[[vk::binding(3, 0)]] SamplerState linearSampler                 DEMO_REGISTER(s0);
+[[vk::binding(4, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData   DEMO_REGISTER(t1);
 
 // Helper: access the single-element structured buffer like a constant buffer
 static FlaxDDGIData ddgi = ddgiData[0];
@@ -23,7 +23,7 @@ struct FlaxDDGICascadePush
 [numthreads(32, 1, 1)]
 void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.probesCounts.w - 1u);
     uint probeIndex = dispatchThreadId.x;
     uint probesPerPlane = ddgi.probesCounts.x * ddgi.probesCounts.z;
     uint totalProbes = probesPerPlane * ddgi.probesCounts.y;
@@ -49,7 +49,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
         uint prevC = cascadeIndex - 1;
         float prevSpacing = ddgi.probesOriginAndSpacing[prevC].w;
         float3 prevOrigin = ddgi.probesOriginAndSpacing[prevC].xyz;
-        float3 prevExtent = float3(ddgi.probesCounts - 1) * (prevSpacing * 0.5f);
+        float3 prevExtent = float3(ddgi.probesCounts.xyz - 1) * (prevSpacing * 0.5f);
         prevExtent -= prevSpacing * kDDGICascadeBlendSize * 2.0f;
         float3 prevCascadeWeight = prevExtent - abs(probeBasePos - prevOrigin);
         if (min(min(prevCascadeWeight.x, prevCascadeWeight.y), prevCascadeWeight.z) > 0.1f)
@@ -147,7 +147,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         // Active probe
         state = newlyActivated ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
-        float distToProbe = length(probePosition - ddgi.viewPos);
+        float distToProbe = length(probePosition - ddgi.viewPos.xyz);
         float attentionRange = max(probesSpacing * float(ddgi.probesCounts.x), probesSpacing);
         float viewAttention = lerp(0.35f, 1.0f,
                                    1.0f - saturate(distToProbe / attentionRange));

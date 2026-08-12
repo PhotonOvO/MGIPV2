@@ -122,15 +122,17 @@ namespace demo
 					const bool opaquePatched = sortedOpaqueCapacity == 0u
 						|| m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 						                                                 context.frameIndex,
-						                                                 persistentIndirectBuffer,
-						                                                 0x00000000u,
-						                                                 0u);
+							                                                 persistentIndirectBuffer,
+							                                                 0x00000000u,
+							                                                 0u,
+							                                                 sortedOpaqueCapacity);
 					const bool alphaPatched = sortedAlphaCapacity == 0u
 						|| m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 						                                                 context.frameIndex,
-						                                                 persistentIndirectBuffer,
-						                                                 0x40000000u,
-						                                                 sortedOpaqueCapacity);
+							                                                 persistentIndirectBuffer,
+							                                                 0x40000000u,
+							                                                 sortedOpaqueCapacity,
+							                                                 sortedAlphaCapacity);
 					if (opaquePatched && alphaPatched)
 					{
 						sortedIndirectBuffer = persistentIndirectBuffer;

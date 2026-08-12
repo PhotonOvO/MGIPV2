@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../rhi/RHIBackend.h"
 #include "../rhi/RHITypes.h"
 
 #include <algorithm>
@@ -52,15 +53,36 @@ namespace demo::ui
     };
   }
 
-  [[nodiscard]] constexpr Projection makeProjection(Float2 displayPos, Float2 displaySize) noexcept
+  [[nodiscard]] constexpr Projection makeProjection(
+    Float2 displayPos,
+    Float2 displaySize,
+    rhi::BackendType backend) noexcept
   {
     const float scaleX = displaySize.x > 0.0f ? 2.0f / displaySize.x : 0.0f;
-    const float scaleY = displaySize.y > 0.0f ? 2.0f / displaySize.y : 0.0f;
+    const float scaleYMagnitude = displaySize.y > 0.0f ? 2.0f / displaySize.y : 0.0f;
+    const bool isVulkan = backend == rhi::BackendType::vulkan;
+    const float scaleY = isVulkan ? scaleYMagnitude : -scaleYMagnitude;
     return {
       scaleX,
       scaleY,
       -1.0f - displayPos.x * scaleX,
-      -1.0f - displayPos.y * scaleY,
+      isVulkan
+        ? -1.0f - displayPos.y * scaleY
+        : 1.0f - displayPos.y * scaleY,
+    };
+  }
+
+  [[nodiscard]] constexpr Float2 makeFramebufferScale(
+    Float2 displaySize,
+    rhi::Extent2D targetExtent) noexcept
+  {
+    return {
+      displaySize.x > 0.0f
+        ? static_cast<float>(targetExtent.width) / displaySize.x
+        : 0.0f,
+      displaySize.y > 0.0f
+        ? static_cast<float>(targetExtent.height) / displaySize.y
+        : 0.0f,
     };
   }
 

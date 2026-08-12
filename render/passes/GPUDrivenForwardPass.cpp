@@ -125,9 +125,10 @@ namespace demo
 			!forwardIndirectBuffer.isNull()
 			&& m_renderer->prepareAndDispatchVisibilityPatch(*context.commandBuffer,
 			                                                 context.frameIndex,
-			                                                 forwardIndirectBuffer,
-			                                                 0x80000000u,
-			                                                 opaqueCapacity + alphaCapacity);
+				                                                 forwardIndirectBuffer,
+				                                                 0x80000000u,
+				                                                 opaqueCapacity + alphaCapacity,
+				                                                 transparentCapacity);
 		m_renderer->recordForwardVisibilityPatch(transparentPatched, transparentCapacity, totalPersistentCapacity);
 		if (!transparentPatched)
 		{

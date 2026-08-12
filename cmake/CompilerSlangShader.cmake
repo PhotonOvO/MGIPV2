@@ -315,6 +315,9 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
       else()
         list(APPEND _COMMANDS COMMAND ${_COMMAND_H})
       endif()
+      list(APPEND _COMMANDS COMMAND ${CMAKE_COMMAND}
+        "-DINPUT_FILE=${OUTPUT_H_FILE}"
+        -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/NormalizeEmbeddedSpirv.cmake")
 
       list(APPEND _OUTPUT_FILES "${OUTPUT_H_FILE}")
       list(APPEND SHADER_HEADERS "${OUTPUT_H_FILE}")
@@ -356,6 +359,7 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
         OUTPUT ${_OUTPUT_FILES}
         ${_COMMANDS}
         MAIN_DEPENDENCY ${SHADER}
+        DEPENDS "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/NormalizeEmbeddedSpirv.cmake"
         DEPFILE "${OUTPUT_DEP_FILE}"
         COMMENT "Compiling Slang shader: ${SHADER_NAME}"
         COMMAND_EXPAND_LISTS
@@ -377,4 +381,97 @@ function(compile_slang SHADER_FILES OUTPUT_DIR)
     set(${COMPILE_SHADER_SPVS_VAR} ${SHADER_SPVS} PARENT_SCOPE)
   endif()
 
+endfunction()
+
+# Compile each Slang module to MSL, use the selected Xcode toolchain to produce
+# a metallib, and generate a lookup header keyed by the corresponding embedded
+# SPIR-V array. This keeps the renderer's shader-loading call sites backend
+# neutral while ensuring Metal consumes native libraries only.
+function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
+  set(oneValueArgs HEADERS_VAR CATALOG_HEADER METAL_TOOLCHAIN)
+  set(multiValueArgs EXTRA_FLAGS)
+  cmake_parse_arguments(METAL_SHADER "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT METAL_SHADER_HEADERS_VAR OR NOT METAL_SHADER_CATALOG_HEADER)
+    message(FATAL_ERROR
+      "compile_slang_metal requires HEADERS_VAR and CATALOG_HEADER")
+  endif()
+  if(NOT EXISTS "${Slang_SLANGC_EXECUTABLE}")
+    message(FATAL_ERROR "compile_slang_metal could not find slangc")
+  endif()
+  if(NOT METAL_SHADER_METAL_TOOLCHAIN)
+    message(FATAL_ERROR
+      "compile_slang_metal requires the Xcode Metal compiler component. "
+      "Install it with: xcodebuild -downloadComponent MetalToolchain")
+  endif()
+
+  file(MAKE_DIRECTORY "${OUTPUT_DIR}")
+  set(_metal_headers "")
+  set(_catalog_includes "")
+  set(_catalog_cases "")
+
+  foreach(_shader ${SHADER_FILES})
+    get_filename_component(_shader_name "${_shader}" NAME)
+    string(REPLACE "." "_" _embed_name "${_shader_name}")
+    set(_base "${OUTPUT_DIR}/${_shader_name}")
+    set(_metal_source "${_base}.metal")
+    set(_air_file "${_base}.air")
+    set(_metallib_file "${_base}.metallib")
+    set(_metallib_header "${_metallib_file}.h")
+    set(_dep_file "${_base}.metal.dep")
+    set(_metal_embed_name "${_embed_name}_metal_lib")
+
+    add_custom_command(
+      OUTPUT
+        "${_metal_source}"
+        "${_air_file}"
+        "${_metallib_file}"
+        "${_metallib_header}"
+      COMMAND "${Slang_SLANGC_EXECUTABLE}"
+        -depfile "${_dep_file}"
+        -lang slang
+        -target metal
+        -matrix-layout-column-major
+        -O0
+        "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,-g1,-g0>"
+        -DDEMO_METAL=1
+        ${METAL_SHADER_EXTRA_FLAGS}
+        -o "${_metal_source}"
+        "${_shader}"
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${METAL_SHADER_METAL_TOOLCHAIN}" metal
+        -std=metal4.0
+        "-fmodules-cache-path=${OUTPUT_DIR}/metal-module-cache"
+        -c "${_metal_source}"
+        -o "${_air_file}"
+      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+        "${METAL_SHADER_METAL_TOOLCHAIN}" metallib
+        "${_air_file}"
+        -o "${_metallib_file}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT_FILE=${_metallib_file}"
+        "-DOUTPUT_FILE=${_metallib_header}"
+        "-DVARIABLE_NAME=${_metal_embed_name}"
+        -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
+      MAIN_DEPENDENCY "${_shader}"
+      DEPENDS "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
+      DEPFILE "${_dep_file}"
+      COMMENT "Compiling Metal shader library: ${_shader_name}"
+      COMMAND_EXPAND_LISTS
+      VERBATIM)
+
+    list(APPEND _metal_headers "${_metallib_header}")
+    string(APPEND _catalog_includes
+      "#include \"${_shader_name}.h\"\n#include \"${_shader_name}.metallib.h\"\n")
+    string(APPEND _catalog_cases
+      "  if (spirv == ${_embed_name})\n"
+      "    return {reinterpret_cast<const std::byte*>(${_metal_embed_name}), ${_metal_embed_name}_sizeInBytes};\n")
+  endforeach()
+
+  set(_catalog_content
+    "#pragma once\n\n#include <cstddef>\n#include <cstdint>\n\n${_catalog_includes}\nnamespace demo {\nstruct EmbeddedMetalLibrary {\n  const std::byte* data{};\n  size_t size{};\n};\n\ninline EmbeddedMetalLibrary findEmbeddedMetalLibrary(const uint32_t* spirv)\n{\n${_catalog_cases}  return {};\n}\n} // namespace demo\n")
+  file(GENERATE OUTPUT "${METAL_SHADER_CATALOG_HEADER}"
+    CONTENT "${_catalog_content}")
+
+  set(${METAL_SHADER_HEADERS_VAR} ${_metal_headers} PARENT_SCOPE)
 endfunction()

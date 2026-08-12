@@ -7,26 +7,57 @@
 #include "sdf_common.slang"
 #include "surface_atlas_common.slang"
 
-[[vk::binding(0, 0)]] Texture2D<float4> probesData        : register(t0);
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes : register(u0);
-[[vk::binding(2, 0)]] RWTexture2D<float4> probesTrace      : register(u1); // rays x selected update slot
+[[vk::binding(0, 0)]] Texture2D<float4> probesData        DEMO_REGISTER(t0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> activeProbes DEMO_REGISTER(u0);
+[[vk::binding(2, 0)]] RWTexture2D<float4> probesTrace      DEMO_REGISTER(u1); // rays x selected update slot
 
-// Global SDF + albedo
-[[vk::binding(3, 0)]] Sampler3D<float> globalSDFTex            : register(t1);
-[[vk::binding(11, 0)]] Texture3D<float4> globalAlbedoTex        : register(t5);
-[[vk::binding(12, 0)]] Texture2D<float4> environmentTex         : register(t6);
-[[vk::binding(13, 0)]] Sampler2D<float4> probesDataHistory       : register(t7);
-[[vk::binding(14, 0)]] Sampler2D<float4> probesDistanceHistory   : register(t8);
-[[vk::binding(15, 0)]] Sampler2D<float4> probesIrradianceHistory : register(t9);
+// Keep these declarations in logical binding order. The Metal target has no
+// register annotations, so Slang assigns direct Metal resource indices from
+// declaration order even when an unused argument is removed from the entry point.
+[[vk::binding(3, 0)]] Sampler3D<float> globalSDFTex            DEMO_REGISTER(t1);
 
 // Surface Atlas resources (for hit shading)
-[[vk::binding(4, 0)]] SamplerState linearSampler              : register(s0);
-[[vk::binding(5, 0)]] Texture2D<float> atlasDepth             : register(t2);
-[[vk::binding(6, 0)]] Texture2D<float4> atlasLighting         : register(t3);
-[[vk::binding(7, 0)]] RWStructuredBuffer<uint> chunks         : register(u2);
-[[vk::binding(8, 0)]] RWStructuredBuffer<uint> culledObjs     : register(u3);
-[[vk::binding(9, 0)]] RWStructuredBuffer<float4> objects      : register(u4);
-[[vk::binding(10, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData : register(t4);
+[[vk::binding(4, 0)]] SamplerState linearSampler              DEMO_REGISTER(s0);
+[[vk::binding(5, 0)]] Texture2D<float> atlasDepth             DEMO_REGISTER(t2);
+[[vk::binding(6, 0)]] Texture2D<float4> atlasLighting         DEMO_REGISTER(t3);
+[[vk::binding(7, 0)]] RWStructuredBuffer<uint> chunks         DEMO_REGISTER(u2);
+[[vk::binding(8, 0)]] RWStructuredBuffer<uint> culledObjs     DEMO_REGISTER(u3);
+[[vk::binding(9, 0)]] RWStructuredBuffer<float4> objects      DEMO_REGISTER(u4);
+[[vk::binding(10, 0)]] StructuredBuffer<FlaxDDGIData> ddgiData DEMO_REGISTER(t4);
+
+// Global SDF albedo, environment, and probe history
+[[vk::binding(11, 0)]] Texture3D<float4> globalAlbedoTex        DEMO_REGISTER(t5);
+[[vk::binding(12, 0)]] Texture2D<float4> environmentTex         DEMO_REGISTER(t6);
+#ifdef DEMO_METAL
+[[vk::binding(13, 0)]] Texture2D<float4> probesDataHistoryTexture;
+[[vk::binding(13, 0)]] SamplerState probesDataHistorySampler;
+[[vk::binding(14, 0)]] Texture2D<float4> probesDistanceHistoryTexture;
+[[vk::binding(14, 0)]] SamplerState probesDistanceHistorySampler;
+[[vk::binding(15, 0)]] Texture2D<float4> probesIrradianceHistoryTexture;
+[[vk::binding(15, 0)]] SamplerState probesIrradianceHistorySampler;
+DemoMetalSampler2D getProbesDataHistory()
+{
+    return makeDemoMetalSampler2D(probesDataHistoryTexture, probesDataHistorySampler);
+}
+DemoMetalSampler2D getProbesDistanceHistory()
+{
+    return makeDemoMetalSampler2D(
+        probesDistanceHistoryTexture, probesDistanceHistorySampler);
+}
+DemoMetalSampler2D getProbesIrradianceHistory()
+{
+    return makeDemoMetalSampler2D(
+        probesIrradianceHistoryTexture, probesIrradianceHistorySampler);
+}
+#else
+[[vk::binding(13, 0)]] Sampler2D<float4> probesDataHistory       DEMO_REGISTER(t7);
+[[vk::binding(14, 0)]] Sampler2D<float4> probesDistanceHistory   DEMO_REGISTER(t8);
+[[vk::binding(15, 0)]] Sampler2D<float4> probesIrradianceHistory DEMO_REGISTER(t9);
+#define getProbesDataHistory() probesDataHistory
+#define getProbesDistanceHistory() probesDistanceHistory
+#define getProbesIrradianceHistory() probesIrradianceHistory
+#endif
+
 static FlaxDDGIData ddgi = ddgiData[0];
 struct FlaxDDGICascadePush
 {
@@ -143,7 +174,7 @@ void CS_TraceRays(uint3 groupId : SV_GroupID,
                   uint3 groupThreadId : SV_GroupThreadID)
 {
     uint updateSlot = groupId.x;
-    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.cascadesCount - 1u);
+    uint cascadeIndex = min(cascadePush.cascadeIndex, ddgi.probesCounts.w - 1u);
     uint probeIndex;
     uint requiredState;
     if (!getProbeUpdateSelection(
@@ -173,7 +204,7 @@ void CS_TraceRays(uint3 groupId : SV_GroupID,
 	sdfConfig.maxSteps = 128;
 
     GlobalSurfaceAtlasData atlasData;
-    atlasData.viewPos = ddgi.viewPos;
+    atlasData.viewPos = ddgi.viewPos.xyz;
     atlasData.resolution = 2048.0f;
     atlasData.chunkSize = atlasData.resolution / 40.0f;
     atlasData.objectsCount = 0;
@@ -189,7 +220,7 @@ void CS_TraceRays(uint3 groupId : SV_GroupID,
 
     // Ray tracing loop. Each lane owns a disjoint ray sequence, so the trace
     // atlas writes require no group-shared reduction or synchronization.
-    uint raysPerProbe = ddgi.raysCount;
+    uint raysPerProbe = uint(ddgi.viewPos.w);
     for (uint r = groupThreadId.x; r < raysPerProbe; r += kRayGroupSize)
     {
         float3 rayDir = flaxSphericalFibonacci(float(r), float(raysPerProbe));
@@ -280,8 +311,8 @@ void CS_TraceRays(uint3 groupId : SV_GroupID,
                     directRadiance +=
                         evaluateFlaxRadianceSources(hitPos, hitNormal, sdfConfig, shadowBias);
                     float3 bouncedIrradiance = sampleFlaxDDGIIrradiance(
-                        ddgi, probesDataHistory, probesDistanceHistory,
-                        probesIrradianceHistory, hitPos, hitNormal, -rayDir,
+                        ddgi, getProbesDataHistory(), getProbesDistanceHistory(),
+                        getProbesIrradianceHistory(), hitPos, hitNormal, -rayDir,
                         max(selfHitThreshold, rayStartOffset), 0.0f,
                         max(ddgi.probesOriginAndSpacing[0].w * 2.0f, 0.001f));
                     directRadiance += bouncedIrradiance * kFlaxDDGIMultiBounceFeedback;

@@ -29,10 +29,7 @@ float linearSliceDepth(uint z, uint clusterCountZ)
 
 float3 reconstructViewRay(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-#ifdef DEMO_D3D12
-    ndc.y = -ndc.y;
-#endif
+    float2 ndc = demoFramebufferUvToNdc(uv);
     const float4 clip = float4(ndc, 1.0, 1.0);
     const float4 view = mul(clusteredLight.invProjectionMatrix, clip);
     const float3 viewPos = view.xyz / max(abs(view.w), 1.0e-5);

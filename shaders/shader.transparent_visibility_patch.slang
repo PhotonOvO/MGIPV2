@@ -89,13 +89,29 @@ void transparentVisibilityPatchMain(uint3 dispatchThreadId : SV_DispatchThreadID
         return;
     }
 
+    const uint visibleCount = readPrefix(
+        pushConstants.scanBufferIndex, pushConstants.elementCount - 1u);
+    if(index < pushConstants.outputCapacity && index >= visibleCount)
+    {
+        GPUCullIndirectCommand tombstone;
+#ifdef DEMO_D3D12
+        tombstone.drawIndex = 0u;
+#endif
+        tombstone.indexCount = 0u;
+        tombstone.instanceCount = 0u;
+        tombstone.firstIndex = 0u;
+        tombstone.vertexOffset = 0;
+        tombstone.firstInstance = 0u;
+        forwardIndirectCommands[pushConstants.outputOffset + index] = tombstone;
+    }
+
     if(!isVisibleCategory(index))
     {
         return;
     }
 
     const uint outputIndex = readPrefix(pushConstants.scanBufferIndex, index);
-    if(outputIndex == 0u)
+    if(outputIndex == 0u || outputIndex > pushConstants.outputCapacity)
     {
         return;
     }

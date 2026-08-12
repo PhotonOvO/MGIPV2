@@ -4,6 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
+
+#if defined(DEMO_HAS_EMBEDDED_METAL_SHADERS)
+#include "_autogen/MetalShaderCatalog.h"
+#endif
 
 namespace demo
 {
@@ -14,6 +19,19 @@ inline rhi::ShaderLibraryHandle loadEmbeddedSpirvLibrary(
 	size_t byteSize,
 	const char* debugName)
 {
+#if defined(DEMO_HAS_EMBEDDED_METAL_SHADERS)
+	if(device.getBackendInfo().type == rhi::BackendType::metal)
+	{
+		const EmbeddedMetalLibrary metalLibrary = findEmbeddedMetalLibrary(words);
+		if(metalLibrary.data == nullptr || metalLibrary.size == 0)
+			throw std::runtime_error("No embedded Metal library matches the shader module");
+		return device.createShaderLibrary(rhi::ShaderLibraryDesc{
+			.format = rhi::ShaderIRFormat::metalLibrary,
+			.data = std::span<const std::byte>{metalLibrary.data, metalLibrary.size},
+			.debugName = debugName,
+		});
+	}
+#endif
 	return device.createShaderLibrary(rhi::ShaderLibraryDesc{
 		.format = rhi::ShaderIRFormat::spirv,
 		.data = std::as_bytes(std::span{words, byteSize / sizeof(uint32_t)}),
