@@ -1,4 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(DEMO_PLATFORM_IOS ON)
+  if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING
+      "Minimum iOS version required by the Metal 4 backend")
+  endif()
+else()
+  set(DEMO_PLATFORM_IOS OFF)
+endif()
+
 project(Demo VERSION 1.0 LANGUAGES C CXX)
 
 include(CTest)
@@ -16,6 +27,15 @@ if(DEMO_ENABLE_METAL4 AND NOT APPLE)
   message(FATAL_ERROR "DEMO_ENABLE_METAL4 is supported only on Apple platforms")
 endif()
 
+if(DEMO_PLATFORM_IOS)
+  option(DEMO_ENABLE_VULKAN "Build the Vulkan RHI backend" OFF)
+else()
+  option(DEMO_ENABLE_VULKAN "Build the Vulkan RHI backend" ON)
+endif()
+if(ANDROID AND NOT DEMO_ENABLE_VULKAN)
+  message(FATAL_ERROR "The Android target currently requires the Vulkan RHI backend")
+endif()
+
 set(DEMO_METAL_CPP_COMMIT "9a8bc57c0318b84863bec2faf6605594877c5f5d")
 set(DEMO_METAL_CPP_SHA256 "46736574f7afd977d7d35a13aa781edb595a43650d437b50f5779ec750879530")
 
@@ -25,16 +45,33 @@ if(APPLE AND DEMO_ENABLE_METAL4)
   set(CMAKE_OBJCXX_STANDARD 20)
   set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
+  if(DEMO_PLATFORM_IOS)
+    string(TOLOWER "${CMAKE_OSX_SYSROOT}" DEMO_OSX_SYSROOT_LOWER)
+    if(DEMO_OSX_SYSROOT_LOWER MATCHES "iphonesimulator")
+      set(DEMO_METAL_SDK "iphonesimulator")
+    else()
+      set(DEMO_METAL_SDK "iphoneos")
+    endif()
+    set(DEMO_METAL_PLATFORM_NAME "iOS")
+  else()
+    set(DEMO_METAL_SDK "macosx")
+    set(DEMO_METAL_PLATFORM_NAME "macOS")
+  endif()
+
   execute_process(
-    COMMAND xcrun --sdk macosx --show-sdk-version
-    OUTPUT_VARIABLE DEMO_MACOS_SDK_VERSION
+    COMMAND xcrun --sdk "${DEMO_METAL_SDK}" --show-sdk-version
+    OUTPUT_VARIABLE DEMO_APPLE_SDK_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE DEMO_MACOS_SDK_QUERY_RESULT
+    RESULT_VARIABLE DEMO_APPLE_SDK_QUERY_RESULT
   )
-  if(NOT DEMO_MACOS_SDK_QUERY_RESULT EQUAL 0 OR DEMO_MACOS_SDK_VERSION VERSION_LESS 26.0)
+  if(NOT DEMO_APPLE_SDK_QUERY_RESULT EQUAL 0 OR DEMO_APPLE_SDK_VERSION VERSION_LESS 26.0)
     message(FATAL_ERROR
-      "The Metal 4 backend requires the macOS 26 SDK. "
+      "The Metal 4 backend requires the ${DEMO_METAL_PLATFORM_NAME} 26 SDK. "
       "Configure with DEVELOPER_DIR pointing at Xcode 26 or newer.")
+  endif()
+  if(DEMO_PLATFORM_IOS AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 26.0)
+    message(FATAL_ERROR
+      "The current Metal 4 backend requires CMAKE_OSX_DEPLOYMENT_TARGET=26.0 or newer")
   endif()
 
   FetchContent_Declare(
@@ -53,7 +90,6 @@ if(APPLE AND DEMO_ENABLE_METAL4)
   find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
   find_library(DEMO_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
   find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
-  find_library(DEMO_APPKIT_FRAMEWORK AppKit REQUIRED)
 
   file(READ "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
     DEMO_METAL4_BLIT_SOURCE)
@@ -105,7 +141,6 @@ if(APPLE AND DEMO_ENABLE_METAL4)
       "${DEMO_METAL_FRAMEWORK}"
       "${DEMO_QUARTZCORE_FRAMEWORK}"
       "${DEMO_FOUNDATION_FRAMEWORK}"
-      "${DEMO_APPKIT_FRAMEWORK}"
     )
   endfunction()
 endif()
@@ -201,10 +236,11 @@ include(CompilerSlangShader)
 include(CompilerGlslShader)
 include(DownloadPackage)
 
-find_package(Vulkan REQUIRED)
-
 set(DEMO_VULKAN_HEADER_DIR "" CACHE PATH "Optional Vulkan header directory to use before the platform SDK headers")
-if(DEMO_VULKAN_HEADER_DIR)
+if(DEMO_ENABLE_VULKAN)
+  find_package(Vulkan REQUIRED)
+endif()
+if(DEMO_ENABLE_VULKAN AND DEMO_VULKAN_HEADER_DIR)
   include_directories(BEFORE "${DEMO_VULKAN_HEADER_DIR}")
 endif()
 
@@ -229,16 +265,17 @@ endif()
 
 if(NOT ANDROID)
   FetchContent_Declare(
-    glfw
-    GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG 3.4
+    SDL
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+    GIT_TAG release-3.4.14
   )
-  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-  set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(glfw)
+  set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+  set(SDL_STATIC ON CACHE BOOL "" FORCE)
+  set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+  set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(SDL)
 endif()
 
 FetchContent_Declare(
@@ -248,12 +285,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-FetchContent_Declare(
-  volk
-  GIT_REPOSITORY https://github.com/zeux/volk.git
-  GIT_TAG master
-)
-FetchContent_MakeAvailable(volk)
+if(DEMO_ENABLE_VULKAN)
+  FetchContent_Declare(
+    volk
+    GIT_REPOSITORY https://github.com/zeux/volk.git
+    GIT_TAG master
+  )
+  FetchContent_MakeAvailable(volk)
+endif()
 
 FetchContent_Declare(
   tinygltf
@@ -273,12 +312,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(meshoptimizer)
 
-FetchContent_Declare(
-  VulkanMemoryAllocator
-  GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-  GIT_TAG master
-)
-FetchContent_MakeAvailable(VulkanMemoryAllocator)
+if(DEMO_ENABLE_VULKAN)
+  FetchContent_Declare(
+    VulkanMemoryAllocator
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG master
+  )
+  FetchContent_MakeAvailable(VulkanMemoryAllocator)
+endif()
 
 FetchContent_Declare(
   imgui
@@ -302,8 +343,8 @@ if(ANDROID)
   )
 else()
   target_sources(imgui_demo PRIVATE
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.h
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.h
   )
 endif()
 target_include_directories(imgui_demo PUBLIC
@@ -313,7 +354,7 @@ target_include_directories(imgui_demo PUBLIC
 if(ANDROID)
   target_link_libraries(imgui_demo PUBLIC android)
 else()
-  target_link_libraries(imgui_demo PUBLIC glfw)
+  target_link_libraries(imgui_demo PUBLIC SDL3::SDL3)
 endif()
 
 set(STB_IMAGE_URL "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h")
@@ -327,11 +368,6 @@ if(NOT EXISTS "${STB_IMAGE_PATH}")
     message(STATUS "Downloading stb_image.h for Demo...")
     file(DOWNLOAD "${STB_IMAGE_URL}" "${STB_IMAGE_PATH}")
   endif()
-endif()
-
-if(UNIX AND NOT APPLE AND NOT ANDROID)
-  find_package(X11 REQUIRED)
-  find_package(Threads REQUIRED)
 endif()
 
 file(GLOB SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/*.slang")
@@ -384,12 +420,12 @@ if(USE_SLANG)
     endif()
 
     execute_process(
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
         "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metal --version
       OUTPUT_QUIET ERROR_QUIET
       RESULT_VARIABLE DEMO_METAL_COMPILER_RESULT)
     execute_process(
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
         "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metallib --version
       OUTPUT_QUIET ERROR_QUIET
       RESULT_VARIABLE DEMO_METALLIB_TOOL_RESULT)
@@ -409,13 +445,13 @@ if(USE_SLANG)
       "${SHADER_OUTPUT_DIR}/MetalBlit.metallib")
     add_custom_command(
       OUTPUT "${DEMO_METAL4_BLIT_AIR}" "${DEMO_METAL4_BLIT_LIBRARY}"
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
         "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metal
         -std=metal4.0
         "-fmodules-cache-path=${SHADER_OUTPUT_DIR}/metal-module-cache"
         -c "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
         -o "${DEMO_METAL4_BLIT_AIR}"
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
         "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metallib
         "${DEMO_METAL4_BLIT_AIR}"
         -o "${DEMO_METAL4_BLIT_LIBRARY}"
@@ -433,6 +469,7 @@ if(USE_SLANG)
       HEADERS_VAR GENERATED_SHADER_METAL_HEADERS
       CATALOG_HEADER "${DEMO_METAL_SHADER_CATALOG}"
       METAL_TOOLCHAIN "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}"
+      METAL_SDK "${DEMO_METAL_SDK}"
       EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
     )
   else()
@@ -516,12 +553,19 @@ if(WIN32 AND USE_SLANG)
   set(DEMO_HAS_DXC_FINAL_SPIRV TRUE)
 endif()
 
-compile_glsl(
-  "${SHADER_GLSL_FILES}"
-  "${SHADER_OUTPUT_DIR}"
-  GENERATED_SHADER_GLSL_HEADERS
-  EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
-)
+if(NOT USE_SLANG)
+  if(NOT DEMO_ENABLE_VULKAN)
+    message(FATAL_ERROR "GLSL compatibility shaders require DEMO_ENABLE_VULKAN=ON")
+  endif()
+  compile_glsl(
+    "${SHADER_GLSL_FILES}"
+    "${SHADER_OUTPUT_DIR}"
+    GENERATED_SHADER_GLSL_HEADERS
+    EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
+  )
+else()
+  set(GENERATED_SHADER_GLSL_HEADERS "")
+endif()
 
 add_library(demo_core STATIC
   rhi/RHITypes.h
@@ -545,29 +589,6 @@ add_library(demo_core STATIC
   rhi/RHIResourceLifetime.h
   rhi/RHIShaderReflection.h
   rhi/RHIPipeline.h
-  # vulkan backend
-  rhi/vulkan/VulkanFormatUtils.h
-  rhi/vulkan/VulkanResourceConversions.h
-  rhi/vulkan/VulkanShaderConversions.h
-  rhi/vulkan/VulkanBarrierConversions.h
-  rhi/vulkan/VulkanPipelineConversions.h
-  rhi/vulkan/VulkanQueueConversions.h
-  rhi/vulkan/VulkanSurface.h
-  rhi/vulkan/VulkanSurface.cpp
-  rhi/vulkan/VulkanDevice.h
-  rhi/vulkan/VulkanDevice.cpp
-  rhi/vulkan/VulkanCommandBuffer.h
-  rhi/vulkan/VulkanCommandBuffer.cpp
-  rhi/vulkan/VulkanCommandAllocator.h
-  rhi/vulkan/VulkanCommandAllocator.cpp
-  rhi/vulkan/VulkanQueue.h
-  rhi/vulkan/VulkanQueue.cpp
-  rhi/vulkan/VulkanResourceTable.h
-  rhi/vulkan/VulkanResourceTable.cpp
-  rhi/vulkan/VulkanPipelines.h
-  rhi/vulkan/VulkanPipelines.cpp
-  rhi/vulkan/VulkanSwapchain.h
-  rhi/vulkan/VulkanSwapchain.cpp
   render/RenderDevice.cpp
   render/RenderDevice.h
   render/ImGuiRhiTypes.h
@@ -731,6 +752,33 @@ add_library(demo_core STATIC
   render/CSMShadowResources.cpp
 )
 
+if(DEMO_ENABLE_VULKAN)
+  target_sources(demo_core PRIVATE
+    rhi/vulkan/VulkanFormatUtils.h
+    rhi/vulkan/VulkanResourceConversions.h
+    rhi/vulkan/VulkanShaderConversions.h
+    rhi/vulkan/VulkanBarrierConversions.h
+    rhi/vulkan/VulkanPipelineConversions.h
+    rhi/vulkan/VulkanQueueConversions.h
+    rhi/vulkan/VulkanSurface.h
+    rhi/vulkan/VulkanSurface.cpp
+    rhi/vulkan/VulkanDevice.h
+    rhi/vulkan/VulkanDevice.cpp
+    rhi/vulkan/VulkanCommandBuffer.h
+    rhi/vulkan/VulkanCommandBuffer.cpp
+    rhi/vulkan/VulkanCommandAllocator.h
+    rhi/vulkan/VulkanCommandAllocator.cpp
+    rhi/vulkan/VulkanQueue.h
+    rhi/vulkan/VulkanQueue.cpp
+    rhi/vulkan/VulkanResourceTable.h
+    rhi/vulkan/VulkanResourceTable.cpp
+    rhi/vulkan/VulkanPipelines.h
+    rhi/vulkan/VulkanPipelines.cpp
+    rhi/vulkan/VulkanSwapchain.h
+    rhi/vulkan/VulkanSwapchain.cpp
+  )
+endif()
+
 if(NOT ANDROID)
   target_sources(demo_core PRIVATE app/MinimalLatestApp.h)
 endif()
@@ -775,7 +823,12 @@ if(ANDROID)
   )
 endif()
 
-target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES)
+if(DEMO_ENABLE_VULKAN)
+  target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES DEMO_HAS_VULKAN=1)
+endif()
+if(DEMO_PLATFORM_IOS)
+  target_compile_definitions(demo_core PUBLIC DEMO_PLATFORM_IOS=1 DEMO_DEFAULT_RHI_METAL=1)
+endif()
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
 endif()
@@ -793,12 +846,16 @@ target_include_directories(demo_core
   PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
-    ${volk_SOURCE_DIR}
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
     ${meshoptimizer_SOURCE_DIR}/src
-    ${vulkanmemoryallocator_SOURCE_DIR}/include
 )
+if(DEMO_ENABLE_VULKAN)
+  target_include_directories(demo_core PUBLIC
+    ${volk_SOURCE_DIR}
+    ${vulkanmemoryallocator_SOURCE_DIR}/include
+  )
+endif()
 
 set(VKDEMO_NVTX_INCLUDE_DIR "" CACHE PATH "Optional NVTX3 include directory")
 if(NOT VKDEMO_NVTX_INCLUDE_DIR)
@@ -824,7 +881,6 @@ endif()
 
    
 target_sources(demo_core PRIVATE
-  ${vulkanmemoryallocator_SOURCE_DIR}/include/vk_mem_alloc.h
   ${STB_IMAGE_PATH}
   ${GENERATED_SHADER_SLANG_HEADERS}
   ${GENERATED_SHADER_SPV_BINARIES}
@@ -833,25 +889,26 @@ target_sources(demo_core PRIVATE
   ${GENERATED_SHADER_GLSL_HEADERS}
   ${SHADER_H_FILES}
 )
+if(DEMO_ENABLE_VULKAN)
+  target_sources(demo_core PRIVATE
+    ${vulkanmemoryallocator_SOURCE_DIR}/include/vk_mem_alloc.h)
+endif()
 
 target_link_libraries(demo_core
   PUBLIC
-    volk
     imgui_demo
     glm
     tinygltf
     meshoptimizer
-    Vulkan::Vulkan
 )
+if(DEMO_ENABLE_VULKAN)
+  target_link_libraries(demo_core PUBLIC volk Vulkan::Vulkan)
+endif()
 
 if(ANDROID)
   target_link_libraries(demo_core PUBLIC android log native_app_glue)
 else()
-  target_link_libraries(demo_core PUBLIC glfw)
-endif()
-
-if(UNIX AND NOT APPLE AND NOT ANDROID)
-  target_link_libraries(demo_core PUBLIC ${X11_LIBRARIES} Threads::Threads)
+  target_link_libraries(demo_core PUBLIC SDL3::SDL3)
 endif()
 
 if(WIN32)
@@ -864,11 +921,43 @@ endif()
 if(ANDROID)
   add_library(DemoAndroid SHARED app/AndroidNativeApp.cpp)
   target_link_libraries(DemoAndroid PRIVATE demo_core)
+elseif(DEMO_PLATFORM_IOS)
+  add_executable(DemoIOS MACOSX_BUNDLE app/MinimalLatestApp.cpp)
+  target_link_libraries(DemoIOS PRIVATE demo_core)
+  set_target_properties(DemoIOS PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_LIST_DIR}/app/ios/Info.plist.in"
+    MACOSX_BUNDLE_BUNDLE_NAME "MGIP Demo"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.happyelements.mgip.demo"
+    MACOSX_BUNDLE_BUNDLE_VERSION "1"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.happyelements.mgip.demo"
+    XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+    XCODE_ATTRIBUTE_ENABLE_USER_SCRIPT_SANDBOXING "NO"
+  )
+
+  if(DEMO_METAL_SDK STREQUAL "iphonesimulator")
+    set_target_properties(DemoIOS PROPERTIES
+      XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "YES"
+      XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "YES"
+      XCODE_ATTRIBUTE_AD_HOC_CODE_SIGNING_ALLOWED "YES"
+      XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
+    )
+  endif()
+
+  add_custom_command(TARGET DemoIOS POST_BUILD
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSOURCE_RESOURCES_DIR=${CMAKE_CURRENT_LIST_DIR}/resources"
+      "-DBUNDLE_DIR=$<TARGET_BUNDLE_DIR:DemoIOS>"
+      -P "${CMAKE_CURRENT_LIST_DIR}/cmake/CopyIOSBundleResources.cmake"
+    COMMENT "Copying iOS scene resources into the application bundle"
+    VERBATIM
+  )
 else()
   add_executable(Demo app/MinimalLatestApp.cpp)
   target_link_libraries(Demo PRIVATE demo_core)
 endif()
-if(BUILD_TESTING AND NOT ANDROID)
+if(BUILD_TESTING AND NOT ANDROID AND NOT DEMO_PLATFORM_IOS)
   add_executable(flax_gi_debug_model_tests
     tests/flax_gi_debug_model_tests.cpp
   )
@@ -946,7 +1035,7 @@ if(BUILD_TESTING AND NOT ANDROID)
 endif()
 
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT DEMO_PLATFORM_IOS)
 if(WIN32)
 add_executable(texture_converter  
   tools/texture_converter.cpp

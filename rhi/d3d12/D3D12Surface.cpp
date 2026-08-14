@@ -1,9 +1,7 @@
 #include "D3D12Surface.h"
 
 #define NOMINMAX
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
+#include <SDL3/SDL.h>
 #include <Windows.h>
 
 #include <limits>
@@ -18,12 +16,14 @@ void D3D12Surface::initD3D12(void* dxgiFactory, void* dxgiAdapter, const WindowH
   if(m_nativeWindow != nullptr)
     throw std::runtime_error("D3D12Surface::init called twice");
   if(window.nativeWindow == nullptr)
-    throw std::runtime_error("D3D12Surface requires a valid GLFW window");
+    throw std::runtime_error("D3D12Surface requires a valid SDL window");
 
-  GLFWwindow* glfwWindow = static_cast<GLFWwindow*>(window.nativeWindow);
-  HWND hwnd = glfwGetWin32Window(glfwWindow);
+  SDL_Window* sdlWindow = static_cast<SDL_Window*>(window.nativeWindow);
+  const SDL_PropertiesID properties = SDL_GetWindowProperties(sdlWindow);
+  HWND hwnd = static_cast<HWND>(
+    SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
   if(hwnd == nullptr || !IsWindow(hwnd))
-    throw std::runtime_error("D3D12Surface could not resolve a valid Win32 window");
+    throw std::runtime_error("D3D12Surface could not resolve a valid Win32 window from SDL3");
 
   m_nativeWindow = hwnd;
 }

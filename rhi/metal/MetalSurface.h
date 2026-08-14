@@ -10,6 +10,8 @@ namespace MTL {
 class Device;
 }
 
+struct SDL_Window;
+
 namespace demo::rhi::metal {
 
 class MetalSurface final : public Surface
@@ -29,7 +31,8 @@ public:
 private:
   MTL::Device* m_device{nullptr};
   CA::MetalLayer* m_layer{nullptr};
-  void* m_nativeView{nullptr};
+  SDL_Window* m_window{nullptr};
+  void* m_metalView{nullptr};
   Extent2D m_extent{};
 };
 

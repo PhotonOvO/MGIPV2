@@ -4,16 +4,7 @@
 #include "../common/FrameDeferredValue.h"
 #include "../common/ProfilerMarkers.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#define GLFW_EXPOSE_NATIVE_WIN32
-#endif
-
-#include <GLFW/glfw3.h>
-
-#ifdef _WIN32
-#include <GLFW/glfw3native.h>
-#endif
+#include <SDL3/SDL.h>
 
 #include "../render/RendererFacade.h"
 #include "../rhi/RHISurface.h"
@@ -28,7 +19,7 @@
 #include "../scene/SceneUploadPlanner.h"
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include <imgui_internal.h>
-#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_sdl3.h>
 
 #include <memory>
 #include <optional>
@@ -50,6 +41,17 @@
 
 class MinimalLatestApp
 {
+  struct SdlWindowDeleter
+  {
+    void operator()(SDL_Window* window) const noexcept
+    {
+      if(window != nullptr)
+      {
+        SDL_DestroyWindow(window);
+      }
+    }
+  };
+
 public:
   enum class AutomationMode
   {
@@ -88,15 +90,49 @@ public:
       , m_renderer(automationOptions.backend)
       , m_automationOptions(automationOptions)
   {
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 #ifdef USE_SLANG
     const char* windowTitle = "Minimal Demo (Slang)";
 #else
     const char* windowTitle = "Minimal Demo (GLSL)";
 #endif
-    m_window  = glfwCreateWindow(m_windowSize.width, m_windowSize.height, windowTitle, nullptr, nullptr);
+    SDL_WindowFlags windowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    switch(m_automationOptions.backend)
+    {
+    case demo::rhi::BackendType::vulkan:
+      windowFlags |= SDL_WINDOW_VULKAN;
+      break;
+    case demo::rhi::BackendType::metal:
+      windowFlags |= SDL_WINDOW_METAL;
+      break;
+    case demo::rhi::BackendType::d3d12:
+      break;
+    }
+    m_window.reset(SDL_CreateWindow(windowTitle,
+                                    static_cast<int>(m_windowSize.width),
+                                    static_cast<int>(m_windowSize.height),
+                                    windowFlags));
+    if(m_window == nullptr)
+    {
+      throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
+    }
+
+    int pixelWidth = 0;
+    int pixelHeight = 0;
+    if(!SDL_GetWindowSizeInPixels(m_window.get(), &pixelWidth, &pixelHeight))
+    {
+      throw std::runtime_error(
+          std::string("SDL_GetWindowSizeInPixels failed: ") + SDL_GetError());
+    }
+    if(pixelWidth > 0 && pixelHeight > 0)
+    {
+      m_viewportSize = {
+        static_cast<uint32_t>(pixelWidth),
+        static_cast<uint32_t>(pixelHeight),
+      };
+    }
+
     m_surface = m_renderer.createSurface();
-    m_renderer.init(m_window, *m_surface, m_vSync);
+    m_renderer.init(m_window.get(), *m_surface, m_vSync);
     if(m_automationOptions.ddgiSmoke)
     {
       demo::DDGIConfig config = m_renderer.getDDGIConfig();
@@ -131,7 +167,7 @@ public:
     m_sceneCameraNavigation.setClipSpaceConvention(projectionBackend);
 
     // Initialize camera
-    m_camera.setPerspective(45.0f, static_cast<float>(m_windowSize.width) / static_cast<float>(m_windowSize.height), 0.1f, 100.0f);
+    m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
     m_camera.setPosition(glm::vec3(8.0f, 1.5f, 0.0f));
     m_camera.setYawPitch(180.0, 0.0);
     m_camera.update();
@@ -184,12 +220,11 @@ public:
   {
     unloadModel();
     m_renderer.shutdown(*m_surface);
-    glfwDestroyWindow(m_window);
   }
 
   void run()
   {
-    while(!glfwWindowShouldClose(m_window))
+    while(!m_shouldClose)
     {
       demo::profiling::ScopedCpuRange frameCpuRange("Frame");
       const char* framePhase = "FrameStart";
@@ -202,8 +237,45 @@ public:
       framePhase = "PollEvents";
       {
         demo::profiling::ScopedCpuRange pollEventsRange("AppPreRecord.PollEvents");
-        glfwPollEvents();
+        SDL_Event event{};
+        while(SDL_PollEvent(&event))
+        {
+          ImGui_ImplSDL3_ProcessEvent(&event);
+#if defined(DEMO_PLATFORM_IOS)
+          if(event.type == SDL_EVENT_WILL_ENTER_BACKGROUND ||
+             event.type == SDL_EVENT_DID_ENTER_BACKGROUND)
+          {
+            m_applicationInBackground = true;
+          }
+          else if(event.type == SDL_EVENT_WILL_ENTER_FOREGROUND ||
+                  event.type == SDL_EVENT_DID_ENTER_FOREGROUND)
+          {
+            m_applicationInBackground = false;
+          }
+          else if(event.type == SDL_EVENT_TERMINATING)
+          {
+            m_shouldClose = true;
+          }
+#endif
+          if(event.type == SDL_EVENT_QUIT ||
+             (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+              event.window.windowID == SDL_GetWindowID(m_window.get())))
+          {
+            m_shouldClose = true;
+          }
+        }
       }
+      if(m_shouldClose)
+      {
+        break;
+      }
+#if defined(DEMO_PLATFORM_IOS)
+      if(m_applicationInBackground)
+      {
+        SDL_Delay(16);
+        continue;
+      }
+#endif
       // UI draw data may still reference the previous Flax debug descriptor until
       // the frame is submitted. Apply resource-rebuilding config changes only at
       // the next frame boundary, before any new ImGui draw commands are recorded.
@@ -238,16 +310,17 @@ public:
           {
           // Keyboard movement
           glm::vec3 moveDir{0.0f};
-          if(glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) moveDir.z += 1.0f;
-          if(glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS) moveDir.z -= 1.0f;
-          if(glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS) moveDir.x -= 1.0f;
-          if(glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS) moveDir.x += 1.0f;
-          if(glfwGetKey(m_window, GLFW_KEY_Q) == GLFW_PRESS) moveDir.y += 1.0f;
-          if(glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS) moveDir.y -= 1.0f;
+          const bool* keyboardState = SDL_GetKeyboardState(nullptr);
+          if(keyboardState[SDL_SCANCODE_W]) moveDir.z += 1.0f;
+          if(keyboardState[SDL_SCANCODE_S]) moveDir.z -= 1.0f;
+          if(keyboardState[SDL_SCANCODE_A]) moveDir.x -= 1.0f;
+          if(keyboardState[SDL_SCANCODE_D]) moveDir.x += 1.0f;
+          if(keyboardState[SDL_SCANCODE_Q]) moveDir.y += 1.0f;
+          if(keyboardState[SDL_SCANCODE_E]) moveDir.y -= 1.0f;
 
           // F1: Toggle fullscreen
           static bool f1Pressed = false;
-          if(glfwGetKey(m_window, GLFW_KEY_F1) == GLFW_PRESS)
+          if(keyboardState[SDL_SCANCODE_F1])
           {
             if(!f1Pressed)
             {
@@ -268,29 +341,39 @@ public:
           }
 
           // Mouse rotation (right-click to capture)
-          if(glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+          const bool rightMousePressed =
+              (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_RMASK) != 0;
+          if(rightMousePressed)
           {
               if(!m_cursorCaptured)
               {
-                  glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                  double xpos, ypos;
-                  glfwGetCursorPos(m_window, &xpos, &ypos);
-                  m_lastMousePos = glm::vec2(static_cast<float>(xpos), static_cast<float>(ypos));
+                  if(!SDL_SetWindowRelativeMouseMode(m_window.get(), true))
+                  {
+                    throw std::runtime_error(
+                        std::string("SDL_SetWindowRelativeMouseMode failed: ") + SDL_GetError());
+                  }
+                  float ignoredX = 0.0f;
+                  float ignoredY = 0.0f;
+                  SDL_GetRelativeMouseState(&ignoredX, &ignoredY);
                   m_cursorCaptured = true;
               }
               else
               {
-                  double xpos, ypos;
-                  glfwGetCursorPos(m_window, &xpos, &ypos);
-                  float deltaX = static_cast<float>(xpos - m_lastMousePos.x) * m_rotateSpeed;
-                  float deltaY = static_cast<float>(ypos - m_lastMousePos.y) * m_rotateSpeed;
-                  m_lastMousePos = glm::vec2(xpos, ypos);
+                  float relativeX = 0.0f;
+                  float relativeY = 0.0f;
+                  SDL_GetRelativeMouseState(&relativeX, &relativeY);
+                  const float deltaX = relativeX * m_rotateSpeed;
+                  const float deltaY = relativeY * m_rotateSpeed;
                   navigationCamera.rotate(deltaX, -deltaY);  // Inverted Y for natural feel
               }
           }
           else if(m_cursorCaptured)
           {
-              glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+              if(!SDL_SetWindowRelativeMouseMode(m_window.get(), false))
+              {
+                throw std::runtime_error(
+                    std::string("SDL_SetWindowRelativeMouseMode failed: ") + SDL_GetError());
+              }
               m_cursorCaptured = false;
           }
           }
@@ -299,9 +382,9 @@ public:
       }
       }
 
-      if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
+      if((SDL_GetWindowFlags(m_window.get()) & SDL_WINDOW_MINIMIZED) != 0)
       {
-        ImGui_ImplGlfw_Sleep(10);
+        SDL_Delay(10);
         continue;
       }
 
@@ -361,7 +444,7 @@ public:
             }
             ImGui::Separator();
             if(ImGui::MenuItem("Exit"))
-              glfwSetWindowShouldClose(m_window, true);
+              m_shouldClose = true;
             ImGui::EndMenu();
           }
           ImGui::Separator();
@@ -375,7 +458,11 @@ public:
         demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.FullWindowViewport");
         int framebufferWidth = 0;
         int framebufferHeight = 0;
-        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+        if(!SDL_GetWindowSizeInPixels(m_window.get(), &framebufferWidth, &framebufferHeight))
+        {
+          throw std::runtime_error(
+              std::string("SDL_GetWindowSizeInPixels failed: ") + SDL_GetError());
+        }
         const demo::rhi::Extent2D requestedViewportSize{
           static_cast<uint32_t>(std::max(framebufferWidth, 0)),
           static_cast<uint32_t>(std::max(framebufferHeight, 0))
@@ -1085,38 +1172,23 @@ public:
 private:
   void toggleFullscreen()
   {
-    if(m_fullscreen)
+    const bool nextFullscreen = !m_fullscreen;
+    if(!nextFullscreen)
     {
-      m_renderer.setFullscreen(false, nullptr);
-      glfwSetWindowAttrib(m_window, GLFW_FLOATING, GLFW_FALSE);
-      glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_TRUE);
-      glfwSetWindowMonitor(m_window, nullptr, m_windowedX, m_windowedY, m_windowedWidth, m_windowedHeight, 0);
-      m_fullscreen = false;
+      m_renderer.setFullscreen(false, m_window.get());
     }
-    else
+    if(!SDL_SetWindowFullscreen(m_window.get(), nextFullscreen))
     {
-      // Save current window position and size
-      glfwGetWindowPos(m_window, &m_windowedX, &m_windowedY);
-      glfwGetWindowSize(m_window, &m_windowedWidth, &m_windowedHeight);
-
-      // Switch to fullscreen on primary monitor
-      GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-      const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-      glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_FALSE);
-      glfwSetWindowAttrib(m_window, GLFW_FLOATING, GLFW_TRUE);
-      glfwSetWindowMonitor(m_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
-      glfwFocusWindow(m_window);
-      m_fullscreen = true;
-#ifdef _WIN32
-      HMONITOR hmonitor = MonitorFromWindow(glfwGetWin32Window(m_window), MONITOR_DEFAULTTONEAREST);
-      m_renderer.setFullscreen(true, static_cast<void*>(hmonitor));
-#else
-      m_renderer.setFullscreen(true, nullptr);
-#endif
+      throw std::runtime_error(std::string("SDL_SetWindowFullscreen failed: ") + SDL_GetError());
     }
+    if(nextFullscreen)
+    {
+      m_renderer.setFullscreen(true, m_window.get());
+    }
+    m_fullscreen = nextFullscreen;
   }
 
-  GLFWwindow*                                       m_window{};
+  std::unique_ptr<SDL_Window, SdlWindowDeleter>     m_window;
   std::unique_ptr<demo::rhi::Surface>               m_surface;
   demo::rhi::Extent2D                               m_windowSize{1920, 1080};
   demo::rhi::Extent2D                               m_viewportSize{1920, 1080};
@@ -1158,13 +1230,14 @@ private:
   float m_moveSpeed{5.0f};       // Units per second
   float m_rotateSpeed{0.1f};     // Mouse sensitivity
   bool m_cursorCaptured{false};  // Mouse capture state
-  glm::vec2 m_lastMousePos{0.0f};
   shaderio::CameraUniforms m_cameraUniforms;  // Camera data for rendering
 
   // Fullscreen state
   bool m_fullscreen{false};
-  int m_windowedX{0}, m_windowedY{0};
-  int m_windowedWidth{800}, m_windowedHeight{600};
+  bool m_shouldClose{false};
+#if defined(DEMO_PLATFORM_IOS)
+  bool m_applicationInBackground{false};
+#endif
   demo::DirectionalLightSettings m_lightSettings{};
   bool m_enableTestDirectionalLight{false};
   glm::vec3 m_testDirectionalLightColor{1.0f, 0.95f, 0.85f};
@@ -1899,7 +1972,7 @@ inline void MinimalLatestApp::onAutomationFrameRendered()
          static_cast<unsigned long long>(automationTotalFrames()));
     if(m_automationOptions.autoExit)
     {
-      glfwSetWindowShouldClose(m_window, true);
+      m_shouldClose = true;
     }
     return;
   }

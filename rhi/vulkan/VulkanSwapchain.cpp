@@ -14,6 +14,12 @@
 #include "volk.h"
 #include "vulkan/vk_enum_string_helper.h"
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <SDL3/SDL.h>
+#include <Windows.h>
+#endif
+
 // Support VK_EXT_full_screen_exclusive even on older Vulkan headers
 #ifndef VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT
 #define VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT   1000255000
@@ -153,7 +159,20 @@ void VulkanSwapchain::setVSync(bool vSync)
 
 void VulkanSwapchain::set_fullscreen(bool fullscreen, void* platform_handle)
 {
-  if(m_fullscreen == fullscreen && m_platform_handle == platform_handle)
+  void* nativeMonitor = nullptr;
+#ifdef _WIN32
+  if(fullscreen && platform_handle != nullptr)
+  {
+    SDL_Window* window = static_cast<SDL_Window*>(platform_handle);
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if(hwnd != nullptr)
+    {
+      nativeMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    }
+  }
+#endif
+  if(m_fullscreen == fullscreen && m_platform_handle == nativeMonitor)
   {
     return;
   }
@@ -164,7 +183,7 @@ void VulkanSwapchain::set_fullscreen(bool fullscreen, void* platform_handle)
   }
 
   m_fullscreen = fullscreen;
-  m_platform_handle = platform_handle;
+  m_platform_handle = nativeMonitor;
   requestRebuild();
 }
 

@@ -1,7 +1,9 @@
 #include "RHIFactory.h"
 
+#if defined(DEMO_HAS_VULKAN)
 #include "vulkan/VulkanDevice.h"
 #include "vulkan/VulkanSurface.h"
+#endif
 
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 #include "d3d12/D3D12Device.h"
@@ -34,7 +36,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return true;
+#else
+			return false;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return true;
@@ -56,7 +62,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return std::make_unique<vulkan::VulkanDevice>();
+#else
+			break;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return std::make_unique<d3d12::D3D12Device>();
@@ -78,7 +88,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return std::make_unique<vulkan::VulkanSurface>();
+#else
+			break;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return std::make_unique<d3d12::D3D12Surface>();

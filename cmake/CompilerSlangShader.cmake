@@ -388,7 +388,7 @@ endfunction()
 # SPIR-V array. This keeps the renderer's shader-loading call sites backend
 # neutral while ensuring Metal consumes native libraries only.
 function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
-  set(oneValueArgs HEADERS_VAR CATALOG_HEADER METAL_TOOLCHAIN)
+  set(oneValueArgs HEADERS_VAR CATALOG_HEADER METAL_TOOLCHAIN METAL_SDK)
   set(multiValueArgs EXTRA_FLAGS)
   cmake_parse_arguments(METAL_SHADER "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -403,6 +403,9 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
     message(FATAL_ERROR
       "compile_slang_metal requires the Xcode Metal compiler component. "
       "Install it with: xcodebuild -downloadComponent MetalToolchain")
+  endif()
+  if(NOT METAL_SHADER_METAL_SDK)
+    set(METAL_SHADER_METAL_SDK "macosx")
   endif()
 
   file(MAKE_DIRECTORY "${OUTPUT_DIR}")
@@ -438,13 +441,13 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
         ${METAL_SHADER_EXTRA_FLAGS}
         -o "${_metal_source}"
         "${_shader}"
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${METAL_SHADER_METAL_SDK}" --toolchain
         "${METAL_SHADER_METAL_TOOLCHAIN}" metal
         -std=metal4.0
         "-fmodules-cache-path=${OUTPUT_DIR}/metal-module-cache"
         -c "${_metal_source}"
         -o "${_air_file}"
-      COMMAND /usr/bin/xcrun --sdk macosx --toolchain
+      COMMAND /usr/bin/xcrun --sdk "${METAL_SHADER_METAL_SDK}" --toolchain
         "${METAL_SHADER_METAL_TOOLCHAIN}" metallib
         "${_air_file}"
         -o "${_metallib_file}"

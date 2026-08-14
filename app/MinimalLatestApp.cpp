@@ -1,5 +1,9 @@
 #include "MinimalLatestApp.h"
 
+#if defined(DEMO_PLATFORM_IOS)
+#include <SDL3/SDL_main.h>
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -7,6 +11,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -17,6 +22,41 @@ namespace
 {
 using AutomationMode = MinimalLatestApp::AutomationMode;
 using AutomationOptions = MinimalLatestApp::AutomationOptions;
+
+class SdlSession
+{
+public:
+	SdlSession()
+	{
+		if(!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
+		{
+			throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
+		}
+
+#if defined(DEMO_PLATFORM_IOS)
+		const char* basePath = SDL_GetBasePath();
+		if(basePath == nullptr)
+		{
+			throw std::runtime_error(std::string("SDL_GetBasePath failed: ") + SDL_GetError());
+		}
+
+		std::error_code pathError;
+		std::filesystem::current_path(std::filesystem::path(basePath) / "assets", pathError);
+		if(pathError)
+		{
+			throw std::runtime_error("Could not select the iOS asset directory: " + pathError.message());
+		}
+#endif
+	}
+
+	~SdlSession()
+	{
+		SDL_Quit();
+	}
+
+	SdlSession(const SdlSession&) = delete;
+	SdlSession& operator=(const SdlSession&) = delete;
+};
 
 [[nodiscard]] std::string_view optionValue(std::string_view argument, std::string_view name)
 {
@@ -225,13 +265,15 @@ int main(int argc, char** argv)
 			return 0;
 		}
 
-		ASSERT(glfwInit() == GLFW_TRUE, "Could not initialize GLFW!");
-		ASSERT(glfwVulkanSupported() == GLFW_TRUE, "GLFW: Vulkan not supported!");
-
-		MinimalLatestApp app({1920, 1080}, automationOptions);
+		SdlSession sdl;
+		const demo::rhi::Extent2D initialWindowSize =
+#if defined(DEMO_PLATFORM_IOS)
+		    {1280, 720};
+#else
+		    {1920, 1080};
+#endif
+		MinimalLatestApp app(initialWindowSize, automationOptions);
 		app.run();
-
-		glfwTerminate();
 	}
 	catch (const std::exception& e)
 	{

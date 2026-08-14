@@ -12,7 +12,7 @@
 #ifdef __ANDROID__
 #  include <backends/imgui_impl_android.h>
 #else
-#  include <backends/imgui_impl_glfw.h>
+#  include <backends/imgui_impl_sdl3.h>
 #endif
 
 #include <algorithm>
@@ -587,7 +587,24 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_Init(static_cast<ANativeWindow*>(info.window));
 #else
-    ImGui_ImplGlfw_InitForOther(static_cast<GLFWwindow*>(info.window), true);
+    SDL_Window* window = static_cast<SDL_Window*>(info.window);
+    bool platformInitialized = false;
+    switch (impl.backend)
+    {
+    case rhi::BackendType::vulkan:
+      platformInitialized = ImGui_ImplSDL3_InitForVulkan(window);
+      break;
+    case rhi::BackendType::d3d12:
+      platformInitialized = ImGui_ImplSDL3_InitForD3D(window);
+      break;
+    case rhi::BackendType::metal:
+      platformInitialized = ImGui_ImplSDL3_InitForMetal(window);
+      break;
+    }
+    if (!platformInitialized)
+    {
+      throw std::runtime_error("Failed to initialize ImGui SDL3 platform backend");
+    }
 #endif
 
     const rhi::ArgumentBinding textureBinding{
@@ -769,7 +786,7 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_Shutdown();
 #else
-    ImGui_ImplGlfw_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
 #endif
     ImGui::DestroyContext();
 
@@ -788,7 +805,7 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_NewFrame();
 #else
-    ImGui_ImplGlfw_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
 #endif
     ImGui::NewFrame();
   }

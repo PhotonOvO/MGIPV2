@@ -215,7 +215,11 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
       ? m_device->name()->utf8String()
       : "Metal 4 device";
     m_physicalDeviceInfo.nativeApiVersion = 4;
+#if defined(DEMO_PLATFORM_IOS)
+    m_physicalDeviceInfo.deviceType = 1u;
+#else
     m_physicalDeviceInfo.deviceType = m_device->isLowPower() ? 1u : 2u;
+#endif
     m_featureInfo = DeviceFeatureInfo{
       .timelineSemaphore = true,
       .synchronization2 = true,

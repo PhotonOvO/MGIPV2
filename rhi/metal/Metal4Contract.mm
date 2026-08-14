@@ -21,7 +21,8 @@ Metal4NativeContractStatus queryMetal4NativeContract() noexcept
   if(device != nullptr)
     device->release();
 
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+#if (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000) || \
+    (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000)
     struct NativeTypeMap
     {
       MTL4::CommandQueue* queue{nullptr};

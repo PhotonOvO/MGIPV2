@@ -26,13 +26,8 @@
 #ifdef __ANDROID__
 #include <android/log.h>
 #include <android/native_window.h>
-#elif defined(_WIN32)
-#define GLFW_EXPOSE_NATIVE_WIN32
 #elif defined(__linux__)
 #include <signal.h>
-#endif
-#ifndef __ANDROID__
-#include <GLFW/glfw3.h>
 #endif
 
 // GLM configuration for Vulkan:
@@ -44,8 +39,6 @@
 #include "VulkanDebugUtil.h"
 #ifdef __ANDROID__
 #include "backends/imgui_impl_android.h"
-#else
-#include "backends/imgui_impl_glfw.h"
 #endif
 #include "imgui.h"
 #include "imgui_internal.h"
