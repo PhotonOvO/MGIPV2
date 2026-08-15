@@ -141,15 +141,15 @@ inline MTL::TextureUsage toMetalTextureUsage(
      hasUsage(usage, TextureUsageFlags::inputAttachment) ||
      hasUsage(usage, TextureUsageFlags::transferSrc))
     result |= MTL::TextureUsageShaderRead;
-  if(hasUsage(usage, TextureUsageFlags::storage) ||
-     hasUsage(usage, TextureUsageFlags::transferDst))
+  if(hasUsage(usage, TextureUsageFlags::storage))
     result |= MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite;
+  if(hasUsage(usage, TextureUsageFlags::transferDst))
+    result |= MTL::TextureUsageShaderWrite;
   if(hasUsage(usage, TextureUsageFlags::colorAttachment) ||
      hasUsage(usage, TextureUsageFlags::depthAttachment) ||
      (supportsRenderPassClear &&
       hasUsage(usage, TextureUsageFlags::transferDst)))
     result |= MTL::TextureUsageRenderTarget;
-  result |= MTL::TextureUsagePixelFormatView;
   return static_cast<MTL::TextureUsage>(result);
 }
 
@@ -319,9 +319,8 @@ inline MTL::Stages toMetalStages(StageFlags stages)
 
 inline MTL4::VisibilityOptions toMetalVisibility(HazardFlags hazards)
 {
+  (void)hazards;
   NS::UInteger result = MTL4::VisibilityOptionDevice;
-  if(any(hazards & HazardFlags::readBeforeWrite))
-    result |= MTL4::VisibilityOptionResourceAlias;
   return static_cast<MTL4::VisibilityOptions>(result);
 }
 

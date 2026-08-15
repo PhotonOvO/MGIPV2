@@ -1,15 +1,16 @@
 #include "MetalPipelines.h"
 
-#include "MetalBlitSource.h"
+#include "_autogen/MetalBuiltins.metallib.h"
 #include "MetalCommon.h"
+#include "../../common/logger.h"
 
 #include <Metal/MTL4Compiler.hpp>
 #include <Metal/MTL4ComputePipeline.hpp>
-#include <Metal/MTL4LibraryDescriptor.hpp>
 #include <Metal/MTL4LibraryFunctionDescriptor.hpp>
 #include <Metal/MTL4PipelineState.hpp>
 #include <Metal/MTL4RenderPipeline.hpp>
 #include <Metal/MTL4SpecializedFunctionDescriptor.hpp>
+#include <Metal/MTLArgumentEncoder.hpp>
 #include <Metal/MTLComputePipeline.hpp>
 #include <Metal/MTLDepthStencil.hpp>
 #include <Metal/MTLDevice.hpp>
@@ -17,6 +18,8 @@
 #include <Metal/MTLLibrary.hpp>
 #include <Metal/MTLRenderPipeline.hpp>
 #include <Metal/MTLVertexDescriptor.hpp>
+
+#include <dispatch/dispatch.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -113,7 +116,8 @@ MTL::DataType specializationType(const SpecializationConstant& constant)
 }
 
 FunctionDescriptorOwner makeFunctionDescriptor(
-  const ShaderEntry& entry, const MetalResourceTable& resources)
+  const ShaderEntry& entry, const MetalResourceTable& resources,
+  bool useIcbLibrary = false)
 {
   const MetalShaderLibraryRecord* library =
     resources.tryGetShaderLibrary(entry.library);
@@ -123,8 +127,12 @@ FunctionDescriptorOwner makeFunctionDescriptor(
     throw std::invalid_argument("Metal shader entry point is empty");
 
   FunctionDescriptorOwner owner;
+  MTL::Library* nativeLibrary = useIcbLibrary &&
+                                library->icbLibrary != nullptr
+    ? library->icbLibrary
+    : library->nativeLibrary;
   owner.base = MTL4::LibraryFunctionDescriptor::alloc()->init();
-  owner.base->setLibrary(library->nativeLibrary);
+  owner.base->setLibrary(nativeLibrary);
   owner.base->setName(NS::String::string(entry.entryPoint.data(),
                                          NS::UTF8StringEncoding));
   if(entry.specializationConstants.empty())
@@ -209,22 +217,57 @@ MTL::VertexDescriptor* makeVertexDescriptor(
 }
 
 void configurePipelineOptions(
-  MTL4::PipelineDescriptor& descriptor, bool enableShaderValidation)
+  MTL4::PipelineDescriptor& descriptor, bool enableShaderValidation,
+  bool disableShaderValidation = false)
 {
   auto* options = MTL4::PipelineOptions::alloc()->init();
   options->setShaderReflection(MTL4::ShaderReflectionBindingInfo);
-  options->setShaderValidation(enableShaderValidation
-                                 ? MTL::ShaderValidationEnabled
-                                 : MTL::ShaderValidationDefault);
+  options->setShaderValidation(disableShaderValidation
+                                 ? MTL::ShaderValidationDisabled
+                                 : enableShaderValidation
+                                   ? MTL::ShaderValidationEnabled
+                                   : MTL::ShaderValidationDefault);
   descriptor.setOptions(options);
   options->release();
+}
+
+MTL::Function* makeMetalFunction(
+  const ShaderEntry& entry, const FunctionDescriptorOwner& descriptor,
+  const MetalResourceTable& resources, bool useIcbLibrary,
+  std::string& failure)
+{
+  const MetalShaderLibraryRecord* library =
+    resources.tryGetShaderLibrary(entry.library);
+  if(library == nullptr || library->nativeLibrary == nullptr)
+  {
+    failure = "Metal argument-buffer function references a stale shader library";
+    return nullptr;
+  }
+
+  MTL::Library* nativeLibrary = useIcbLibrary &&
+                                library->icbLibrary != nullptr
+    ? library->icbLibrary
+    : library->nativeLibrary;
+  NS::Error* error = nullptr;
+  MTL::Function* function = descriptor.constants != nullptr
+    ? nativeLibrary->newFunction(
+        nsString(entry.entryPoint.data()), descriptor.constants, &error)
+    : nativeLibrary->newFunction(nsString(entry.entryPoint.data()));
+  if(function == nullptr)
+  {
+    failure = errorMessage("Metal argument-buffer function", error);
+    failure += " (";
+    failure += entry.entryPoint;
+    failure += ')';
+  }
+  return function;
 }
 
 }  // namespace
 
 MetalPipelineBindingLayout buildMetalPipelineBindingLayout(
   const PipelineBindingSchemaDesc& schema, const VertexInputLayoutDesc& vertexInput,
-  const MetalResourceTable& resources)
+  const MetalResourceTable& resources, bool useNestedResourceArgumentBuffer)
 {
   const PipelineBindingSchemaValidationResult validation =
     validatePipelineBindingSchema(schema);
@@ -232,6 +275,7 @@ MetalPipelineBindingLayout buildMetalPipelineBindingLayout(
     throw std::invalid_argument("Metal pipeline binding schema is invalid");
 
   MetalPipelineBindingLayout result;
+  uint32_t nestedArgumentCount = 0;
   std::vector<PipelineArgumentSlotDesc> slots(schema.argumentSlots.begin(),
                                                schema.argumentSlots.end());
   std::sort(slots.begin(), slots.end(),
@@ -265,14 +309,39 @@ MetalPipelineBindingLayout buildMetalPipelineBindingLayout(
         break;
       case ArgumentType::sampledTexture:
       case ArgumentType::storageTexture:
-        placement.textureIndex = result.textureCount;
-        result.textureCount += binding.arrayCount;
+        if(useNestedResourceArgumentBuffer)
+        {
+          if(result.nestedArgumentBufferIndex == kInvalidMetalBinding)
+            result.nestedArgumentBufferIndex = result.bufferCount++;
+          placement.nestedArgumentIndex = nestedArgumentCount;
+          nestedArgumentCount += binding.arrayCount;
+        }
+        else
+        {
+          placement.textureIndex = result.textureCount;
+          result.textureCount += binding.arrayCount;
+        }
         break;
       case ArgumentType::sampler:
-        placement.samplerIndex = result.samplerCount;
-        result.samplerCount += binding.arrayCount;
+        if(useNestedResourceArgumentBuffer)
+        {
+          if(result.nestedArgumentBufferIndex == kInvalidMetalBinding)
+            result.nestedArgumentBufferIndex = result.bufferCount++;
+          placement.nestedArgumentIndex = nestedArgumentCount;
+          nestedArgumentCount += binding.arrayCount;
+        }
+        else
+        {
+          placement.samplerIndex = result.samplerCount;
+          result.samplerCount += binding.arrayCount;
+        }
         break;
       case ArgumentType::combinedImageSampler:
+        if(useNestedResourceArgumentBuffer)
+        {
+          throw std::invalid_argument(
+            "Metal ICB argument buffers require separate texture and sampler bindings");
+        }
         placement.textureIndex = result.textureCount;
         placement.samplerIndex = result.samplerCount;
         result.textureCount += binding.arrayCount;
@@ -341,15 +410,21 @@ MetalPipelineRecord compileMetalGraphicsPipeline(
   result.kind = MetalPipelineKind::graphics;
   result.debugName = std::string(vertex->entryPoint);
   result.bindingLayout = buildMetalPipelineBindingLayout(
-    desc.bindingSchema, desc.vertexInput, resources);
+    desc.bindingSchema, desc.vertexInput, resources,
+    desc.supportsGpuGeneratedCommands);
   result.rasterState = desc.rasterState;
   result.depthState = desc.depthState;
   result.specializationVariant = desc.specializationVariant;
+  result.supportsGpuGeneratedCommands = desc.supportsGpuGeneratedCommands;
 
-  FunctionDescriptorOwner vertexFunction = makeFunctionDescriptor(*vertex, resources);
+  FunctionDescriptorOwner vertexFunction = makeFunctionDescriptor(
+    *vertex, resources, desc.supportsGpuGeneratedCommands);
   FunctionDescriptorOwner fragmentFunction;
   if(fragment != nullptr)
-    fragmentFunction = makeFunctionDescriptor(*fragment, resources);
+  {
+    fragmentFunction = makeFunctionDescriptor(
+      *fragment, resources, desc.supportsGpuGeneratedCommands);
+  }
 
   auto* pipelineDesc = MTL4::RenderPipelineDescriptor::alloc()->init();
   pipelineDesc->setLabel(nsString("Metal4 graphics pipeline"));
@@ -360,7 +435,16 @@ MetalPipelineRecord compileMetalGraphicsPipeline(
     toMetalTopologyClass(desc.rasterState.topology));
   pipelineDesc->setRasterSampleCount(static_cast<uint32_t>(desc.rasterState.sampleCount));
   pipelineDesc->setRasterizationEnabled(true);
-  configurePipelineOptions(*pipelineDesc, enableShaderValidation);
+  if(result.supportsGpuGeneratedCommands)
+  {
+    pipelineDesc->setSupportIndirectCommandBuffers(
+      MTL4::IndirectCommandBufferSupportStateEnabled);
+  }
+  // Xcode 27 beta's shader validation drops draws from GPU-generated ICBs and
+  // then crashes its diagnostic decoder. The Slang ICB builder and ordinary
+  // pipelines remain validated; API validation still covers this PSO.
+  configurePipelineOptions(*pipelineDesc, enableShaderValidation,
+                           result.supportsGpuGeneratedCommands);
 
   MTL::VertexDescriptor* vertexDesc =
     makeVertexDescriptor(desc.vertexInput, result.bindingLayout);
@@ -398,6 +482,22 @@ MetalPipelineRecord compileMetalGraphicsPipeline(
   NS::Error* error = nullptr;
   result.nativeRenderPipeline = compiler.newRenderPipelineState(
     pipelineDesc, taskOptions, &error);
+  if(result.nativeRenderPipeline == nullptr &&
+     result.supportsGpuGeneratedCommands)
+  {
+    const std::string indirectError = errorMessage(
+      "MTL4::Compiler graphics pipeline with indirect-command support", error);
+    LOGW("Metal disabled GPU-generated commands for %s variant %u: %s",
+         result.debugName.c_str(), result.specializationVariant,
+         indirectError.c_str());
+    // Keep an ordinary Metal 4 PSO for the clamped direct-draw fallback.
+    pipelineDesc->setSupportIndirectCommandBuffers(
+      MTL4::IndirectCommandBufferSupportStateDisabled);
+    result.supportsGpuGeneratedCommands = false;
+    error = nullptr;
+    result.nativeRenderPipeline = compiler.newRenderPipelineState(
+      pipelineDesc, taskOptions, &error);
+  }
   taskOptions->release();
   pipelineDesc->release();
   if(result.nativeRenderPipeline == nullptr)
@@ -414,6 +514,33 @@ MetalPipelineRecord compileMetalGraphicsPipeline(
   {
     result.nativeRenderPipeline->release();
     throw std::runtime_error("Metal failed to create depth-stencil state");
+  }
+
+  if(result.bindingLayout.nestedArgumentBufferIndex != kInvalidMetalBinding)
+  {
+    const ShaderEntry& argumentEntry = fragment != nullptr ? *fragment : *vertex;
+    const FunctionDescriptorOwner& argumentDescriptor = fragment != nullptr
+      ? fragmentFunction
+      : vertexFunction;
+    std::string functionError;
+    auto function = NS::TransferPtr(makeMetalFunction(
+      argumentEntry, argumentDescriptor, resources,
+      desc.supportsGpuGeneratedCommands, functionError));
+    if(!function)
+    {
+      result.nativeDepthStencilState->release();
+      result.nativeRenderPipeline->release();
+      throw std::runtime_error(functionError);
+    }
+    result.nestedArgumentEncoder = function->newArgumentEncoder(
+      result.bindingLayout.nestedArgumentBufferIndex);
+    if(result.nestedArgumentEncoder == nullptr)
+    {
+      result.nativeDepthStencilState->release();
+      result.nativeRenderPipeline->release();
+      throw std::runtime_error(
+        "Metal ICB shader did not expose its material ParameterBlock");
+    }
   }
   return result;
 }
@@ -465,45 +592,83 @@ MetalPipelineRecord compileMetalComputePipeline(
   return result;
 }
 
-MTL::ComputePipelineState* compileMetalBlitPipeline(
-  MTL4::Compiler& compiler, bool enableShaderValidation)
+MetalBuiltinPipelines compileMetalBuiltinPipelines(
+  MTL::Device& device, MTL4::Compiler& compiler, bool enableShaderValidation)
 {
-  auto* compileOptions = MTL::CompileOptions::alloc()->init();
-  compileOptions->setLanguageVersion(MTL::LanguageVersion4_0);
-  compileOptions->setMathMode(MTL::MathModeSafe);
-
-  auto* libraryDesc = MTL4::LibraryDescriptor::alloc()->init();
-  libraryDesc->setName(nsString("MGIP Metal4 compute blit library"));
-  libraryDesc->setOptions(compileOptions);
-  libraryDesc->setSource(nsString(kMetal4BlitSource));
+  dispatch_data_t payload = dispatch_data_create(
+    mgip_metal_builtins_lib, mgip_metal_builtins_lib_sizeInBytes,
+    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+    DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+  if(payload == nullptr)
+    throw std::runtime_error("Metal failed to wrap the built-in Slang metallib");
   NS::Error* error = nullptr;
-  MTL::Library* library = compiler.newLibrary(libraryDesc, &error);
-  libraryDesc->release();
-  compileOptions->release();
+  MTL::Library* library = device.newLibrary(payload, &error);
+  dispatch_release(payload);
   if(library == nullptr)
-    throw std::runtime_error(errorMessage("MTL4::Compiler blit library", error));
+    throw std::runtime_error(errorMessage("MTLDevice::newLibrary(MetalBuiltins)", error));
+  library->setLabel(nsString("MGIP Metal4 built-in Slang library"));
 
-  auto* functionDesc = MTL4::LibraryFunctionDescriptor::alloc()->init();
-  functionDesc->setLibrary(library);
-  functionDesc->setName(nsString("mgipMetal4Blit2D"));
+  MetalBuiltinPipelines result;
+  const auto compilePipeline =
+    [&](const char* entryPoint, const char* label, MTL::Size threadgroupSize) {
+      auto* functionDesc = MTL4::LibraryFunctionDescriptor::alloc()->init();
+      functionDesc->setLibrary(library);
+      functionDesc->setName(nsString(entryPoint));
 
-  auto* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
-  pipelineDesc->setLabel(nsString("MGIP Metal4 compute blit pipeline"));
-  pipelineDesc->setComputeFunctionDescriptor(functionDesc);
-  pipelineDesc->setRequiredThreadsPerThreadgroup(MTL::Size::Make(8, 8, 1));
-  pipelineDesc->setMaxTotalThreadsPerThreadgroup(64);
-  configurePipelineOptions(*pipelineDesc, enableShaderValidation);
+      auto* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
+      pipelineDesc->setLabel(nsString(label));
+      pipelineDesc->setComputeFunctionDescriptor(functionDesc);
+      pipelineDesc->setRequiredThreadsPerThreadgroup(threadgroupSize);
+      pipelineDesc->setMaxTotalThreadsPerThreadgroup(
+        threadgroupSize.width * threadgroupSize.height * threadgroupSize.depth);
+      configurePipelineOptions(*pipelineDesc, enableShaderValidation);
 
-  auto* taskOptions = MTL4::CompilerTaskOptions::alloc()->init();
-  MTL::ComputePipelineState* pipeline = compiler.newComputePipelineState(
-    pipelineDesc, taskOptions, &error);
-  taskOptions->release();
-  pipelineDesc->release();
-  functionDesc->release();
+      auto* taskOptions = MTL4::CompilerTaskOptions::alloc()->init();
+      error = nullptr;
+      MTL::ComputePipelineState* pipeline = compiler.newComputePipelineState(
+        pipelineDesc, taskOptions, &error);
+      taskOptions->release();
+      pipelineDesc->release();
+      functionDesc->release();
+      if(pipeline == nullptr)
+        throw std::runtime_error(errorMessage(label, error));
+      return pipeline;
+    };
+
+  try
+  {
+    result.blit = compilePipeline(
+      "mgipMetal4Blit2D", "MTL4::Compiler Slang blit pipeline",
+      MTL::Size::Make(8, 8, 1));
+    result.indexedIndirectUInt32 = compilePipeline(
+      "mgipPrepareIndexedIndirectUInt32",
+      "MTL4::Compiler Slang indexed-indirect uint32 pipeline",
+      MTL::Size::Make(64, 1, 1));
+    result.indexedIndirectUInt16 = compilePipeline(
+      "mgipPrepareIndexedIndirectUInt16",
+      "MTL4::Compiler Slang indexed-indirect uint16 pipeline",
+      MTL::Size::Make(64, 1, 1));
+
+    result.indexedIndirectFunction = library->newFunction(
+      nsString("mgipPrepareIndexedIndirectUInt32"));
+    if(result.indexedIndirectFunction == nullptr)
+      throw std::runtime_error("Metal failed to load the indexed-indirect Slang function");
+  }
+  catch(...)
+  {
+    if(result.indexedIndirectFunction != nullptr)
+      result.indexedIndirectFunction->release();
+    if(result.indexedIndirectUInt16 != nullptr)
+      result.indexedIndirectUInt16->release();
+    if(result.indexedIndirectUInt32 != nullptr)
+      result.indexedIndirectUInt32->release();
+    if(result.blit != nullptr)
+      result.blit->release();
+    library->release();
+    throw;
+  }
   library->release();
-  if(pipeline == nullptr)
-    throw std::runtime_error(errorMessage("MTL4::Compiler blit pipeline", error));
-  return pipeline;
+  return result;
 }
 
 }  // namespace demo::rhi::metal

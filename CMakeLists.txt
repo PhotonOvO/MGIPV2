@@ -40,11 +40,6 @@ set(DEMO_METAL_CPP_COMMIT "9a8bc57c0318b84863bec2faf6605594877c5f5d")
 set(DEMO_METAL_CPP_SHA256 "46736574f7afd977d7d35a13aa781edb595a43650d437b50f5779ec750879530")
 
 if(APPLE AND DEMO_ENABLE_METAL4)
-  enable_language(OBJC)
-  enable_language(OBJCXX)
-  set(CMAKE_OBJCXX_STANDARD 20)
-  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
-
   if(DEMO_PLATFORM_IOS)
     string(TOLOWER "${CMAKE_OSX_SYSROOT}" DEMO_OSX_SYSROOT_LOWER)
     if(DEMO_OSX_SYSROOT_LOWER MATCHES "iphonesimulator")
@@ -90,22 +85,17 @@ if(APPLE AND DEMO_ENABLE_METAL4)
   find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
   find_library(DEMO_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
   find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(DEMO_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
 
-  file(READ "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
-    DEMO_METAL4_BLIT_SOURCE)
   set(DEMO_METAL4_GENERATED_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/_metal4")
   file(MAKE_DIRECTORY "${DEMO_METAL4_GENERATED_INCLUDE_DIR}")
-  configure_file(
-    "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlitSource.h.in"
-    "${DEMO_METAL4_GENERATED_INCLUDE_DIR}/MetalBlitSource.h"
-    @ONLY)
 
   set(DEMO_METAL4_SOURCES
     rhi/metal/Metal4Availability.h
-    rhi/metal/Metal4Availability.mm
+    rhi/metal/Metal4Availability.cpp
     rhi/metal/Metal4Contract.h
-    rhi/metal/Metal4Contract.mm
+    rhi/metal/Metal4Contract.cpp
     rhi/metal/MetalCpp.cpp
     rhi/metal/MetalCommon.h
     rhi/metal/MetalResourceTable.h
@@ -117,7 +107,7 @@ if(APPLE AND DEMO_ENABLE_METAL4)
     rhi/metal/MetalCommandBuffer.h
     rhi/metal/MetalCommandBuffer.cpp
     rhi/metal/MetalSurface.h
-    rhi/metal/MetalSurface.mm
+    rhi/metal/MetalSurface.cpp
     rhi/metal/MetalDevice.h
     rhi/metal/MetalDevice.cpp
     rhi/metal/MetalPipelines.h
@@ -134,13 +124,14 @@ if(APPLE AND DEMO_ENABLE_METAL4)
     )
     target_compile_definitions(${target_name} PUBLIC DEMO_HAS_METAL4=1)
     target_compile_options(${target_name} PRIVATE
-      $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-fblocks>
+      $<$<COMPILE_LANGUAGE:CXX>:-fblocks>
     )
     target_link_libraries(${target_name} PUBLIC
       metal_cpp_headers
       "${DEMO_METAL_FRAMEWORK}"
       "${DEMO_QUARTZCORE_FRAMEWORK}"
       "${DEMO_FOUNDATION_FRAMEWORK}"
+      "${DEMO_COREFOUNDATION_FRAMEWORK}"
     )
   endfunction()
 endif()
@@ -165,15 +156,17 @@ if(DEMO_RHI_CONTRACT_ONLY)
   endif()
 
   if(APPLE)
-    enable_language(OBJCXX)
     find_library(DEMO_METAL_FRAMEWORK Metal REQUIRED)
     find_library(DEMO_FOUNDATION_FRAMEWORK Foundation REQUIRED)
     add_executable(metal4_contract_tests
-      tests/metal4_contract_tests.mm
-      rhi/metal/Metal4Availability.mm
-      rhi/metal/Metal4Contract.mm
+      tests/metal4_contract_tests.cpp
+      rhi/metal/Metal4Availability.cpp
+      rhi/metal/Metal4Contract.cpp
     )
-    target_include_directories(metal4_contract_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+    target_include_directories(metal4_contract_tests PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}"
+      "${metal_cpp_SOURCE_DIR}")
+    target_compile_options(metal4_contract_tests PRIVATE -fblocks)
     target_link_libraries(metal4_contract_tests PRIVATE
       "${DEMO_METAL_FRAMEWORK}"
       "${DEMO_FOUNDATION_FRAMEWORK}"
@@ -203,6 +196,10 @@ endif()
 #====================================================================================
 
 option(USE_SLANG "Use Slang shaders instead of GLSL" ON)
+if(APPLE AND DEMO_ENABLE_METAL4 AND NOT USE_SLANG)
+  message(FATAL_ERROR
+    "The Metal 4 backend requires Slang as the shader source authority")
+endif()
 if(USE_SLANG)
   message(STATUS "Shader Authority: Slang is the single source of truth")
   message(STATUS "  - Slang compilation: ENABLED")
@@ -415,7 +412,7 @@ if(USE_SLANG)
        DEMO_METAL_JSON_ERROR OR
        NOT DEMO_METAL_TOOLCHAIN_IDENTIFIER)
       message(FATAL_ERROR
-        "Xcode 26's optional Metal Toolchain component is required. "
+        "The selected Xcode's optional Metal Toolchain component is required. "
         "Install it with: xcodebuild -downloadComponent MetalToolchain")
     endif()
 
@@ -439,41 +436,72 @@ if(USE_SLANG)
       "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" CACHE STRING
       "Xcode Metal toolchain used for Metal shader libraries" FORCE)
 
-    set(DEMO_METAL4_BLIT_AIR
-      "${SHADER_OUTPUT_DIR}/MetalBlit.air")
-    set(DEMO_METAL4_BLIT_LIBRARY
-      "${SHADER_OUTPUT_DIR}/MetalBlit.metallib")
-    add_custom_command(
-      OUTPUT "${DEMO_METAL4_BLIT_AIR}" "${DEMO_METAL4_BLIT_LIBRARY}"
-      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
-        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metal
-        -std=metal4.0
-        "-fmodules-cache-path=${SHADER_OUTPUT_DIR}/metal-module-cache"
-        -c "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
-        -o "${DEMO_METAL4_BLIT_AIR}"
-      COMMAND /usr/bin/xcrun --sdk "${DEMO_METAL_SDK}" --toolchain
-        "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}" metallib
-        "${DEMO_METAL4_BLIT_AIR}"
-        -o "${DEMO_METAL4_BLIT_LIBRARY}"
-      DEPENDS "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBlit.metal"
-      COMMENT "Validating the Metal 4 compute blit shader"
-      VERBATIM)
-    add_custom_target(metal4_builtin_shader_validation ALL
-      DEPENDS "${DEMO_METAL4_BLIT_AIR}" "${DEMO_METAL4_BLIT_LIBRARY}")
+    compile_slang_metal_embedded(
+      "${CMAKE_CURRENT_LIST_DIR}/rhi/metal/MetalBuiltins.slang"
+      "${SHADER_OUTPUT_DIR}"
+      NAME MetalBuiltins
+      VARIABLE_NAME mgip_metal_builtins_lib
+      HEADER_VAR DEMO_METAL4_BUILTIN_SHADER_HEADER
+      METAL_TOOLCHAIN "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}"
+      METAL_SDK "${DEMO_METAL_SDK}"
+      ENTRY_POINTS
+        "mgipMetal4Blit2D:compute"
+        "mgipPrepareIndexedIndirectUInt32:compute"
+        "mgipPrepareIndexedIndirectUInt16:compute"
+      EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}")
+
+    compile_slang_metal_embedded(
+      "${CMAKE_CURRENT_LIST_DIR}/tests/metal4_validation_smoke.slang"
+      "${SHADER_OUTPUT_DIR}"
+      NAME Metal4ValidationSmoke
+      VARIABLE_NAME mgip_metal4_validation_smoke_lib
+      HEADER_VAR DEMO_METAL4_VALIDATION_SHADER_HEADER
+      METAL_TOOLCHAIN "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}"
+      METAL_SDK "${DEMO_METAL_SDK}"
+      ENTRY_POINTS
+        "offscreenSmokeVertex:vertex"
+        "offscreenSmokeFragment:fragment"
+        "indexedSmokeVertex:vertex"
+        "indexedSmokeFragment:fragment"
+        "icbTopLevelTextureSmokeFragment:fragment"
+        "icbArgumentBufferSmokeFragment:fragment"
+        "depthWriteSmokeVertex:vertex"
+        "depthRejectSmokeVertex:vertex"
+        "depthWriteSmokeFragment:fragment"
+        "depthRejectSmokeFragment:fragment"
+        "depthSampleSmokeFragment:fragment"
+        "writeIndexedIndirectSmoke:compute"
+        "argumentTableSnapshotSmoke:compute"
+      EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}")
 
     set(DEMO_METAL_SHADER_CATALOG
       "${SHADER_OUTPUT_DIR}/MetalShaderCatalog.h")
+    set(DEMO_METAL_ICB_VARIANT_CATALOG
+      "${SHADER_OUTPUT_DIR}/MetalShaderICBVariantCatalog.h")
     compile_slang_metal(
       "${SHADER_SLANG_FILES}"
       "${SHADER_OUTPUT_DIR}"
       HEADERS_VAR GENERATED_SHADER_METAL_HEADERS
       CATALOG_HEADER "${DEMO_METAL_SHADER_CATALOG}"
+      ICB_VARIANT_CATALOG_HEADER
+        "${DEMO_METAL_ICB_VARIANT_CATALOG}"
       METAL_TOOLCHAIN "${DEMO_METAL_TOOLCHAIN_IDENTIFIER}"
       METAL_SDK "${DEMO_METAL_SDK}"
       EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
+      ICB_VARIANT_SHADERS
+        "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.depth_prepass.slang"
+        "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.gbuffer.slang"
+        "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.shadow.slang"
+        "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.forward.slang"
     )
+    list(APPEND GENERATED_SHADER_METAL_HEADERS
+      "${DEMO_METAL4_BUILTIN_SHADER_HEADER}")
+    add_custom_target(demo_metal_shader_libraries
+      DEPENDS ${GENERATED_SHADER_METAL_HEADERS})
   else()
     set(GENERATED_SHADER_METAL_HEADERS "")
+    set(DEMO_METAL4_VALIDATION_SHADER_HEADER "")
+    set(DEMO_METAL_ICB_VARIANT_CATALOG "")
   endif()
   # Reflection metadata will be extracted from SPIR-V at build time or runtime
   # For v1, we establish the contract structure; actual extraction is a follow-on task
@@ -827,7 +855,10 @@ if(DEMO_ENABLE_VULKAN)
   target_compile_definitions(demo_core PUBLIC VK_NO_PROTOTYPES DEMO_HAS_VULKAN=1)
 endif()
 if(DEMO_PLATFORM_IOS)
-  target_compile_definitions(demo_core PUBLIC DEMO_PLATFORM_IOS=1 DEMO_DEFAULT_RHI_METAL=1)
+  target_compile_definitions(demo_core PUBLIC DEMO_PLATFORM_IOS=1)
+endif()
+if(APPLE AND DEMO_ENABLE_METAL4 AND NOT DEMO_ENABLE_VULKAN)
+  target_compile_definitions(demo_core PUBLIC DEMO_DEFAULT_RHI_METAL=1)
 endif()
 if(USE_SLANG)
   target_compile_definitions(demo_core PUBLIC USE_SLANG)
@@ -886,9 +917,13 @@ target_sources(demo_core PRIVATE
   ${GENERATED_SHADER_SPV_BINARIES}
   ${GENERATED_SHADER_METAL_HEADERS}
   ${DEMO_METAL_SHADER_CATALOG}
+  ${DEMO_METAL_ICB_VARIANT_CATALOG}
   ${GENERATED_SHADER_GLSL_HEADERS}
   ${SHADER_H_FILES}
 )
+if(TARGET demo_metal_shader_libraries)
+  add_dependencies(demo_core demo_metal_shader_libraries)
+endif()
 if(DEMO_ENABLE_VULKAN)
   target_sources(demo_core PRIVATE
     ${vulkanmemoryallocator_SOURCE_DIR}/include/vk_mem_alloc.h)
@@ -1017,6 +1052,21 @@ if(BUILD_TESTING AND NOT ANDROID AND NOT DEMO_PLATFORM_IOS)
   )
   target_link_libraries(rhi_backend_factory_tests PRIVATE demo_core)
   add_test(NAME rhi_backend_factory COMMAND rhi_backend_factory_tests)
+
+  add_test(NAME metal4_source_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}"
+      -P "${CMAKE_CURRENT_LIST_DIR}/tests/metal4_source_contract.cmake")
+
+  if(APPLE AND DEMO_ENABLE_METAL4)
+    add_executable(metal4_validation_smoke_tests
+      tests/metal4_validation_smoke_tests.cpp
+      "${DEMO_METAL4_VALIDATION_SHADER_HEADER}")
+    target_link_libraries(metal4_validation_smoke_tests PRIVATE demo_core)
+    demo_configure_metal4_target(metal4_validation_smoke_tests)
+    add_test(NAME metal4_validation_smoke COMMAND metal4_validation_smoke_tests)
+    set_tests_properties(metal4_validation_smoke PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   if(WIN32 AND DEMO_ENABLE_D3D12)
     add_executable(d3d12_device_smoke_tests

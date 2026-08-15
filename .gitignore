@@ -1,9 +1,13 @@
 out/
+.DS_Store
+/.txt
+/com.apple.DeveloperTools/
 .vs/
 .idea/
 resources/
 build/
 build_*/
+build-*/
 .worktrees/
 .superpowers/
 captures/

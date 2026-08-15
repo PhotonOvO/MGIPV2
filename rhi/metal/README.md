@@ -1,13 +1,15 @@
 # Metal 4 RHI Backend
 
-This directory contains the macOS Metal 4 implementation of the Demo RHI. It
-targets the Metal 4 core API introduced with macOS 26 and is compiled with
-Xcode 26 or newer.
+This directory contains the Apple-platform Metal 4 implementation of the Demo
+RHI. It targets the Metal 4 core API introduced with macOS 26 and iOS 26 and is
+compiled with Xcode 26 or newer.
 
 Authoritative references:
 
 - Apple, Understanding the Metal 4 core API:
   <https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api>
+- Slang, Metal-specific functionalities:
+  <https://shader-slang.org/slang/user-guide/metal-target-specific>
 - metal-cpp: <https://github.com/bkaradzic/metal-cpp>
 - Pinned metal-cpp commit: `9a8bc57c0318b84863bec2faf6605594877c5f5d`
 - Pinned archive SHA-256:
@@ -15,10 +17,10 @@ Authoritative references:
 
 ## Requirements
 
-- Xcode 26 with a macOS 26 SDK
+- Xcode 26 or newer with a macOS 26 or newer SDK
 - The optional Xcode Metal Toolchain component for production shader builds
 - A Metal 4 runtime for execution and smoke testing
-- C++20 and Objective-C++20
+- C++20
 
 The CMake configuration rejects SDKs older than macOS 26. The deployment host
 may be older for compile-only validation, but Metal 4 executables must only be
@@ -27,7 +29,8 @@ runtime protocols, and a device as available.
 
 ## Core API Contract
 
-The command path uses only these Metal 4 command types through metal-cpp:
+The CPU command path is implemented in `.cpp` files and uses these Metal 4
+command types exclusively through metal-cpp:
 
 - `MTL4::CommandQueue`
 - `MTL4::CommandAllocator`
@@ -36,7 +39,8 @@ The command path uses only these Metal 4 command types through metal-cpp:
 - `MTL4::ComputeCommandEncoder`
 
 `tests/metal4_source_contract.cmake` scans the backend and fails if a legacy
-command family or legacy drawable submission call is introduced.
+command family, Objective-C runtime call, runtime MSL source path, `.mm` file,
+hand-authored `.metal` file, or legacy drawable submission call is introduced.
 
 Apple's Metal 4 command-buffer lifecycle is represented directly:
 
@@ -100,21 +104,37 @@ Graphics and compute pipelines are compiled with `MTL4::Compiler` and Metal 4
 pipeline descriptors. Validation-enabled devices request
 `MTL::ShaderValidationEnabled` in pipeline options.
 
-Slang remains the shader source of truth. A production Apple build performs:
+Slang remains the only shader source of truth. A production Apple build
+performs the following offline build pipeline:
 
 ```text
-Slang -> MSL -> AIR -> metallib -> embedded C++ bytes
+Slang -> generated MSL -> AIR -> metallib -> embedded C++ bytes
 ```
 
 At runtime `EmbeddedShaderLibrary` selects the metallib corresponding to the
 same embedded SPIR-V module used by Vulkan. Every compute pipeline supplies an
 explicit Metal threads-per-threadgroup size.
 
-The private scaling/flipping shader lives in `MetalBlit.metal`. CMake embeds
-that exact source into the backend, and `MTL4::LibraryDescriptor` plus
-`MTL4::Compiler` creates its runtime library and compute pipeline. This keeps
-the private kernel on the Metal 4 compiler path while allowing Xcode's offline
-compiler to validate the identical source during a production build.
+Metal-specific blit and indexed-indirect-count kernels live in
+`MetalBuiltins.slang`. Slang's Metal target generates temporary `.metal` files
+only in the build directory; Xcode compiles them to one embedded metallib.
+Runtime code loads those bytes with metal-cpp and creates pipeline states with
+`MTL4::Compiler`. It never compiles MSL source at runtime.
+
+The indexed-indirect builder uses Slang's target interoperation facilities.
+`__target_intrinsic(metal, ...)` maps Slang wrapper types to Metal shader-side
+`command_buffer` and `render_command`, and `ParameterBlock<T>` lowers to the
+argument buffer that carries the ICB reference. These are GPU shader types used
+to write ICB commands. They are unrelated to the CPU-side
+`MTL4::CommandBuffer` and `MTL4::RenderCommandEncoder` objects.
+
+Render pipelines that opt into GPU-generated commands select a second Slang
+Metal variant compiled with `DEMO_METAL_ICB=1`. That variant places the material
+texture array and shared sampler in a `ParameterBlock`, because Xcode 27 rejects
+fragment ICB pipelines with those resources at top level. The Metal RHI encodes
+the existing material argument table into that nested argument buffer and binds
+its GPU address through the ordinary Metal 4 argument table. Renderer binding
+schemas and the Vulkan/D3D12 shader variants are unchanged.
 
 ## Copy, Blit, And Mipmaps
 
@@ -199,6 +219,8 @@ verifies:
   pipeline;
 - compute and render argument-table updates after command-buffer end and before
   queue submit, including destruction of the replaced buffer;
+- direct indexed, ordinary indexed-indirect, and GPU-count/ICB indexed draws in
+  three independent viewport regions;
 - an offscreen Metal 4 render pass, draw, render-to-transfer barrier, and texture
   readback without issuing any draw command against a drawable;
 - API and shader validation while the work executes.
@@ -207,29 +229,60 @@ The executable returns `77` when the Metal 4 runtime or device is unavailable,
 and CTest declares `SKIP_RETURN_CODE 77`. This lets an Xcode 26 compile-only host
 produce the test, while a separate macOS 26 host performs GPU validation.
 
-## Xcode 26 Build
+## Xcode Project Generation
+
+Use the repository generator instead of assigning `DEVELOPER_DIR` manually:
+
+```sh
+./tools/generate_xcode_project.py --platform macos
+```
+
+The generator scans the system and user application directories, including
+`~/Downloads`, and selects the highest installed Xcode version supported by the
+backend. Xcode prerelease applications are eligible, so an Xcode 27 Beta is
+preferred over an Xcode 26 release. The default output directory includes the
+selected major version, for example `build-macos-xcode27`, so a project never
+reuses an older Xcode's CMake cache.
+
+Inspect the selection without generating files:
+
+```sh
+./tools/generate_xcode_project.py --platform macos --dry-run
+```
+
+Force a particular installation when needed:
+
+```sh
+./tools/generate_xcode_project.py \
+  --xcode '/Applications/Xcode 26.app' \
+  --platform macos
+```
+
+The same entry point supports `ios-simulator` and `ios-device`. Additional
+CMake options may be passed after `--`.
+
+## Metal Toolchain
 
 Install the optional shader tools once:
 
 ```sh
-DEVELOPER_DIR='/Applications/Xcode 26.app/Contents/Developer' \
+DEVELOPER_DIR='/path/to/Xcode.app/Contents/Developer' \
   xcodebuild -downloadComponent MetalToolchain
 ```
 
-Configure and build with Xcode 26 explicitly selected:
+After generation, use the selected developer directory printed by the script
+when building from a terminal. The script also prints the exact build and
+`open -a` commands for the selected Xcode application.
 
 ```sh
-DEVELOPER_DIR='/Applications/Xcode 26.app/Contents/Developer' \
-  cmake -S . -B build-metal4 -DDEMO_ENABLE_METAL4=ON
-
-DEVELOPER_DIR='/Applications/Xcode 26.app/Contents/Developer' \
-  cmake --build build-metal4 --parallel
+DEVELOPER_DIR='/path/to/Xcode.app/Contents/Developer' \
+  cmake --build build-macos-xcode27 --target Demo --parallel
 ```
 
 Compile-only validation must not invoke the produced Metal executables. Move or
 rebuild the artifacts on the macOS 26 machine and run:
 
 ```sh
-ctest --test-dir build-metal4 -R 'metal4_(source_contract|validation_smoke)' \
+ctest --test-dir build-macos-xcode27 -R 'metal4_(source_contract|validation_smoke)' \
   --output-on-failure
 ```

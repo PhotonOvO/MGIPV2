@@ -388,8 +388,13 @@ endfunction()
 # SPIR-V array. This keeps the renderer's shader-loading call sites backend
 # neutral while ensuring Metal consumes native libraries only.
 function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
-  set(oneValueArgs HEADERS_VAR CATALOG_HEADER METAL_TOOLCHAIN METAL_SDK)
-  set(multiValueArgs EXTRA_FLAGS)
+  set(oneValueArgs
+    HEADERS_VAR
+    CATALOG_HEADER
+    ICB_VARIANT_CATALOG_HEADER
+    METAL_TOOLCHAIN
+    METAL_SDK)
+  set(multiValueArgs EXTRA_FLAGS ICB_VARIANT_SHADERS)
   cmake_parse_arguments(METAL_SHADER "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
   if(NOT METAL_SHADER_HEADERS_VAR OR NOT METAL_SHADER_CATALOG_HEADER)
@@ -407,11 +412,27 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
   if(NOT METAL_SHADER_METAL_SDK)
     set(METAL_SHADER_METAL_SDK "macosx")
   endif()
+  if(METAL_SHADER_ICB_VARIANT_SHADERS AND
+     NOT METAL_SHADER_ICB_VARIANT_CATALOG_HEADER)
+    message(FATAL_ERROR
+      "compile_slang_metal requires ICB_VARIANT_CATALOG_HEADER when "
+      "ICB_VARIANT_SHADERS are provided")
+  endif()
+
+  foreach(_icb_shader IN LISTS METAL_SHADER_ICB_VARIANT_SHADERS)
+    list(FIND SHADER_FILES "${_icb_shader}" _icb_shader_index)
+    if(_icb_shader_index EQUAL -1)
+      message(FATAL_ERROR
+        "Metal ICB variant shader is not in SHADER_FILES: ${_icb_shader}")
+    endif()
+  endforeach()
 
   file(MAKE_DIRECTORY "${OUTPUT_DIR}")
   set(_metal_headers "")
   set(_catalog_includes "")
   set(_catalog_cases "")
+  set(_icb_catalog_includes "")
+  set(_icb_catalog_cases "")
 
   foreach(_shader ${SHADER_FILES})
     get_filename_component(_shader_name "${_shader}" NAME)
@@ -424,12 +445,56 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
     set(_dep_file "${_base}.metal.dep")
     set(_metal_embed_name "${_embed_name}_metal_lib")
 
+    set(_shader_outputs
+      "${_metal_source}"
+      "${_air_file}"
+      "${_metallib_file}"
+      "${_metallib_header}")
+    set(_icb_compile_commands "")
+    list(FIND METAL_SHADER_ICB_VARIANT_SHADERS "${_shader}"
+      _icb_variant_index)
+    if(NOT _icb_variant_index EQUAL -1)
+      set(_icb_metal_source "${_base}.icb.metal")
+      set(_icb_air_file "${_base}.icb.air")
+      set(_icb_metallib_file "${_base}.icb.metallib")
+      set(_icb_metallib_header "${_icb_metallib_file}.h")
+      set(_icb_metal_embed_name "${_embed_name}_metal_icb_lib")
+      list(APPEND _shader_outputs
+        "${_icb_metal_source}"
+        "${_icb_air_file}"
+        "${_icb_metallib_file}"
+        "${_icb_metallib_header}")
+      list(APPEND _icb_compile_commands
+        COMMAND "${Slang_SLANGC_EXECUTABLE}"
+          -lang slang
+          -target metal
+          -matrix-layout-column-major
+          -O0
+          "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,-g1,-g0>"
+          -DDEMO_METAL=1
+          -DDEMO_METAL_ICB=1
+          ${METAL_SHADER_EXTRA_FLAGS}
+          -o "${_icb_metal_source}"
+          "${_shader}"
+        COMMAND /usr/bin/xcrun --sdk "${METAL_SHADER_METAL_SDK}" --toolchain
+          "${METAL_SHADER_METAL_TOOLCHAIN}" metal
+          -std=metal4.0
+          "-fmodules-cache-path=${OUTPUT_DIR}/metal-module-cache"
+          -c "${_icb_metal_source}"
+          -o "${_icb_air_file}"
+        COMMAND /usr/bin/xcrun --sdk "${METAL_SHADER_METAL_SDK}" --toolchain
+          "${METAL_SHADER_METAL_TOOLCHAIN}" metallib
+          "${_icb_air_file}"
+          -o "${_icb_metallib_file}"
+        COMMAND "${CMAKE_COMMAND}"
+          "-DINPUT_FILE=${_icb_metallib_file}"
+          "-DOUTPUT_FILE=${_icb_metallib_header}"
+          "-DVARIABLE_NAME=${_icb_metal_embed_name}"
+          -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake")
+    endif()
+
     add_custom_command(
-      OUTPUT
-        "${_metal_source}"
-        "${_air_file}"
-        "${_metallib_file}"
-        "${_metallib_header}"
+      OUTPUT ${_shader_outputs}
       COMMAND "${Slang_SLANGC_EXECUTABLE}"
         -depfile "${_dep_file}"
         -lang slang
@@ -456,6 +521,7 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
         "-DOUTPUT_FILE=${_metallib_header}"
         "-DVARIABLE_NAME=${_metal_embed_name}"
         -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
+      ${_icb_compile_commands}
       MAIN_DEPENDENCY "${_shader}"
       DEPENDS "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
       DEPFILE "${_dep_file}"
@@ -469,6 +535,15 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
     string(APPEND _catalog_cases
       "  if (spirv == ${_embed_name})\n"
       "    return {reinterpret_cast<const std::byte*>(${_metal_embed_name}), ${_metal_embed_name}_sizeInBytes};\n")
+
+    if(NOT _icb_variant_index EQUAL -1)
+      list(APPEND _metal_headers "${_icb_metallib_header}")
+      string(APPEND _icb_catalog_includes
+        "#include \"${_shader_name}.metallib.h\"\n#include \"${_shader_name}.icb.metallib.h\"\n")
+      string(APPEND _icb_catalog_cases
+        "  if (metalLibrary == reinterpret_cast<const std::byte*>(${_metal_embed_name}))\n"
+        "    return {reinterpret_cast<const std::byte*>(${_icb_metal_embed_name}), ${_icb_metal_embed_name}_sizeInBytes};\n")
+    endif()
   endforeach()
 
   set(_catalog_content
@@ -476,5 +551,104 @@ function(compile_slang_metal SHADER_FILES OUTPUT_DIR)
   file(GENERATE OUTPUT "${METAL_SHADER_CATALOG_HEADER}"
     CONTENT "${_catalog_content}")
 
+  if(METAL_SHADER_ICB_VARIANT_CATALOG_HEADER)
+    set(_icb_catalog_content
+      "#pragma once\n\n#include <cstddef>\n\n${_icb_catalog_includes}\nnamespace demo {\nstruct EmbeddedMetalICBVariantLibrary {\n  const std::byte* data{};\n  size_t size{};\n};\n\ninline EmbeddedMetalICBVariantLibrary findEmbeddedMetalICBVariantLibrary(const std::byte* metalLibrary)\n{\n${_icb_catalog_cases}  return {};\n}\n} // namespace demo\n")
+    file(GENERATE OUTPUT "${METAL_SHADER_ICB_VARIANT_CATALOG_HEADER}"
+      CONTENT "${_icb_catalog_content}")
+  endif()
+
   set(${METAL_SHADER_HEADERS_VAR} ${_metal_headers} PARENT_SCOPE)
+endfunction()
+
+# Compile selected Slang entry points independently, link their AIR objects into
+# one metallib, and embed that binary in a generated C++ header. Compiling each
+# entry independently keeps its entry-point parameter bindings local to zero.
+function(compile_slang_metal_embedded SOURCE_FILE OUTPUT_DIR)
+  set(oneValueArgs
+    NAME
+    VARIABLE_NAME
+    HEADER_VAR
+    METAL_TOOLCHAIN
+    METAL_SDK)
+  set(multiValueArgs ENTRY_POINTS EXTRA_FLAGS)
+  cmake_parse_arguments(EMBEDDED_METAL "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT EMBEDDED_METAL_NAME OR NOT EMBEDDED_METAL_VARIABLE_NAME OR
+     NOT EMBEDDED_METAL_HEADER_VAR OR NOT EMBEDDED_METAL_ENTRY_POINTS)
+    message(FATAL_ERROR
+      "compile_slang_metal_embedded requires NAME, VARIABLE_NAME, HEADER_VAR, and ENTRY_POINTS")
+  endif()
+  if(NOT EXISTS "${Slang_SLANGC_EXECUTABLE}")
+    message(FATAL_ERROR "compile_slang_metal_embedded could not find slangc")
+  endif()
+  if(NOT EMBEDDED_METAL_METAL_TOOLCHAIN)
+    message(FATAL_ERROR
+      "compile_slang_metal_embedded requires the Xcode Metal compiler component")
+  endif()
+  if(NOT EMBEDDED_METAL_METAL_SDK)
+    set(EMBEDDED_METAL_METAL_SDK "macosx")
+  endif()
+
+  file(MAKE_DIRECTORY "${OUTPUT_DIR}")
+  set(_outputs "")
+  set(_air_files "")
+  set(_compile_commands "")
+  foreach(_entry_spec IN LISTS EMBEDDED_METAL_ENTRY_POINTS)
+    string(REPLACE ":" ";" _entry_parts "${_entry_spec}")
+    list(LENGTH _entry_parts _entry_part_count)
+    if(NOT _entry_part_count EQUAL 2)
+      message(FATAL_ERROR
+        "Metal entry point '${_entry_spec}' must use the entry:stage form")
+    endif()
+    list(GET _entry_parts 0 _entry_name)
+    list(GET _entry_parts 1 _entry_stage)
+    set(_metal_source "${OUTPUT_DIR}/${EMBEDDED_METAL_NAME}.${_entry_name}.metal")
+    set(_air_file "${OUTPUT_DIR}/${EMBEDDED_METAL_NAME}.${_entry_name}.air")
+    set(_dep_file "${OUTPUT_DIR}/${EMBEDDED_METAL_NAME}.${_entry_name}.dep")
+    list(APPEND _outputs "${_metal_source}" "${_air_file}")
+    list(APPEND _air_files "${_air_file}")
+    list(APPEND _compile_commands
+      COMMAND "${Slang_SLANGC_EXECUTABLE}"
+        -depfile "${_dep_file}"
+        -lang slang
+        -target metal
+        -matrix-layout-column-major
+        -O0
+        "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,-g1,-g0>"
+        -DDEMO_METAL=1
+        ${EMBEDDED_METAL_EXTRA_FLAGS}
+        -entry "${_entry_name}"
+        -stage "${_entry_stage}"
+        -o "${_metal_source}"
+        "${SOURCE_FILE}"
+      COMMAND /usr/bin/xcrun --sdk "${EMBEDDED_METAL_METAL_SDK}" --toolchain
+        "${EMBEDDED_METAL_METAL_TOOLCHAIN}" metal
+        -std=metal4.0
+        "-fmodules-cache-path=${OUTPUT_DIR}/metal-module-cache"
+        -c "${_metal_source}"
+        -o "${_air_file}")
+  endforeach()
+
+  set(_metallib_file "${OUTPUT_DIR}/${EMBEDDED_METAL_NAME}.metallib")
+  set(_header_file "${_metallib_file}.h")
+  add_custom_command(
+    OUTPUT ${_outputs} "${_metallib_file}" "${_header_file}"
+    ${_compile_commands}
+    COMMAND /usr/bin/xcrun --sdk "${EMBEDDED_METAL_METAL_SDK}" --toolchain
+      "${EMBEDDED_METAL_METAL_TOOLCHAIN}" metallib
+      ${_air_files}
+      -o "${_metallib_file}"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DINPUT_FILE=${_metallib_file}"
+      "-DOUTPUT_FILE=${_header_file}"
+      "-DVARIABLE_NAME=${EMBEDDED_METAL_VARIABLE_NAME}"
+      -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
+    MAIN_DEPENDENCY "${SOURCE_FILE}"
+    DEPENDS "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake"
+    COMMENT "Compiling embedded Metal Slang library: ${EMBEDDED_METAL_NAME}"
+    COMMAND_EXPAND_LISTS
+    VERBATIM)
+
+  set(${EMBEDDED_METAL_HEADER_VAR} "${_header_file}" PARENT_SCOPE)
 endfunction()

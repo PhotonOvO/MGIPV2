@@ -285,6 +285,7 @@ struct GraphicsPipelineDesc
 
   PipelineBindingSchemaDesc bindingSchema{};
   uint32_t                  specializationVariant{0};
+  bool                      supportsGpuGeneratedCommands{false};
 };
 
 struct ComputePipelineDesc

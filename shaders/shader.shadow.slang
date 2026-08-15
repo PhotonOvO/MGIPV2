@@ -16,7 +16,20 @@ struct VertexOutput
     float2 uv       : TEXCOORD0;
 };
 
-#ifdef DEMO_METAL
+#if defined(DEMO_METAL_ICB)
+struct MetalIcbMaterialResources
+{
+    Texture2D<float4> textures[LMaterialTextureCapacity];
+    SamplerState sampler;
+};
+[[vk::binding(LBindTextures, LSetTextures)]]
+ParameterBlock<MetalIcbMaterialResources> materialResources;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(
+        materialResources.textures[index], materialResources.sampler);
+}
+#elif defined(DEMO_METAL)
 [[vk::binding(LBindTextures, LSetTextures)]]
 Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
 [[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
@@ -43,6 +56,16 @@ StructuredBuffer<DrawUniforms> drawData;
 #ifdef DEMO_D3D12
 [[vk::push_constant]]
 ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool mdiAlphaTestEnabled = (DEMO_SPECIALIZATION_0 != 0);
+#else
+[[vk::constant_id(0)]]
+const bool mdiAlphaTestEnabled = false;
 #endif
 
 float3 safeNormalizeShadowVector(float3 value, float3 fallback)
@@ -171,7 +194,7 @@ void fragmentMain(VertexOutput input)
 void fragmentMdiMain(VertexOutputMdi input)
 {
     const DrawUniforms mdiDraw = drawData[input.drawIndex];
-    if(mdiDraw.alphaMode != LAlphaMask || mdiDraw.baseColorTextureIndex < 0)
+    if(!mdiAlphaTestEnabled || mdiDraw.alphaMode != LAlphaMask || mdiDraw.baseColorTextureIndex < 0)
     {
         return;
     }

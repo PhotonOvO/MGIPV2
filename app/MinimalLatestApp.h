@@ -817,6 +817,8 @@ public:
                         visibilityDiagnostics.depthUsesPreviousFrameIndirect ? "Yes" : "No");
             ImGui::Text("Depth Sorted Bootstrap: %s",
                         visibilityDiagnostics.depthUsesSortedBootstrap ? "Yes" : "No");
+            ImGui::Text("GBuffer Raw Culling Stream: %s",
+                        visibilityDiagnostics.gbufferUsesRawCullingStream ? "Yes" : "No");
             ImGui::Text("GBuffer Opaque/Alpha Patch: %s",
                         visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched ? "Yes" : "No");
             ImGui::Text("Transparent Patch: %s",
@@ -1216,6 +1218,9 @@ private:
   bool m_automationMetricsWindowStarted{false};
   std::vector<double> m_automationCpuFrameMs;
   std::vector<double> m_automationGpuFrameMs;
+  std::vector<std::string> m_automationPassNames;
+  std::vector<std::vector<double>> m_automationCpuPassMs;
+  std::vector<std::vector<double>> m_automationGpuPassMs;
 
   // glTF model loading
   std::unique_ptr<demo::GltfLoader>               m_gltfLoader;
@@ -1762,6 +1767,9 @@ inline void MinimalLatestApp::beginAutomationMetricsWindow()
   m_renderer.resetRhiHotPathCounters();
   m_automationCpuFrameMs.clear();
   m_automationGpuFrameMs.clear();
+  m_automationPassNames.clear();
+  m_automationCpuPassMs.clear();
+  m_automationGpuPassMs.clear();
   m_automationMetricsWindowStarted = true;
   LOGI("[RHI_METRICS] marker=window-start backend=%s frame=%llu",
        demo::rhi::toString(m_automationOptions.backend),
@@ -1777,6 +1785,37 @@ inline void MinimalLatestApp::recordAutomationMetricsFrame()
 
   const demo::RuntimeProfileSnapshot snapshot =
     m_renderer.getRuntimeProfileSnapshot();
+  static constexpr size_t kMaxProfilePassCount = 256;
+  const size_t passCount = std::min({
+    snapshot.passNames.size(),
+    snapshot.cpuPassDurationsMs.size(),
+    snapshot.gpuPassDurationsMs.size(),
+    kMaxProfilePassCount,
+  });
+  if(passCount != 0 && m_automationPassNames.empty())
+  {
+    m_automationPassNames.assign(snapshot.passNames.begin(),
+                                 snapshot.passNames.begin() + static_cast<ptrdiff_t>(passCount));
+    m_automationCpuPassMs.resize(passCount);
+    m_automationGpuPassMs.resize(passCount);
+  }
+  const bool passLayoutMatches =
+    m_automationPassNames.size() == passCount &&
+    std::equal(m_automationPassNames.begin(), m_automationPassNames.end(),
+               snapshot.passNames.begin());
+  if(passLayoutMatches)
+  {
+    for(size_t passIndex = 0; passIndex < passCount; ++passIndex)
+    {
+      m_automationCpuPassMs[passIndex].push_back(
+        std::max(0.0, snapshot.cpuPassDurationsMs[passIndex]));
+      if(snapshot.gpuValid)
+      {
+        m_automationGpuPassMs[passIndex].push_back(
+          std::max(0.0, snapshot.gpuPassDurationsMs[passIndex]));
+      }
+    }
+  }
   if(!snapshot.cpuPassDurationsMs.empty())
   {
     const double cpuMs = std::accumulate(
@@ -1866,15 +1905,19 @@ inline void MinimalLatestApp::writeAutomationMetrics() const
       "Could not open metrics output: " +
       m_automationOptions.metricsOutputPath.string());
   }
-  const auto writeSummary = [&output](
-    const char* name, const MetricSummary& summary, bool comma) {
-    output << "    " << std::quoted(name) << ": {"
+  const auto writeSummaryObject = [&output](const MetricSummary& summary) {
+    output << '{'
            << std::quoted("samples") << ": " << summary.count
            << ", " << std::quoted("average_ms") << ": " << summary.average
            << ", " << std::quoted("min_ms") << ": " << summary.minimum
            << ", " << std::quoted("max_ms") << ": " << summary.maximum
-           << ", " << std::quoted("p95_ms") << ": " << summary.p95 << "}"
-           << (comma ? "," : "") << std::endl;
+           << ", " << std::quoted("p95_ms") << ": " << summary.p95 << '}';
+  };
+  const auto writeSummary = [&output, &writeSummaryObject](
+    const char* name, const MetricSummary& summary, bool comma) {
+    output << "    " << std::quoted(name) << ": ";
+    writeSummaryObject(summary);
+    output << (comma ? "," : "") << std::endl;
   };
 
   output << std::fixed << std::setprecision(6)
@@ -1889,8 +1932,22 @@ inline void MinimalLatestApp::writeAutomationMetrics() const
          << m_automationOptions.warmupFrames << ',' << std::endl
          << "  " << std::quoted("timings") << ": {" << std::endl;
   writeSummary("cpu_pass_sum", cpu, true);
-  writeSummary("gpu_pass_sum", gpu, false);
-  output << "  }," << std::endl
+  writeSummary("gpu_pass_sum", gpu, true);
+  output << "    " << std::quoted("passes") << ": [" << std::endl;
+  for(size_t passIndex = 0; passIndex < m_automationPassNames.size(); ++passIndex)
+  {
+    output << "      {" << std::quoted("name") << ": "
+           << std::quoted(m_automationPassNames[passIndex]) << ", "
+           << std::quoted("cpu") << ": ";
+    writeSummaryObject(summarize(m_automationCpuPassMs[passIndex]));
+    output << ", " << std::quoted("gpu") << ": ";
+    writeSummaryObject(summarize(m_automationGpuPassMs[passIndex]));
+    output << '}'
+           << (passIndex + 1u < m_automationPassNames.size() ? "," : "")
+           << std::endl;
+  }
+  output << "    ]" << std::endl
+         << "  }," << std::endl
          << "  " << std::quoted("hot_path_counters") << ": {" << std::endl
          << "    " << std::quoted("command_buffer_begins") << ": "
          << counters.commandBufferBegins << ',' << std::endl

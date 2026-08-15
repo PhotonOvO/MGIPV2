@@ -8,6 +8,7 @@
 #include <SDL3/SDL_metal.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 
 namespace demo::rhi::metal {

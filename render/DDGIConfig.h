@@ -30,8 +30,8 @@ namespace demo
 		uint32_t irradianceTexelSize{8u};
 		// Octahedral depth texel resolution per probe (excluding 2px border).
 		uint32_t depthTexelSize{16u};
-		// Rays traced per probe per update (mobile budget; LuxGI desktop default 256).
-		uint32_t raysPerProbe{256u};
+		// Conservative default; callers can raise this toward the LuxGI desktop budget.
+		uint32_t raysPerProbe{64u};
 		// Temporal blend factor: mix(newResult, history, hysteresis).
 		float hysteresis{0.98f};
 		// Irradiance storage gamma encode/decode exponent.
@@ -65,7 +65,7 @@ namespace demo
 		// Fallback irradiance color when no valid probe data is available.
 		glm::vec4 fallbackIrradiance{0.0f, 0.0f, 0.0f, 1.0f};
 		// Maximum probes updated per frame (budget cap). 0 = unlimited.
-		uint32_t maxUpdatedProbesPerFrame{4096u};
+		uint32_t maxUpdatedProbesPerFrame{256u};
 		// Inner cascade update frequency (1 = every frame, 2 = every other, etc.).
 		uint32_t cascadeUpdateFrequency{1u};
 		// Debug override: force a specific cascade for visualization (-1 = off).

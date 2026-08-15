@@ -470,6 +470,16 @@ namespace demo
 			return drawData;
 		}
 
+		void partitionShadowPackedMeshes(std::vector<ShadowPackedMesh>& meshes)
+		{
+			std::stable_partition(
+				meshes.begin(), meshes.end(),
+				[](const ShadowPackedMesh& mesh)
+				{
+					return mesh.drawData.alphaMode != shaderio::LAlphaMask;
+				});
+		}
+
 		[[nodiscard]] glm::vec4 computeBoundsSphere(const MeshRecord& mesh, const glm::mat4& transform)
 		{
 			const std::array<glm::vec3, 8> corners{
@@ -1255,6 +1265,11 @@ namespace demo
 	PipelineHandle RenderDevice::getCSMShadowPipelineHandle() const
 	{
 		return m_csmShadowPipeline.isNull() ? m_shadowPipeline : m_csmShadowPipeline;
+	}
+
+	PipelineHandle RenderDevice::getCSMShadowOpaquePipelineHandle() const
+	{
+		return m_csmShadowOpaquePipeline.isNull() ? getCSMShadowPipelineHandle() : m_csmShadowOpaquePipeline;
 	}
 
 	PipelineHandle RenderDevice::getShadowCullingPipelineHandle() const
@@ -4616,6 +4631,7 @@ namespace demo
 				std::array<rhi::ShaderEntry, 2> depthMdiShaderStages = depthMdiStages;
 				depthMdiDesc.shaderStages = depthMdiShaderStages;
 				depthMdiDesc.bindingSchema = depthMdiBindingSchema.view();
+				depthMdiDesc.supportsGpuGeneratedCommands = true;
 
 				depthMdiShaderStages[1].specializationData = specDataFalse;
 				depthMdiShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
@@ -4777,6 +4793,7 @@ namespace demo
 				rhi::GraphicsPipelineDesc gbufferMdiGraphicsDesc = gbufferGraphicsDesc;
 				gbufferMdiGraphicsDesc.shaderStages = gbufferMdiShaderStages;
 				gbufferMdiGraphicsDesc.bindingSchema = gbufferMdiBindingSchema.view();
+				gbufferMdiGraphicsDesc.supportsGpuGeneratedCommands = true;
 
 				gbufferMdiShaderStages[1].specializationData = specDataFalse;
 				gbufferMdiShaderStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
@@ -4883,7 +4900,20 @@ namespace demo
 			rhi::GraphicsPipelineDesc shadowMdiDesc = shadowDesc;
 			shadowMdiDesc.shaderStages = shadowMdiStages;
 			shadowMdiDesc.bindingSchema = shadowMdiBindingSchema.view();
+			shadowMdiDesc.supportsGpuGeneratedCommands = true;
 
+			rhi::SpecializationConstant specConstantAlphaTest(
+				0, 0, sizeof(uint32_t), rhi::SpecializationConstantType::boolean);
+			uint32_t alphaTestFalse = uint32_t{0};
+			rhi::SpecializationData specDataFalse{std::as_bytes(std::span{&alphaTestFalse, 1})};
+			shadowMdiStages[1].specializationData = specDataFalse;
+			shadowMdiStages[1].specializationConstants = std::span{&specConstantAlphaTest, 1};
+			shadowMdiDesc.specializationVariant = 18;
+			m_csmShadowOpaquePipeline = m_device.device->createGraphicsPipeline(shadowMdiDesc);
+
+			uint32_t alphaTestTrue = uint32_t{1};
+			rhi::SpecializationData specDataTrue{std::as_bytes(std::span{&alphaTestTrue, 1})};
+			shadowMdiStages[1].specializationData = specDataTrue;
 			shadowMdiDesc.specializationVariant = 7;
 			m_csmShadowPipeline = m_device.device->createGraphicsPipeline(shadowMdiDesc);
 		}
@@ -5022,6 +5052,7 @@ namespace demo
 				forwardMdiGraphicsDesc.shaderStages = forwardMdiShaderStages;
 				forwardMdiGraphicsDesc.renderingInfo.colorFormats = std::span{&hdrSceneColorFormat, 1};
 				forwardMdiGraphicsDesc.bindingSchema = forwardMdiBindingSchema.view();
+				forwardMdiGraphicsDesc.supportsGpuGeneratedCommands = true;
 
 				forwardMdiGraphicsDesc.specializationVariant = 17;
 				m_forwardMDIPipeline = m_device.device->createGraphicsPipeline(forwardMdiGraphicsDesc);
@@ -5893,7 +5924,7 @@ namespace demo
 	}
 	void RenderDevice::destroyPipelines()
 	{
-		const std::array<PipelineHandle, 27> handles{
+		const std::array<PipelineHandle, 28> handles{
 			m_device.prebuiltPipelines.compute,
 			m_device.prebuiltPipelines.graphicsTextured,
 			m_device.prebuiltPipelines.graphicsNonTextured,
@@ -5909,6 +5940,7 @@ namespace demo
 			m_gbufferOpaqueMDIPipeline,
 			m_gbufferAlphaTestMDIPipeline,
 			m_shadowPipeline,
+			m_csmShadowOpaquePipeline,
 			m_csmShadowPipeline,
 			m_forwardPipeline,
 			m_forwardMDIPipeline,
@@ -5942,6 +5974,7 @@ namespace demo
 		m_gbufferOpaqueMDIPipeline = kNullPipelineHandle;
 		m_gbufferAlphaTestMDIPipeline = kNullPipelineHandle;
 		m_shadowPipeline = kNullPipelineHandle;
+		m_csmShadowOpaquePipeline = kNullPipelineHandle;
 		m_csmShadowPipeline = kNullPipelineHandle;
 		m_forwardPipeline = kNullPipelineHandle;
 		m_forwardMDIPipeline = kNullPipelineHandle;
@@ -7105,6 +7138,7 @@ namespace demo
 		{
 			return;
 		}
+		partitionShadowPackedMeshes(result.shadowPackedMeshes);
 
 		const std::span<const std::byte> packedVertexBytes(reinterpret_cast<const std::byte*>(packedVertexData.data()),
 		                                                   packedVertexData.size());
@@ -7240,6 +7274,7 @@ namespace demo
 		{
 			return;
 		}
+		partitionShadowPackedMeshes(result.shadowPackedMeshes);
 
 		const std::span<const std::byte> packedVertexBytes(reinterpret_cast<const std::byte*>(packedVertexData.data()),
 		                                                   packedVertexData.size());

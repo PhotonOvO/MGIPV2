@@ -16,6 +16,7 @@ namespace MTL {
 class Allocation;
 class ComputePipelineState;
 class Device;
+class Function;
 class Texture;
 class TextureViewPool;
 }
@@ -141,6 +142,9 @@ private:
   MTL::Device* m_device{nullptr};
   MTL4::Compiler* m_compiler{nullptr};
   MTL::ComputePipelineState* m_blitPipeline{nullptr};
+  MTL::ComputePipelineState* m_indexedIndirectUInt32Pipeline{nullptr};
+  MTL::ComputePipelineState* m_indexedIndirectUInt16Pipeline{nullptr};
+  MTL::Function* m_indexedIndirectFunction{nullptr};
   MTL::TextureViewPool* m_textureViewPool{nullptr};
   uint32_t m_textureViewCapacity{65536};
   uint32_t m_nextTextureViewIndex{0};

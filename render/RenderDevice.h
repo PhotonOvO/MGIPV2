@@ -136,6 +136,7 @@ namespace demo
 		PipelineHandle getDebugPipelineHandle() const;
 		PipelineHandle getGPUCullingDebugPipelineHandle() const;
 		PipelineHandle getGPUCullingPipelineHandle() const;
+		PipelineHandle getCSMShadowOpaquePipelineHandle() const;
 		PipelineHandle getCSMShadowPipelineHandle() const; // CSM shadow depth pipeline
 		PipelineHandle getShadowCullingPipelineHandle() const;
 		void updateGPUCullingDepthPyramidArgumentTable(uint32_t frameIndex,
@@ -737,6 +738,7 @@ namespace demo
 		PipelineHandle m_gbufferOpaqueMDIPipeline{};
 		PipelineHandle m_gbufferAlphaTestMDIPipeline{};
 		PipelineHandle m_shadowPipeline{}; // Directional shadow depth pass
+		PipelineHandle m_csmShadowOpaquePipeline{}; // CSM opaque MDI depth pass
 		PipelineHandle m_csmShadowPipeline{}; // CSM cascade MDI depth pass
 		CSMShadowResources m_csmShadowResources{}; // CSM cascade texture and uniform buffer
 		std::array<rhi::TextureViewHandle, shaderio::LCascadeCount> m_csmCascadeViewHandles{};

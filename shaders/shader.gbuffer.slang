@@ -30,7 +30,20 @@ struct VertexOutput
 //------------------------------------------------------------------------------
 
 // Set 0: Bindless textures (for material sampling)
-#ifdef DEMO_METAL
+#if defined(DEMO_METAL_ICB)
+struct MetalIcbMaterialResources
+{
+    Texture2D<float4> textures[LMaterialTextureCapacity];
+    SamplerState sampler;
+};
+[[vk::binding(LBindTextures, LSetTextures)]]
+ParameterBlock<MetalIcbMaterialResources> materialResources;
+float4 sampleBindlessTexture(uint index, float2 uv)
+{
+    return materialResources.textures[index].Sample(
+        materialResources.sampler, uv);
+}
+#elif defined(DEMO_METAL)
 [[vk::binding(LBindTextures, LSetTextures)]]
 Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
 [[vk::binding(LBindSharedTextureSampler, LSetTextures)]]

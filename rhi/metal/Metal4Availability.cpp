@@ -10,16 +10,12 @@
 #include <Metal/MTLResidencySet.hpp>
 #include <Metal/MTLTextureViewPool.hpp>
 
-#include <objc/runtime.h>
-
 namespace demo::rhi::metal {
 
 Metal4Availability queryMetal4Availability() noexcept
 {
   MTL::Device* device = MTL::CreateSystemDefaultDevice();
   Metal4Availability result{.deviceAvailable = device != nullptr};
-  if(device != nullptr)
-    device->release();
 
 #if (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000) || \
     (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000)
@@ -38,15 +34,17 @@ Metal4Availability queryMetal4Availability() noexcept
     (void)sizeof(ResidencySet);
     (void)sizeof(TextureViewPool);
     result.sdkHasCoreApi = true;
-    result.runtimeHasCoreApi =
-      objc_getProtocol("MTL4CommandQueue") != nullptr &&
-      objc_getProtocol("MTL4CommandAllocator") != nullptr &&
-      objc_getProtocol("MTL4CommandBuffer") != nullptr &&
-      objc_getProtocol("MTL4RenderCommandEncoder") != nullptr &&
-      objc_getProtocol("MTL4ComputeCommandEncoder") != nullptr &&
-      objc_getProtocol("MTLResidencySet") != nullptr &&
-      objc_getProtocol("MTLTextureViewPool") != nullptr;
+    // GPUFamilyMetal4 describes a feature family and is false on some Apple
+    // Silicon devices that can still create and execute Metal 4 command queues.
+    // Probe the core API object that the backend actually requires instead.
+    MTL4::CommandQueue* queue =
+      device != nullptr ? device->newMTL4CommandQueue() : nullptr;
+    result.runtimeHasCoreApi = queue != nullptr;
+    if(queue != nullptr)
+      queue->release();
 #endif
+  if(device != nullptr)
+    device->release();
   return result;
 }
 

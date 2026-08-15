@@ -16,7 +16,20 @@ struct VertexOutput
     float2 uv       : TEXCOORD0;
 };
 
-#ifdef DEMO_METAL
+#if defined(DEMO_METAL_ICB)
+struct MetalIcbMaterialResources
+{
+    Texture2D<float4> textures[LMaterialTextureCapacity];
+    SamplerState sampler;
+};
+[[vk::binding(LBindTextures, LSetTextures)]]
+ParameterBlock<MetalIcbMaterialResources> materialResources;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(
+        materialResources.textures[index], materialResources.sampler);
+}
+#elif defined(DEMO_METAL)
 [[vk::binding(LBindTextures, LSetTextures)]]
 Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
 [[vk::binding(LBindSharedTextureSampler, LSetTextures)]]

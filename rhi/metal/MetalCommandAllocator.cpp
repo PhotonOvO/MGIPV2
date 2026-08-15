@@ -8,8 +8,10 @@
 
 #include <Metal/MTL4ArgumentTable.hpp>
 #include <Metal/MTL4CommandAllocator.hpp>
+#include <Metal/MTLArgumentEncoder.hpp>
 #include <Metal/MTLBuffer.hpp>
 #include <Metal/MTLDevice.hpp>
+#include <Metal/MTLLibrary.hpp>
 #include <Metal/MTLResidencySet.hpp>
 
 #include <algorithm>
@@ -31,21 +33,41 @@ uint64_t alignUp(uint64_t value, uint64_t alignment)
 
 MetalCommandAllocator::MetalCommandAllocator(
   MetalQueue& queue, MTL::Device* device, MetalResourceTable* resourceTable,
-  MTL::ComputePipelineState* blitPipeline)
+  MTL::ComputePipelineState* blitPipeline,
+  MTL::ComputePipelineState* indexedIndirectUInt32Pipeline,
+  MTL::ComputePipelineState* indexedIndirectUInt16Pipeline,
+  MTL::Function* indexedIndirectFunction)
   : m_queue(queue), m_device(device), m_blitPipeline(blitPipeline),
+    m_indexedIndirectUInt32Pipeline(indexedIndirectUInt32Pipeline),
+    m_indexedIndirectUInt16Pipeline(indexedIndirectUInt16Pipeline),
     m_resourceTable(resourceTable)
 {
   require(m_device != nullptr && m_blitPipeline != nullptr &&
+            m_indexedIndirectUInt32Pipeline != nullptr &&
+            m_indexedIndirectUInt16Pipeline != nullptr &&
+            indexedIndirectFunction != nullptr &&
             m_resourceTable != nullptr,
           "MetalCommandAllocator requires an initialized device and resource table");
   m_allocator = m_device->newCommandAllocator();
   require(m_allocator != nullptr, "Metal failed to create MTL4::CommandAllocator");
+  m_indexedIndirectArgumentEncoder = indexedIndirectFunction->newArgumentEncoder(0);
+  if(m_indexedIndirectArgumentEncoder == nullptr)
+  {
+    m_allocator->release();
+    m_allocator = nullptr;
+    throw std::runtime_error("Metal failed to create the indexed-indirect argument encoder");
+  }
 }
 
 MetalCommandAllocator::~MetalCommandAllocator()
 {
   if(!m_commandBuffers.empty())
     std::terminate();
+  {
+    std::lock_guard lock(m_recordingMutex);
+    if(m_recordingOwner != nullptr)
+      std::terminate();
+  }
   if(m_lastSubmission.isValid())
   {
     try
@@ -60,6 +82,8 @@ MetalCommandAllocator::~MetalCommandAllocator()
   for(ScratchBuffer& scratch : m_scratchBuffers)
     scratch.buffer->release();
   m_scratchBuffers.clear();
+  if(m_indexedIndirectArgumentEncoder != nullptr)
+    m_indexedIndirectArgumentEncoder->release();
   if(m_allocator != nullptr)
     m_allocator->release();
 }
@@ -71,6 +95,11 @@ QueueClass MetalCommandAllocator::queueClass() const noexcept
 
 void MetalCommandAllocator::reset(SubmissionToken completedToken)
 {
+  {
+    std::lock_guard lock(m_recordingMutex);
+    require(m_recordingOwner == nullptr,
+            "MetalCommandAllocator::reset called while a command buffer is recording");
+  }
   if(m_lastSubmission.isValid())
   {
     require(completedToken.isValid(),
@@ -129,24 +158,47 @@ MetalRootDataAllocation MetalCommandAllocator::allocateRootData(
   std::span<const std::byte> data, uint32_t alignment)
 {
   require(!data.empty(), "Metal root-data allocation must not be empty");
-  ScratchBuffer& scratch = acquireScratch(data.size_bytes(), std::max(alignment, 16u));
-  scratch.offset = alignUp(scratch.offset, std::max(alignment, 16u));
-  std::memcpy(static_cast<std::byte*>(scratch.buffer->contents()) + scratch.offset,
+  const MetalRootDataAllocation allocation = allocateScratchData(
+    data.size_bytes(), alignment);
+  std::memcpy(static_cast<std::byte*>(allocation.buffer->contents()) +
+                allocation.offset,
               data.data(), data.size_bytes());
-  const MetalRootDataAllocation allocation{
-    .buffer = scratch.buffer,
-    .offset = scratch.offset,
-    .gpuAddress = scratch.buffer->gpuAddress() + scratch.offset,
-  };
-  scratch.offset += data.size_bytes();
   return allocation;
 }
 
-void MetalCommandAllocator::addScratchAllocations(
-  MTL::ResidencySet& residencySet) const
+MetalRootDataAllocation MetalCommandAllocator::allocateArgumentData(
+  uint64_t size, uint32_t alignment)
+{
+  require(size != 0, "Metal argument-data allocation must not be empty");
+  const MetalRootDataAllocation allocation = allocateScratchData(size, alignment);
+  std::memset(static_cast<std::byte*>(allocation.buffer->contents()) +
+                allocation.offset,
+              0, static_cast<size_t>(size));
+  return allocation;
+}
+
+void MetalCommandAllocator::appendScratchAllocations(
+  std::vector<const MTL::Allocation*>& allocations) const
 {
   for(const ScratchBuffer& scratch : m_scratchBuffers)
-    residencySet.addAllocation(scratch.buffer);
+    allocations.push_back(scratch.buffer);
+}
+
+void MetalCommandAllocator::acquireRecording(
+  MetalCommandBuffer& commandBuffer)
+{
+  std::lock_guard lock(m_recordingMutex);
+  require(m_recordingOwner == nullptr,
+          "MetalCommandAllocator supports only one recording command buffer");
+  m_recordingOwner = &commandBuffer;
+}
+
+void MetalCommandAllocator::releaseRecording(
+  MetalCommandBuffer& commandBuffer) noexcept
+{
+  std::lock_guard lock(m_recordingMutex);
+  if(m_recordingOwner == &commandBuffer)
+    m_recordingOwner = nullptr;
 }
 
 void MetalCommandAllocator::noteSubmitted(
@@ -163,6 +215,7 @@ void MetalCommandAllocator::noteSubmitted(
 
 void MetalCommandAllocator::releaseCommandBuffer(MetalCommandBuffer& commandBuffer) noexcept
 {
+  releaseRecording(commandBuffer);
   const auto found = std::find(m_commandBuffers.begin(), m_commandBuffers.end(), &commandBuffer);
   if(found != m_commandBuffers.end())
     m_commandBuffers.erase(found);
@@ -185,6 +238,21 @@ MetalCommandAllocator::ScratchBuffer& MetalCommandAllocator::acquireScratch(
   buffer->setLabel(nsString("Metal4 root data scratch"));
   m_scratchBuffers.push_back(ScratchBuffer{buffer, capacity, 0});
   return m_scratchBuffers.back();
+}
+
+MetalRootDataAllocation MetalCommandAllocator::allocateScratchData(
+  uint64_t size, uint32_t alignment)
+{
+  const uint32_t safeAlignment = std::max(alignment, 16u);
+  ScratchBuffer& scratch = acquireScratch(size, safeAlignment);
+  scratch.offset = alignUp(scratch.offset, safeAlignment);
+  const MetalRootDataAllocation allocation{
+    .buffer = scratch.buffer,
+    .offset = scratch.offset,
+    .gpuAddress = scratch.buffer->gpuAddress() + scratch.offset,
+  };
+  scratch.offset += size;
+  return allocation;
 }
 
 void MetalCommandAllocator::releaseSnapshots() noexcept

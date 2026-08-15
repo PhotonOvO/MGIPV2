@@ -136,6 +136,48 @@ namespace demo
 			return;
 		}
 
+		const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
+		const MeshRecord* representativeMesh = nullptr;
+		for (uint32_t drawIndex : transparentDrawIndices)
+		{
+			MeshHandle meshHandle = kNullMeshHandle;
+			if (m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
+			{
+				representativeMesh = meshPool.tryGet(meshHandle);
+				if (representativeMesh != nullptr)
+				{
+					break;
+				}
+			}
+		}
+
+		const rhi::BufferHandle vertexBuffer = meshPool.getSharedVertexBufferRHIHandle();
+		const rhi::BufferHandle indexBuffer = m_renderer->isMeshletRenderingActive()
+			                                      ? m_renderer->getMeshletIndexBufferRHIHandle()
+			                                      : meshPool.getSharedIndexBufferRHIHandle();
+		const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
+		const uint64_t transparentCommandOffset =
+			static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * indirectCommandStride;
+		const rhi::DrawIndirectCountDesc transparentDraw{
+			.argsBuffer = forwardIndirectBuffer,
+			.argsOffset = transparentCommandOffset,
+			.countBuffer = countBuffer,
+			.countBufferOffset = offsetof(shaderio::GPUCullDrawCounts, transparentCount),
+			.maxDrawCount = transparentCapacity,
+			.stride = indirectCommandStride,
+		};
+		const bool drawReady = representativeMesh != nullptr && !vertexBuffer.isNull() && !indexBuffer.isNull();
+		if (drawReady)
+		{
+			context.commandBuffer->prepareIndexedIndirectCount(rhi::PrepareIndexedIndirectCountDesc{
+				.draw = transparentDraw,
+				.indexBuffer = indexBuffer,
+				.indexBufferOffset = 0,
+				.indexFormat = rhi::IndexFormat::uint32,
+				.topology = rhi::PrimitiveTopology::triangleList,
+			});
+		}
+
 		const rhi::RenderPassDesc passDesc{
 			.renderArea = {{0, 0}, renderExtent},
 			.colorTargets = std::span{&colorTarget, 1},
@@ -160,55 +202,13 @@ namespace demo
 		}
 		enc->setArgumentTable(rhi::ShaderStage::allGraphics, shaderio::LSetDraw, drawTable);
 
-		const auto transparentDrawIndices = m_renderer->getTransparentDrawIndices();
-		const MeshRecord* representativeMesh = nullptr;
-		for (uint32_t drawIndex : transparentDrawIndices)
+		if (drawReady)
 		{
-			MeshHandle meshHandle = kNullMeshHandle;
-			if (m_renderer->tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-			{
-				representativeMesh = meshPool.tryGet(meshHandle);
-				if (representativeMesh != nullptr)
-				{
-					break;
-				}
-			}
-		}
-
-		if (representativeMesh != nullptr)
-		{
-			const rhi::BufferHandle vertexBufferRHI = meshPool.getSharedVertexBufferRHIHandle();
-			const rhi::BufferHandle indexBufferRHI = m_renderer->isMeshletRenderingActive()
-				                                         ? m_renderer->getMeshletIndexBufferRHIHandle()
-				                                         : meshPool.getSharedIndexBufferRHIHandle();
-			if (vertexBufferRHI.isNull() || indexBufferRHI.isNull())
-			{
-				context.commandBuffer->endEncoding();
-				context.commandBuffer->endEvent();
-				return;
-			}
-			const uint64_t vertexOffset = 0;
-			const uint64_t transparentCommandOffset =
-				static_cast<uint64_t>(opaqueCapacity + alphaCapacity) * m_renderer->
-				getGPUCullingIndirectCommandStride();
-			enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
-			enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
+			enc->bindVertexBuffer(0, vertexBuffer, 0);
+			enc->bindIndexBuffer(indexBuffer, 0, rhi::IndexFormat::uint32);
 
 			// Transparent pass uses the current-frame persistent indirect stream + culling counts.
-			DrawStreamRecorder::recordIndexedIndirectCount(*enc, DrawStreamRecorder::IndexedIndirectCountRecordDesc{
-				                                               .argsBuffer = m_renderer->
-				                                               getGPUDrivenPersistentIndirectStreamBufferRHIHandle(
-					                                               context.frameIndex),
-				                                               .argsOffset = transparentCommandOffset,
-				                                               .countBuffer = m_renderer->
-				                                               getGPUCullingDrawCountBufferRHIHandle(
-					                                               context.frameIndex),
-				                                               .countBufferOffset = offsetof(
-					                                               shaderio::GPUCullDrawCounts, transparentCount),
-				                                               .maxDrawCount = transparentCapacity,
-				                                               .stride = m_renderer->
-				                                               getGPUCullingIndirectCommandStride(),
-			                                               });
+			DrawStreamRecorder::recordIndexedIndirectCount(*enc, transparentDraw);
 		}
 
 		context.commandBuffer->endEncoding();

@@ -97,6 +97,7 @@ namespace demo
 		uint32_t maxMobileTransparentDraws{0};
 		bool depthUsesPreviousFrameIndirect{false};
 		bool depthUsesSortedBootstrap{false};
+		bool gbufferUsesRawCullingStream{false};
 		bool gbufferOpaqueAlphaPatchDispatched{false};
 		bool transparentPatchDispatched{false};
 		bool transparentOrderingCpuSeeded{false};
@@ -593,6 +594,11 @@ namespace demo
 			return m_renderer.getCSMShadowPipelineHandle();
 		}
 
+		[[nodiscard]] PipelineHandle getCSMShadowOpaquePipelineHandle() const
+		{
+			return m_renderer.getCSMShadowOpaquePipelineHandle();
+		}
+
 		[[nodiscard]] PipelineHandle getShadowCullingPipelineHandle() const
 		{
 			return m_renderer.getShadowCullingPipelineHandle();
@@ -903,6 +909,7 @@ namespace demo
 		                                        uint32_t previousObjectCount,
 		                                        uint32_t opaqueMaxDrawCount,
 		                                        uint32_t alphaMaxDrawCount);
+		void recordGBufferRawVisibilitySource(bool usedRawCullingStream, uint32_t objectCount);
 		void recordGBufferVisibilityPatch(bool patched, uint32_t opaqueCapacity, uint32_t alphaCapacity);
 		void recordForwardVisibilityPatch(bool patched, uint32_t transparentCapacity, uint32_t totalPersistentCapacity);
 		[[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
@@ -1360,9 +1367,6 @@ namespace demo
 		std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
 		std::vector<uint32_t> m_visibilitySortInputObjects;
 		std::vector<uint32_t> m_visibilitySortInputKeys;
-		std::vector<uint32_t> m_cachedStaticVisibilitySortObjects;
-		std::vector<uint32_t> m_cachedStaticVisibilitySortKeys;
-		uint64_t m_cachedStaticVisibilitySortTopologyVersion{0};
 		std::vector<shaderio::DrawUniforms> m_persistentDrawData;
 		std::vector<SceneUploadResult::SceneDrawRecord> m_sceneDrawRecords;
 		std::vector<SubmittedTransformHistory> m_transformHistoryByDrawRecord;

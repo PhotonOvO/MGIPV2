@@ -40,8 +40,6 @@ namespace demo
 		constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
 		constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
 		constexpr uint32_t kVisibilitySortKeyMask = 0x3fffffffu;
-		constexpr uint32_t kVisibilitySortCategoryOpaque = 0x00000000u;
-		constexpr uint32_t kVisibilitySortCategoryAlpha = 0x40000000u;
 		constexpr uint32_t kVisibilitySortCategoryTransparent = 0x80000000u;
 		constexpr uint32_t kMobileMaxTransparentDraws = 2048u;
 		constexpr float kGPUDrivenHiZDepthEpsilon = 2.0e-3f;
@@ -1429,63 +1427,19 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			.transparentCapacity = static_cast<uint32_t>(m_transparentDrawIndices.size()),
 			.maxMobileTransparentDraws = kMobileMaxTransparentDraws,
 			.transparentOrderingCpuSeeded = !m_transparentDrawIndices.empty(),
-			.materialSortKeysCpuSeeded = true,
+			.materialSortKeysCpuSeeded = false,
 			.transparentCapacityOverflow = m_transparentDrawIndices.size() > kMobileMaxTransparentDraws,
 		};
 		const bool visibilitySortEnabled = kEnableShippingVisibilitySort && !sceneRenderingSuspended;
 		if (visibilitySortEnabled)
 		{
 			{
-				if (m_cachedStaticVisibilitySortTopologyVersion != m_sceneTopologyVersion)
-				{
-					m_cachedStaticVisibilitySortObjects.clear();
-					m_cachedStaticVisibilitySortKeys.clear();
-					const size_t staticSortInputCount = m_opaqueDrawIndices.size() + m_alphaTestDrawIndices.size();
-					m_cachedStaticVisibilitySortObjects.reserve(staticSortInputCount);
-					m_cachedStaticVisibilitySortKeys.reserve(staticSortInputCount);
-					const auto appendStaticDraws = [&](std::span<const uint32_t> drawIndices, uint32_t categoryValue)
-					{
-						for (uint32_t drawIndex : drawIndices)
-						{
-							MeshHandle meshHandle = kNullMeshHandle;
-							if (!tryGetMeshHandleForDrawIndex(drawIndex, meshHandle))
-							{
-								continue;
-							}
-
-							const MeshRecord* mesh = m_renderer.getMeshPool().tryGet(meshHandle);
-							if (mesh == nullptr)
-							{
-								continue;
-							}
-
-							const uint32_t subKey =
-								mesh->materialIndex >= 0
-									? std::min(static_cast<uint32_t>(mesh->materialIndex), kVisibilitySortKeyMask)
-									: kVisibilitySortKeyMask;
-							m_cachedStaticVisibilitySortObjects.push_back(drawIndex);
-							m_cachedStaticVisibilitySortKeys.push_back(encodeVisibilitySortKey(categoryValue, subKey));
-						}
-					};
-					appendStaticDraws(m_opaqueDrawIndices, kVisibilitySortCategoryOpaque);
-					appendStaticDraws(m_alphaTestDrawIndices, kVisibilitySortCategoryAlpha);
-					m_cachedStaticVisibilitySortTopologyVersion = m_sceneTopologyVersion;
-				}
-
 				const glm::vec3 cameraPos =
 					params.cameraUniforms != nullptr ? params.cameraUniforms->cameraPosition : glm::vec3(0.0f);
-				const size_t totalSortInputCount = m_cachedStaticVisibilitySortObjects.size() + m_transparentDrawIndices
-					.size();
 				m_visibilitySortInputObjects.clear();
 				m_visibilitySortInputKeys.clear();
-				m_visibilitySortInputObjects.reserve(totalSortInputCount);
-				m_visibilitySortInputKeys.reserve(totalSortInputCount);
-				m_visibilitySortInputObjects.insert(m_visibilitySortInputObjects.end(),
-				                                    m_cachedStaticVisibilitySortObjects.begin(),
-				                                    m_cachedStaticVisibilitySortObjects.end());
-				m_visibilitySortInputKeys.insert(m_visibilitySortInputKeys.end(),
-				                                 m_cachedStaticVisibilitySortKeys.begin(),
-				                                 m_cachedStaticVisibilitySortKeys.end());
+				m_visibilitySortInputObjects.reserve(m_transparentDrawIndices.size());
+				m_visibilitySortInputKeys.reserve(m_transparentDrawIndices.size());
 				const auto appendTransparentDraws = [&](std::span<const uint32_t> drawIndices)
 				{
 					for (uint32_t drawIndex : drawIndices)
@@ -3361,9 +3315,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_persistentDrawFrameUploads.clear();
 		m_visibilitySortInputObjects.clear();
 		m_visibilitySortInputKeys.clear();
-		m_cachedStaticVisibilitySortObjects.clear();
-		m_cachedStaticVisibilitySortKeys.clear();
-		m_cachedStaticVisibilitySortTopologyVersion = 0;
 		m_objectHandleByMeshHandle.clear();
 		m_objectHandlesByMeshHandle.clear();
 		m_drawIndexByMeshHandle.clear();
@@ -4179,6 +4130,16 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity = opaqueCapacity;
 			m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity = alphaCapacity;
+		}
+	}
+
+	void GPUDrivenRenderer::recordGBufferRawVisibilitySource(bool usedRawCullingStream, uint32_t objectCount)
+	{
+		m_runtimeStats.visibilityDiagnostics.gbufferUsesRawCullingStream = usedRawCullingStream;
+		if (usedRawCullingStream)
+		{
+			m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity = objectCount;
+			m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity = objectCount;
 		}
 	}
 
@@ -5989,7 +5950,10 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		const bool transparentVisibilityAuthoritative =
 			m_runtimeStats.visibilityDiagnostics.transparentCapacity == 0u
 			|| m_runtimeStats.visibilityDiagnostics.transparentPatchDispatched;
-		if (hasCurrentVisibility && m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched
+		const bool gbufferVisibilityAuthoritative =
+			m_runtimeStats.visibilityDiagnostics.gbufferUsesRawCullingStream
+			|| m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched;
+		if (hasCurrentVisibility && gbufferVisibilityAuthoritative
 			&& transparentVisibilityAuthoritative)
 		{
 			m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
@@ -6036,7 +6000,9 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			                  ? GPUDrivenOwnershipState::gpuOwned
 			                  : GPUDrivenOwnershipState::disabled,
 		                  m_visibilitySortPass != nullptr
-			                  ? "GPU sort executes; transparent distance keys are still CPU-seeded"
+			                  ? (m_runtimeStats.visibilityDiagnostics.sortInputCount > 0u
+				                  ? "GPU sort executes for transparent distance ordering"
+				                  : "No transparent draws; visibility sort is a no-op")
 			                  : "Visibility sort pass is not registered");
 		addPassDiagnostic("GPUDrivenLightCulling",
 		                  m_runtimeStats.clusteredLightingDiagnostics.resourcesOwned

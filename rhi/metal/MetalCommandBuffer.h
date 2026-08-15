@@ -14,7 +14,9 @@ class Object;
 }
 
 namespace MTL {
+class Allocation;
 class Buffer;
+class IndirectCommandBuffer;
 class ResidencySet;
 }
 
@@ -67,6 +69,7 @@ struct MetalEncoderBindingState
 {
   PipelineHandle pipeline{};
   std::vector<MetalBoundTable> tables;
+  std::vector<MetalDynamicBufferValue> pendingDynamicBuffers;
   std::vector<MetalDynamicBufferValue> dynamicBuffers;
   std::vector<MetalRootValue> roots;
   std::vector<MetalVertexBufferValue> vertexBuffers;
@@ -85,6 +88,22 @@ struct MetalArgumentTableSnapshotSource
 struct MetalArgumentTableSnapshot
 {
   std::vector<MetalArgumentTableSnapshotSource> sources;
+};
+
+struct MetalPreparedIndexedIndirect
+{
+  DrawIndirectCountDesc draw{};
+  BufferHandle indexBuffer{};
+  uint64_t indexBufferOffset{0};
+  IndexFormat indexFormat{IndexFormat::uint32};
+  PrimitiveTopology topology{PrimitiveTopology::triangleList};
+  MTL::IndirectCommandBuffer* commandBuffer{nullptr};
+  MTL::Buffer* executionRangeBuffer{nullptr};
+  uint64_t executionRangeOffset{0};
+  MTL::Buffer* clampedArgumentsBuffer{nullptr};
+  uint64_t clampedArgumentsOffset{0};
+  uint32_t argumentStride{0};
+  bool consumed{false};
 };
 
 class MetalCommandBuffer;
@@ -178,6 +197,10 @@ public:
   RenderEncoder* beginRenderPass(const RenderPassDesc& desc) override;
   ComputeEncoder* beginComputePass() override;
   void endEncoding() override;
+  void prepareIndexedIndirect(
+    const PrepareIndexedIndirectDesc& desc) override;
+  void prepareIndexedIndirectCount(
+    const PrepareIndexedIndirectCountDesc& desc) override;
   RHIResult useResidencySet(ResidencySetHandle set) override;
 
   void barrier(StageFlags producer, StageFlags consumer, HazardFlags hazards) override;
@@ -217,6 +240,7 @@ public:
   void trackSampler(SamplerHandle sampler);
   void trackQueryPool(QueryPoolHandle pool);
   void trackResidencySet(ResidencySetHandle set);
+  void trackNativeAllocation(const MTL::Allocation* allocation);
   void retainNative(NS::Object* object);
 
 private:
@@ -242,6 +266,16 @@ private:
   void rebuildAutomaticResidencySet();
   void releaseRetainedResources() noexcept;
   void clearTracking();
+  void prepareIndexedIndirectImpl(
+    const PrepareIndexedIndirectCountDesc& desc);
+  [[nodiscard]] MetalPreparedIndexedIndirect* consumePreparedIndexedIndirect(
+    const DrawIndirectDesc& draw, BufferHandle indexBuffer,
+    uint64_t indexBufferOffset, IndexFormat indexFormat,
+    PrimitiveTopology topology);
+  [[nodiscard]] MetalPreparedIndexedIndirect& consumePreparedIndexedIndirectCount(
+    const DrawIndirectCountDesc& draw, BufferHandle indexBuffer,
+    uint64_t indexBufferOffset, IndexFormat indexFormat,
+    PrimitiveTopology topology);
 
   MTL4::CommandBuffer* m_commandBuffer{nullptr};
   MetalResourceTable* m_resourceTable{nullptr};
@@ -263,14 +297,18 @@ private:
   std::vector<SamplerHandle> m_samplers;
   std::vector<QueryPoolHandle> m_queryPools;
   std::vector<ResidencySetHandle> m_residencySets;
+  std::vector<const MTL::Allocation*> m_nativeAllocations;
   std::vector<NS::Object*> m_retainedResources;
+  std::vector<const MTL::Allocation*> m_automaticResidencyAllocations;
   std::vector<MetalArgumentTableSnapshot> m_argumentTableSnapshots;
+  std::vector<MetalPreparedIndexedIndirect> m_preparedIndexedIndirect;
   std::vector<ReplayCommand> m_replayCommands;
   bool m_replaying{false};
 
   StageFlags m_pendingProducer{StageFlags::none};
   StageFlags m_pendingConsumer{StageFlags::none};
   HazardFlags m_pendingHazards{HazardFlags::none};
+  bool m_pendingResourceAlias{false};
   uint32_t m_debugGroupDepth{0};
   DebugResourceStateTracker m_resourceStates;
 };

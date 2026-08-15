@@ -8,9 +8,13 @@
 
 #include "../RHIDebugCounters.h"
 
+#if defined(DEMO_HAS_EMBEDDED_METAL_SHADERS)
+#include "_autogen/MetalShaderICBVariantCatalog.h"
+#endif
+
+#include <CoreFoundation/CFData.h>
 #include <Metal/Metal.hpp>
-#include <objc/message.h>
-#include <objc/runtime.h>
+#include <mach/mach_time.h>
 
 #include <algorithm>
 #include <cmath>
@@ -45,12 +49,9 @@ bool hasFormatFeature(FormatFeatureFlag value, FormatFeatureFlag requested)
 
 const void* immutableDataBytes(const NS::Data* data)
 {
-  // The metal-cpp Foundation wrapper only exposes mutableBytes(), while
-  // MTL4CounterHeap returns an immutable NSData on macOS 26.
-  using BytesMessage = const void* (*)(id, SEL);
-  const auto sendBytes = reinterpret_cast<BytesMessage>(objc_msgSend);
-  return sendBytes(reinterpret_cast<id>(const_cast<NS::Data*>(data)),
-                   sel_registerName("bytes"));
+  return data != nullptr
+    ? CFDataGetBytePtr(reinterpret_cast<CFDataRef>(data))
+    : nullptr;
 }
 
 MTL::TextureSwizzle resolveSwizzle(
@@ -114,6 +115,29 @@ bool isIdentityMapping(const ComponentMapping& mapping)
          mapping.a == ComponentSwizzle::identity;
 }
 
+bool isMemorylessResidencyResource(
+  const MetalResourceTable& resources, ResidencyResource resource)
+{
+  if(resource.kind == ResidencyResourceKind::texture)
+  {
+    const MetalTextureRecord* texture = resources.tryGetTexture(
+      TextureHandle{resource.index, resource.generation});
+    return texture != nullptr &&
+           texture->desc.memoryUsage == MemoryUsage::transientAttachment;
+  }
+  if(resource.kind == ResidencyResourceKind::textureView)
+  {
+    const MetalTextureViewRecord* view = resources.tryGetTextureView(
+      TextureViewHandle{resource.index, resource.generation});
+    const MetalTextureRecord* parent = view != nullptr
+      ? resources.tryGetTexture(view->parentTexture)
+      : nullptr;
+    return parent != nullptr &&
+           parent->desc.memoryUsage == MemoryUsage::transientAttachment;
+  }
+  return false;
+}
+
 TextureFormat resolvedViewFormat(
   TextureFormat requested, TextureFormat parent)
 {
@@ -161,8 +185,12 @@ void MetalDevice::init(const DeviceCreateInfo& createInfo)
     if(m_compiler == nullptr)
       throw std::runtime_error(errorMessage("MTLDevice::newCompiler", error));
 
-    m_blitPipeline = compileMetalBlitPipeline(
-      *m_compiler, createInfo.enableValidationLayers);
+    MetalBuiltinPipelines builtins = compileMetalBuiltinPipelines(
+      *m_device, *m_compiler, createInfo.enableValidationLayers);
+    m_blitPipeline = builtins.blit;
+    m_indexedIndirectUInt32Pipeline = builtins.indexedIndirectUInt32;
+    m_indexedIndirectUInt16Pipeline = builtins.indexedIndirectUInt16;
+    m_indexedIndirectFunction = builtins.indexedIndirectFunction;
 
     auto* poolDesc = MTL::ResourceViewPoolDescriptor::alloc()->init();
     poolDesc->setLabel(nsString("MGIP Metal4 texture-view pool"));
@@ -277,11 +305,17 @@ void MetalDevice::deinit()
   m_retirements.clear();
   for(auto& queue : m_queues)
     queue.reset();
+  if(m_indexedIndirectFunction != nullptr) m_indexedIndirectFunction->release();
+  if(m_indexedIndirectUInt16Pipeline != nullptr) m_indexedIndirectUInt16Pipeline->release();
+  if(m_indexedIndirectUInt32Pipeline != nullptr) m_indexedIndirectUInt32Pipeline->release();
   if(m_blitPipeline != nullptr) m_blitPipeline->release();
   if(m_textureViewPool != nullptr) m_textureViewPool->release();
   if(m_compiler != nullptr) m_compiler->release();
   m_textureViewPool = nullptr;
   m_blitPipeline = nullptr;
+  m_indexedIndirectUInt32Pipeline = nullptr;
+  m_indexedIndirectUInt16Pipeline = nullptr;
+  m_indexedIndirectFunction = nullptr;
   m_compiler = nullptr;
   m_device->release();
   m_device = nullptr;
@@ -352,7 +386,8 @@ std::unique_ptr<CommandAllocator> MetalDevice::createCommandAllocator(
   validateInitialized("MetalDevice::createCommandAllocator");
   return std::make_unique<MetalCommandAllocator>(
     *m_queues[static_cast<uint32_t>(queueClass)], m_device, m_resources.get(),
-    m_blitPipeline);
+    m_blitPipeline, m_indexedIndirectUInt32Pipeline,
+    m_indexedIndirectUInt16Pipeline, m_indexedIndirectFunction);
 }
 
 void MetalDevice::waitIdle()
@@ -436,7 +471,14 @@ void MetalDevice::collectGarbage()
 
 float MetalDevice::getTimestampPeriodNs() const
 {
-  return 1.0f;
+  if(m_device == nullptr)
+    return 0.0f;
+
+  mach_timebase_info_data_t timebase{};
+  if(mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0)
+    return 0.0f;
+  return static_cast<float>(timebase.numer) /
+         static_cast<float>(timebase.denom);
 }
 
 bool MetalDevice::isFormatSupported(
@@ -503,22 +545,27 @@ TextureHandle MetalDevice::createTexture(const TextureDesc& desc)
   {
     throw std::invalid_argument("Metal cube texture requires six square faces");
   }
-  if(hasUsage(desc.usage, TextureUsageFlags::depthAttachment) !=
-     isDepthFormat(desc.format))
+  const bool depthFormat = isDepthFormat(desc.format);
+  if((hasUsage(desc.usage, TextureUsageFlags::depthAttachment) && !depthFormat) ||
+     (hasUsage(desc.usage, TextureUsageFlags::colorAttachment) && depthFormat))
   {
-    if(hasUsage(desc.usage, TextureUsageFlags::depthAttachment) ||
-       hasUsage(desc.usage, TextureUsageFlags::colorAttachment))
-    {
-      throw std::invalid_argument("Metal texture attachment usage and format are incompatible");
-    }
+    throw std::invalid_argument("Metal texture attachment usage and format are incompatible");
   }
-  if(isDepthFormat(desc.format) && hasUsage(desc.usage, TextureUsageFlags::storage))
+  if(depthFormat && hasUsage(desc.usage, TextureUsageFlags::storage))
     throw std::invalid_argument("Metal depth textures cannot use storage-image access");
-  if(desc.memoryUsage == MemoryUsage::transientAttachment &&
-     !hasUsage(desc.usage, TextureUsageFlags::colorAttachment) &&
-     !hasUsage(desc.usage, TextureUsageFlags::depthAttachment))
+  if(desc.memoryUsage == MemoryUsage::transientAttachment)
   {
-    throw std::invalid_argument("Metal memoryless texture requires attachment usage");
+    constexpr uint32_t attachmentUsage =
+      static_cast<uint32_t>(TextureUsageFlags::colorAttachment) |
+      static_cast<uint32_t>(TextureUsageFlags::depthAttachment);
+    const uint32_t usage = static_cast<uint32_t>(desc.usage);
+    if((usage & attachmentUsage) == 0 || (usage & ~attachmentUsage) != 0)
+    {
+      throw std::invalid_argument(
+        "Metal memoryless texture must be attachment-only");
+    }
+    if(desc.mipLevels != 1)
+      throw std::invalid_argument("Metal memoryless texture requires one mip level");
   }
 
   auto* nativeDesc = MTL::TextureDescriptor::alloc()->init();
@@ -579,6 +626,11 @@ TextureViewHandle MetalDevice::createTextureView(
   const TextureFormat format = resolvedViewFormat(desc.format, parent->desc.format);
   if(toMetalPixelFormat(format) == MTL::PixelFormatInvalid)
     throw std::invalid_argument("Metal texture view format is unsupported");
+  if(format != parent->desc.format)
+  {
+    throw std::invalid_argument(
+      "Metal texture views do not support format reinterpretation");
+  }
   if((desc.aspect != TextureAspect::color) != isDepthFormat(format))
     throw std::invalid_argument("Metal texture view aspect does not match its format");
   if(desc.levelCount == 0 || desc.baseMipLevel >= parent->desc.mipLevels ||
@@ -1017,6 +1069,8 @@ void MetalDevice::destroyPipeline(PipelineHandle handle)
   if(handle.isNull() || m_resources == nullptr)
     return;
   MetalPipelineRecord record = m_resources->removePipeline(handle);
+  if(record.nestedArgumentEncoder != nullptr)
+    record.nestedArgumentEncoder->release();
   NS::Object* primary = record.kind == MetalPipelineKind::graphics
     ? asObject(record.nativeRenderPipeline)
     : asObject(record.nativeComputePipeline);
@@ -1122,8 +1176,41 @@ ShaderLibraryHandle MetalDevice::createShaderLibrary(
     throw std::runtime_error(errorMessage("MTLDevice::newLibrary(metallib)", error));
   if(desc.debugName != nullptr)
     library->setLabel(nsString(desc.debugName));
+
+  MTL::Library* icbLibrary = nullptr;
+#if defined(DEMO_HAS_EMBEDDED_METAL_SHADERS)
+  const ::demo::EmbeddedMetalICBVariantLibrary icbVariant =
+    ::demo::findEmbeddedMetalICBVariantLibrary(desc.data.data());
+  if(icbVariant.data != nullptr && icbVariant.size != 0)
+  {
+    dispatch_data_t icbPayload = dispatch_data_create(
+      icbVariant.data, icbVariant.size,
+      dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+      DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    if(icbPayload == nullptr)
+    {
+      library->release();
+      throw std::runtime_error(
+        "Metal failed to wrap the ICB variant metallib data");
+    }
+    error = nullptr;
+    icbLibrary = m_device->newLibrary(icbPayload, &error);
+    dispatch_release(icbPayload);
+    if(icbLibrary == nullptr)
+    {
+      library->release();
+      throw std::runtime_error(errorMessage(
+        "MTLDevice::newLibrary(ICB variant metallib)", error));
+    }
+    const std::string icbLabel =
+      std::string(desc.debugName != nullptr ? desc.debugName : "Metal shader") +
+      " ICB variant";
+    icbLibrary->setLabel(nsString(icbLabel.c_str()));
+  }
+#endif
   return m_resources->registerShaderLibrary(MetalShaderLibraryRecord{
     .nativeLibrary = library,
+    .icbLibrary = icbLibrary,
     .format = desc.format,
     .debugName = desc.debugName != nullptr ? desc.debugName : "",
   });
@@ -1134,8 +1221,8 @@ void MetalDevice::destroyShaderLibrary(ShaderLibraryHandle handle)
   if(handle.isNull() || m_resources == nullptr)
     return;
   MetalShaderLibraryRecord record = m_resources->removeShaderLibrary(handle);
-  if(record.nativeLibrary != nullptr)
-    enqueueRetirement(asObject(record.nativeLibrary), record.pendingUses);
+  enqueueRetirement(asObject(record.nativeLibrary), record.pendingUses,
+                    asObject(record.icbLibrary));
 }
 
 MTL::Allocation* MetalDevice::resolveAllocation(
@@ -1155,7 +1242,8 @@ MTL::Allocation* MetalDevice::resolveAllocation(
   {
     const auto* record = m_resources->tryGetTexture(
       TextureHandle{resource.index, resource.generation});
-    return record != nullptr
+    return record != nullptr &&
+           record->desc.memoryUsage != MemoryUsage::transientAttachment
       ? reinterpret_cast<MTL::Allocation*>(record->nativeTexture)
       : nullptr;
   }
@@ -1163,7 +1251,11 @@ MTL::Allocation* MetalDevice::resolveAllocation(
   {
     const auto* record = m_resources->tryGetTextureView(
       TextureViewHandle{resource.index, resource.generation});
-    return record != nullptr
+    const auto* parent = record != nullptr
+      ? m_resources->tryGetTexture(record->parentTexture)
+      : nullptr;
+    return record != nullptr && parent != nullptr &&
+           parent->desc.memoryUsage != MemoryUsage::transientAttachment
       ? reinterpret_cast<MTL::Allocation*>(record->nativeTextureView)
       : nullptr;
   }
@@ -1245,6 +1337,12 @@ RHIResult MetalDevice::updateResidencySet(
     if(found == next.end())
       return RHIResult::fail(RHIErrorCode::invalidArgument,
                              "Metal residency removal is not in the set");
+    if(isMemorylessResidencyResource(*m_resources, resource))
+    {
+      return RHIResult::fail(
+        RHIErrorCode::unsupported,
+        "Metal residency sets cannot contain memoryless textures or views");
+    }
     MTL::Allocation* allocation = resolveAllocation(resource);
     if(allocation == nullptr)
       return RHIResult::fail(RHIErrorCode::invalidHandle,
@@ -1257,6 +1355,12 @@ RHIResult MetalDevice::updateResidencySet(
     if(std::find(next.begin(), next.end(), resource) != next.end())
       return RHIResult::fail(RHIErrorCode::invalidArgument,
                              "Metal residency addition is duplicated");
+    if(isMemorylessResidencyResource(*m_resources, resource))
+    {
+      return RHIResult::fail(
+        RHIErrorCode::unsupported,
+        "Metal residency sets cannot contain memoryless textures or views");
+    }
     MTL::Allocation* allocation = resolveAllocation(resource);
     if(allocation == nullptr)
       return RHIResult::fail(RHIErrorCode::unsupported,
@@ -1267,11 +1371,14 @@ RHIResult MetalDevice::updateResidencySet(
   if(next.size() > record->maxResources)
     return RHIResult::fail(RHIErrorCode::outOfMemory,
                            "Metal residency set capacity exceeded");
-  if(!removals.empty())
-    record->nativeSet->removeAllocations(removals.data(), removals.size());
-  if(!additions.empty())
-    record->nativeSet->addAllocations(additions.data(), additions.size());
-  record->nativeSet->commit();
+  if(!removals.empty() || !additions.empty())
+  {
+    if(!removals.empty())
+      record->nativeSet->removeAllocations(removals.data(), removals.size());
+    if(!additions.empty())
+      record->nativeSet->addAllocations(additions.data(), additions.size());
+    record->nativeSet->commit();
+  }
   record->resources = std::move(next);
   record->pendingUses = {};
   return RHIResult::ok();

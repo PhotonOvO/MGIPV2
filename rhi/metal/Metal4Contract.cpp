@@ -10,16 +10,12 @@
 #include <Metal/MTLResidencySet.hpp>
 #include <Metal/MTLTextureViewPool.hpp>
 
-#include <objc/runtime.h>
-
 namespace demo::rhi::metal {
 
 Metal4NativeContractStatus queryMetal4NativeContract() noexcept
 {
   MTL::Device* device = MTL::CreateSystemDefaultDevice();
   Metal4NativeContractStatus result{.deviceAvailable = device != nullptr};
-  if(device != nullptr)
-    device->release();
 
 #if (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000) || \
     (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000)
@@ -36,15 +32,14 @@ Metal4NativeContractStatus queryMetal4NativeContract() noexcept
     };
     (void)sizeof(NativeTypeMap);
     result.sdkTypesCompiled = true;
-    result.runtimeTypesAvailable =
-      objc_getProtocol("MTL4CommandQueue") != nullptr &&
-      objc_getProtocol("MTL4CommandAllocator") != nullptr &&
-      objc_getProtocol("MTL4CommandBuffer") != nullptr &&
-      objc_getProtocol("MTL4RenderCommandEncoder") != nullptr &&
-      objc_getProtocol("MTL4ComputeCommandEncoder") != nullptr &&
-      objc_getProtocol("MTLResidencySet") != nullptr &&
-      objc_getProtocol("MTLTextureViewPool") != nullptr;
+    MTL4::CommandQueue* queue =
+      device != nullptr ? device->newMTL4CommandQueue() : nullptr;
+    result.runtimeTypesAvailable = queue != nullptr;
+    if(queue != nullptr)
+      queue->release();
 #endif
+  if(device != nullptr)
+    device->release();
   return result;
 }
 

@@ -12,9 +12,11 @@
 #include <Metal/MTL4Counters.hpp>
 #include <Metal/MTL4RenderCommandEncoder.hpp>
 #include <Metal/MTL4RenderPass.hpp>
+#include <Metal/MTLArgumentEncoder.hpp>
 #include <Metal/MTLBuffer.hpp>
 #include <Metal/MTLComputePipeline.hpp>
 #include <Metal/MTLDevice.hpp>
+#include <Metal/MTLIndirectCommandBuffer.hpp>
 #include <Metal/MTLRenderPipeline.hpp>
 #include <Metal/MTLResidencySet.hpp>
 #include <Metal/MTLSampler.hpp>
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -132,6 +135,30 @@ struct alignas(16) MetalBlitParameters
   uint32_t sourceMipLevel;
   uint32_t destinationMipLevel;
 };
+
+struct alignas(16) MetalIndexedIndirectPreparationParameters
+{
+  uint32_t maxDrawCount;
+  uint32_t argumentStride;
+  uint32_t primitiveType;
+  uint32_t reserved;
+};
+
+constexpr uint32_t kIndexedIndirectCommandSize = 5u * sizeof(uint32_t);
+constexpr uint32_t kIndexedIndirectThreadgroupSize = 64u;
+
+uint32_t toMetalShaderPrimitive(PrimitiveTopology topology)
+{
+  switch(topology)
+  {
+  case PrimitiveTopology::pointList:     return 0u;
+  case PrimitiveTopology::lineList:      return 1u;
+  case PrimitiveTopology::lineStrip:     return 2u;
+  case PrimitiveTopology::triangleList:  return 3u;
+  case PrimitiveTopology::triangleStrip: return 4u;
+  }
+  return 3u;
+}
 
 uint32_t mipDimension(uint32_t dimension, uint32_t mipLevel)
 {
@@ -257,6 +284,7 @@ void MetalEncoderBindingState::reset()
 {
   pipeline = {};
   tables.clear();
+  pendingDynamicBuffers.clear();
   dynamicBuffers.clear();
   roots.clear();
   vertexBuffers.clear();
@@ -363,6 +391,19 @@ void MetalRenderEncoder::setArgumentTable(
     m_bindings.tables.push_back(MetalBoundTable{slot, table, stages});
   else
     *bound = MetalBoundTable{slot, table, stages};
+  std::erase_if(m_bindings.dynamicBuffers,
+                [slot](const MetalDynamicBufferValue& value) {
+                  return value.tableSlot == slot;
+                });
+  for(const MetalDynamicBufferValue& value : m_bindings.pendingDynamicBuffers)
+  {
+    if(value.tableSlot == slot)
+      m_bindings.dynamicBuffers.push_back(value);
+  }
+  std::erase_if(m_bindings.pendingDynamicBuffers,
+                [slot](const MetalDynamicBufferValue& value) {
+                  return value.tableSlot == slot;
+                });
   m_bindings.dirty = true;
   m_owner->trackArgumentTable(table);
   m_owner->recordCommand([stages, slot, table](MetalCommandBuffer& owner) {
@@ -385,8 +426,8 @@ void MetalRenderEncoder::setDynamicBuffer(
     checkedEnd(offset, resolvedSize, record->desc.size, "Metal dynamic buffer");
     m_owner->trackBuffer(buffer);
   }
-  m_bindings.dynamicBuffers.push_back(MetalDynamicBufferValue{slot, buffer, offset, size});
-  m_bindings.dirty = true;
+  m_bindings.pendingDynamicBuffers.push_back(
+    MetalDynamicBufferValue{slot, buffer, offset, size});
   m_owner->recordCommand(
     [stages, slot, buffer, offset, size](MetalCommandBuffer& owner) {
       owner.m_renderEncoder.setDynamicBuffer(stages, slot, buffer, offset, size);
@@ -577,6 +618,8 @@ void MetalRenderEncoder::drawIndexed(const DrawIndexedDesc& desc)
 void MetalRenderEncoder::drawIndexedIndirect(const DrawIndirectDesc& desc)
 {
   requireActive();
+  if(desc.drawCount == 0)
+    return;
   if(!m_indexBuffer.isValid())
     throw std::runtime_error("Metal indexed indirect draw requires an index buffer");
   bindSnapshot();
@@ -592,14 +635,39 @@ void MetalRenderEncoder::drawIndexedIndirect(const DrawIndirectDesc& desc)
   m_owner->trackBuffer(desc.argsBuffer);
   m_owner->retainNative(asObject(index->nativeBuffer));
   m_owner->retainNative(asObject(args->nativeBuffer));
-  for(uint32_t drawIndex = 0; drawIndex < desc.drawCount; ++drawIndex)
+
+  MetalPreparedIndexedIndirect* prepared =
+    m_owner->consumePreparedIndexedIndirect(
+      desc, m_indexBuffer, m_indexOffset, m_indexFormat,
+      pipeline.rasterState.topology);
+  if(prepared != nullptr && pipeline.supportsGpuGeneratedCommands)
   {
-    m_encoder->drawIndexedPrimitives(
-      toMetalPrimitive(pipeline.rasterState.topology), toMetalIndexType(m_indexFormat),
-      index->nativeBuffer->gpuAddress() + m_indexOffset,
-      index->desc.size - m_indexOffset,
-      args->nativeBuffer->gpuAddress() + desc.offset +
-        static_cast<uint64_t>(drawIndex) * stride);
+    m_encoder->executeCommandsInBuffer(
+      prepared->commandBuffer,
+      prepared->executionRangeBuffer->gpuAddress() +
+        prepared->executionRangeOffset);
+  }
+  else
+  {
+    if(prepared != nullptr && prepared->clampedArgumentsBuffer == nullptr)
+    {
+      throw std::runtime_error(
+        "Metal indexed-indirect fallback preparation is incomplete");
+    }
+    for(uint32_t drawIndex = 0; drawIndex < desc.drawCount; ++drawIndex)
+    {
+      const uint64_t indirectAddress = prepared != nullptr
+        ? prepared->clampedArgumentsBuffer->gpuAddress() +
+            prepared->clampedArgumentsOffset +
+            static_cast<uint64_t>(drawIndex) * prepared->argumentStride
+        : args->nativeBuffer->gpuAddress() + desc.offset +
+            static_cast<uint64_t>(drawIndex) * stride;
+      m_encoder->drawIndexedPrimitives(
+        toMetalPrimitive(pipeline.rasterState.topology),
+        toMetalIndexType(m_indexFormat),
+        index->nativeBuffer->gpuAddress() + m_indexOffset,
+        index->desc.size - m_indexOffset, indirectAddress);
+    }
   }
   m_owner->recordCommand([desc](MetalCommandBuffer& owner) {
     owner.m_renderEncoder.drawIndexedIndirect(desc);
@@ -609,21 +677,48 @@ void MetalRenderEncoder::drawIndexedIndirect(const DrawIndirectDesc& desc)
 void MetalRenderEncoder::drawIndexedIndirectCount(const DrawIndirectCountDesc& desc)
 {
   requireActive();
-  const MetalBufferRecord* count = m_owner->resources().tryGetBuffer(desc.countBuffer);
-  if(count == nullptr)
-    throw std::invalid_argument("Metal indexed-indirect count buffer is stale");
-  checkedEnd(desc.countBufferOffset, sizeof(uint32_t), count->desc.size,
-             "Metal indexed-indirect count");
-  m_owner->trackBuffer(desc.countBuffer);
-  m_owner->retainNative(asObject(count->nativeBuffer));
+  if(desc.maxDrawCount == 0)
+    return;
+  if(!m_indexBuffer.isValid())
+    throw std::runtime_error(
+      "Metal indexed-indirect-count draw requires an index buffer");
 
-	  // MTL4 has no direct count-buffer draw. Renderer-produced unused commands carry
-	  // zero index and instance counts, so issuing the bounded range is equivalent.
-  drawIndexedIndirect(DrawIndirectDesc{
-    .argsBuffer = desc.argsBuffer,
-    .offset = desc.argsOffset,
-    .drawCount = desc.maxDrawCount,
-    .stride = desc.stride,
+  bindSnapshot();
+  const MetalPipelineRecord& pipeline = requirePipeline();
+
+  MetalPreparedIndexedIndirect& prepared =
+    m_owner->consumePreparedIndexedIndirectCount(
+      desc, m_indexBuffer, m_indexOffset, m_indexFormat,
+      pipeline.rasterState.topology);
+  if(pipeline.supportsGpuGeneratedCommands)
+  {
+    m_encoder->executeCommandsInBuffer(
+      prepared.commandBuffer,
+      prepared.executionRangeBuffer->gpuAddress() + prepared.executionRangeOffset);
+  }
+  else
+  {
+    const MetalBufferRecord* index =
+      m_owner->resources().tryGetBuffer(m_indexBuffer);
+    if(index == nullptr || prepared.clampedArgumentsBuffer == nullptr)
+    {
+      throw std::runtime_error(
+        "Metal indexed-indirect-count fallback preparation is incomplete");
+    }
+    for(uint32_t drawIndex = 0; drawIndex < desc.maxDrawCount; ++drawIndex)
+    {
+      m_encoder->drawIndexedPrimitives(
+        toMetalPrimitive(pipeline.rasterState.topology),
+        toMetalIndexType(m_indexFormat),
+        index->nativeBuffer->gpuAddress() + m_indexOffset,
+        index->desc.size - m_indexOffset,
+        prepared.clampedArgumentsBuffer->gpuAddress() +
+          prepared.clampedArgumentsOffset +
+          static_cast<uint64_t>(drawIndex) * prepared.argumentStride);
+    }
+  }
+  m_owner->recordCommand([desc](MetalCommandBuffer& owner) {
+    owner.m_renderEncoder.drawIndexedIndirectCount(desc);
   });
 }
 
@@ -765,6 +860,19 @@ void MetalComputeEncoder::setArgumentTable(
     m_bindings.tables.push_back(MetalBoundTable{slot, table, ShaderStage::compute});
   else
     *bound = MetalBoundTable{slot, table, ShaderStage::compute};
+  std::erase_if(m_bindings.dynamicBuffers,
+                [slot](const MetalDynamicBufferValue& value) {
+                  return value.tableSlot == slot;
+                });
+  for(const MetalDynamicBufferValue& value : m_bindings.pendingDynamicBuffers)
+  {
+    if(value.tableSlot == slot)
+      m_bindings.dynamicBuffers.push_back(value);
+  }
+  std::erase_if(m_bindings.pendingDynamicBuffers,
+                [slot](const MetalDynamicBufferValue& value) {
+                  return value.tableSlot == slot;
+                });
   m_bindings.dirty = true;
   m_owner->trackArgumentTable(table);
   m_owner->recordCommand([slot, table](MetalCommandBuffer& owner) {
@@ -1053,6 +1161,7 @@ void MetalComputeEncoder::blitTexture(const TextureBlitDesc& desc)
       throw std::runtime_error("Metal compute blit cannot scale or flip block-compressed textures");
     MTL::ComputePipelineState* blitPipeline = m_owner->allocator().blitPipeline();
     require(blitPipeline != nullptr, "Metal compute blit pipeline is unavailable");
+    m_owner->trackNativeAllocation(blitPipeline);
     const MetalBlitParameters parameters{
       .sourceOffset0 = {desc.srcOffsets[0].x, desc.srcOffsets[0].y},
       .sourceOffset1 = {desc.srcOffsets[1].x, desc.srcOffsets[1].y},
@@ -1192,22 +1301,32 @@ void MetalCommandBuffer::begin(CommandAllocator& allocatorValue)
     throw std::invalid_argument("MetalCommandBuffer::begin rejected a foreign allocator");
   if(m_state != CommandBufferState::idle && m_state != CommandBufferState::reusable)
     throw std::runtime_error("MetalCommandBuffer::begin requires idle or reusable state");
-  if(!m_replaying)
-    m_replayCommands.clear();
-  releaseRetainedResources();
-  clearTracking();
-  m_commandBuffer->beginCommandBuffer(m_allocator->nativeAllocator());
-  m_commandBuffer->useResidencySet(m_automaticResidencySet);
-  m_active = EncoderKind::none;
-  m_submission = {};
-  m_pendingProducer = StageFlags::none;
-  m_pendingConsumer = StageFlags::none;
-  m_pendingHazards = HazardFlags::none;
-  m_debugGroupDepth = 0;
-  m_resourceStates.reset();
-  m_state = CommandBufferState::recording;
-  if(!m_replaying)
-    incrementHotPathCounter(BackendType::metal, HotPathCounter::commandBufferBegins);
+  m_allocator->acquireRecording(*this);
+  try
+  {
+    if(!m_replaying)
+      m_replayCommands.clear();
+    releaseRetainedResources();
+    clearTracking();
+    m_commandBuffer->beginCommandBuffer(m_allocator->nativeAllocator());
+    m_commandBuffer->useResidencySet(m_automaticResidencySet);
+    m_active = EncoderKind::none;
+    m_submission = {};
+    m_pendingProducer = StageFlags::none;
+    m_pendingConsumer = StageFlags::none;
+    m_pendingHazards = HazardFlags::none;
+    m_pendingResourceAlias = false;
+    m_debugGroupDepth = 0;
+    m_resourceStates.reset();
+    m_state = CommandBufferState::recording;
+    if(!m_replaying)
+      incrementHotPathCounter(BackendType::metal, HotPathCounter::commandBufferBegins);
+  }
+  catch(...)
+  {
+    m_allocator->releaseRecording(*this);
+    throw;
+  }
 }
 
 void MetalCommandBuffer::end()
@@ -1217,8 +1336,18 @@ void MetalCommandBuffer::end()
     throw std::runtime_error("MetalCommandBuffer::end requires no active encoder");
   if(m_debugGroupDepth != 0)
     throw std::runtime_error("MetalCommandBuffer::end found an unbalanced debug group");
-  m_commandBuffer->endCommandBuffer();
-  m_state = CommandBufferState::executable;
+  try
+  {
+    m_commandBuffer->endCommandBuffer();
+    m_state = CommandBufferState::executable;
+    m_allocator->releaseRecording(*this);
+  }
+  catch(...)
+  {
+    m_allocator->releaseRecording(*this);
+    m_state = CommandBufferState::reusable;
+    throw;
+  }
 }
 
 CommandBufferState MetalCommandBuffer::state() const noexcept
@@ -1260,6 +1389,13 @@ RenderEncoder* MetalCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
     throw std::runtime_error("MetalCommandBuffer already has an active encoder");
   if(desc.colorTargets.empty() && desc.depthTarget == nullptr)
     throw std::invalid_argument("Metal render pass requires an attachment");
+  if(desc.renderArea.offset.x != 0 || desc.renderArea.offset.y != 0)
+  {
+    throw std::invalid_argument(
+      "Metal render pass does not support a non-zero render-area offset");
+  }
+  if(desc.renderArea.extent.width == 0 || desc.renderArea.extent.height == 0)
+    throw std::invalid_argument("Metal render pass requires a non-empty render area");
 
   auto* nativeDesc = MTL4::RenderPassDescriptor::alloc()->init();
   nativeDesc->setRenderTargetWidth(desc.renderArea.extent.width);
@@ -1313,6 +1449,13 @@ RenderEncoder* MetalCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
       throw std::invalid_argument(
         "Metal render pass color attachment '" + name +
         "' was not created with TextureUsageFlags::colorAttachment");
+    }
+    if(textureRecord->desc.memoryUsage == MemoryUsage::transientAttachment &&
+       (target.loadOp == LoadOp::load || target.storeOp == StoreOp::store))
+    {
+      nativeDesc->release();
+      throw std::invalid_argument(
+        "Metal memoryless color attachments require clear/dontCare load and dontCare store");
     }
     retainNative(asObject(nativeTexture));
     MTL::RenderPassColorAttachmentDescriptor* attachment =
@@ -1378,6 +1521,13 @@ RenderEncoder* MetalCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
       throw std::invalid_argument(
         "Metal render pass depth attachment '" + name +
         "' was not created with TextureUsageFlags::depthAttachment");
+    }
+    if(textureRecord->desc.memoryUsage == MemoryUsage::transientAttachment &&
+       (target.loadOp == LoadOp::load || target.storeOp == StoreOp::store))
+    {
+      nativeDesc->release();
+      throw std::invalid_argument(
+        "Metal memoryless depth attachments require clear/dontCare load and dontCare store");
     }
     retainNative(asObject(nativeTexture));
     MTL::RenderPassDepthAttachmentDescriptor* depth = nativeDesc->depthAttachment();
@@ -1463,6 +1613,255 @@ void MetalCommandBuffer::endEncoding()
   recordCommand([](MetalCommandBuffer& owner) { owner.endEncoding(); });
 }
 
+void MetalCommandBuffer::prepareIndexedIndirect(
+  const PrepareIndexedIndirectDesc& desc)
+{
+  const PrepareIndexedIndirectCountDesc normalized{
+    .draw = {
+      .argsBuffer = desc.draw.argsBuffer,
+      .argsOffset = desc.draw.offset,
+      .countBuffer = {},
+      .countBufferOffset = 0,
+      .maxDrawCount = desc.draw.drawCount,
+      .stride = desc.draw.stride,
+    },
+    .indexBuffer = desc.indexBuffer,
+    .indexBufferOffset = desc.indexBufferOffset,
+    .indexFormat = desc.indexFormat,
+    .topology = desc.topology,
+  };
+  prepareIndexedIndirectImpl(normalized);
+  if(desc.draw.drawCount == 0)
+    return;
+  recordCommand([desc](MetalCommandBuffer& owner) {
+    owner.prepareIndexedIndirect(desc);
+  });
+}
+
+void MetalCommandBuffer::prepareIndexedIndirectCount(
+  const PrepareIndexedIndirectCountDesc& desc)
+{
+  if(desc.draw.maxDrawCount != 0 && !desc.draw.countBuffer.isValid())
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect-count preparation requires a count buffer");
+  }
+  prepareIndexedIndirectImpl(desc);
+  if(desc.draw.maxDrawCount == 0)
+    return;
+  recordCommand([desc](MetalCommandBuffer& owner) {
+    owner.prepareIndexedIndirectCount(desc);
+  });
+}
+
+void MetalCommandBuffer::prepareIndexedIndirectImpl(
+  const PrepareIndexedIndirectCountDesc& desc)
+{
+  requireRecording("MetalCommandBuffer::prepareIndexedIndirect");
+  requireQueueOperation(
+    QueueOperation::render,
+    "MetalCommandBuffer::prepareIndexedIndirect");
+  if(m_active != EncoderKind::none)
+  {
+    throw std::runtime_error(
+      "Metal indexed-indirect preparation requires no active encoder");
+  }
+  if(desc.draw.maxDrawCount == 0)
+    return;
+
+  const bool usesCountBuffer = desc.draw.countBuffer.isValid();
+  const MetalBufferRecord* arguments =
+    resources().tryGetBuffer(desc.draw.argsBuffer);
+  const MetalBufferRecord* count = usesCountBuffer
+    ? resources().tryGetBuffer(desc.draw.countBuffer)
+    : nullptr;
+  const MetalBufferRecord* index = resources().tryGetBuffer(desc.indexBuffer);
+  if(arguments == nullptr || arguments->nativeBuffer == nullptr)
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect preparation has a stale argument buffer");
+  }
+  if(usesCountBuffer && (count == nullptr || count->nativeBuffer == nullptr))
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect-count preparation has a stale count buffer");
+  }
+  if(index == nullptr || index->nativeBuffer == nullptr)
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect preparation has a stale index buffer");
+  }
+
+  const uint32_t stride = defaultIndirectStride(
+    desc.draw.stride, kIndexedIndirectCommandSize);
+  if(stride < kIndexedIndirectCommandSize || (stride % sizeof(uint32_t)) != 0)
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect stride must be a 4-byte-aligned value of at least 20 bytes");
+  }
+  if((desc.draw.argsOffset % alignof(uint32_t)) != 0 ||
+     (usesCountBuffer &&
+      (desc.draw.countBufferOffset % alignof(uint32_t)) != 0))
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect argument and count offsets require 4-byte alignment");
+  }
+  const uint32_t indexSize = indexElementSize(desc.indexFormat);
+  if((desc.indexBufferOffset % indexSize) != 0)
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect index offset is misaligned");
+  }
+  const uint64_t argumentBytes =
+    static_cast<uint64_t>(desc.draw.maxDrawCount - 1u) * stride +
+    kIndexedIndirectCommandSize;
+  checkedEnd(desc.draw.argsOffset, argumentBytes, arguments->desc.size,
+             "Metal indexed-indirect arguments");
+  if(usesCountBuffer)
+  {
+    checkedEnd(desc.draw.countBufferOffset, sizeof(uint32_t), count->desc.size,
+               "Metal indexed-indirect count");
+  }
+  checkedEnd(desc.indexBufferOffset, 0, index->desc.size,
+             "Metal indexed-indirect index buffer");
+  const uint64_t clampedArgumentBytes =
+    static_cast<uint64_t>(desc.draw.maxDrawCount) * stride;
+  if(clampedArgumentBytes > std::numeric_limits<size_t>::max())
+  {
+    throw std::invalid_argument(
+      "Metal indexed-indirect fallback allocation is too large");
+  }
+
+  auto descriptor = NS::TransferPtr(
+    MTL::IndirectCommandBufferDescriptor::alloc()->init());
+  descriptor->setCommandTypes(MTL::IndirectCommandTypeDrawIndexed);
+  descriptor->setInheritPipelineState(true);
+  descriptor->setInheritBuffers(true);
+  descriptor->setInheritCullMode(true);
+  descriptor->setInheritDepthBias(true);
+  descriptor->setInheritDepthClipMode(true);
+  descriptor->setInheritDepthStencilState(true);
+  descriptor->setInheritFrontFacingWinding(true);
+  descriptor->setInheritTriangleFillMode(true);
+
+  auto commandBuffer = NS::TransferPtr(allocator().device()->newIndirectCommandBuffer(
+    descriptor.get(), desc.draw.maxDrawCount,
+    static_cast<MTL::ResourceOptions>(
+      MTL::ResourceStorageModePrivate |
+      MTL::ResourceHazardTrackingModeUntracked)));
+  if(!commandBuffer)
+    throw std::runtime_error("Metal failed to create an indexed indirect command buffer");
+  commandBuffer->setLabel(nsString("Metal4 Slang indexed-indirect command buffer"));
+
+  MTL::ArgumentEncoder* argumentEncoder =
+    allocator().indexedIndirectArgumentEncoder();
+  require(argumentEncoder != nullptr,
+          "Metal indexed-indirect argument encoder is unavailable");
+  const NS::UInteger encodedLength = argumentEncoder->encodedLength();
+  const NS::UInteger encodedAlignment = argumentEncoder->alignment();
+  if(encodedLength == 0 || encodedAlignment > std::numeric_limits<uint32_t>::max())
+  {
+    throw std::runtime_error(
+      "Metal indexed-indirect argument-buffer layout is invalid");
+  }
+  std::vector<std::byte> argumentBytesStorage(encodedLength);
+  const MetalRootDataAllocation commandArguments = allocator().allocateRootData(
+    argumentBytesStorage, static_cast<uint32_t>(encodedAlignment));
+  argumentEncoder->setArgumentBuffer(
+    commandArguments.buffer, commandArguments.offset);
+  argumentEncoder->setIndirectCommandBuffer(commandBuffer.get(), 0);
+
+  const MTL::IndirectCommandBufferExecutionRange initialExecutionRange{0u, 0u};
+  const MetalRootDataAllocation executionRange = allocator().allocateRootData(
+    std::as_bytes(std::span{&initialExecutionRange, 1}), alignof(uint32_t));
+  const MetalIndexedIndirectPreparationParameters parameters{
+    .maxDrawCount = desc.draw.maxDrawCount,
+    .argumentStride = stride,
+    .primitiveType = toMetalShaderPrimitive(desc.topology),
+    .reserved = 0u,
+  };
+  const MetalRootDataAllocation preparationConstants = allocator().allocateRootData(
+    std::as_bytes(std::span{&parameters, 1}), alignof(decltype(parameters)));
+  const std::vector<std::byte> clampedArgumentStorage(
+    static_cast<size_t>(clampedArgumentBytes));
+  const MetalRootDataAllocation clampedArguments = allocator().allocateRootData(
+    clampedArgumentStorage, alignof(uint32_t));
+  uint64_t drawCountAddress = 0;
+  if(usesCountBuffer)
+  {
+    drawCountAddress = count->nativeBuffer->gpuAddress() +
+                       desc.draw.countBufferOffset;
+  }
+  else
+  {
+    const uint32_t fixedDrawCount = desc.draw.maxDrawCount;
+    drawCountAddress = allocator().allocateRootData(
+      std::as_bytes(std::span{&fixedDrawCount, 1}),
+      alignof(decltype(fixedDrawCount))).gpuAddress;
+  }
+
+  MTL4::ArgumentTable* table = allocator().allocateArgumentTable(
+    7, 0, 0, "Metal4 Slang indexed-indirect builder arguments");
+  table->setAddress(commandArguments.gpuAddress, 0);
+  table->setAddress(arguments->nativeBuffer->gpuAddress() + desc.draw.argsOffset, 1);
+  table->setAddress(drawCountAddress, 2);
+  table->setAddress(executionRange.gpuAddress, 3);
+  table->setAddress(index->nativeBuffer->gpuAddress() + desc.indexBufferOffset, 4);
+  table->setAddress(preparationConstants.gpuAddress, 5);
+  table->setAddress(clampedArguments.gpuAddress, 6);
+
+  MTL::ComputePipelineState* pipeline =
+    allocator().indexedIndirectPipeline(desc.indexFormat);
+  require(pipeline != nullptr,
+          "Metal indexed-indirect builder pipeline is unavailable");
+
+  // A caller's indirect-input barrier targets the eventual draw. The Slang
+  // builder becomes the first consumer, so include its dispatch stage too.
+  if(any(m_pendingHazards))
+    m_pendingConsumer |= StageFlags::compute;
+  MTL4::ComputeCommandEncoder* encoder = m_commandBuffer->computeCommandEncoder();
+  if(encoder == nullptr)
+    throw std::runtime_error("Metal failed to create the indexed-indirect builder encoder");
+  applyPendingBarrier(*encoder);
+  encoder->resetCommandsInBuffer(
+    commandBuffer.get(), NS::Range::Make(0, desc.draw.maxDrawCount));
+  encoder->barrierAfterEncoderStages(
+    MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
+  encoder->setComputePipelineState(pipeline);
+  encoder->setArgumentTable(table);
+  encoder->dispatchThreads(
+    MTL::Size::Make(desc.draw.maxDrawCount, 1, 1),
+    MTL::Size::Make(kIndexedIndirectThreadgroupSize, 1, 1));
+  encoder->barrierAfterStages(
+    MTL::StageDispatch, MTL::StageVertex, MTL4::VisibilityOptionDevice);
+  encoder->endEncoding();
+
+  trackBuffer(desc.draw.argsBuffer);
+  if(usesCountBuffer)
+    trackBuffer(desc.draw.countBuffer);
+  trackBuffer(desc.indexBuffer);
+  retainNative(asObject(arguments->nativeBuffer));
+  if(usesCountBuffer)
+    retainNative(asObject(count->nativeBuffer));
+  retainNative(asObject(index->nativeBuffer));
+  retainNative(asObject(commandBuffer.get()));
+  trackNativeAllocation(commandBuffer.get());
+  trackNativeAllocation(pipeline);
+  m_preparedIndexedIndirect.push_back(MetalPreparedIndexedIndirect{
+    .draw = desc.draw,
+    .indexBuffer = desc.indexBuffer,
+    .indexBufferOffset = desc.indexBufferOffset,
+    .indexFormat = desc.indexFormat,
+    .topology = desc.topology,
+    .commandBuffer = commandBuffer.get(),
+    .executionRangeBuffer = executionRange.buffer,
+    .executionRangeOffset = executionRange.offset,
+    .clampedArgumentsBuffer = clampedArguments.buffer,
+    .clampedArgumentsOffset = clampedArguments.offset,
+    .argumentStride = stride,
+  });
+}
+
 RHIResult MetalCommandBuffer::useResidencySet(ResidencySetHandle set)
 {
   if(m_state != CommandBufferState::recording)
@@ -1531,12 +1930,19 @@ void MetalCommandBuffer::applyPendingBarrier(MTL4::CommandEncoder& encoder)
 {
   if(!any(m_pendingHazards))
     return;
+  MTL4::VisibilityOptions visibility = toMetalVisibility(m_pendingHazards);
+  if(m_pendingResourceAlias)
+  {
+    visibility = static_cast<MTL4::VisibilityOptions>(
+      visibility | MTL4::VisibilityOptionResourceAlias);
+  }
   encoder.barrierAfterQueueStages(toMetalStages(m_pendingProducer),
                                   toMetalStages(m_pendingConsumer),
-                                  toMetalVisibility(m_pendingHazards));
+                                  visibility);
   m_pendingProducer = StageFlags::none;
   m_pendingConsumer = StageFlags::none;
   m_pendingHazards = HazardFlags::none;
+  m_pendingResourceAlias = false;
 }
 
 void MetalCommandBuffer::resourceBarrier(
@@ -1625,6 +2031,7 @@ void MetalCommandBuffer::resourceBarrier(
       m_pendingProducer |= producer;
       m_pendingConsumer |= consumer;
       m_pendingHazards |= hazards | HazardFlags::readBeforeWrite;
+      m_pendingResourceAlias = true;
     }
   }
   else if(!textures.empty() || !buffers.empty())
@@ -1660,6 +2067,12 @@ void MetalCommandBuffer::clearColorTexture(
   const MetalTextureRecord* texture = resources().tryGetTexture(handle);
   if(texture == nullptr || texture->nativeTexture == nullptr)
     throw std::invalid_argument("Metal texture clear references a stale texture");
+  if(texture->desc.memoryUsage == MemoryUsage::transientAttachment ||
+     !hasUsage(texture->desc.usage, TextureUsageFlags::transferDst))
+  {
+    throw std::invalid_argument(
+      "Metal texture clear requires a non-memoryless transfer destination");
+  }
   const TextureSubresourceRange resolvedRange = resolveTextureRange(
     range, texture->desc, "Metal clear texture");
   trackTexture(handle);
@@ -1727,9 +2140,16 @@ void MetalCommandBuffer::resetQueryPool(
   MetalQueryPoolRecord* record = resources().tryGetQueryPool(pool);
   if(record == nullptr || record->nativeHeap == nullptr)
     throw std::invalid_argument("Metal query pool is stale");
-  if(queryCount == 0 || firstQuery + queryCount > record->count)
+  if(queryCount == 0 || firstQuery >= record->count ||
+     queryCount > record->count - firstQuery)
     throw std::out_of_range("Metal query reset range is invalid");
+  for(uint32_t index = 0; index < record->pendingUses.count; ++index)
+  {
+    if(!m_allocator->queue().isComplete(record->pendingUses.tokens[index]))
+      throw std::runtime_error("Metal query reset requires prior GPU uses to complete");
+  }
   record->nativeHeap->invalidateCounterRange(NS::Range::Make(firstQuery, queryCount));
+  record->pendingUses = {};
   trackQueryPool(pool);
   retainNative(asObject(record->nativeHeap));
   recordCommand([pool, firstQuery, queryCount](MetalCommandBuffer& owner) {
@@ -1790,6 +2210,28 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
     pipeline->bindingLayout.textureCount,
     pipeline->bindingLayout.samplerCount,
     "Metal4 composed argument table");
+
+  MTL::ArgumentEncoder* nestedEncoder = pipeline->nestedArgumentEncoder;
+  if(pipeline->bindingLayout.nestedArgumentBufferIndex != kInvalidMetalBinding)
+  {
+    if(nestedEncoder == nullptr)
+      throw std::runtime_error("Metal pipeline has no nested argument encoder");
+    const NS::UInteger encodedLength = nestedEncoder->encodedLength();
+    const NS::UInteger encodedAlignment = nestedEncoder->alignment();
+    if(encodedLength == 0 ||
+       encodedAlignment > std::numeric_limits<uint32_t>::max())
+    {
+      throw std::runtime_error("Metal nested argument-buffer layout is invalid");
+    }
+    const MetalRootDataAllocation nestedArguments =
+      allocator().allocateArgumentData(
+        encodedLength, static_cast<uint32_t>(encodedAlignment));
+    nestedEncoder->setArgumentBuffer(
+      nestedArguments.buffer, nestedArguments.offset);
+    snapshot->setAddress(
+      nestedArguments.gpuAddress,
+      pipeline->bindingLayout.nestedArgumentBufferIndex);
+  }
 
   std::vector<std::pair<uint32_t, uint32_t>> dynamicOrdinals;
   const auto takeDynamic = [&state, &dynamicOrdinals](uint32_t tableSlot)
@@ -1883,7 +2325,11 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
         retainNative(asObject(buffer->nativeBuffer));
       }
 
-      if(placement.textureIndex != kInvalidMetalBinding)
+      const bool nestedTexture =
+        placement.nestedArgumentIndex != kInvalidMetalBinding &&
+        (placement.type == ArgumentType::sampledTexture ||
+         placement.type == ArgumentType::storageTexture);
+      if(placement.textureIndex != kInvalidMetalBinding || nestedTexture)
       {
         const MetalTextureViewRecord* view =
           resources().tryGetTextureView(value->textureView);
@@ -1894,7 +2340,16 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
           resourceId = view->nativeTextureView->gpuResourceID();
         if(resourceId._impl == 0)
           throw std::runtime_error("Metal texture view has no GPU resource ID");
-        snapshot->setTexture(resourceId, placement.textureIndex + element);
+        if(nestedTexture)
+        {
+          nestedEncoder->setTexture(
+            view->nativeTextureView,
+            placement.nestedArgumentIndex + element);
+        }
+        else
+        {
+          snapshot->setTexture(resourceId, placement.textureIndex + element);
+        }
         if(view->parentTexture.isValid())
         {
           const MetalTextureRecord* parent =
@@ -1907,13 +2362,25 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
           retainNative(asObject(view->nativeTextureView));
       }
 
-      if(placement.samplerIndex != kInvalidMetalBinding)
+      const bool nestedSampler =
+        placement.nestedArgumentIndex != kInvalidMetalBinding &&
+        placement.type == ArgumentType::sampler;
+      if(placement.samplerIndex != kInvalidMetalBinding || nestedSampler)
       {
         const MetalSamplerRecord* sampler = resources().tryGetSampler(value->sampler);
         if(sampler == nullptr || sampler->nativeSampler == nullptr)
           throw std::runtime_error("Metal argument table references a stale sampler");
-        snapshot->setSamplerState(sampler->nativeSampler->gpuResourceID(),
-                                  placement.samplerIndex + element);
+        if(nestedSampler)
+        {
+          nestedEncoder->setSamplerState(
+            sampler->nativeSampler,
+            placement.nestedArgumentIndex + element);
+        }
+        else
+        {
+          snapshot->setSamplerState(sampler->nativeSampler->gpuResourceID(),
+                                    placement.samplerIndex + element);
+        }
         retainNative(asObject(sampler->nativeSampler));
       }
     }
@@ -2063,6 +2530,19 @@ void MetalCommandBuffer::reencodeForSubmit()
   catch(...)
   {
     m_replaying = false;
+    if(m_state == CommandBufferState::recording)
+    {
+      m_renderEncoder.invalidate();
+      m_computeEncoder.invalidate();
+      m_nativeRenderEncoder = nullptr;
+      m_nativeComputeEncoder = nullptr;
+      m_active = EncoderKind::none;
+      m_allocator->releaseRecording(*this);
+      MTL4::CommandBuffer* failed = m_commandBuffer;
+      m_commandBuffer = m_allocator->device()->newCommandBuffer();
+      failed->release();
+      m_state = CommandBufferState::reusable;
+    }
     throw;
   }
 
@@ -2074,28 +2554,75 @@ void MetalCommandBuffer::rebuildAutomaticResidencySet()
 {
   require(m_automaticResidencySet != nullptr,
           "Metal command buffer has no automatic residency set");
-  m_automaticResidencySet->removeAllAllocations();
-  m_allocator->addScratchAllocations(*m_automaticResidencySet);
+  std::vector<const MTL::Allocation*> next;
+  m_allocator->appendScratchAllocations(next);
 
   for(BufferHandle handle : m_buffers)
   {
     const MetalBufferRecord* buffer = m_resourceTable->tryGetBuffer(handle);
     if(buffer != nullptr && buffer->nativeBuffer != nullptr)
-      m_automaticResidencySet->addAllocation(buffer->nativeBuffer);
+      next.push_back(buffer->nativeBuffer);
   }
   for(TextureHandle handle : m_textures)
   {
     const MetalTextureRecord* texture = m_resourceTable->tryGetTexture(handle);
-    if(texture != nullptr && texture->nativeTexture != nullptr)
-      m_automaticResidencySet->addAllocation(texture->nativeTexture);
+    if(texture != nullptr && texture->nativeTexture != nullptr &&
+       texture->desc.memoryUsage != MemoryUsage::transientAttachment)
+    {
+      next.push_back(texture->nativeTexture);
+    }
   }
   for(TextureViewHandle handle : m_textureViews)
   {
     const MetalTextureViewRecord* view = m_resourceTable->tryGetTextureView(handle);
-    if(view != nullptr && view->nativeTextureView != nullptr)
-      m_automaticResidencySet->addAllocation(view->nativeTextureView);
+    const MetalTextureRecord* parent = view != nullptr
+      ? m_resourceTable->tryGetTexture(view->parentTexture)
+      : nullptr;
+    if(view != nullptr && view->nativeTextureView != nullptr &&
+       (parent == nullptr ||
+        parent->desc.memoryUsage != MemoryUsage::transientAttachment))
+    {
+      next.push_back(view->nativeTextureView);
+    }
   }
+  for(PipelineHandle handle : m_pipelines)
+  {
+    const MetalPipelineRecord* pipeline = m_resourceTable->tryGetPipeline(handle);
+    if(pipeline == nullptr)
+      continue;
+    if(pipeline->kind == MetalPipelineKind::graphics &&
+       pipeline->nativeRenderPipeline != nullptr)
+    {
+      next.push_back(pipeline->nativeRenderPipeline);
+    }
+    else if(pipeline->kind == MetalPipelineKind::compute &&
+            pipeline->nativeComputePipeline != nullptr)
+    {
+      next.push_back(pipeline->nativeComputePipeline);
+    }
+  }
+  next.insert(next.end(), m_nativeAllocations.begin(), m_nativeAllocations.end());
+
+  const std::less<const MTL::Allocation*> less;
+  std::sort(next.begin(), next.end(), less);
+  next.erase(std::unique(next.begin(), next.end()), next.end());
+
+  std::vector<const MTL::Allocation*> removals;
+  std::vector<const MTL::Allocation*> additions;
+  std::set_difference(
+    m_automaticResidencyAllocations.begin(), m_automaticResidencyAllocations.end(),
+    next.begin(), next.end(), std::back_inserter(removals), less);
+  std::set_difference(
+    next.begin(), next.end(), m_automaticResidencyAllocations.begin(),
+    m_automaticResidencyAllocations.end(), std::back_inserter(additions), less);
+  if(removals.empty() && additions.empty())
+    return;
+  if(!removals.empty())
+    m_automaticResidencySet->removeAllocations(removals.data(), removals.size());
+  if(!additions.empty())
+    m_automaticResidencySet->addAllocations(additions.data(), additions.size());
   m_automaticResidencySet->commit();
+  m_automaticResidencyAllocations = std::move(next);
 }
 
 void MetalCommandBuffer::retainNative(NS::Object* object)
@@ -2157,6 +2684,17 @@ void MetalCommandBuffer::trackResidencySet(ResidencySetHandle value)
   trackUnique(m_residencySets, value);
 }
 
+void MetalCommandBuffer::trackNativeAllocation(
+  const MTL::Allocation* allocation)
+{
+  if(allocation != nullptr &&
+     std::find(m_nativeAllocations.begin(), m_nativeAllocations.end(), allocation) ==
+       m_nativeAllocations.end())
+  {
+    m_nativeAllocations.push_back(allocation);
+  }
+}
+
 void MetalCommandBuffer::clearTracking()
 {
   m_argumentTables.clear();
@@ -2167,7 +2705,79 @@ void MetalCommandBuffer::clearTracking()
   m_samplers.clear();
   m_queryPools.clear();
   m_residencySets.clear();
+  m_nativeAllocations.clear();
   m_argumentTableSnapshots.clear();
+  m_preparedIndexedIndirect.clear();
+}
+
+MetalPreparedIndexedIndirect*
+MetalCommandBuffer::consumePreparedIndexedIndirect(
+  const DrawIndirectDesc& draw, BufferHandle indexBuffer,
+  uint64_t indexBufferOffset, IndexFormat indexFormat,
+  PrimitiveTopology topology)
+{
+  MetalPreparedIndexedIndirect* prepared = findValue(
+    m_preparedIndexedIndirect,
+    [&](const MetalPreparedIndexedIndirect& candidate) {
+      return !candidate.consumed &&
+             candidate.draw.argsBuffer == draw.argsBuffer &&
+             candidate.draw.argsOffset == draw.offset &&
+             !candidate.draw.countBuffer.isValid() &&
+             candidate.draw.maxDrawCount == draw.drawCount &&
+             candidate.draw.stride == draw.stride &&
+             candidate.indexBuffer == indexBuffer &&
+             candidate.indexBufferOffset == indexBufferOffset &&
+             candidate.indexFormat == indexFormat &&
+             candidate.topology == topology;
+    });
+  if(prepared == nullptr)
+    return nullptr;
+  if(prepared->commandBuffer == nullptr ||
+     prepared->executionRangeBuffer == nullptr ||
+     prepared->clampedArgumentsBuffer == nullptr ||
+     prepared->argumentStride == 0)
+  {
+    throw std::runtime_error(
+      "Metal indexed-indirect preparation is incomplete");
+  }
+  prepared->consumed = true;
+  return prepared;
+}
+
+MetalPreparedIndexedIndirect&
+MetalCommandBuffer::consumePreparedIndexedIndirectCount(
+  const DrawIndirectCountDesc& draw, BufferHandle indexBuffer,
+  uint64_t indexBufferOffset, IndexFormat indexFormat,
+  PrimitiveTopology topology)
+{
+  const auto matches = [&](const MetalPreparedIndexedIndirect& prepared) {
+    return !prepared.consumed &&
+           prepared.draw.argsBuffer == draw.argsBuffer &&
+           prepared.draw.argsOffset == draw.argsOffset &&
+           prepared.draw.countBuffer == draw.countBuffer &&
+           prepared.draw.countBufferOffset == draw.countBufferOffset &&
+           prepared.draw.maxDrawCount == draw.maxDrawCount &&
+           prepared.draw.stride == draw.stride &&
+           prepared.indexBuffer == indexBuffer &&
+           prepared.indexBufferOffset == indexBufferOffset &&
+           prepared.indexFormat == indexFormat &&
+           prepared.topology == topology;
+  };
+  const auto found = std::find_if(
+    m_preparedIndexedIndirect.begin(), m_preparedIndexedIndirect.end(), matches);
+  if(found == m_preparedIndexedIndirect.end())
+  {
+    throw std::runtime_error(
+      "Metal indexed-indirect-count draw has no matching pre-render ICB preparation");
+  }
+  if(found->commandBuffer == nullptr || found->executionRangeBuffer == nullptr ||
+     found->clampedArgumentsBuffer == nullptr || found->argumentStride == 0)
+  {
+    throw std::runtime_error(
+      "Metal indexed-indirect-count preparation is incomplete");
+  }
+  found->consumed = true;
+  return *found;
 }
 
 void MetalCommandBuffer::validateForSubmit(const MetalQueue& queue)
@@ -2271,8 +2881,45 @@ void MetalCommandBuffer::markSubmitted(SubmissionToken token)
     recordUse(m_resourceTable->tryGetSampler(handle)->pendingUses);
   for(QueryPoolHandle handle : m_queryPools)
     recordUse(m_resourceTable->tryGetQueryPool(handle)->pendingUses);
+  const auto recordResidencyResourceUse =
+    [this, &recordUse](ResidencyResource resource) {
+      switch(resource.kind)
+      {
+      case ResidencyResourceKind::buffer:
+        recordUse(m_resourceTable->tryGetBuffer(
+          BufferHandle{resource.index, resource.generation})->pendingUses);
+        break;
+      case ResidencyResourceKind::texture:
+        recordUse(m_resourceTable->tryGetTexture(
+          TextureHandle{resource.index, resource.generation})->pendingUses);
+        break;
+      case ResidencyResourceKind::textureView:
+      {
+        MetalTextureViewRecord* view = m_resourceTable->tryGetTextureView(
+          TextureViewHandle{resource.index, resource.generation});
+        recordUse(view->pendingUses);
+        if(view->parentTexture.isValid())
+          recordUse(m_resourceTable->tryGetTexture(view->parentTexture)->pendingUses);
+        break;
+      }
+      case ResidencyResourceKind::pipeline:
+        recordUse(m_resourceTable->tryGetPipeline(
+          PipelineHandle{resource.index, resource.generation})->pendingUses);
+        break;
+      case ResidencyResourceKind::sampler:
+      case ResidencyResourceKind::shaderLibrary:
+      case ResidencyResourceKind::argumentTable:
+        throw std::runtime_error(
+          "Metal residency set contains a non-allocation resource");
+      }
+    };
   for(ResidencySetHandle handle : m_residencySets)
-    recordUse(m_resourceTable->tryGetResidencySet(handle)->pendingUses);
+  {
+    MetalResidencySetRecord* set = m_resourceTable->tryGetResidencySet(handle);
+    for(ResidencyResource resource : set->resources)
+      recordResidencyResourceUse(resource);
+    recordUse(set->pendingUses);
+  }
   m_submission = token;
   m_state = CommandBufferState::submitted;
   m_allocator->noteSubmitted(*this, token);

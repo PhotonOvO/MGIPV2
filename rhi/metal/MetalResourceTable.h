@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace MTL {
+class ArgumentEncoder;
 class Buffer;
 class ComputePipelineState;
 class DepthStencilState;
@@ -78,6 +79,7 @@ struct MetalQueryPoolRecord
 struct MetalShaderLibraryRecord
 {
   MTL::Library* nativeLibrary{nullptr};
+  MTL::Library* icbLibrary{nullptr};
   ShaderIRFormat format{ShaderIRFormat::unknown};
   std::string debugName;
   SubmissionTokenSet pendingUses{};
@@ -125,6 +127,7 @@ struct MetalArgumentPlacement
   uint32_t bufferIndex{kInvalidMetalBinding};
   uint32_t textureIndex{kInvalidMetalBinding};
   uint32_t samplerIndex{kInvalidMetalBinding};
+  uint32_t nestedArgumentIndex{kInvalidMetalBinding};
 };
 
 struct MetalRootPlacement
@@ -153,6 +156,7 @@ struct MetalPipelineBindingLayout
   uint32_t bufferCount{0};
   uint32_t textureCount{0};
   uint32_t samplerCount{0};
+  uint32_t nestedArgumentBufferIndex{kInvalidMetalBinding};
   ShaderStage stages{ShaderStage::none};
 
   [[nodiscard]] const MetalArgumentPlacement* findArgument(
@@ -174,10 +178,12 @@ struct MetalPipelineRecord
   MTL::RenderPipelineState* nativeRenderPipeline{nullptr};
   MTL::ComputePipelineState* nativeComputePipeline{nullptr};
   MTL::DepthStencilState* nativeDepthStencilState{nullptr};
+  MTL::ArgumentEncoder* nestedArgumentEncoder{nullptr};
   MetalPipelineBindingLayout bindingLayout{};
   RasterState rasterState{};
   DepthState depthState{};
   uint32_t specializationVariant{0};
+  bool supportsGpuGeneratedCommands{false};
   uint32_t computeThreadExecutionWidth{1};
   uint32_t computeMaxThreadsPerThreadgroup{1};
   Extent3D computeThreadsPerThreadgroup{1, 1, 1};
