@@ -293,7 +293,8 @@ void MetalEncoderBindingState::reset()
 }
 
 void MetalRenderEncoder::prepare(
-  MTL4::RenderCommandEncoder* encoder, MetalCommandBuffer& owner)
+  MTL4::RenderCommandEncoder* encoder, MetalCommandBuffer& owner,
+  const Rect2D& defaultScissor)
 {
   require(encoder != nullptr, "Metal render pass failed to create an MTL4 encoder");
   m_encoder = encoder;
@@ -302,6 +303,7 @@ void MetalRenderEncoder::prepare(
   m_indexBuffer = {};
   m_indexOffset = 0;
   m_indexFormat = IndexFormat::uint32;
+  m_scissor = defaultScissor;
   m_valid = true;
 }
 
@@ -502,10 +504,18 @@ void MetalRenderEncoder::setScissor(const Rect2D& scissor)
   requireActive();
   if(scissor.offset.x < 0 || scissor.offset.y < 0)
     throw std::invalid_argument("Metal scissor offsets must be non-negative");
+  if(scissor.offset.x == m_scissor.offset.x &&
+     scissor.offset.y == m_scissor.offset.y &&
+     scissor.extent.width == m_scissor.extent.width &&
+     scissor.extent.height == m_scissor.extent.height)
+  {
+    return;
+  }
   m_encoder->setScissorRect(MTL::ScissorRect{
     static_cast<NS::UInteger>(scissor.offset.x),
     static_cast<NS::UInteger>(scissor.offset.y),
     scissor.extent.width, scissor.extent.height});
+  m_scissor = scissor;
   m_owner->recordCommand([scissor](MetalCommandBuffer& owner) {
     owner.m_renderEncoder.setScissor(scissor);
   });
@@ -1550,7 +1560,7 @@ RenderEncoder* MetalCommandBuffer::beginRenderPass(const RenderPassDesc& desc)
   if(m_nativeRenderEncoder == nullptr)
     throw std::runtime_error("Metal failed to create MTL4::RenderCommandEncoder");
   applyPendingBarrier(*m_nativeRenderEncoder);
-  m_renderEncoder.prepare(m_nativeRenderEncoder, *this);
+  m_renderEncoder.prepare(m_nativeRenderEncoder, *this, desc.renderArea);
   m_active = EncoderKind::render;
   const Rect2D replayArea = desc.renderArea;
   std::vector<RenderTargetDesc> replayColors(desc.colorTargets.begin(),

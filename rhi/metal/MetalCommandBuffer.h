@@ -111,7 +111,8 @@ class MetalCommandBuffer;
 class MetalRenderEncoder final : public RenderEncoder
 {
 public:
-  void prepare(MTL4::RenderCommandEncoder* encoder, MetalCommandBuffer& owner);
+  void prepare(MTL4::RenderCommandEncoder* encoder, MetalCommandBuffer& owner,
+               const Rect2D& defaultScissor);
   void invalidate() noexcept;
 
   void setPipeline(PipelineHandle pipeline) override;
@@ -147,6 +148,7 @@ private:
   BufferHandle m_indexBuffer{};
   uint64_t m_indexOffset{0};
   IndexFormat m_indexFormat{IndexFormat::uint32};
+  Rect2D m_scissor{};
   bool m_valid{false};
 };
 
