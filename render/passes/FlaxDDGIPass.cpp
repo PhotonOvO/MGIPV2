@@ -1285,22 +1285,22 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   readDebugTelemetry(frameIndex, totalProbes);
 
   const uint32_t argsScratchOffset = indirectArgsScratchUintOffset(cascadeCount);
-  rhi::ComputeEncoder* clear = cmd.beginComputePass();
+  rhi::ComputeEncoder* setupEncoder = cmd.beginComputePass();
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
-    clear->fillBuffer(m_flaxResources->getActiveProbes(cascadeIndex),
-                      0, 4u * sizeof(uint32_t), 0u);
+    setupEncoder->fillBuffer(m_flaxResources->getActiveProbes(cascadeIndex),
+                             0, 4u * sizeof(uint32_t), 0u);
   }
-  clear->fillBuffer(m_flaxResources->getUpdateProbesInitArgs(),
-                    static_cast<uint64_t>(argsScratchOffset) * sizeof(uint32_t),
-                    sizeof(uint32_t), 0u);
-  cmd.endEncoding();
+  setupEncoder->fillBuffer(m_flaxResources->getUpdateProbesInitArgs(),
+                           static_cast<uint64_t>(argsScratchOffset) * sizeof(uint32_t),
+                           sizeof(uint32_t), 0u);
   cmd.barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
               rhi::HazardFlags::bufferWrites
                 | rhi::HazardFlags::storageBufferReadWrite);
 
   if (m_ddgiUniformBuffers[frameIndex].isNull())
   {
+    cmd.endEncoding();
     markDebugStage(FlaxGIDebugStage::cascadeLayout, FlaxGIDebugStageState::invalid,
                    sourceFrame, "Per-frame FlaxDDGIData buffer is unavailable");
     cmd.endEvent();
@@ -1309,6 +1309,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   const FlaxGISpatialSnapshot currentSpatial = captureSpatialSnapshot();
   if(!currentSpatial.valid)
   {
+    cmd.endEncoding();
     markDebugStage(FlaxGIDebugStage::cascadeLayout, FlaxGIDebugStageState::invalid,
                    sourceFrame, "FlaxGI spatial snapshot is incomplete");
     cmd.endEvent();
@@ -1380,6 +1381,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
 
   if (!shouldExecuteFlaxGIStage(FlaxGIDebugStage::classify, stopAfterStage))
   {
+    cmd.endEncoding();
     m_consumedRunToStageRequestId = debugOptions.flaxGIRunToStageRequestId;
     finishPass(false, false);
     return;
@@ -1389,9 +1391,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     m_flaxResources->getProbesData(),
   };
   cmd.beginEvent("DDGI.Classify");
-  rhi::ComputeEncoder* setupEncoder = nullptr;
   {
-    setupEncoder = cmd.beginComputePass();
     setupEncoder->setPipeline(m_classifyPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
