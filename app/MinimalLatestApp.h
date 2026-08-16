@@ -1118,18 +1118,15 @@ public:
                 + " frame=" + std::to_string(m_automationFrame);
           }
         }
+        frameParams.renderUi       = !m_automationOptions.noUi;
         frameParams.recordUi       = [hideUi = m_automationOptions.noUi]() {
           demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
-          ImGui::Render();
           if(hideUi)
           {
-            if(ImDrawData* drawData = ImGui::GetDrawData())
-            {
-              drawData->CmdListsCount = 0;
-              drawData->TotalIdxCount = 0;
-              drawData->TotalVtxCount = 0;
-            }
+            ImGui::EndFrame();
+            return;
           }
+          ImGui::Render();
         };
       }
       }

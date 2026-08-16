@@ -90,11 +90,14 @@ namespace demo
 		});
 		context.commandBuffer->endEncoding();
 
-		// Special resource boundary: restore blit source/destination to General before
-		// the subsequent ImGui/present path uses the swapchain.
+		// Leave the swapchain in General only when ImGui will consume it. Headless
+		// automation can transition directly to Present in this existing barrier.
+		const rhi::ResourceState swapchainAfterBlit = context.params->renderUi
+			? rhi::ResourceState::General
+			: rhi::ResourceState::Present;
 		const rhi::TextureBarrier fromBlit[] = {
 			{
-				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = rhi::ResourceState::General,
+				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = swapchainAfterBlit,
 				.range = colorRange
 			},
 			{

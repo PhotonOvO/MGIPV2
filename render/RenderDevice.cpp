@@ -1456,6 +1456,15 @@ namespace demo
 	// Pass execution wrappers (used by PassNode implementations)
 	void RenderDevice::executeImGuiPass(rhi::CommandBuffer& cmdBuffer, const RenderParams& params)
 	{
+		if (!params.renderUi)
+		{
+			if (params.recordUi)
+			{
+				params.recordUi();
+			}
+			return;
+		}
+
 		if (params.debugOptions.showViewportAxis && params.cameraUniforms != nullptr)
 		{
 			ui::DrawAxisInRect(params.viewportImageRect, params.cameraUniforms->view);

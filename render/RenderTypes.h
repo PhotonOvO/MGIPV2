@@ -322,6 +322,7 @@ namespace demo
 		MaterialHandle materialHandle{};
 		rhi::ClearColorValue clearColor{0.2F, 0.2F, 0.3F, 1.0F};
 		std::function<void()> recordUi;
+		bool renderUi{true};
 		glm::vec4 viewportImageRect{0.0f}; // x, y, width, height in ImGui screen space
 		// glTF model data for rendering
 		const SceneUploadResult* gltfModel{nullptr};
