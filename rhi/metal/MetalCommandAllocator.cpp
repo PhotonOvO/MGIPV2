@@ -11,6 +11,7 @@
 #include <Metal/MTLArgumentEncoder.hpp>
 #include <Metal/MTLBuffer.hpp>
 #include <Metal/MTLDevice.hpp>
+#include <Metal/MTLIndirectCommandBuffer.hpp>
 #include <Metal/MTLLibrary.hpp>
 #include <Metal/MTLResidencySet.hpp>
 
@@ -79,6 +80,7 @@ MetalCommandAllocator::~MetalCommandAllocator()
     }
   }
   releaseSnapshots();
+  releaseIndexedIndirectCommandBuffers();
   for(ScratchBuffer& scratch : m_scratchBuffers)
     scratch.buffer->release();
   m_scratchBuffers.clear();
@@ -119,6 +121,7 @@ void MetalCommandAllocator::reset(SubmissionToken completedToken)
 
   m_allocator->reset();
   recycleSnapshots();
+  recycleIndexedIndirectCommandBuffers();
   for(ScratchBuffer& scratch : m_scratchBuffers)
     scratch.offset = 0;
   for(MetalCommandBuffer* commandBuffer : m_commandBuffers)
@@ -178,6 +181,58 @@ MTL4::ArgumentTable* MetalCommandAllocator::allocateArgumentTable(
   });
   incrementHotPathCounter(BackendType::metal, HotPathCounter::tableVersionAllocations);
   return table;
+}
+
+MTL::IndirectCommandBuffer*
+MetalCommandAllocator::acquireIndexedIndirectCommandBuffer(
+  uint32_t maxCommandCount)
+{
+  require(maxCommandCount != 0,
+          "Metal indexed-indirect command buffer capacity must not be zero");
+  IndexedIndirectCommandBuffer* reusable = nullptr;
+  for(IndexedIndirectCommandBuffer& entry : m_indexedIndirectCommandBuffers)
+  {
+    if(!entry.inUse && entry.capacity >= maxCommandCount &&
+       (reusable == nullptr || entry.capacity < reusable->capacity))
+    {
+      reusable = &entry;
+    }
+  }
+  if(reusable != nullptr)
+  {
+    reusable->inUse = true;
+    return reusable->commandBuffer;
+  }
+
+  auto descriptor = NS::TransferPtr(
+    MTL::IndirectCommandBufferDescriptor::alloc()->init());
+  descriptor->setCommandTypes(MTL::IndirectCommandTypeDrawIndexed);
+  descriptor->setInheritPipelineState(true);
+  descriptor->setInheritBuffers(true);
+  descriptor->setInheritCullMode(true);
+  descriptor->setInheritDepthBias(true);
+  descriptor->setInheritDepthClipMode(true);
+  descriptor->setInheritDepthStencilState(true);
+  descriptor->setInheritFrontFacingWinding(true);
+  descriptor->setInheritTriangleFillMode(true);
+
+  auto commandBuffer = NS::TransferPtr(m_device->newIndirectCommandBuffer(
+    descriptor.get(), maxCommandCount,
+    static_cast<MTL::ResourceOptions>(
+      MTL::ResourceStorageModePrivate |
+      MTL::ResourceHazardTrackingModeUntracked)));
+  if(!commandBuffer)
+    throw std::runtime_error("Metal failed to create an indexed indirect command buffer");
+  commandBuffer->setLabel(nsString("Metal4 Slang indexed-indirect command buffer"));
+  m_indexedIndirectCommandBuffers.push_back(IndexedIndirectCommandBuffer{
+    .commandBuffer = commandBuffer.get(),
+    .capacity = maxCommandCount,
+    .inUse = true,
+  });
+  commandBuffer.detach();
+  incrementHotPathCounter(
+    BackendType::metal, HotPathCounter::commandRecordingNativeObjectCreations);
+  return m_indexedIndirectCommandBuffers.back().commandBuffer;
 }
 
 MetalRootDataAllocation MetalCommandAllocator::allocateRootData(
@@ -292,6 +347,22 @@ void MetalCommandAllocator::recycleSnapshots() noexcept
 {
   for(ArgumentTableSnapshot& snapshot : m_argumentTableSnapshots)
     snapshot.inUse = false;
+}
+
+void MetalCommandAllocator::releaseIndexedIndirectCommandBuffers() noexcept
+{
+  for(const IndexedIndirectCommandBuffer& entry :
+      m_indexedIndirectCommandBuffers)
+  {
+    entry.commandBuffer->release();
+  }
+  m_indexedIndirectCommandBuffers.clear();
+}
+
+void MetalCommandAllocator::recycleIndexedIndirectCommandBuffers() noexcept
+{
+  for(IndexedIndirectCommandBuffer& entry : m_indexedIndirectCommandBuffers)
+    entry.inUse = false;
 }
 
 }  // namespace demo::rhi::metal

@@ -1774,26 +1774,8 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
       "Metal indexed-indirect fallback allocation is too large");
   }
 
-  auto descriptor = NS::TransferPtr(
-    MTL::IndirectCommandBufferDescriptor::alloc()->init());
-  descriptor->setCommandTypes(MTL::IndirectCommandTypeDrawIndexed);
-  descriptor->setInheritPipelineState(true);
-  descriptor->setInheritBuffers(true);
-  descriptor->setInheritCullMode(true);
-  descriptor->setInheritDepthBias(true);
-  descriptor->setInheritDepthClipMode(true);
-  descriptor->setInheritDepthStencilState(true);
-  descriptor->setInheritFrontFacingWinding(true);
-  descriptor->setInheritTriangleFillMode(true);
-
-  auto commandBuffer = NS::TransferPtr(allocator().device()->newIndirectCommandBuffer(
-    descriptor.get(), desc.draw.maxDrawCount,
-    static_cast<MTL::ResourceOptions>(
-      MTL::ResourceStorageModePrivate |
-      MTL::ResourceHazardTrackingModeUntracked)));
-  if(!commandBuffer)
-    throw std::runtime_error("Metal failed to create an indexed indirect command buffer");
-  commandBuffer->setLabel(nsString("Metal4 Slang indexed-indirect command buffer"));
+  MTL::IndirectCommandBuffer* commandBuffer =
+    allocator().acquireIndexedIndirectCommandBuffer(desc.draw.maxDrawCount);
 
   MTL::ArgumentEncoder* argumentEncoder =
     allocator().indexedIndirectArgumentEncoder();
@@ -1811,7 +1793,7 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
     argumentBytesStorage, static_cast<uint32_t>(encodedAlignment));
   argumentEncoder->setArgumentBuffer(
     commandArguments.buffer, commandArguments.offset);
-  argumentEncoder->setIndirectCommandBuffer(commandBuffer.get(), 0);
+  argumentEncoder->setIndirectCommandBuffer(commandBuffer, 0);
 
   const MTL::IndirectCommandBufferExecutionRange initialExecutionRange{0u, 0u};
   const MetalRootDataAllocation executionRange = allocator().allocateRootData(
@@ -1866,7 +1848,7 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
     throw std::runtime_error("Metal failed to create the indexed-indirect builder encoder");
   applyPendingBarrier(*encoder);
   encoder->resetCommandsInBuffer(
-    commandBuffer.get(), NS::Range::Make(0, desc.draw.maxDrawCount));
+    commandBuffer, NS::Range::Make(0, desc.draw.maxDrawCount));
   encoder->barrierAfterEncoderStages(
     MTL::StageBlit, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
   encoder->setComputePipelineState(pipeline);
@@ -1886,8 +1868,8 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
   if(usesCountBuffer)
     retainNative(asObject(count->nativeBuffer));
   retainNative(asObject(index->nativeBuffer));
-  retainNative(asObject(commandBuffer.get()));
-  trackNativeAllocation(commandBuffer.get());
+  retainNative(asObject(commandBuffer));
+  trackNativeAllocation(commandBuffer);
   trackNativeAllocation(pipeline);
   m_preparedIndexedIndirect.push_back(MetalPreparedIndexedIndirect{
     .draw = desc.draw,
@@ -1895,7 +1877,7 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
     .indexBufferOffset = desc.indexBufferOffset,
     .indexFormat = desc.indexFormat,
     .topology = desc.topology,
-    .commandBuffer = commandBuffer.get(),
+    .commandBuffer = commandBuffer,
     .executionRangeBuffer = executionRange.buffer,
     .executionRangeOffset = executionRange.offset,
     .clampedArgumentsBuffer = clampedArguments.buffer,

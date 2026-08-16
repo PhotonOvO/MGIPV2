@@ -16,6 +16,7 @@ class Buffer;
 class ComputePipelineState;
 class Device;
 class Function;
+class IndirectCommandBuffer;
 class ResidencySet;
 }
 
@@ -55,6 +56,8 @@ public:
   [[nodiscard]] MTL4::ArgumentTable* allocateArgumentTable(
     uint32_t bufferCount, uint32_t textureCount, uint32_t samplerCount,
     const char* label = nullptr);
+  [[nodiscard]] MTL::IndirectCommandBuffer* acquireIndexedIndirectCommandBuffer(
+    uint32_t maxCommandCount);
   [[nodiscard]] MetalRootDataAllocation allocateRootData(
     std::span<const std::byte> data, uint32_t alignment);
   [[nodiscard]] MetalRootDataAllocation allocateArgumentData(
@@ -104,11 +107,20 @@ private:
     uint64_t offset{0};
   };
 
+  struct IndexedIndirectCommandBuffer
+  {
+    MTL::IndirectCommandBuffer* commandBuffer{nullptr};
+    uint32_t capacity{0};
+    bool inUse{false};
+  };
+
   [[nodiscard]] ScratchBuffer& acquireScratch(uint64_t size, uint32_t alignment);
   [[nodiscard]] MetalRootDataAllocation allocateScratchData(
     uint64_t size, uint32_t alignment);
   void recycleSnapshots() noexcept;
   void releaseSnapshots() noexcept;
+  void recycleIndexedIndirectCommandBuffers() noexcept;
+  void releaseIndexedIndirectCommandBuffers() noexcept;
 
   MetalQueue& m_queue;
   MTL::Device* m_device{nullptr};
@@ -120,6 +132,7 @@ private:
   MetalResourceTable* m_resourceTable{nullptr};
   std::vector<MetalCommandBuffer*> m_commandBuffers;
   std::vector<ArgumentTableSnapshot> m_argumentTableSnapshots;
+  std::vector<IndexedIndirectCommandBuffer> m_indexedIndirectCommandBuffers;
   std::vector<ScratchBuffer> m_scratchBuffers;
   SubmissionToken m_lastSubmission{};
   std::mutex m_recordingMutex;
