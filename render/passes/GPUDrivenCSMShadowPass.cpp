@@ -7,7 +7,6 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
-#include <cstring>
 
 namespace demo
 {
@@ -252,18 +251,10 @@ namespace demo
 			enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
 
 			shaderio::CameraUniforms cascadeCamera{};
+			// The shadow shaders consume only the cascade transform and caster-bias fields.
+			// Leave the remaining camera fields value-initialized instead of deriving
+			// unused inverse and temporal matrices for every cascade.
 			cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
-			cascadeCamera.projection = cascadeCamera.viewProjection;
-			cascadeCamera.view = glm::mat4(1.0f);
-			cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
-			cascadeCamera.prevView = cascadeCamera.view;
-			cascadeCamera.prevProjection = cascadeCamera.projection;
-			cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
-			cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.cameraPosition = glm::vec3(0.0f);
 			const float casterNormalBias = csmFrameData.normalBiasWorld;
 			const glm::vec3 dirToLight = -csmFrameData.lightDirection;
 			cascadeCamera.shadowConstantBias = 0.0f; // Receiver depth bias is applied once in LightPass.
