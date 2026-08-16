@@ -9,7 +9,7 @@
 // Sub-passes:
 //   Classify      — probe classification and relocation (FGI-050)
 //   InitArgs      — indirect dispatch argument builder (FGI-051)
-//   UpdateInactive — jump-flood inactive probe fallback (FGI-052)
+//   UpdateInactive — logical checkpoint; sanitation is folded into Classify
 //   TraceRays     — SDF ray trace into Flax ProbesTrace (FGI-053)
 //   UpdateDistance — octahedral distance moment update (FGI-054)
 //   UpdateIrradiance — octahedral irradiance convolution update (FGI-055)
@@ -83,7 +83,6 @@ private:
   // --- Argument layouts (one per shader) ---
   rhi::ArgumentLayoutHandle m_classifyLayout{};
   rhi::ArgumentLayoutHandle m_initArgsLayout{};
-  rhi::ArgumentLayoutHandle m_updateInactiveLayout{};
   rhi::ArgumentLayoutHandle m_traceRaysLayout{};
   rhi::ArgumentLayoutHandle m_distanceLayout{};
   rhi::ArgumentLayoutHandle m_debugViewsLayout{};
@@ -92,7 +91,6 @@ private:
   // --- Argument tables ---
   std::vector<rhi::ArgumentTableHandle> m_classifyTables;
   std::vector<rhi::ArgumentTableHandle> m_initArgsTables;
-  std::vector<rhi::ArgumentTableHandle> m_updateInactiveTables;
   std::vector<rhi::ArgumentTableHandle> m_traceRaysTables;
   std::vector<rhi::ArgumentTableHandle> m_distanceTables;
   std::vector<rhi::ArgumentTableHandle> m_debugViewsTables;
@@ -102,7 +100,6 @@ private:
   rhi::PipelineHandle m_classifyPipeline{};
   rhi::PipelineHandle m_initArgsPipeline{};
   rhi::PipelineHandle m_compactPipeline{};
-  rhi::PipelineHandle m_updateInactivePipeline{};
   rhi::PipelineHandle m_traceRaysPipeline{};
   rhi::PipelineHandle m_distancePipeline{};
   rhi::PipelineHandle m_debugViewsPipeline{};

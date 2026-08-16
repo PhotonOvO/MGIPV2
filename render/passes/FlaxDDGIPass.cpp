@@ -13,7 +13,6 @@
 #ifdef USE_SLANG
 #include "_autogen/ddgi_flax_classify.slang.h"
 #include "_autogen/ddgi_flax_init_args.slang.h"
-#include "_autogen/ddgi_flax_update_inactive.slang.h"
 #include "_autogen/ddgi_flax_trace_rays.slang.h"
 #include "_autogen/ddgi_flax_update_distance.slang.h"
 #include "_autogen/ddgi_flax_update_irradiance.slang.h"
@@ -294,15 +293,6 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
     m_initArgsLayout = device.createArgumentLayout({.bindings = bindings, .debugName = "FlaxDDGI.InitArgs"});
   }
 
-	// updateInactive: probesData(RW,u0) + activeProbes(RW,u1) + ddgiUBO(b0)
-	{
-		std::vector<rhi::ArgumentBinding> bindings;
-		bindings.push_back({0, rhi::ArgumentType::storageTexture, rhi::ShaderStage::compute, 1});
-		bindings.push_back({1, rhi::ArgumentType::storageBuffer, rhi::ShaderStage::compute, 1});
-		bindings.push_back({2, rhi::ArgumentType::storageBuffer, rhi::ShaderStage::compute, 1});
-		m_updateInactiveLayout = device.createArgumentLayout({.bindings = bindings, .debugName = "FlaxDDGI.UpdateInactive"});
-	}
-
   // traceRays: probesData(RO,t0) + activeProbes(RW,u0) + probesTrace(RW,u1)
   //            + globalSDF RO(t1) + sampler(s0)
   //            + atlasDepth(RO,t2) + atlasLighting(RO,t3) + chunks(RW,u2) + culledObjs(RW,u3) + objects(RW,u4)
@@ -482,7 +472,6 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
 
 	const uint32_t frameCascadeTableCount = m_frameCount * cascadeCount;
 	m_classifyTables.resize(frameCascadeTableCount);
-	m_updateInactiveTables.resize(m_frameCount);
 	m_traceRaysTables.resize(frameCascadeTableCount);
 	const uint32_t historyTableCount = frameCascadeTableCount * kHistoryParityCount;
 	m_distanceTables.resize(historyTableCount);
@@ -492,13 +481,6 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
 	for(uint32_t frameIndex = 0; frameIndex < m_frameCount; ++frameIndex)
 	{
 		const rhi::BufferHandle ddgiBuffer = m_ddgiUniformBuffers[frameIndex];
-
-
-		rhi::ArgumentTableHandle& updateInactiveTable = m_updateInactiveTables[frameIndex];
-		updateInactiveTable = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_updateInactiveLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
-		writeTextureRW(updateInactiveTable, 0, m_probesDataView);
-		writeBufferRW(updateInactiveTable, 1, m_flaxResources->getActiveProbes(0));
-		writeUniformBuffer(updateInactiveTable, 2, ddgiBuffer, ddgiUBOSize);
 
 		for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
 		{
@@ -633,7 +615,6 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
 	  m_classifyPipeline = createPipeline(ddgi_flax_classify_slang, std::size(ddgi_flax_classify_slang), "CS_Classify", m_classifyLayout, sizeof(FlaxDDGICascadePush), {32, 1, 1}, 0x1001u);
 	  m_compactPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_CompactActiveProbes", m_initArgsLayout, initArgsPushSize, {256, 1, 1}, 0x1002u);
 	  m_initArgsPipeline = createPipeline(ddgi_flax_init_args_slang, std::size(ddgi_flax_init_args_slang), "CS_UpdateProbesInitArgs", m_initArgsLayout, initArgsPushSize, {1, 1, 1}, 0x1008u);
-	  m_updateInactivePipeline = createPipeline(ddgi_flax_update_inactive_slang, std::size(ddgi_flax_update_inactive_slang), "CS_UpdateInactive", m_updateInactiveLayout, 0, {8, 8, 1}, 0x1003u);
 	  m_traceRaysPipeline = createPipeline(ddgi_flax_trace_rays_slang, std::size(ddgi_flax_trace_rays_slang), "CS_TraceRays", m_traceRaysLayout, sizeof(FlaxDDGICascadePush), {64, 1, 1}, 0x1004u);
 	  m_distancePipeline = createPipeline(ddgi_flax_update_distance_slang, std::size(ddgi_flax_update_distance_slang), "CS_UpdateDistance", m_distanceLayout, sizeof(FlaxDDGICascadePush), {8, 8, 1}, 0x1005u);
 	  m_irradiancePipeline = createPipeline(ddgi_flax_update_irradiance_slang, std::size(ddgi_flax_update_irradiance_slang), "CS_UpdateIrradiance", m_irradianceLayout, sizeof(FlaxDDGICascadePush), {8, 8, 1}, 0x1006u);
@@ -643,7 +624,7 @@ void FlaxDDGIPass::initResources(rhi::Device& device, uint32_t frameCount)
   m_pipelinesCreated = true;
   m_debugTextureId = m_renderer->registerDebugTexture(m_debugAtlasView);
 
-  LOGI("FlaxDDGIPass initialized: %u cascades, %u max probes, %u max batches, 8 pipelines + debug atlas",
+  LOGI("FlaxDDGIPass initialized: %u cascades, %u max probes, %u max batches, 7 pipelines + debug atlas",
        m_flaxResources->getCascadeCount(),
        m_flaxResources->getMaxProbesPerCascade(),
        m_flaxResources->getMaxBatchesPerCascade());
@@ -660,7 +641,6 @@ void FlaxDDGIPass::shutdownResources()
   {
     m_classifyTables.clear();
     m_initArgsTables.clear();
-    m_updateInactiveTables.clear();
     m_traceRaysTables.clear();
     m_distanceTables.clear();
     m_irradianceTables.clear();
@@ -687,7 +667,6 @@ void FlaxDDGIPass::shutdownResources()
   destroyPipeline(m_classifyPipeline);
   destroyPipeline(m_initArgsPipeline);
   destroyPipeline(m_compactPipeline);
-  destroyPipeline(m_updateInactivePipeline);
   destroyPipeline(m_traceRaysPipeline);
   destroyPipeline(m_distancePipeline);
   destroyPipeline(m_irradiancePipeline);
@@ -700,7 +679,6 @@ void FlaxDDGIPass::shutdownResources()
   };
   destroyTables(m_classifyTables);
   destroyTables(m_initArgsTables);
-  destroyTables(m_updateInactiveTables);
   destroyTables(m_traceRaysTables);
   destroyTables(m_distanceTables);
   destroyTables(m_irradianceTables);
@@ -708,7 +686,6 @@ void FlaxDDGIPass::shutdownResources()
 
   destroyLayout(m_classifyLayout);
   destroyLayout(m_initArgsLayout);
-  destroyLayout(m_updateInactiveLayout);
   destroyLayout(m_traceRaysLayout);
   destroyLayout(m_distanceLayout);
   destroyLayout(m_irradianceLayout);
@@ -1294,8 +1271,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   const uint32_t requiredFrameCascadeTables = m_frameCount * cascadeCount;
   const uint32_t lastHistoryTable =
     historyTableIndex(frameIndex, cascadeCount - 1u, updateParity);
-  if(frameIndex >= m_updateInactiveTables.size()
-     || cascadeCount > m_initArgsTables.size()
+  if(cascadeCount > m_initArgsTables.size()
      || requiredFrameCascadeTables > m_classifyTables.size()
      || requiredFrameCascadeTables > m_traceRaysTables.size()
      || lastHistoryTable >= m_distanceTables.size()
@@ -1305,7 +1281,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     cmd.endEvent();
     return;
   }
-  const rhi::ArgumentTableHandle updateInactiveTable = m_updateInactiveTables[frameIndex];
   const rhi::ArgumentTableHandle debugViewsTable = m_debugViewsTables[debugTableIndex];
   readDebugTelemetry(frameIndex, totalProbes);
 
@@ -1513,20 +1488,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   cmd.endEvent();
   if (stopAfter(FlaxGIDebugStage::initArgs, true)) return;
 
-  cmd.beginEvent("DDGI.UpdateInactive");
-  {
-    rhi::ComputeEncoder* enc = cmd.beginComputePass();
-    enc->setPipeline(m_updateInactivePipeline);
-    enc->setArgumentTable(0, updateInactiveTable);
-    const auto& dataExt = m_flaxResources->getDataExtent();
-    enc->dispatch({(dataExt.width + 7u) / 8u, (dataExt.height + 7u) / 8u, 1});
-    cmd.endEncoding();
-    const std::array<rhi::TextureHandle, 1> probesDataWrite{
-      m_flaxResources->getProbesData(),
-    };
-    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
-  }
-  cmd.endEvent();
+  // Classification now writes the canonical inactive payload directly. Keep
+  // this logical checkpoint so Run To Stage retains its stable stage ordering.
   if (stopAfter(FlaxGIDebugStage::updateInactive, true)) return;
 
   const bool updateDistanceRequested = shouldExecuteFlaxGIStage(

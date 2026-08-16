@@ -200,6 +200,7 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
                 max(probesSpacing * 0.5f, voxelSize * 0.1f);
             if (relocatedSDF < -deepInsideTolerance)
             {
+                probeOffset = float3(0,0,0);
                 state = kDDGIProbeStateInactive;
                 attention = 0.0f;
             }
