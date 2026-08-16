@@ -877,6 +877,8 @@ void MetalComputeEncoder::setPipeline(PipelineHandle pipelineHandle)
   {
     throw std::invalid_argument("MetalComputeEncoder::setPipeline received a stale or non-compute pipeline");
   }
+  if(m_bindings.pipeline == pipelineHandle)
+    return;
   m_bindings.pipeline = pipelineHandle;
   m_bindings.dirty = true;
   m_bindings.snapshot = nullptr;
