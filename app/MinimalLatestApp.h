@@ -1090,6 +1090,11 @@ public:
           frameParams.debugOptions.enableTAA = true;
           frameParams.debugOptions.upscalingMode = 1;
         }
+        if(m_automationOptions.noUi)
+        {
+          frameParams.debugOptions.flaxGIDebugTelemetryEnabled = false;
+          frameParams.debugOptions.flaxGIDebugOverlayEnabled = false;
+        }
         if(m_automationOptions.noDdgi)
         {
           frameParams.debugOptions.ddgiDebugVisualize = false;

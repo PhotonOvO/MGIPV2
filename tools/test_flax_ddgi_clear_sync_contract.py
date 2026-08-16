@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FLAX_PASS = (ROOT / "render/passes/FlaxDDGIPass.cpp").read_text(encoding="utf-8")
+APP_HEADER = (ROOT / "app/MinimalLatestApp.h").read_text(encoding="utf-8")
+RENDER_TYPES = (ROOT / "render/RenderTypes.h").read_text(encoding="utf-8")
 VULKAN_COMMAND_BUFFER = (
     ROOT / "rhi/vulkan/VulkanCommandBuffer.cpp"
 ).read_text(encoding="utf-8")
@@ -38,6 +40,28 @@ def barrier_calls(source: str) -> list[str]:
 
 
 class FlaxDDGIClearSyncContractTests(unittest.TestCase):
+    def test_no_ui_automation_skips_unconsumed_debug_gpu_work(self) -> None:
+        self.assertIn("bool flaxGIDebugTelemetryEnabled{true}", RENDER_TYPES)
+        self.assertRegex(
+            APP_HEADER,
+            r"if\(m_automationOptions\.noUi\)\s*\{\s*"
+            r"frameParams\.debugOptions\.flaxGIDebugTelemetryEnabled = false;\s*"
+            r"frameParams\.debugOptions\.flaxGIDebugOverlayEnabled = false;",
+        )
+        self.assertIn(
+            "debugOptions.flaxGIDebugTelemetryEnabled || runToStageRequested",
+            FLAX_PASS,
+        )
+        self.assertRegex(
+            FLAX_PASS,
+            r"if\(debugTelemetryRequested\)\s*"
+            r"readDebugTelemetry\(frameIndex, totalProbes\);",
+        )
+        self.assertIn(
+            "debugTelemetryRequested && recordReadback && !debugReadbackRecorded",
+            FLAX_PASS,
+        )
+
     def test_pass_local_write_dependency_is_an_image_barrier(self) -> None:
         helper = braced_source(FLAX_PASS, "recordTextureWriteDependency(")
 

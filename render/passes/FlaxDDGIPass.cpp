@@ -1090,6 +1090,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     ? context.params->debugOptions : defaultDebugOptions;
   const bool runToStageRequested = isNewFlaxGIDebugRequest(
     debugOptions.flaxGIRunToStageRequestId, m_consumedRunToStageRequestId);
+  const bool debugTelemetryRequested =
+    debugOptions.flaxGIDebugTelemetryEnabled || runToStageRequested;
   const FlaxGIDebugStage stopAfterStage = runToStageRequested
     ? debugOptions.flaxGIRunToStage
     : FlaxGIDebugStage::updateIrradiance;
@@ -1287,7 +1289,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     return;
   }
   const rhi::ArgumentTableHandle debugViewsTable = m_debugViewsTables[debugTableIndex];
-  readDebugTelemetry(frameIndex, totalProbes);
+  if(debugTelemetryRequested)
+    readDebugTelemetry(frameIndex, totalProbes);
 
   const uint32_t argsScratchOffset = indirectArgsScratchUintOffset(cascadeCount);
   rhi::ComputeEncoder* setupEncoder = cmd.beginComputePass();
@@ -1340,7 +1343,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   const auto finishPass = [&](bool recordReadback, bool advanceProbeWindow)
   {
     executeDebugViews(cmd, context, debugViewsTable);
-    if(recordReadback && !debugReadbackRecorded)
+    if(debugTelemetryRequested && recordReadback && !debugReadbackRecorded)
       debugReadbackRecorded = recordDebugReadback(cmd, frameIndex, sourceFrame);
     cmd.barrier(rhi::StageFlags::compute,
                 rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
@@ -1471,8 +1474,11 @@ void FlaxDDGIPass::execute(const PassContext& context) const
                       | rhi::HazardFlags::drawArguments);
       }
     }
-    debugReadbackRecorded = recordDebugReadback(
-      cmd, frameIndex, sourceFrame, setupEncoder);
+    if(debugTelemetryRequested)
+    {
+      debugReadbackRecorded = recordDebugReadback(
+        cmd, frameIndex, sourceFrame, setupEncoder);
+    }
     cmd.endEncoding();
     recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
     cmd.barrier(rhi::StageFlags::compute,

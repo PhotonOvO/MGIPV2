@@ -127,6 +127,7 @@ namespace demo
 		int flaxGIDebugMode{0}; // 0=Off, 1=Irradiance, 2=No visibility, 3=Diffuse, 4=Gate, 5=Direct atlas
 		float flaxGIDebugScale{1.0f};
 		int flaxGIRayDebugMode{0}; // 0=Normal, 1=Hit albedo, 2=Branch colors
+		bool flaxGIDebugTelemetryEnabled{true};
 		bool flaxGIDebugOverlayEnabled{true};
 		uint32_t flaxGIDebugViewMask{0xffu};
 		float flaxGIDebugSDFSlice{0.5f};
