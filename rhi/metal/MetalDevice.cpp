@@ -99,6 +99,16 @@ bool usesBuffer(ArgumentType type)
          type == ArgumentType::storageBuffer;
 }
 
+bool argumentValueMatchesWrite(
+  const MetalArgumentValue& value, const ArgumentWrite& write)
+{
+  return value.written && value.binding == write.binding &&
+         value.arrayElement == write.arrayElement && value.type == write.type &&
+         value.buffer == write.buffer && value.textureView == write.textureView &&
+         value.sampler == write.sampler && value.offset == write.offset &&
+         value.size == write.size && value.accessIntent == write.accessIntent;
+}
+
 bool isDepthFormat(TextureFormat format)
 {
   return format == TextureFormat::d16Unorm ||
@@ -979,6 +989,7 @@ void MetalDevice::updateArgumentTable(
   if(layout == nullptr)
     throw std::runtime_error("Metal argument table references a stale layout");
 
+  uint64_t changedWriteCount = 0;
   for(const ArgumentWrite& write : writes)
   {
     const ArgumentBinding* binding = findBinding(*layout, write.binding);
@@ -1016,6 +1027,8 @@ void MetalDevice::updateArgumentTable(
       });
     if(found == table->values.end())
       throw std::runtime_error("Metal argument table storage is inconsistent");
+    if(argumentValueMatchesWrite(*found, write))
+      continue;
     *found = MetalArgumentValue{
       .binding = write.binding,
       .arrayElement = write.arrayElement,
@@ -1028,10 +1041,13 @@ void MetalDevice::updateArgumentTable(
       .accessIntent = write.accessIntent,
       .written = true,
     };
+    ++changedWriteCount;
   }
+  if(changedWriteCount == 0)
+    return;
   ++table->version;
   incrementHotPathCounter(BackendType::metal, HotPathCounter::descriptorUpdates,
-                          writes.size());
+                          changedWriteCount);
 }
 
 ArgumentLayoutHandle MetalDevice::getArgumentTableLayout(
