@@ -108,25 +108,6 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     float voxelLimit = voxelSize * 0.8f;
     float distanceLimit = probesSpacing * 2.3f;
 
-    // SDF curvature separates planar/empty regions from corners and thin
-    // geometry without changing the fixed probe-grid/atlas topology.
-    float sdfTexel = 1.0f / max(sdfRes, 1.0f);
-    float sdfXP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float sdfXN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float sdfYP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float sdfYN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float sdfZP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float sdfZN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
-    float curvatureMagnitude =
-        abs(sdfXP + sdfXN - 2.0f * sdf)
-      + abs(sdfYP + sdfYN - 2.0f * sdf)
-      + abs(sdfZP + sdfZN - 2.0f * sdf);
-    float curvatureThreshold = max(voxelSize * 0.5f, probesSpacing * 0.05f);
-    float proximityComplexity = saturate(
-        1.0f - sdfDist / max(probesSpacing * 1.25f, voxelSize * 2.0f));
-    float curvatureComplexity = saturate(curvatureMagnitude / curvatureThreshold);
-    bool highGeometryComplexity =
-        max(proximityComplexity, curvatureComplexity) > 0.2f;
 	// Empty area fallback: only for probes within cascade range of the SDF volume.
 	// Tight threshold avoids marking far probes active that can never trace into SDF.
 	float emptyAreaThreshold = probesSpacing * ddgi.probesCounts.x * 0.08f;
@@ -147,6 +128,27 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         // Active probe
         state = newlyActivated ? kDDGIProbeStateActivated : kDDGIProbeStateActive;
+
+        // Only probes near geometry need the SDF neighborhood. Empty fallback
+        // and far-inactive probes are decided by the center sample above.
+        float sdfTexel = 1.0f / max(sdfRes, 1.0f);
+        float sdfXP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float sdfXN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(sdfTexel,0,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float sdfYP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float sdfYN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,sdfTexel,0), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float sdfZP = (globalSDFTex.SampleLevel(linearSampler, sdfUvw + float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float sdfZN = (globalSDFTex.SampleLevel(linearSampler, sdfUvw - float3(0,0,sdfTexel), 0) * 2.0f - 1.0f) * maxEncodeDistance;
+        float curvatureMagnitude =
+            abs(sdfXP + sdfXN - 2.0f * sdf)
+          + abs(sdfYP + sdfYN - 2.0f * sdf)
+          + abs(sdfZP + sdfZN - 2.0f * sdf);
+        float curvatureThreshold = max(voxelSize * 0.5f, probesSpacing * 0.05f);
+        float proximityComplexity = saturate(
+            1.0f - sdfDist / max(probesSpacing * 1.25f, voxelSize * 2.0f));
+        float curvatureComplexity = saturate(curvatureMagnitude / curvatureThreshold);
+        bool highGeometryComplexity =
+            max(proximityComplexity, curvatureComplexity) > 0.2f;
+
         float distToProbe = length(probePosition - ddgi.viewPos.xyz);
         float attentionRange = max(probesSpacing * float(ddgi.probesCounts.x), probesSpacing);
         float viewAttention = lerp(0.35f, 1.0f,
