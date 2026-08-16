@@ -118,7 +118,7 @@ void MetalCommandAllocator::reset(SubmissionToken completedToken)
   }
 
   m_allocator->reset();
-  releaseSnapshots();
+  recycleSnapshots();
   for(ScratchBuffer& scratch : m_scratchBuffers)
     scratch.offset = 0;
   for(MetalCommandBuffer* commandBuffer : m_commandBuffers)
@@ -136,6 +136,26 @@ std::unique_ptr<CommandBuffer> MetalCommandAllocator::createCommandBuffer()
 MTL4::ArgumentTable* MetalCommandAllocator::allocateArgumentTable(
   uint32_t bufferCount, uint32_t textureCount, uint32_t samplerCount, const char* label)
 {
+  const auto reusable = std::find_if(
+    m_argumentTableSnapshots.begin(), m_argumentTableSnapshots.end(),
+    [bufferCount, textureCount, samplerCount](
+      const ArgumentTableSnapshot& snapshot) {
+      return !snapshot.inUse && snapshot.bufferCount == bufferCount &&
+             snapshot.textureCount == textureCount &&
+             snapshot.samplerCount == samplerCount;
+    });
+  if(reusable != m_argumentTableSnapshots.end())
+  {
+    for(uint32_t index = 0; index < bufferCount; ++index)
+      reusable->table->setAddress(0, index);
+    for(uint32_t index = 0; index < textureCount; ++index)
+      reusable->table->setTexture(MTL::ResourceID{}, index);
+    for(uint32_t index = 0; index < samplerCount; ++index)
+      reusable->table->setSamplerState(MTL::ResourceID{}, index);
+    reusable->inUse = true;
+    return reusable->table;
+  }
+
   auto* descriptor = MTL4::ArgumentTableDescriptor::alloc()->init();
   descriptor->setMaxBufferBindCount(bufferCount);
   descriptor->setMaxTextureBindCount(textureCount);
@@ -149,7 +169,13 @@ MTL4::ArgumentTable* MetalCommandAllocator::allocateArgumentTable(
   descriptor->release();
   if(table == nullptr)
     throw std::runtime_error(errorMessage("MTLDevice::newArgumentTable", error));
-  m_argumentTableSnapshots.push_back(table);
+  m_argumentTableSnapshots.push_back(ArgumentTableSnapshot{
+    .table = table,
+    .bufferCount = bufferCount,
+    .textureCount = textureCount,
+    .samplerCount = samplerCount,
+    .inUse = true,
+  });
   incrementHotPathCounter(BackendType::metal, HotPathCounter::tableVersionAllocations);
   return table;
 }
@@ -257,9 +283,15 @@ MetalRootDataAllocation MetalCommandAllocator::allocateScratchData(
 
 void MetalCommandAllocator::releaseSnapshots() noexcept
 {
-  for(MTL4::ArgumentTable* table : m_argumentTableSnapshots)
-    table->release();
+  for(const ArgumentTableSnapshot& snapshot : m_argumentTableSnapshots)
+    snapshot.table->release();
   m_argumentTableSnapshots.clear();
+}
+
+void MetalCommandAllocator::recycleSnapshots() noexcept
+{
+  for(ArgumentTableSnapshot& snapshot : m_argumentTableSnapshots)
+    snapshot.inUse = false;
 }
 
 }  // namespace demo::rhi::metal

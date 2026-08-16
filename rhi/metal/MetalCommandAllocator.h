@@ -88,6 +88,15 @@ public:
   [[nodiscard]] MetalResourceTable* resourceTable() const noexcept { return m_resourceTable; }
 
 private:
+  struct ArgumentTableSnapshot
+  {
+    MTL4::ArgumentTable* table{nullptr};
+    uint32_t bufferCount{0};
+    uint32_t textureCount{0};
+    uint32_t samplerCount{0};
+    bool inUse{false};
+  };
+
   struct ScratchBuffer
   {
     MTL::Buffer* buffer{nullptr};
@@ -98,6 +107,7 @@ private:
   [[nodiscard]] ScratchBuffer& acquireScratch(uint64_t size, uint32_t alignment);
   [[nodiscard]] MetalRootDataAllocation allocateScratchData(
     uint64_t size, uint32_t alignment);
+  void recycleSnapshots() noexcept;
   void releaseSnapshots() noexcept;
 
   MetalQueue& m_queue;
@@ -109,7 +119,7 @@ private:
   MTL4::CommandAllocator* m_allocator{nullptr};
   MetalResourceTable* m_resourceTable{nullptr};
   std::vector<MetalCommandBuffer*> m_commandBuffers;
-  std::vector<MTL4::ArgumentTable*> m_argumentTableSnapshots;
+  std::vector<ArgumentTableSnapshot> m_argumentTableSnapshots;
   std::vector<ScratchBuffer> m_scratchBuffers;
   SubmissionToken m_lastSubmission{};
   std::mutex m_recordingMutex;
