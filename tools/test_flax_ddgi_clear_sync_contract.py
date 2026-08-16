@@ -254,13 +254,13 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
             execute,
         )
 
-    def test_trace_splits_raw_waw_from_history_war(self) -> None:
+    def test_trace_visibility_barrier_also_orders_history_war(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
         trace = braced_source(execute, 'cmd.beginEvent("DDGI.TraceRays")')
 
-        publish = trace.index("rhi::HazardFlags::textureWrites")
-        history_war = trace.index("rhi::HazardFlags::readBeforeWrite")
-        self.assertLess(publish, history_war)
+        self.assertEqual(len(barrier_calls(trace)), 1)
+        self.assertIn("rhi::HazardFlags::textureWrites", trace)
+        self.assertNotIn("rhi::HazardFlags::readBeforeWrite", trace)
 
     def test_distance_to_irradiance_is_war_but_cascade_history_is_raw(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")

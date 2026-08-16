@@ -1518,14 +1518,10 @@ void FlaxDDGIPass::execute(const PassContext& context) const
         indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Trace)});
       if(updateDistanceRequested || updateIrradianceRequested)
       {
+        // This visibility barrier is also a compute execution dependency, so
+        // it orders TraceRays history reads before the downstream history writes.
         cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                     rhi::HazardFlags::textureWrites);
-
-        // Trace both writes the shared trace atlas and reads history. Keep its
-        // producer-write dependency separate from the history read -> write WAR
-        // dependency because readBeforeWrite intentionally selects read sources.
-        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                    rhi::HazardFlags::readBeforeWrite);
       }
     }
     cmd.endEvent();
