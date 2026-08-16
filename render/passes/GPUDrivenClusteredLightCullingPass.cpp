@@ -14,10 +14,16 @@ namespace demo
 
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenClusteredLightCullingPass::getDependencies() const
 	{
-		static const std::array<PassResourceDependency, 7> dependencies = {
+		static const std::array<PassResourceDependency, 9> dependencies = {
 			PassResourceDependency::buffer(kPassPointLightBufferHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassSpotLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+			PassResourceDependency::buffer(kPassPointLightCoarseBoundsHandle, ResourceAccess::read,
+			                               rhi::ShaderStage::compute),
+			PassResourceDependency::buffer(kPassSpotLightCoarseBoundsHandle, ResourceAccess::read,
+			                               rhi::ShaderStage::compute),
+			PassResourceDependency::buffer(kPassLightCoarseCullingUniformHandle, ResourceAccess::read,
+			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassClusteredLightUniformHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassClusterLightCountsHandle, ResourceAccess::write,
@@ -26,8 +32,6 @@ namespace demo
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassClusterLightStatsHandle, ResourceAccess::write,
 			                               rhi::ShaderStage::compute),
-			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
-			                                rhi::ResourceState::ShaderRead),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
@@ -46,8 +50,10 @@ namespace demo
 			context.frameIndex);
 		if (context.params->debugOptions.enableClusteredLighting && !pipeline.isNull() && !argumentTable.isNull())
 		{
+			const bool collectStats =
+				(m_renderer->getTemporalFrameCounter() % shaderio::LClusterStatsPeriod) == 0u;
 			const rhi::BufferHandle statsBuffer = m_renderer->getClusterStatsBufferHandle(context.frameIndex);
-			if (!statsBuffer.isNull())
+			if (collectStats && !statsBuffer.isNull())
 			{
 				rhi::ComputeEncoder* clear = context.commandBuffer->beginComputePass();
 				clear->fillBuffer(statsBuffer, 0, sizeof(GPUDrivenLightResources::ClusterStats), 0u);
@@ -66,12 +72,13 @@ namespace demo
 
 			// Local output barrier: clustered culling writes light-list buffers consumed
 			// through lighting tables that are not fully represented in pass dependencies.
-			context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader,
+			context.commandBuffer->barrier(rhi::StageFlags::compute,
+			                               rhi::StageFlags::fragmentShader | rhi::StageFlags::transfer,
 			                               rhi::HazardFlags::bufferWrites);
 
 			const rhi::BufferHandle statsReadback =
 				m_renderer->getClusterStatsReadbackBufferHandle(context.frameIndex);
-			if (!statsBuffer.isNull() && !statsReadback.isNull())
+			if (collectStats && !statsBuffer.isNull() && !statsReadback.isNull())
 			{
 				rhi::ComputeEncoder* copy = context.commandBuffer->beginComputePass();
 				copy->copyBuffer(statsBuffer, 0u, statsReadback, 0u,

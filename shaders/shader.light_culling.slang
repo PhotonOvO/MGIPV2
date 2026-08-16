@@ -33,11 +33,6 @@ bool accumulateProjectedPoint(float3 worldPos, inout float2 minNdc, inout float2
     }
 
     float3 ndc = clip.xyz / clip.w;
-    if(ndc.z < 0.0 || ndc.z > 1.0)
-    {
-        return false;
-    }
-
     minNdc = hasProjectedPoint ? min(minNdc, ndc.xy) : ndc.xy;
     maxNdc = hasProjectedPoint ? max(maxNdc, ndc.xy) : ndc.xy;
     hasProjectedPoint = true;
@@ -52,16 +47,33 @@ uint16_t4 projectSphereToTileBounds(float3 center, float radius)
     const uint tileCountY = uint(lightCoarseCulling.screenTileInfo.w);
     const float3 right = normalize(lightCoarseCulling.cameraRight.xyz);
     const float3 up = normalize(lightCoarseCulling.cameraUp.xyz);
+    const float3 forward = normalize(cross(right, up));
 
     float2 minNdc = float2(0.0, 0.0);
     float2 maxNdc = float2(0.0, 0.0);
     bool hasProjectedPoint = false;
 
-    accumulateProjectedPoint(center, minNdc, maxNdc, hasProjectedPoint);
-    accumulateProjectedPoint(center + right * radius, minNdc, maxNdc, hasProjectedPoint);
-    accumulateProjectedPoint(center - right * radius, minNdc, maxNdc, hasProjectedPoint);
-    accumulateProjectedPoint(center + up * radius, minNdc, maxNdc, hasProjectedPoint);
-    accumulateProjectedPoint(center - up * radius, minNdc, maxNdc, hasProjectedPoint);
+    // Project the camera-aligned cube enclosing the sphere. Its eight corners
+    // conservatively bound the sphere in screen space while the whole cube is
+    // in front of the camera. If it crosses the camera plane, return an empty
+    // range so clustered culling falls back to its exact view-space test.
+    bool allCornersProjectable = true;
+    [unroll]
+    for(uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex)
+    {
+        const float rightSign = (cornerIndex & 1u) != 0u ? 1.0 : -1.0;
+        const float upSign = (cornerIndex & 2u) != 0u ? 1.0 : -1.0;
+        const float forwardSign = (cornerIndex & 4u) != 0u ? 1.0 : -1.0;
+        const float3 corner = center + radius
+            * (right * rightSign + up * upSign + forward * forwardSign);
+        allCornersProjectable = accumulateProjectedPoint(
+            corner, minNdc, maxNdc, hasProjectedPoint) && allCornersProjectable;
+    }
+
+    if(!allCornersProjectable)
+    {
+        return emptyTileBounds();
+    }
 
     if(!hasProjectedPoint || maxNdc.x < -1.0 || minNdc.x > 1.0 || maxNdc.y < -1.0 || minNdc.y > 1.0)
     {

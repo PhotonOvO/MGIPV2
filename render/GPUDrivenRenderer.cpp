@@ -1950,7 +1950,10 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					              : (getIBLEnvironmentLoaded() ? "equirect_fallback" : "flat_ambient"),
 				.status = getIBLEnvironmentStatus(),
 			};
-			m_lightResources.cacheClusterStats(frameIndex);
+			if ((m_temporalFrameCounter % shaderio::LClusterStatsPeriod) == 0u)
+			{
+				m_lightResources.cacheClusterStats(frameIndex);
+			}
 			const GPUDrivenLightResources::Diagnostics lightDiagnostics = m_lightResources.getDiagnostics();
 			m_runtimeStats.clusteredLightingDiagnostics = GPUDrivenClusteredLightingDiagnostics{
 				.gridX = lightDiagnostics.clusterGridX,
@@ -5508,7 +5511,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.debugInfo = glm::vec4(params.debugOptions.enableClusteredLighting ? 1.0f : 0.0f,
 			                       params.debugOptions.showClusteredLightingHeatmap ? 1.0f : 0.0f,
 			                       params.debugOptions.showClusteredLightingOverflow ? 1.0f : 0.0f,
-			                       0.0f),
+			                       (getTemporalFrameCounter() % shaderio::LClusterStatsPeriod) == 0u
+			                         ? 1.0f : 0.0f),
 			.viewMatrix = view,
 			.projectionMatrix = projection,
 			.invProjectionMatrix = glm::inverse(projection),

@@ -308,6 +308,7 @@ STATIC_CONST uint32_t LClusterGridSizeY = 9u;
 STATIC_CONST uint32_t LClusterGridSizeZ = 24u;
 STATIC_CONST uint32_t LClusterCount = LClusterGridSizeX * LClusterGridSizeY * LClusterGridSizeZ;
 STATIC_CONST uint32_t LMaxLightsPerCluster = 32u;
+STATIC_CONST uint32_t LClusterStatsPeriod = 30u;
 STATIC_CONST uint32_t LClusterOverflowBit = 0x80000000u;
 STATIC_CONST uint32_t LClusterCountMask = 0x7fffffffu;
 STATIC_CONST uint32_t LClusterLightTypePointBit = 0x00000000u;
@@ -498,7 +499,7 @@ struct ClusteredLightUniforms
   vec4 screenSizeAndClusterInfo;  // xy = render extent, z = clusterCountX, w = clusterCountY
   vec4 clusterZAndLightInfo;      // x = clusterCountZ, y = max lights/cluster, z = point count, w = spot count
   vec4 clipInfo;                  // x = near, y = far, z = z slicing scale, w = z slicing bias
-  vec4 debugInfo;                 // x = enabled, y = heatmap, z = overflow highlight, w = fallback
+  vec4 debugInfo;                 // x = enabled, y = heatmap, z = overflow highlight, w = collect stats
   mat4 viewMatrix;
   mat4 projectionMatrix;
   mat4 invProjectionMatrix;
