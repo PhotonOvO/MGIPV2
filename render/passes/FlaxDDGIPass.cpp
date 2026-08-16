@@ -1021,13 +1021,16 @@ void FlaxDDGIPass::readDebugTelemetry(uint32_t frameIndex, uint32_t maximumProbe
   m_device->unmapBuffer(m_debugReadbackBuffers[frameIndex]);
 }
 
-void FlaxDDGIPass::recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex,
-                                       uint64_t sourceFrame) const
+bool FlaxDDGIPass::recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex,
+                                       uint64_t sourceFrame,
+                                       rhi::ComputeEncoder* activeEncoder) const
 {
-  if(frameIndex >= m_debugReadbackBuffers.size() || m_debugReadbackBuffers[frameIndex].isNull()) return;
+  if(frameIndex >= m_debugReadbackBuffers.size()
+     || m_debugReadbackBuffers[frameIndex].isNull()) return false;
 
   cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::transfer, rhi::HazardFlags::bufferWrites);
-  rhi::ComputeEncoder* copy = cmd.beginComputePass();
+  rhi::ComputeEncoder* copy = activeEncoder != nullptr
+    ? activeEncoder : cmd.beginComputePass();
   copy->copyBuffer(m_flaxResources->getActiveProbes(0), 0,
                    m_debugReadbackBuffers[frameIndex], 0, sizeof(uint32_t));
   copy->copyBuffer(m_flaxResources->getActiveProbes(0), 3u * sizeof(uint32_t),
@@ -1035,8 +1038,10 @@ void FlaxDDGIPass::recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIn
   copy->copyBuffer(m_flaxResources->getUpdateProbesInitArgs(), 0,
                    m_debugReadbackBuffers[frameIndex], 2u * sizeof(uint32_t),
                    9u * sizeof(uint32_t));
-  cmd.endEncoding();
+  if(activeEncoder == nullptr)
+    cmd.endEncoding();
   m_debugReadbackSourceFrames[frameIndex] = sourceFrame;
+  return true;
 }
 
 void FlaxDDGIPass::executeDebugViews(rhi::CommandBuffer& cmd, const PassContext& context,
@@ -1331,11 +1336,12 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     }
   }
 
+  bool debugReadbackRecorded = false;
   const auto finishPass = [&](bool recordReadback, bool advanceProbeWindow)
   {
     executeDebugViews(cmd, context, debugViewsTable);
-    if (recordReadback)
-      recordDebugReadback(cmd, frameIndex, sourceFrame);
+    if(recordReadback && !debugReadbackRecorded)
+      debugReadbackRecorded = recordDebugReadback(cmd, frameIndex, sourceFrame);
     cmd.barrier(rhi::StageFlags::compute,
                 rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
                 rhi::HazardFlags::textureWrites | rhi::HazardFlags::bufferWrites);
@@ -1479,6 +1485,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
                       | rhi::HazardFlags::drawArguments);
       }
     }
+    debugReadbackRecorded = recordDebugReadback(
+      cmd, frameIndex, sourceFrame, setupEncoder);
     cmd.endEncoding();
     recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
     cmd.barrier(rhi::StageFlags::compute,

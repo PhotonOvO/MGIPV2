@@ -157,7 +157,9 @@ private:
 			+ (parity & 1u);
 	}
 	void readDebugTelemetry(uint32_t frameIndex, uint32_t maximumProbeCount) const;
-	void recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex, uint64_t sourceFrame) const;
+	[[nodiscard]] bool recordDebugReadback(rhi::CommandBuffer& cmd, uint32_t frameIndex,
+	                                      uint64_t sourceFrame,
+	                                      rhi::ComputeEncoder* activeEncoder = nullptr) const;
 	void executeDebugViews(rhi::CommandBuffer& cmd, const PassContext& context,
 	                       rhi::ArgumentTableHandle table) const;
 	void markDebugStage(FlaxGIDebugStage stage, FlaxGIDebugStageState state,
