@@ -160,21 +160,22 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
         self.assertLess(begin_event, reset)
         self.assertLess(reset, reset_only_return)
 
-    def test_transfer_clear_feeds_storage_read_write_consumers(self) -> None:
+    def test_setup_fills_feed_storage_read_write_consumers(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
-        clear_start = execute.index("rhi::ComputeEncoder* clear")
-        clear_end = execute.index(
+        setup_start = execute.index("rhi::ComputeEncoder* setupEncoder")
+        setup_end = execute.index(
             "if (m_ddgiUniformBuffers[frameIndex].isNull())",
-            clear_start,
+            setup_start,
         )
-        clear = execute[clear_start:clear_end]
+        setup = execute[setup_start:setup_end]
 
-        self.assertIn("rhi::StageFlags::transfer", clear)
-        self.assertIn("rhi::StageFlags::compute", clear)
-        self.assertIn("rhi::HazardFlags::bufferWrites", clear)
-        self.assertIn("rhi::HazardFlags::storageBufferReadWrite", clear)
+        self.assertIn("fillBuffer(", setup)
+        self.assertIn("rhi::StageFlags::transfer", setup)
+        self.assertIn("rhi::StageFlags::compute", setup)
+        self.assertIn("rhi::HazardFlags::bufferWrites", setup)
+        self.assertIn("rhi::HazardFlags::storageBufferReadWrite", setup)
 
-    def test_classify_publishes_probe_data_and_active_lists_per_cascade(self) -> None:
+    def test_classify_only_publishes_active_lists_after_all_cascades(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
         classify = braced_source(execute, 'cmd.beginEvent("DDGI.Classify")')
         cascade_loop = braced_source(
@@ -182,17 +183,15 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
             "for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount;",
         )
 
-        self.assertIn("m_flaxResources->getProbesData()", cascade_loop)
-        self.assertIn("recordTextureWriteDependency(", cascade_loop)
-        self.assertIn("rhi::HazardFlags::bufferWrites", cascade_loop)
+        self.assertNotIn("cmd.barrier(", cascade_loop)
+        self.assertEqual(len(barrier_calls(classify)), 1)
+        self.assertIn("rhi::HazardFlags::bufferWrites", classify)
         self.assertIn(
             "rhi::HazardFlags::storageBufferReadWrite",
-            cascade_loop,
+            classify,
         )
-        self.assertLess(
-            cascade_loop.index("cmd.endEncoding()"),
-            cascade_loop.index("recordTextureWriteDependency("),
-        )
+        self.assertNotIn("rhi::HazardFlags::textureWrites", classify)
+        self.assertLess(classify.index(cascade_loop), classify.index("cmd.barrier("))
 
     def test_compact_and_init_args_publish_rw_buffers_per_cascade(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
@@ -203,11 +202,11 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
         )
         init_args = braced_source(execute, 'cmd.beginEvent("DDGI.InitArgs")')
 
-        self.assertIn("cmd.endEncoding()", compact_loop)
-        self.assertIn("rhi::HazardFlags::bufferWrites", compact_loop)
+        self.assertNotIn("cmd.endEncoding()", compact_loop)
+        self.assertIn("rhi::HazardFlags::bufferWrites", compact)
         self.assertIn(
             "rhi::HazardFlags::storageBufferReadWrite",
-            compact_loop,
+            compact,
         )
         self.assertIn("rhi::HazardFlags::bufferWrites", init_args)
         self.assertIn(
@@ -216,42 +215,41 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
         )
         self.assertIn("rhi::HazardFlags::drawArguments", init_args)
 
-    def test_classify_and_update_inactive_publish_probe_data_writes(self) -> None:
+    def test_setup_encoder_publishes_classify_probe_data_writes(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
-        update_inactive = braced_source(
-            execute,
-            'cmd.beginEvent("DDGI.UpdateInactive")',
-        )
+        init_args = braced_source(execute, 'cmd.beginEvent("DDGI.InitArgs")')
 
-        self.assertIn("m_flaxResources->getProbesData()", update_inactive)
-        self.assertIn("recordTextureWriteDependency(", update_inactive)
+        end_encoding = init_args.index("cmd.endEncoding()")
+        publish = init_args.index("recordTextureWriteDependency(")
+        self.assertIn("probesDataWrite", init_args)
+        self.assertLess(end_encoding, publish)
+        self.assertIn(
+            "stopAfter(FlaxGIDebugStage::updateInactive, true)",
+            execute,
+        )
 
     def test_trace_splits_raw_waw_from_history_war(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
         trace = braced_source(execute, 'cmd.beginEvent("DDGI.TraceRays")')
 
-        publish = trace.index("recordTextureWriteDependency(")
+        publish = trace.index("rhi::HazardFlags::textureWrites")
         history_war = trace.index("rhi::HazardFlags::readBeforeWrite")
-        self.assertIn("m_flaxResources->getProbesTrace()", trace)
         self.assertLess(publish, history_war)
 
     def test_distance_and_irradiance_publish_both_physical_histories(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
-        distance = braced_source(
-            execute,
-            'cmd.beginEvent("DDGI.UpdateDistance")',
+        update_start = execute.index("rhi::ComputeEncoder* updateEncoder")
+        update_end = execute.index(
+            "if (stopAfter(FlaxGIDebugStage::traceRays, true))",
+            update_start,
         )
-        irradiance = braced_source(
-            execute,
-            'cmd.beginEvent("DDGI.UpdateIrradiance")',
-        )
+        update = execute[update_start:update_end]
 
         for suffix in ("Write(0)", "Read(0)"):
-            self.assertIn(f"getProbesDistance{suffix}", distance)
-            self.assertIn(f"getProbesIrradiance{suffix}", irradiance)
-        self.assertIn("m_flaxResources->getProbesData()", irradiance)
-        self.assertIn("recordTextureWriteDependency(", distance)
-        self.assertIn("recordTextureWriteDependency(", irradiance)
+            self.assertIn(f"getProbesDistance{suffix}", update)
+            self.assertIn(f"getProbesIrradiance{suffix}", update)
+        self.assertIn("m_flaxResources->getProbesData()", update)
+        self.assertGreaterEqual(update.count("recordTextureWriteDependency("), 3)
 
     def test_shutdown_forgets_external_texture_state(self) -> None:
         shutdown = braced_source(
