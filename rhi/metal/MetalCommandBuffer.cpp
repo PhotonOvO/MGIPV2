@@ -2505,23 +2505,22 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
     retainNative(asObject(buffer->nativeBuffer));
   }
 
-  MetalArgumentTableSnapshot trackedSnapshot;
   for(const MetalBoundTable& bound : state.tables)
   {
-    const auto duplicate = std::find_if(
-      trackedSnapshot.sources.begin(), trackedSnapshot.sources.end(),
-      [&bound](const MetalArgumentTableSnapshotSource& source) {
-        return source.table == bound.table;
-      });
-    if(duplicate != trackedSnapshot.sources.end())
-      continue;
     const MetalArgumentTableRecord* table =
       resources().tryGetArgumentTable(bound.table);
     if(table == nullptr)
       throw std::runtime_error("Metal argument-table snapshot source is stale");
-    trackedSnapshot.sources.push_back({bound.table, table->version});
+    const MetalArgumentTableSnapshotSource source{bound.table, table->version};
+    const auto duplicate = std::find_if(
+      m_argumentTableSnapshotSources.begin(), m_argumentTableSnapshotSources.end(),
+      [&source](const MetalArgumentTableSnapshotSource& existing) {
+        return existing.table == source.table &&
+               existing.version == source.version;
+      });
+    if(duplicate == m_argumentTableSnapshotSources.end())
+      m_argumentTableSnapshotSources.push_back(source);
   }
-  m_argumentTableSnapshots.push_back(std::move(trackedSnapshot));
 
   state.snapshot = snapshot;
   state.dirty = false;
@@ -2530,17 +2529,15 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
 
 bool MetalCommandBuffer::argumentTableSnapshotsChanged() const
 {
-  for(const MetalArgumentTableSnapshot& snapshot : m_argumentTableSnapshots)
+  for(const MetalArgumentTableSnapshotSource& source :
+      m_argumentTableSnapshotSources)
   {
-    for(const MetalArgumentTableSnapshotSource& source : snapshot.sources)
-    {
-      const MetalArgumentTableRecord* table =
-        m_resourceTable->tryGetArgumentTable(source.table);
-      if(table == nullptr)
-        throw std::runtime_error("Metal submission references a stale argument table");
-      if(table->version != source.version)
-        return true;
-    }
+    const MetalArgumentTableRecord* table =
+      m_resourceTable->tryGetArgumentTable(source.table);
+    if(table == nullptr)
+      throw std::runtime_error("Metal submission references a stale argument table");
+    if(table->version != source.version)
+      return true;
   }
   return false;
 }
@@ -2748,7 +2745,7 @@ void MetalCommandBuffer::clearTracking()
   m_queryPools.clear();
   m_residencySets.clear();
   m_nativeAllocations.clear();
-  m_argumentTableSnapshots.clear();
+  m_argumentTableSnapshotSources.clear();
   m_preparedIndexedIndirect.clear();
 }
 

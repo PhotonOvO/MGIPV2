@@ -85,11 +85,6 @@ struct MetalArgumentTableSnapshotSource
   uint64_t version{0};
 };
 
-struct MetalArgumentTableSnapshot
-{
-  std::vector<MetalArgumentTableSnapshotSource> sources;
-};
-
 struct MetalPreparedIndexedIndirect
 {
   DrawIndirectCountDesc draw{};
@@ -305,7 +300,7 @@ private:
   std::vector<const MTL::Allocation*> m_nativeAllocations;
   std::vector<NS::Object*> m_retainedResources;
   std::vector<const MTL::Allocation*> m_automaticResidencyAllocations;
-  std::vector<MetalArgumentTableSnapshot> m_argumentTableSnapshots;
+  std::vector<MetalArgumentTableSnapshotSource> m_argumentTableSnapshotSources;
   std::vector<MetalPreparedIndexedIndirect> m_preparedIndexedIndirect;
   std::vector<ReplayCommand> m_replayCommands;
   bool m_replaying{false};
