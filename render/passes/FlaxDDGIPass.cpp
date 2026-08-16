@@ -1417,10 +1417,11 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   cmd.endEvent();
   if (stopAfter(FlaxGIDebugStage::classify, false)) return;
 
+  rhi::ComputeEncoder* setupEncoder = nullptr;
   cmd.beginEvent("DDGI.Compact");
   {
-    rhi::ComputeEncoder* enc = cmd.beginComputePass();
-    enc->setPipeline(m_compactPipeline);
+    setupEncoder = cmd.beginComputePass();
+    setupEncoder->setPipeline(m_compactPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1432,9 +1433,9 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
-      enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
-      enc->dispatch({1, 1, 1});
+      setupEncoder->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
+      setupEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
+      setupEncoder->dispatch({1, 1, 1});
       if(cascadeIndex + 1u < cascadeCount)
       {
         cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
@@ -1442,7 +1443,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
                       | rhi::HazardFlags::storageBufferReadWrite);
       }
     }
-    cmd.endEncoding();
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::bufferWrites
                   | rhi::HazardFlags::storageBufferReadWrite);
@@ -1453,8 +1453,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   {
     // Dispatch cascades in order with an explicit barrier so each one consumes
     // only the slack left by the preceding deterministic allocations.
-    rhi::ComputeEncoder* enc = cmd.beginComputePass();
-    enc->setPipeline(m_initArgsPipeline);
+    setupEncoder->setPipeline(m_initArgsPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1466,9 +1465,9 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
-      enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
-      enc->dispatch({1, 1, 1});
+      setupEncoder->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
+      setupEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
+      setupEncoder->dispatch({1, 1, 1});
       if(cascadeIndex + 1u < cascadeCount)
       {
         cmd.barrier(rhi::StageFlags::compute,
