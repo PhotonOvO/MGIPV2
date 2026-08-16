@@ -1499,6 +1499,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   const bool updateIrradianceRequested = shouldExecuteFlaxGIStage(
     FlaxGIDebugStage::updateIrradiance, stopAfterStage);
 
+  rhi::ComputeEncoder* updateEncoder = cmd.beginComputePass();
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
     const FlaxDDGICascadePush cascadePush{cascadeIndex};
@@ -1507,14 +1508,12 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     const uint32_t historyIndex =
       historyTableIndex(frameIndex, cascadeIndex, updateParity);
 
-    rhi::ComputeEncoder* enc = nullptr;
     cmd.beginEvent("DDGI.TraceRays");
     {
-      enc = cmd.beginComputePass();
-      enc->setPipeline(m_traceRaysPipeline);
-      enc->setArgumentTable(0, m_traceRaysTables[frameCascadeIndex]);
-      enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
-      enc->dispatchIndirect({
+      updateEncoder->setPipeline(m_traceRaysPipeline);
+      updateEncoder->setArgumentTable(0, m_traceRaysTables[frameCascadeIndex]);
+      updateEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
+      updateEncoder->dispatchIndirect({
         m_flaxResources->getUpdateProbesInitArgs(),
         indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Trace)});
       if(updateDistanceRequested || updateIrradianceRequested)
@@ -1535,10 +1534,10 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     {
       cmd.beginEvent("DDGI.UpdateDistance");
       {
-        enc->setPipeline(m_distancePipeline);
-        enc->setArgumentTable(0, m_distanceTables[historyIndex]);
-        enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
-        enc->dispatchIndirect({
+        updateEncoder->setPipeline(m_distancePipeline);
+        updateEncoder->setArgumentTable(0, m_distanceTables[historyIndex]);
+        updateEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
+        updateEncoder->dispatchIndirect({
           m_flaxResources->getUpdateProbesInitArgs(),
           indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Distance)});
         if(updateIrradianceRequested)
@@ -1554,42 +1553,49 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     {
       cmd.beginEvent("DDGI.UpdateIrradiance");
       {
-        enc->setPipeline(m_irradiancePipeline);
-        enc->setArgumentTable(0, m_irradianceTables[historyIndex]);
-        enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
-        enc->dispatchIndirect({
+        updateEncoder->setPipeline(m_irradiancePipeline);
+        updateEncoder->setArgumentTable(0, m_irradianceTables[historyIndex]);
+        updateEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
+        updateEncoder->dispatchIndirect({
           m_flaxResources->getUpdateProbesInitArgs(),
           indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Irradiance)});
       }
       cmd.endEvent();
     }
-    cmd.endEncoding();
-    if(updateIrradianceRequested)
+
+    if(cascadeIndex + 1u < cascadeCount)
     {
-      const std::array<rhi::TextureHandle, 3> irradianceWrites{
-        m_flaxResources->getProbesData(),
-        m_flaxResources->getProbesIrradianceWrite(0),
-        m_flaxResources->getProbesIrradianceRead(0),
-      };
-      recordTextureWriteDependency(cmd, irradianceWrites, flaxTextureRange);
-    }
-    else if(updateDistanceRequested)
-    {
-      const std::array<rhi::TextureHandle, 2> distanceWrites{
-        m_flaxResources->getProbesDistanceWrite(0),
-        m_flaxResources->getProbesDistanceRead(0),
-      };
-      recordTextureWriteDependency(cmd, distanceWrites, flaxTextureRange);
-    }
-    else
-    {
-      const std::array<rhi::TextureHandle, 1> traceWrite{
-        m_flaxResources->getProbesTrace(),
-      };
-      recordTextureWriteDependency(cmd, traceWrite, flaxTextureRange);
       cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                  rhi::HazardFlags::readBeforeWrite);
+                  rhi::HazardFlags::textureWrites);
     }
+  }
+  cmd.endEncoding();
+
+  if(updateIrradianceRequested)
+  {
+    const std::array<rhi::TextureHandle, 3> irradianceWrites{
+      m_flaxResources->getProbesData(),
+      m_flaxResources->getProbesIrradianceWrite(0),
+      m_flaxResources->getProbesIrradianceRead(0),
+    };
+    recordTextureWriteDependency(cmd, irradianceWrites, flaxTextureRange);
+  }
+  else if(updateDistanceRequested)
+  {
+    const std::array<rhi::TextureHandle, 2> distanceWrites{
+      m_flaxResources->getProbesDistanceWrite(0),
+      m_flaxResources->getProbesDistanceRead(0),
+    };
+    recordTextureWriteDependency(cmd, distanceWrites, flaxTextureRange);
+  }
+  else
+  {
+    const std::array<rhi::TextureHandle, 1> traceWrite{
+      m_flaxResources->getProbesTrace(),
+    };
+    recordTextureWriteDependency(cmd, traceWrite, flaxTextureRange);
+    cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                rhi::HazardFlags::readBeforeWrite);
   }
 
   if (stopAfter(FlaxGIDebugStage::traceRays, true)) return;
