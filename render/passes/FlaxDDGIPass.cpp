@@ -49,6 +49,59 @@ constexpr uint32_t computeFlaxGIRegularUpdateBudget(uint32_t updateBudget)
 {
   return updateBudget - computeFlaxGIHighPriorityUpdateBudget(updateBudget);
 }
+
+struct FlaxGICascadeSchedule
+{
+  std::array<bool, FlaxDDGIResources::kMaxCascades> update{};
+  std::array<bool, FlaxDDGIResources::kMaxCascades> classify{};
+  std::array<uint32_t, FlaxDDGIResources::kMaxCascades> budgets{};
+  uint32_t updateCount{0u};
+  uint32_t classifyCount{0u};
+
+  [[nodiscard]] bool hasUpdates() const { return updateCount != 0u; }
+};
+
+bool hasDirtyProbeSlab(const DDGICascadeDesc& cascade)
+{
+  return cascade.scrollDelta.x != 0
+      || cascade.scrollDelta.y != 0
+      || cascade.scrollDelta.z != 0;
+}
+
+FlaxGICascadeSchedule buildFlaxGICascadeSchedule(
+  const DDGIConfig& config,
+  const std::vector<DDGICascadeDesc>& cascades,
+  uint64_t frameIndex,
+  uint32_t cascadeCount,
+  uint32_t maximumProbeCount,
+  bool forceUpdate)
+{
+  FlaxGICascadeSchedule schedule{};
+  const uint32_t boundedCascadeCount = std::min(
+    cascadeCount, FlaxDDGIResources::kMaxCascades);
+  for(uint32_t cascadeIndex = 0; cascadeIndex < boundedCascadeCount; ++cascadeIndex)
+  {
+    const bool dirty = cascadeIndex >= cascades.size()
+      || hasDirtyProbeSlab(cascades[cascadeIndex]);
+    schedule.update[cascadeIndex] = shouldUpdateFlaxGICascade(
+      frameIndex, config.cascadeUpdateFrequency, cascadeIndex, dirty, forceUpdate);
+    schedule.classify[cascadeIndex] = schedule.update[cascadeIndex]
+      && shouldClassifyFlaxGICascade(
+        frameIndex, config.cascadeUpdateFrequency,
+        config.probeClassificationFrequency, cascadeIndex, dirty, forceUpdate);
+    schedule.updateCount += schedule.update[cascadeIndex] ? 1u : 0u;
+    schedule.classifyCount += schedule.classify[cascadeIndex] ? 1u : 0u;
+  }
+
+  for(uint32_t cascadeIndex = 0; cascadeIndex < boundedCascadeCount; ++cascadeIndex)
+  {
+    if(!schedule.update[cascadeIndex]) continue;
+    schedule.budgets[cascadeIndex] = computeFlaxGICascadeUpdateBudget(
+      config.maxUpdatedProbesPerFrame, maximumProbeCount,
+      cascadeIndex, boundedCascadeCount);
+  }
+  return schedule;
+}
 constexpr uint32_t indirectArgsUintOffset(
   uint32_t cascadeIndex, FlaxDDGIResources::IndirectPass pass)
 {
@@ -883,23 +936,22 @@ static shaderio::FlaxDDGIData buildFlaxDDGIData(
 }
 
 void FlaxDDGIPass::writeFlaxDDGIDataToBuffer(
-  uint32_t frameIndex, const FlaxGISpatialSnapshot& spatialSnapshot) const
+  uint32_t frameIndex, const FlaxGISpatialSnapshot& spatialSnapshot,
+  const std::array<uint32_t, FlaxDDGIResources::kMaxCascades>& cascadeBudgets) const
 {
 	if(frameIndex >= m_ddgiUniformBuffers.size() || m_device == nullptr) return;
 	shaderio::FlaxDDGIData ddgi = buildFlaxDDGIData(*m_renderer, spatialSnapshot);
 	const uint32_t cascadeCount = m_flaxResources->getCascadeCount();
-	const uint32_t maximumProbeCount = m_flaxResources->getMaxProbesPerCascade();
 	const uint32_t globalBudget = m_renderer->getDDGIConfig().maxUpdatedProbesPerFrame;
 	for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
 	{
-		const uint32_t updateBudget = computeFlaxGICascadeUpdateBudget(
-			globalBudget, maximumProbeCount, cascadeIndex, cascadeCount);
 		const uint32_t updateOffset = cascadeIndex < m_probeUpdateOffsets.size()
 			? m_probeUpdateOffsets[cascadeIndex] : 0u;
 		const uint32_t priorityUpdateOffset = cascadeIndex < m_priorityProbeUpdateOffsets.size()
 			? m_priorityProbeUpdateOffsets[cascadeIndex] : 0u;
 		ddgi.updateParams[cascadeIndex] = shaderio::uvec4{
-			updateOffset, updateBudget, priorityUpdateOffset, globalBudget == 0u ? 1u : 0u};
+			updateOffset, cascadeBudgets[cascadeIndex], priorityUpdateOffset,
+			globalBudget == 0u ? 1u : 0u};
 	}
 	void* dst = m_device->mapBuffer(m_ddgiUniformBuffers[frameIndex]);
 	std::memcpy(dst, &ddgi, sizeof(ddgi));
@@ -925,7 +977,16 @@ bool FlaxDDGIPass::plansFullOutputUpdate(const DebugPassOptions& debugOptions) c
   const FlaxGIDebugStage stopAfterStage = runToStageRequested
     ? debugOptions.flaxGIRunToStage
     : FlaxGIDebugStage::updateIrradiance;
-  return shouldExecuteFlaxGIStage(FlaxGIDebugStage::updateIrradiance, stopAfterStage);
+  if(!shouldExecuteFlaxGIStage(FlaxGIDebugStage::updateIrradiance, stopAfterStage))
+    return false;
+
+  const bool forceUpdate = hasPendingReset(debugOptions)
+    || config.flaxGISingleStep || runToStageRequested
+    || !m_outputState.publishedSnapshot().isValid();
+  return buildFlaxGICascadeSchedule(
+    config, m_renderer->getFlaxDDGICascadeDescs(),
+    m_renderer->getTemporalFrameCounter(), m_flaxResources->getCascadeCount(),
+    m_flaxResources->getMaxProbesPerCascade(), forceUpdate).hasUpdates();
 }
 
 bool FlaxDDGIPass::hasPendingReset(const DebugPassOptions& debugOptions) const
@@ -1103,6 +1164,14 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   rhi::CommandBuffer& cmd = *context.commandBuffer;
   const uint64_t sourceFrame = m_renderer->getTemporalFrameCounter();
   const uint32_t cascadeCount = m_flaxResources->getCascadeCount();
+  const uint32_t totalProbes = m_flaxResources->getMaxProbesPerCascade();
+  const bool forceUpdate = resetRequested || ddgiConfig.flaxGISingleStep
+    || runToStageRequested || !m_outputState.publishedSnapshot().isValid();
+  const FlaxGICascadeSchedule cascadeSchedule = buildFlaxGICascadeSchedule(
+    ddgiConfig, m_renderer->getFlaxDDGICascadeDescs(), sourceFrame,
+    cascadeCount, totalProbes, forceUpdate);
+  if(updateRequested && !cascadeSchedule.hasUpdates() && !resetRequested)
+    return;
   const rhi::TextureSubresourceRange flaxTextureRange{
     .aspect = rhi::TextureAspect::color,
     .baseMipLevel = 0,
@@ -1191,9 +1260,12 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     if(updateRequested)
     {
       std::vector<rhi::BufferHandle> writableBuffers;
-      writableBuffers.reserve(static_cast<std::size_t>(cascadeCount) + 1u);
+      writableBuffers.reserve(static_cast<std::size_t>(cascadeSchedule.updateCount) + 1u);
       for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
-        writableBuffers.push_back(m_flaxResources->getActiveProbes(cascadeIndex));
+      {
+        if(cascadeSchedule.update[cascadeIndex])
+          writableBuffers.push_back(m_flaxResources->getActiveProbes(cascadeIndex));
+      }
       writableBuffers.push_back(m_flaxResources->getUpdateProbesInitArgs());
       recordBufferWriteDependency(cmd, writableBuffers);
     }
@@ -1241,7 +1313,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     return;
   }
 
-  const uint32_t totalProbes = m_flaxResources->getMaxProbesPerCascade();
   m_debugSnapshot.cascadeCount = cascadeCount;
   m_debugSnapshot.implementedCascadeCount = cascadeCount;
   m_debugSnapshot.totalProbes = totalProbes;
@@ -1296,6 +1367,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   rhi::ComputeEncoder* setupEncoder = cmd.beginComputePass();
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
+    if(!cascadeSchedule.update[cascadeIndex]) continue;
     setupEncoder->fillBuffer(m_flaxResources->getActiveProbes(cascadeIndex),
                              0, 4u * sizeof(uint32_t), 0u);
   }
@@ -1323,7 +1395,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     cmd.endEvent();
     return;
   }
-  writeFlaxDDGIDataToBuffer(frameIndex, currentSpatial);
+  writeFlaxDDGIDataToBuffer(frameIndex, currentSpatial, cascadeSchedule.budgets);
 
   if (runToStageRequested)
   {
@@ -1354,8 +1426,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     {
       for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
       {
-        const uint32_t updateBudget = computeFlaxGICascadeUpdateBudget(
-          ddgiConfig.maxUpdatedProbesPerFrame, totalProbes, cascadeIndex, cascadeCount);
+        if(!cascadeSchedule.update[cascadeIndex]) continue;
+        const uint32_t updateBudget = cascadeSchedule.budgets[cascadeIndex];
         if(totalProbes != 0u && cascadeIndex < m_probeUpdateOffsets.size()
            && cascadeIndex < m_priorityProbeUpdateOffsets.size())
         {
@@ -1399,11 +1471,13 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   const std::array<rhi::TextureHandle, 1> probesDataWrite{
     m_flaxResources->getProbesData(),
   };
-  cmd.beginEvent("DDGI.Classify");
+  if(cascadeSchedule.classifyCount != 0u)
   {
+    cmd.beginEvent("DDGI.Classify");
     setupEncoder->setPipeline(m_classifyPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
+      if(!cascadeSchedule.classify[cascadeIndex]) continue;
       const FlaxDDGICascadePush cascadePush{cascadeIndex};
       setupEncoder->setArgumentTable(0, m_classifyTables[
         frameCascadeTableIndex(frameIndex, cascadeIndex)]);
@@ -1413,8 +1487,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::bufferWrites
                   | rhi::HazardFlags::storageBufferReadWrite);
+    cmd.endEvent();
   }
-  cmd.endEvent();
   if(runToStageRequested && stopAfterStage == FlaxGIDebugStage::classify)
   {
     cmd.endEncoding();
@@ -1427,8 +1501,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     setupEncoder->setPipeline(m_compactPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
-      const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
-        ddgiConfig.maxUpdatedProbesPerFrame, totalProbes, cascadeIndex, cascadeCount);
+      if(!cascadeSchedule.update[cascadeIndex]) continue;
+      const uint32_t baseUpdateBudget = cascadeSchedule.budgets[cascadeIndex];
       const FlaxDDGIInitArgsPush initArgs{
         .maxActiveProbes = totalProbes,
         .baseUpdateBudget = baseUpdateBudget,
@@ -1451,10 +1525,11 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     // Dispatch cascades in order with an explicit barrier so each one consumes
     // only the slack left by the preceding deterministic allocations.
     setupEncoder->setPipeline(m_initArgsPipeline);
+    uint32_t updateOrdinal = 0u;
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
-      const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
-        ddgiConfig.maxUpdatedProbesPerFrame, totalProbes, cascadeIndex, cascadeCount);
+      if(!cascadeSchedule.update[cascadeIndex]) continue;
+      const uint32_t baseUpdateBudget = cascadeSchedule.budgets[cascadeIndex];
       const FlaxDDGIInitArgsPush initArgs{
         .maxActiveProbes = totalProbes,
         .baseUpdateBudget = baseUpdateBudget,
@@ -1465,7 +1540,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
       setupEncoder->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       setupEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       setupEncoder->dispatch({1, 1, 1});
-      if(cascadeIndex + 1u < cascadeCount)
+      ++updateOrdinal;
+      if(updateOrdinal < cascadeSchedule.updateCount)
       {
         cmd.barrier(rhi::StageFlags::compute,
                     rhi::StageFlags::compute,
@@ -1480,7 +1556,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
         cmd, frameIndex, sourceFrame, setupEncoder);
     }
     cmd.endEncoding();
-    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
+    if(cascadeSchedule.classifyCount != 0u)
+      recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
     cmd.barrier(rhi::StageFlags::compute,
                 rhi::StageFlags::compute | rhi::StageFlags::commandInput,
                 rhi::HazardFlags::bufferWrites
@@ -1500,8 +1577,10 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     FlaxGIDebugStage::updateIrradiance, stopAfterStage);
 
   rhi::ComputeEncoder* updateEncoder = cmd.beginComputePass();
+  uint32_t updateOrdinal = 0u;
   for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
   {
+    if(!cascadeSchedule.update[cascadeIndex]) continue;
     const FlaxDDGICascadePush cascadePush{cascadeIndex};
     const uint32_t frameCascadeIndex =
       frameCascadeTableIndex(frameIndex, cascadeIndex);
@@ -1559,7 +1638,8 @@ void FlaxDDGIPass::execute(const PassContext& context) const
       cmd.endEvent();
     }
 
-    if(cascadeIndex + 1u < cascadeCount)
+    ++updateOrdinal;
+    if(updateOrdinal < cascadeSchedule.updateCount)
     {
       cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                   rhi::HazardFlags::textureWrites);

@@ -214,11 +214,13 @@ void CS_Classify(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Write probe data
     probesData[dataCoord] = encodeProbeData(probeOffset / probesSpacing, state, attention);
 
-    // Mark disjoint deterministic inputs for the compaction pass.
+    // Activated probes are the dirty set: newly exposed or relocated atlas
+    // tiles must consume the priority budget before steady-state refreshes.
+    // Attention still affects sampling/history, but must not let a large set
+    // of near-camera probes starve genuinely dirty tiles.
     if (state != kDDGIProbeStateInactive)
     {
-        bool priorityProbe = state == kDDGIProbeStateActivated
-            || attention >= kDDGIProbeHighPriorityAttention;
+        bool priorityProbe = state == kDDGIProbeStateActivated;
         if (priorityProbe)
             activeProbes[priorityBase + probeIndex] = 1u;
         else

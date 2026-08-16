@@ -2994,7 +2994,20 @@ inline void MinimalLatestApp::drawFlaxDebugUI()
     config.maxUpdatedProbesPerFrame = static_cast<uint32_t>(std::max(maxProbes, 0));
     configChanged = true;
   }
-  ImGui::TextDisabled("All allocated cascades execute; DDGI Cascade selects their debug draw.");
+  int cascadeFrequency = static_cast<int>(config.cascadeUpdateFrequency);
+  if(ImGui::InputInt("Inner Cascade Period", &cascadeFrequency, 1, 2))
+  {
+    config.cascadeUpdateFrequency = static_cast<uint32_t>(std::max(cascadeFrequency, 1));
+    configChanged = true;
+  }
+  int classificationFrequency = static_cast<int>(config.probeClassificationFrequency);
+  if(ImGui::InputInt("Probe Classification Period", &classificationFrequency, 1, 4))
+  {
+    config.probeClassificationFrequency =
+      static_cast<uint32_t>(std::max(classificationFrequency, 1));
+    configChanged = true;
+  }
+  ImGui::TextDisabled("Coarser cascades update less often; dirty probe slabs update immediately.");
 
   configChanged |= ImGui::Checkbox("Request Surface Atlas", &config.enableGlobalSurfaceAtlas);
   ImGui::SameLine();

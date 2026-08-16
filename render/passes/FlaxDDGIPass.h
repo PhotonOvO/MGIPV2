@@ -20,6 +20,7 @@
 #include "../FlaxGIDebugModel.h"
 #include "../Pass.h"
 
+#include <array>
 #include <vector>
 
 namespace demo
@@ -142,7 +143,8 @@ private:
 
 	[[nodiscard]] FlaxGISpatialSnapshot captureSpatialSnapshot() const;
 	void writeFlaxDDGIDataToBuffer(
-		uint32_t frameIndex, const FlaxGISpatialSnapshot& spatialSnapshot) const;
+		uint32_t frameIndex, const FlaxGISpatialSnapshot& spatialSnapshot,
+		const std::array<uint32_t, FlaxDDGIResources::kMaxCascades>& cascadeBudgets) const;
 	[[nodiscard]] bool plansFullOutputUpdate(const DebugPassOptions& debugOptions) const;
 	[[nodiscard]] bool hasPendingReset(const DebugPassOptions& debugOptions) const;
 	[[nodiscard]] uint32_t frameCascadeTableIndex(

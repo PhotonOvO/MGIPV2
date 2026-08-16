@@ -66,8 +66,13 @@ namespace demo
 		glm::vec4 fallbackIrradiance{0.0f, 0.0f, 0.0f, 1.0f};
 		// Maximum probes updated per frame (budget cap). 0 = unlimited.
 		uint32_t maxUpdatedProbesPerFrame{256u};
-		// Inner cascade update frequency (1 = every frame, 2 = every other, etc.).
+		// Inner-cascade update period. Each coarser cascade doubles this period,
+		// while newly exposed probe slabs always update immediately.
 		uint32_t cascadeUpdateFrequency{1u};
+		// Rebuild active/dirty probe lists every N scheduled updates. The lists
+		// remain valid between rebuilds because the scene SDF is static; scrolling
+		// and resets bypass this period and classify immediately.
+		uint32_t probeClassificationFrequency{8u};
 		// Debug override: force a specific cascade for visualization (-1 = off).
 		int32_t debugCascadeOverride{-1};
 
