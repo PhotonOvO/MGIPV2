@@ -1788,9 +1788,9 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
     throw std::runtime_error(
       "Metal indexed-indirect argument-buffer layout is invalid");
   }
-  std::vector<std::byte> argumentBytesStorage(encodedLength);
-  const MetalRootDataAllocation commandArguments = allocator().allocateRootData(
-    argumentBytesStorage, static_cast<uint32_t>(encodedAlignment));
+  const MetalRootDataAllocation commandArguments =
+    allocator().allocateArgumentData(
+      encodedLength, static_cast<uint32_t>(encodedAlignment));
   argumentEncoder->setArgumentBuffer(
     commandArguments.buffer, commandArguments.offset);
   argumentEncoder->setIndirectCommandBuffer(commandBuffer, 0);
@@ -1806,10 +1806,9 @@ void MetalCommandBuffer::prepareIndexedIndirectImpl(
   };
   const MetalRootDataAllocation preparationConstants = allocator().allocateRootData(
     std::as_bytes(std::span{&parameters, 1}), alignof(decltype(parameters)));
-  const std::vector<std::byte> clampedArgumentStorage(
-    static_cast<size_t>(clampedArgumentBytes));
-  const MetalRootDataAllocation clampedArguments = allocator().allocateRootData(
-    clampedArgumentStorage, alignof(uint32_t));
+  const MetalRootDataAllocation clampedArguments =
+    allocator().allocateArgumentData(
+      clampedArgumentBytes, alignof(uint32_t));
   uint64_t drawCountAddress = 0;
   if(usesCountBuffer)
   {
