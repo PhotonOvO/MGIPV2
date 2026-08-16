@@ -16,8 +16,10 @@ class Object;
 namespace MTL {
 class Allocation;
 class Buffer;
+class Drawable;
 class IndirectCommandBuffer;
 class ResidencySet;
+class Texture;
 }
 
 namespace MTL4 {
@@ -226,6 +228,15 @@ public:
   void markSubmitted(SubmissionToken token);
   void markReusable();
   void requireQueueOperation(QueueOperation operation, const char* command) const;
+  void encodeDrawablePresent(TextureHandle sourceTexture,
+                             MTL::Texture* drawableTexture,
+                             MTL::ResidencySet* compositionResidencySet,
+                             MTL::ResidencySet* drawableResidencySet,
+                             MTL::Drawable* drawable);
+  [[nodiscard]] MTL::Drawable* drawableForPresent() const noexcept
+  {
+    return m_drawableForPresent;
+  }
 
   [[nodiscard]] MetalResourceTable& resources() const;
   [[nodiscard]] MetalCommandAllocator& allocator() const;
@@ -290,6 +301,7 @@ private:
   MTL4::RenderCommandEncoder* m_nativeRenderEncoder{nullptr};
   MTL4::ComputeCommandEncoder* m_nativeComputeEncoder{nullptr};
   MTL::ResidencySet* m_automaticResidencySet{nullptr};
+  MTL::Drawable* m_drawableForPresent{nullptr};
   EncoderKind m_active{EncoderKind::none};
   CommandBufferState m_state{CommandBufferState::idle};
   SubmissionToken m_submission{};

@@ -1361,6 +1361,7 @@ void MetalCommandBuffer::begin(CommandAllocator& allocatorValue)
     m_commandBuffer->beginCommandBuffer(m_allocator->nativeAllocator());
     m_commandBuffer->useResidencySet(m_automaticResidencySet);
     m_active = EncoderKind::none;
+    m_drawableForPresent = nullptr;
     m_submission = {};
     m_pendingProducer = StageFlags::none;
     m_pendingConsumer = StageFlags::none;
@@ -1919,6 +1920,60 @@ RHIResult MetalCommandBuffer::useResidencySet(ResidencySetHandle set)
                                  : "Metal residency-set replay failed");
   });
   return RHIResult::ok();
+}
+
+void MetalCommandBuffer::encodeDrawablePresent(
+  TextureHandle sourceTexture, MTL::Texture* drawableTexture,
+  MTL::ResidencySet* compositionResidencySet,
+  MTL::ResidencySet* drawableResidencySet, MTL::Drawable* drawable)
+{
+  requireRecording("MetalCommandBuffer::encodeDrawablePresent");
+  requireQueueOperation(QueueOperation::transfer,
+                        "MetalCommandBuffer::encodeDrawablePresent");
+  if(m_active != EncoderKind::none)
+    throw std::runtime_error("Metal drawable copy requires no active encoder");
+  if(m_drawableForPresent != nullptr)
+    throw std::runtime_error("Metal command buffer already has a drawable present");
+  if(drawableTexture == nullptr || compositionResidencySet == nullptr ||
+     drawableResidencySet == nullptr || drawable == nullptr)
+  {
+    throw std::invalid_argument("Metal drawable copy requires live native resources");
+  }
+
+  const MetalTextureRecord* source = resources().tryGetTexture(sourceTexture);
+  if(source == nullptr || source->nativeTexture == nullptr)
+    throw std::invalid_argument("Metal drawable copy source texture is stale");
+  if(source->nativeTexture->width() != drawableTexture->width() ||
+     source->nativeTexture->height() != drawableTexture->height() ||
+     source->nativeTexture->pixelFormat() != drawableTexture->pixelFormat())
+  {
+    throw std::invalid_argument("Metal drawable copy requires matching textures");
+  }
+
+  m_commandBuffer->useResidencySet(compositionResidencySet);
+  m_commandBuffer->useResidencySet(drawableResidencySet);
+  MTL4::ComputeCommandEncoder* encoder = m_commandBuffer->computeCommandEncoder();
+  require(encoder != nullptr, "Metal drawable copy failed to create an encoder");
+  encoder->setLabel(nsString("Metal4 drawable compute copy"));
+  encoder->barrierAfterQueueStages(MTL::StageAll, MTL::StageBlit,
+                                   MTL4::VisibilityOptionDevice);
+  encoder->copyFromTexture(source->nativeTexture, drawableTexture);
+  encoder->endEncoding();
+
+  trackTexture(sourceTexture);
+  retainNative(asObject(source->nativeTexture));
+  retainNative(asObject(drawableTexture));
+  retainNative(asObject(compositionResidencySet));
+  retainNative(asObject(drawableResidencySet));
+  retainNative(asObject(drawable));
+  m_drawableForPresent = drawable;
+  recordCommand(
+    [sourceTexture, drawableTexture, compositionResidencySet,
+     drawableResidencySet, drawable](MetalCommandBuffer& owner) {
+      owner.encodeDrawablePresent(sourceTexture, drawableTexture,
+                                  compositionResidencySet,
+                                  drawableResidencySet, drawable);
+    });
 }
 
 MTL4::CommandEncoder* MetalCommandBuffer::activeEncoder() const noexcept
@@ -3001,6 +3056,7 @@ void MetalCommandBuffer::markReusable()
   clearTracking();
   clearReplayCommands();
   m_active = EncoderKind::none;
+  m_drawableForPresent = nullptr;
   m_nativeRenderEncoder = nullptr;
   m_nativeComputeEncoder = nullptr;
   m_submission = {};

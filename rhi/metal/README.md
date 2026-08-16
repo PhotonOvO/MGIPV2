@@ -162,13 +162,12 @@ flipping plus ImGui rendering target those composition textures, so the backend
 never uses a drawable texture as a render attachment and never issues a draw
 command against one.
 
-`MetalSwapchain::present()` uses a reusable Metal 4 allocator and command buffer
-for each in-flight image. Its compute encoder performs an equal-size
-`copyFromTexture` from the completed composition texture to the drawable.
-Each presentation slot also owns a residency set containing its composition
-texture. The command buffer binds that set after every `beginCommandBuffer`, as
-Metal 4 clears prior command-buffer residency declarations at begin time.
-The copy command buffer also binds `CAMetalLayer::residencySet()`. Metal updates
+Before the frame command buffer is submitted, `MetalSwapchain::encodePresent()`
+appends an equal-size `copyFromTexture` from the completed composition texture to
+the drawable. This folds presentation into the frame's existing Metal 4 command
+buffer instead of allocating and committing a second command buffer every frame.
+Each presentation slot owns a residency set containing its composition texture.
+The frame command buffer also binds `CAMetalLayer::residencySet()`. Metal updates
 that set as drawable backing resources change, including during a window resize;
 without it, a valid copy submission can target a drawable whose resources are not
 resident and intermittently present an empty frame.
@@ -182,15 +181,14 @@ so blocking here cannot turn those states into a drawable wait.
 The required order is:
 
 ```text
-wait(drawable) -> encode scene/UI work -> commit frame command buffer
--> encode drawable compute copy -> commit copy command buffer
--> signalDrawable(drawable) -> drawable->present()
+wait(drawable) -> encode scene/UI work -> encode drawable compute copy
+-> commit frame command buffer -> signalDrawable(drawable)
+-> drawable->present()
 ```
 
 `MetalSwapchain::acquireNextImage()` waits for the drawable before exposing the
-corresponding composition texture. `Queue::submit()` commits the encoded frame.
-`MetalSwapchain::present()` commits the compute copy, signals the drawable on the
-Metal 4 queue, and then presents it.
+corresponding composition texture. `Queue::submit()` commits the encoded frame
+and signals its drawable. `MetalSwapchain::present()` then presents it.
 
 The queue's presentation completion event is scheduled after `signalDrawable`.
 Consequently, waiting for a presentation token (including `waitIdle()` during

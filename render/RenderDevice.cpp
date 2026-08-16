@@ -3402,6 +3402,12 @@ namespace demo
 		ASSERT(m_perFrame.frameScheduler.frameCount() != 0,
 		       "Per-frame FrameScheduler must be initialized");
 
+		if (m_swapchainDependent.hasAcquiredImage)
+		{
+			demo::profiling::ScopedCpuRange encodePresentRange("EncodePresent");
+			m_swapchainDependent.swapchain->encodePresent(cmdBuffer);
+		}
+
 		{
 			demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
 			(void)m_perFrame.frameScheduler.submitFrame(

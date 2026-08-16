@@ -87,6 +87,7 @@ SubmissionToken MetalQueue::submit(const SubmitBatch& batch)
 
   std::vector<const MTL4::CommandBuffer*> nativeBuffers;
   nativeBuffers.reserve(batch.commandBuffers.size());
+  MTL::Drawable* drawable = nullptr;
   for(CommandBuffer* commandBuffer : batch.commandBuffers)
   {
     auto* metalBuffer = dynamic_cast<MetalCommandBuffer*>(commandBuffer);
@@ -94,10 +95,21 @@ SubmissionToken MetalQueue::submit(const SubmitBatch& batch)
       throw std::invalid_argument("MetalQueue::submit received a command buffer from another backend");
     metalBuffer->validateForSubmit(*this);
     nativeBuffers.push_back(metalBuffer->nativeHandle());
+    if(MTL::Drawable* pendingDrawable = metalBuffer->drawableForPresent();
+       pendingDrawable != nullptr)
+    {
+      if(drawable != nullptr)
+        throw std::invalid_argument("Metal submission contains multiple drawable presents");
+      if(!m_info.capabilities.supportsPresent)
+        throw std::runtime_error("Metal drawable present requires a present-capable queue");
+      drawable = pendingDrawable;
+    }
   }
 
   const uint64_t submissionValue = ++m_lastSubmittedValue;
   m_queue->commit(nativeBuffers.data(), nativeBuffers.size());
+  if(drawable != nullptr)
+    m_queue->signalDrawable(drawable);
   m_queue->signalEvent(m_completionEvent, submissionValue);
 
   const SubmissionToken token{m_identity, submissionValue};
@@ -108,29 +120,6 @@ SubmissionToken MetalQueue::submit(const SubmitBatch& batch)
   incrementHotPathCounter(BackendType::metal, HotPathCounter::submittedCommandBuffers,
                           batch.commandBuffers.size());
   return token;
-}
-
-SubmissionToken MetalQueue::commitPresentationCommandBuffer(
-  const MTL4::CommandBuffer* commandBuffer, MTL::Drawable* drawable)
-{
-  if(m_queue == nullptr || commandBuffer == nullptr || drawable == nullptr)
-  {
-    throw std::invalid_argument(
-      "MetalQueue::commitPresentationCommandBuffer requires initialized objects and a drawable");
-  }
-
-  const MTL4::CommandBuffer* nativeBuffers[]{commandBuffer};
-  const uint64_t submissionValue = ++m_lastSubmittedValue;
-  m_queue->commit(nativeBuffers, 1);
-  // Keep the completion event last. Swapchain rebuild waits on this token before
-  // releasing drawable references and replacing CAMetalLayer backing resources.
-  m_queue->signalDrawable(drawable);
-  m_queue->signalEvent(m_completionEvent, submissionValue);
-
-  incrementHotPathCounter(BackendType::metal, HotPathCounter::queueSubmits);
-  incrementHotPathCounter(BackendType::metal,
-                          HotPathCounter::submittedCommandBuffers, 1);
-  return SubmissionToken{m_identity, submissionValue};
 }
 
 bool MetalQueue::isComplete(SubmissionToken token) const

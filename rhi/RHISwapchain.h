@@ -6,6 +6,8 @@
 
 namespace demo::rhi {
 
+class CommandBuffer;
+
 struct AcquireResult
 {
   enum class Status
@@ -41,6 +43,9 @@ public:
   virtual ~Swapchain() = default;
 
   virtual AcquireResult acquireNextImage()           = 0;
+  // Backends that require a final drawable copy can append it to the frame
+  // command buffer before submission. Direct-present backends keep the no-op.
+  virtual void          encodePresent(CommandBuffer& /*commandBuffer*/) {}
   virtual PresentResult present()                    = 0;
   // Releases backend swapchain resources; called by the render layer at shutdown.
   virtual void          deinit() {}

@@ -38,8 +38,6 @@ public:
   void waitIdle() override;
   [[nodiscard]] SubmissionToken lastSubmittedToken() const noexcept override;
 
-  [[nodiscard]] SubmissionToken commitPresentationCommandBuffer(
-    const MTL4::CommandBuffer* commandBuffer, MTL::Drawable* drawable);
   void waitDrawable(MTL::Drawable* drawable);
 
   [[nodiscard]] MTL4::CommandQueue* nativeQueue() const noexcept { return m_queue; }

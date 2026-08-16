@@ -9,11 +9,6 @@ class MetalDrawable;
 class MetalLayer;
 }
 
-namespace MTL4 {
-class CommandAllocator;
-class CommandBuffer;
-}
-
 namespace MTL {
 class ResidencySet;
 }
@@ -40,6 +35,7 @@ public:
   [[nodiscard]] bool needsRebuild() const override;
   void rebuild() override;
   [[nodiscard]] AcquireResult acquireNextImage() override;
+  void encodePresent(CommandBuffer& commandBuffer) override;
   [[nodiscard]] PresentResult present() override;
   [[nodiscard]] TextureHandle currentTexture() const override;
   [[nodiscard]] TextureViewHandle textureView(uint32_t imageIndex) const override;
@@ -53,8 +49,6 @@ private:
   {
     TextureHandle texture{};
     TextureViewHandle view{};
-    MTL4::CommandAllocator* presentAllocator{nullptr};
-    MTL4::CommandBuffer* presentCommandBuffer{nullptr};
     MTL::ResidencySet* presentResidencySet{nullptr};
     CA::MetalDrawable* pendingDrawable{nullptr};
     SubmissionToken presentSubmission{};
@@ -76,6 +70,7 @@ private:
   Extent2D m_extent{};
   bool m_vSync{true};
   bool m_hasAcquiredImage{false};
+  bool m_presentEncoded{false};
   bool m_needsRebuild{true};
 };
 

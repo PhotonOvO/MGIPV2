@@ -1,14 +1,12 @@
 #include "MetalSwapchain.h"
 
 #include "MetalCommon.h"
+#include "MetalCommandBuffer.h"
 #include "MetalDevice.h"
 #include "MetalQueue.h"
 #include "MetalResourceTable.h"
 #include "MetalSurface.h"
 
-#include <Metal/MTL4CommandAllocator.hpp>
-#include <Metal/MTL4CommandBuffer.hpp>
-#include <Metal/MTL4ComputeCommandEncoder.hpp>
 #include <Metal/MTLDevice.hpp>
 #include <Metal/MTLResidencySet.hpp>
 #include <Metal/MTLTexture.hpp>
@@ -62,6 +60,7 @@ void MetalSwapchain::deinit()
   m_extent = {};
   m_frameImageIndex = 0;
   m_hasAcquiredImage = false;
+  m_presentEncoded = false;
   m_needsRebuild = true;
 }
 
@@ -128,7 +127,6 @@ AcquireResult MetalSwapchain::acquireNextImage()
   const uint32_t imageIndex = m_frameImageIndex;
   ImageResource& image = m_images[imageIndex];
   if(!image.texture.isValid() || !image.view.isValid() ||
-     image.presentAllocator == nullptr || image.presentCommandBuffer == nullptr ||
      image.presentResidencySet == nullptr)
   {
     throw std::runtime_error("MetalSwapchain has no presentation composition image");
@@ -162,6 +160,7 @@ AcquireResult MetalSwapchain::acquireNextImage()
 
   m_currentDrawable = drawable;
   m_hasAcquiredImage = true;
+  m_presentEncoded = false;
   return AcquireResult{
     .texture = image.texture,
     .imageIndex = imageIndex,
@@ -169,44 +168,43 @@ AcquireResult MetalSwapchain::acquireNextImage()
   };
 }
 
+void MetalSwapchain::encodePresent(CommandBuffer& commandBuffer)
+{
+  if(!m_hasAcquiredImage || m_currentDrawable == nullptr)
+    return;
+  auto* metalCommandBuffer = dynamic_cast<MetalCommandBuffer*>(&commandBuffer);
+  if(metalCommandBuffer == nullptr)
+    throw std::invalid_argument("MetalSwapchain received a foreign command buffer");
+
+  ImageResource& image = m_images[m_frameImageIndex];
+  MTL::Texture* drawableTexture = m_currentDrawable->texture();
+  MTL::ResidencySet* drawableResidencySet = m_layer->residencySet();
+  require(drawableTexture != nullptr && image.presentResidencySet != nullptr &&
+            drawableResidencySet != nullptr,
+          "MetalSwapchain requires live presentation textures and residency sets");
+  metalCommandBuffer->encodeDrawablePresent(
+    image.texture, drawableTexture, image.presentResidencySet,
+    drawableResidencySet,
+    reinterpret_cast<MTL::Drawable*>(m_currentDrawable));
+  m_presentEncoded = true;
+}
+
 PresentResult MetalSwapchain::present()
 {
   if(!m_hasAcquiredImage || m_currentDrawable == nullptr)
     return PresentResult{.status = PresentResult::Status::outOfDate};
+  if(!m_presentEncoded)
+    throw std::runtime_error("MetalSwapchain::present requires an encoded drawable copy");
 
   ImageResource& image = m_images[m_frameImageIndex];
-  const MetalTextureRecord* composition =
-    m_device->resourceTable().tryGetTexture(image.texture);
-  MTL::Texture* drawableTexture = m_currentDrawable->texture();
-  require(composition != nullptr && composition->nativeTexture != nullptr &&
-            drawableTexture != nullptr,
-          "MetalSwapchain::present requires live composition and drawable textures");
-
-  image.presentCommandBuffer->beginCommandBuffer(image.presentAllocator);
-  image.presentCommandBuffer->useResidencySet(image.presentResidencySet);
-  MTL::ResidencySet* drawableResidencySet = m_layer->residencySet();
-  require(drawableResidencySet != nullptr,
-          "MetalSwapchain requires the CAMetalLayer drawable residency set");
-  image.presentCommandBuffer->useResidencySet(drawableResidencySet);
-  image.presentCommandBuffer->setLabel(nsString("Metal4 drawable compute copy"));
-  MTL4::ComputeCommandEncoder* encoder =
-    image.presentCommandBuffer->computeCommandEncoder();
-  require(encoder != nullptr,
-          "MetalSwapchain failed to create the drawable compute-copy encoder");
-  encoder->setLabel(nsString("Metal4 drawable compute copy"));
-  encoder->barrierAfterQueueStages(MTL::StageAll, MTL::StageBlit,
-                                   MTL4::VisibilityOptionDevice);
-  encoder->copyFromTexture(composition->nativeTexture, drawableTexture);
-  encoder->endEncoding();
-  image.presentCommandBuffer->endCommandBuffer();
-
-  MTL::Drawable* drawable = reinterpret_cast<MTL::Drawable*>(m_currentDrawable);
-  image.presentSubmission =
-    m_queue->commitPresentationCommandBuffer(image.presentCommandBuffer, drawable);
-  drawable->present();
+  image.presentSubmission = m_queue->lastSubmittedToken();
+  require(image.presentSubmission.isValid(),
+          "MetalSwapchain::present requires a submitted frame");
+  reinterpret_cast<MTL::Drawable*>(m_currentDrawable)->present();
   image.pendingDrawable = m_currentDrawable;
   m_currentDrawable = nullptr;
   m_hasAcquiredImage = false;
+  m_presentEncoded = false;
   m_frameImageIndex = (m_frameImageIndex + 1u) % m_maxFramesInFlight;
   return PresentResult{.status = PresentResult::Status::success};
 }
@@ -273,13 +271,6 @@ void MetalSwapchain::createImageResources()
       .layerCount = 1,
       .debugName = "Metal4 present composition view",
     });
-    image.presentAllocator = m_device->nativeDevice()->newCommandAllocator();
-    image.presentCommandBuffer = m_device->nativeDevice()->newCommandBuffer();
-    require(image.presentAllocator != nullptr && image.presentCommandBuffer != nullptr,
-            "MetalSwapchain failed to allocate Metal 4 presentation commands");
-    image.presentCommandBuffer->setLabel(
-      nsString("Metal4 reusable drawable compute copy"));
-
     const MetalTextureRecord* composition =
       m_device->resourceTable().tryGetTexture(image.texture);
     require(composition != nullptr && composition->nativeTexture != nullptr,
@@ -307,10 +298,6 @@ void MetalSwapchain::destroyImageResources()
   {
     if(image.pendingDrawable != nullptr)
       image.pendingDrawable->release();
-    if(image.presentCommandBuffer != nullptr)
-      image.presentCommandBuffer->release();
-    if(image.presentAllocator != nullptr)
-      image.presentAllocator->release();
     if(image.presentResidencySet != nullptr)
     {
       image.presentResidencySet->endResidency();
@@ -333,8 +320,6 @@ void MetalSwapchain::retireImagePresentation(ImageResource& image)
     image.pendingDrawable->release();
     image.pendingDrawable = nullptr;
   }
-  if(image.presentAllocator != nullptr)
-    image.presentAllocator->reset();
   image.presentSubmission = {};
 }
 
@@ -343,6 +328,7 @@ void MetalSwapchain::releaseCurrentDrawable() noexcept
   if(m_currentDrawable != nullptr)
     m_currentDrawable->release();
   m_currentDrawable = nullptr;
+  m_presentEncoded = false;
 }
 
 }  // namespace demo::rhi::metal
