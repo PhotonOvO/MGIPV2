@@ -1413,10 +1413,10 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   cmd.beginEvent("DDGI.Classify");
   {
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
+    enc->setPipeline(m_classifyPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const FlaxDDGICascadePush cascadePush{cascadeIndex};
-      enc->setPipeline(m_classifyPipeline);
       enc->setArgumentTable(0, m_classifyTables[
         frameCascadeTableIndex(frameIndex, cascadeIndex)]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
@@ -1445,6 +1445,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   cmd.beginEvent("DDGI.Compact");
   {
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
+    enc->setPipeline(m_compactPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1456,7 +1457,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      enc->setPipeline(m_compactPipeline);
       enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       enc->dispatch({1, 1, 1});
@@ -1479,6 +1479,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     // Dispatch cascades in order with an explicit barrier so each one consumes
     // only the slack left by the preceding deterministic allocations.
     rhi::ComputeEncoder* enc = cmd.beginComputePass();
+    enc->setPipeline(m_initArgsPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1490,7 +1491,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      enc->setPipeline(m_initArgsPipeline);
       enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       enc->dispatch({1, 1, 1});
