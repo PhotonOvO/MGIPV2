@@ -303,6 +303,7 @@ void MetalRenderEncoder::prepare(
   m_indexBuffer = {};
   m_indexOffset = 0;
   m_indexFormat = IndexFormat::uint32;
+  m_pipelineStateCacheValid = false;
   m_scissor = defaultScissor;
   m_valid = true;
 }
@@ -349,28 +350,57 @@ void MetalRenderEncoder::setPipeline(PipelineHandle pipelineHandle)
   m_bindings.snapshot = nullptr;
   m_owner->trackPipeline(pipelineHandle);
   m_owner->retainNative(asObject(pipeline->nativeRenderPipeline));
-  if(pipeline->nativeDepthStencilState != nullptr)
-    m_owner->retainNative(asObject(pipeline->nativeDepthStencilState));
 
   m_encoder->setRenderPipelineState(pipeline->nativeRenderPipeline);
-  m_encoder->setDepthStencilState(pipeline->nativeDepthStencilState);
-  m_encoder->setCullMode(metalCullMode(pipeline->rasterState.cullMode));
-  m_encoder->setFrontFacingWinding(
-    pipeline->rasterState.frontFace == FrontFace::clockwise
-      ? MTL::WindingClockwise
-      : MTL::WindingCounterClockwise);
   if(pipeline->rasterState.polygonMode == PolygonMode::point)
     throw std::runtime_error("Metal does not support point polygon fill mode");
-  m_encoder->setTriangleFillMode(
-    pipeline->rasterState.polygonMode == PolygonMode::line
-      ? MTL::TriangleFillModeLines
-      : MTL::TriangleFillModeFill);
+
+  const DepthState& depthState = pipeline->depthState;
+  if(!m_pipelineStateCacheValid ||
+     depthState.depthTestEnable != m_depthState.depthTestEnable ||
+     depthState.depthWriteEnable != m_depthState.depthWriteEnable ||
+     depthState.depthCompareOp != m_depthState.depthCompareOp)
+  {
+    m_owner->retainNative(asObject(pipeline->nativeDepthStencilState));
+    m_encoder->setDepthStencilState(pipeline->nativeDepthStencilState);
+  }
+
+  const RasterState& rasterState = pipeline->rasterState;
+  if(!m_pipelineStateCacheValid || rasterState.cullMode != m_rasterState.cullMode)
+    m_encoder->setCullMode(metalCullMode(rasterState.cullMode));
+  if(!m_pipelineStateCacheValid || rasterState.frontFace != m_rasterState.frontFace)
+  {
+    m_encoder->setFrontFacingWinding(
+      rasterState.frontFace == FrontFace::clockwise
+        ? MTL::WindingClockwise
+        : MTL::WindingCounterClockwise);
+  }
+  if(!m_pipelineStateCacheValid || rasterState.polygonMode != m_rasterState.polygonMode)
+  {
+    m_encoder->setTriangleFillMode(
+      rasterState.polygonMode == PolygonMode::line
+        ? MTL::TriangleFillModeLines
+        : MTL::TriangleFillModeFill);
+  }
+
   if(pipeline->rasterState.depthBiasEnable)
   {
-    m_encoder->setDepthBias(pipeline->rasterState.depthBiasConstantFactor,
-                            pipeline->rasterState.depthBiasSlopeFactor,
-                            pipeline->rasterState.depthBiasClamp);
+    if(!m_pipelineStateCacheValid || !m_rasterState.depthBiasEnable ||
+       rasterState.depthBiasConstantFactor != m_rasterState.depthBiasConstantFactor ||
+       rasterState.depthBiasSlopeFactor != m_rasterState.depthBiasSlopeFactor ||
+       rasterState.depthBiasClamp != m_rasterState.depthBiasClamp)
+    {
+      m_encoder->setDepthBias(rasterState.depthBiasConstantFactor,
+                              rasterState.depthBiasSlopeFactor,
+                              rasterState.depthBiasClamp);
+    }
   }
+  else if(m_pipelineStateCacheValid && m_rasterState.depthBiasEnable)
+    m_encoder->setDepthBias(0.0f, 0.0f, 0.0f);
+
+  m_depthState = depthState;
+  m_rasterState = rasterState;
+  m_pipelineStateCacheValid = true;
   m_owner->recordCommand([pipelineHandle](MetalCommandBuffer& owner) {
     owner.m_renderEncoder.setPipeline(pipelineHandle);
   });

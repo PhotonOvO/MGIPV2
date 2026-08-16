@@ -148,7 +148,10 @@ private:
   BufferHandle m_indexBuffer{};
   uint64_t m_indexOffset{0};
   IndexFormat m_indexFormat{IndexFormat::uint32};
+  RasterState m_rasterState{};
+  DepthState m_depthState{};
   Rect2D m_scissor{};
+  bool m_pipelineStateCacheValid{false};
   bool m_valid{false};
 };
 
