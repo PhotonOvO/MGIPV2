@@ -1385,17 +1385,21 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     return;
   }
 
+  const std::array<rhi::TextureHandle, 1> probesDataWrite{
+    m_flaxResources->getProbesData(),
+  };
   cmd.beginEvent("DDGI.Classify");
+  rhi::ComputeEncoder* setupEncoder = nullptr;
   {
-    rhi::ComputeEncoder* enc = cmd.beginComputePass();
-    enc->setPipeline(m_classifyPipeline);
+    setupEncoder = cmd.beginComputePass();
+    setupEncoder->setPipeline(m_classifyPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const FlaxDDGICascadePush cascadePush{cascadeIndex};
-      enc->setArgumentTable(0, m_classifyTables[
+      setupEncoder->setArgumentTable(0, m_classifyTables[
         frameCascadeTableIndex(frameIndex, cascadeIndex)]);
-      enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
-      enc->dispatch({(totalProbes + 31u) / 32u, 1, 1});
+      setupEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
+      setupEncoder->dispatch({(totalProbes + 31u) / 32u, 1, 1});
 
       if(cascadeIndex + 1u < cascadeCount)
       {
@@ -1405,22 +1409,20 @@ void FlaxDDGIPass::execute(const PassContext& context) const
                       | rhi::HazardFlags::storageBufferReadWrite);
       }
     }
-    cmd.endEncoding();
-    const std::array<rhi::TextureHandle, 1> probesDataWrite{
-      m_flaxResources->getProbesData(),
-    };
-    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::bufferWrites
                   | rhi::HazardFlags::storageBufferReadWrite);
   }
   cmd.endEvent();
+  if(runToStageRequested && stopAfterStage == FlaxGIDebugStage::classify)
+  {
+    cmd.endEncoding();
+    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
+  }
   if (stopAfter(FlaxGIDebugStage::classify, false)) return;
 
-  rhi::ComputeEncoder* setupEncoder = nullptr;
   cmd.beginEvent("DDGI.Compact");
   {
-    setupEncoder = cmd.beginComputePass();
     setupEncoder->setPipeline(m_compactPipeline);
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
@@ -1478,6 +1480,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
       }
     }
     cmd.endEncoding();
+    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
     cmd.barrier(rhi::StageFlags::compute,
                 rhi::StageFlags::compute | rhi::StageFlags::commandInput,
                 rhi::HazardFlags::bufferWrites
