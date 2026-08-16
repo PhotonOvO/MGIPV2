@@ -211,6 +211,8 @@ namespace demo
 			| rhi::TextureUsageFlags::sampled
 			| rhi::TextureUsageFlags::transferSrc
 			| rhi::TextureUsageFlags::transferDst;
+		const auto gbufferTargetUsage = rhi::TextureUsageFlags::colorAttachment
+			| rhi::TextureUsageFlags::sampled;
 
 		m_resources.colorImages.resize(numColor);
 		m_resources.colorViews.resize(numColor);
@@ -223,7 +225,7 @@ namespace demo
 			const rhi::TextureDesc imageInfo =
 				makeTextureDesc(m_createInfo.color[c],
 				                m_createInfo.size,
-				                colorTargetUsage | rhi::TextureUsageFlags::storage,
+				                gbufferTargetUsage,
 				                m_createInfo.sampleCount,
 				                1,
 				                imageName.c_str());
@@ -453,6 +455,9 @@ namespace demo
 			}
 		}
 
+		// GBuffer render passes clear every attachment before first use. Only establish
+		// the initial state here; avoiding transfer-destination/storage usage keeps these
+		// private render targets eligible for Metal bandwidth compression.
 		for (uint32_t c = 0; c < numColor; ++c)
 		{
 			const rhi::TextureSubresourceRange range{
@@ -465,8 +470,6 @@ namespace demo
 				.range = range,
 			};
 			cmdBuffer.resourceBarrier(std::span{&barrier, 1}, {});
-			cmdBuffer.clearColorTexture(m_resources.colorImages[c].image, range,
-			                            rhi::ClearColorValue{0.F, 0.F, 0.F, 0.F});
 		}
 
 		// Initialize output texture layout
@@ -537,7 +540,7 @@ namespace demo
 			for (size_t d = 0; d < m_resources.uiImageViews.size(); ++d)
 			{
 				m_imguiTextureIds[d] = m_imguiRenderer->registerTexture(
-					m_resources.uiImageViews[d], rhi::ArgumentAccessIntent::readWrite);
+					m_resources.uiImageViews[d], rhi::ArgumentAccessIntent::sampledRead);
 			}
 		}
 

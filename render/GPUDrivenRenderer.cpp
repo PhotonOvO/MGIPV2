@@ -123,6 +123,7 @@ namespace demo
 			case rhi::TextureFormat::bgra8Unorm:
 			case rhi::TextureFormat::rgba8Unorm:
 			case rhi::TextureFormat::rgba8Srgb:
+			case rhi::TextureFormat::r11g11b10Ufloat:
 				return 4u;
 			case rhi::TextureFormat::rg16Sfloat:
 				return 4u;
@@ -152,6 +153,8 @@ namespace demo
 				return "R8G8B8A8_SRGB";
 			case rhi::TextureFormat::rgba16Sfloat:
 				return "R16G16B16A16_SFLOAT";
+			case rhi::TextureFormat::r11g11b10Ufloat:
+				return "B10G11R11_UFLOAT";
 			case rhi::TextureFormat::rg16Sfloat:
 				return "R16G16_SFLOAT";
 			case rhi::TextureFormat::undefined:

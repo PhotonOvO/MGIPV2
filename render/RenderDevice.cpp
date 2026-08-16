@@ -160,19 +160,34 @@ namespace demo
 
 		[[nodiscard]] rhi::TextureFormat findPortableDepthFormat(rhi::Device& device)
 		{
-			constexpr rhi::FormatFeatureFlag depthFeature = rhi::FormatFeatureFlag::depthStencilAttachment;
 			for (rhi::TextureFormat fmt : {
-					 rhi::TextureFormat::d32Sfloat,
 					 rhi::TextureFormat::d16Unorm,
+					 rhi::TextureFormat::d32Sfloat,
 					 rhi::TextureFormat::d32SfloatS8,
 					 rhi::TextureFormat::d24UnormS8,
 				 })
 			{
-				if (device.isFormatSupported(fmt, depthFeature))
+				if (device.isFormatSupported(fmt, rhi::FormatFeatureFlag::depthStencilAttachment)
+					&& device.isFormatSupported(fmt, rhi::FormatFeatureFlag::sampledImage))
 					return fmt;
 			}
-			ASSERT(false, "No supported depth format found");
+			ASSERT(false, "No supported sampled depth format found");
 			return rhi::TextureFormat::d32Sfloat;
+		}
+
+		[[nodiscard]] rhi::TextureFormat findPortableGBufferEmissiveFormat(rhi::Device& device)
+		{
+			for (rhi::TextureFormat fmt : {
+					 rhi::TextureFormat::r11g11b10Ufloat,
+					 rhi::TextureFormat::rgba16Sfloat,
+				 })
+			{
+				if (device.isFormatSupported(fmt, rhi::FormatFeatureFlag::colorAttachment)
+					&& device.isFormatSupported(fmt, rhi::FormatFeatureFlag::sampledImage))
+					return fmt;
+			}
+			ASSERT(false, "No supported emissive GBuffer format found");
+			return rhi::TextureFormat::rgba16Sfloat;
 		}
 
 		[[nodiscard]] const char* formatDisplayName(rhi::TextureFormat format)
@@ -183,6 +198,7 @@ namespace demo
 			case rhi::TextureFormat::rgba8Unorm:   return "R8G8B8A8_UNORM";
 			case rhi::TextureFormat::rgba8Srgb:    return "R8G8B8A8_SRGB";
 			case rhi::TextureFormat::rgba16Sfloat: return "R16G16B16A16_SFLOAT";
+			case rhi::TextureFormat::r11g11b10Ufloat: return "B10G11R11_UFLOAT";
 			case rhi::TextureFormat::rg16Sfloat:   return "R16G16_SFLOAT";
 			case rhi::TextureFormat::r16Sfloat:    return "R16_SFLOAT";
 			case rhi::TextureFormat::d32Sfloat:    return "D32_SFLOAT";
@@ -810,12 +826,13 @@ namespace demo
 		m_perFrame.uploadManager.execute([&](rhi::CommandBuffer& rhiCmd)
 		{
 			const rhi::TextureFormat depthFormat = findPortableDepthFormat(*m_device.device);
+			const rhi::TextureFormat emissiveFormat = findPortableGBufferEmissiveFormat(*m_device.device);
 			SceneResources::CreateInfo sceneResourcesInit{
 				.size = m_swapchainDependent.windowSize,
 				.color = {
 					rhi::TextureFormat::rgba8Unorm, // GBuffer0: BaseColor.rgb + roughness
 					rhi::TextureFormat::rgba8Unorm, // GBuffer1: oct normal.xy + metallic + AO
-					rhi::TextureFormat::rgba16Sfloat, // GBuffer2: emissive.rgb + material flags
+					emissiveFormat, // GBuffer2: emissive.rgb (alpha is unused)
 				},
 				.depth = depthFormat,
 				.linearSampler = m_device.sceneLinearSamplerHandle,
@@ -4669,11 +4686,9 @@ namespace demo
 
 			// Packed GBuffer formats: 3 color attachments + depth
 			const std::array<rhi::TextureFormat, kPackedGBufferTargetCount> gbufferColorFormats{
-				{
-					rhi::TextureFormat::rgba8Unorm, // GBuffer0: BaseColor.rgb + Roughness
-					rhi::TextureFormat::rgba8Unorm, // GBuffer1: OctNormal.xy + Metallic + AO
-					rhi::TextureFormat::rgba16Sfloat, // GBuffer2: Emissive.rgb + flags
-				}
+				m_swapchainDependent.sceneResources.getColorFormat(0),
+				m_swapchainDependent.sceneResources.getColorFormat(1),
+				m_swapchainDependent.sceneResources.getColorFormat(2),
 			};
 
 			// Specialization constant for alpha test (uint32_t = 4 bytes)
