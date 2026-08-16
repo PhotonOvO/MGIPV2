@@ -261,6 +261,11 @@ private:
                      HazardFlags hazards);
   using ReplayCommand = std::function<void(MetalCommandBuffer&)>;
   void recordCommand(ReplayCommand command);
+  [[nodiscard]] size_t storeRootConstantReplayData(
+    std::span<const std::byte> data);
+  [[nodiscard]] std::span<const std::byte> rootConstantReplayData(
+    size_t index) const;
+  void clearReplayCommands();
   [[nodiscard]] bool argumentTableSnapshotsChanged() const;
   void reencodeForSubmit();
   void rebuildAutomaticResidencySet();
@@ -306,6 +311,8 @@ private:
   std::vector<MetalArgumentTableSnapshotSource> m_argumentTableSnapshotSources;
   std::vector<MetalPreparedIndexedIndirect> m_preparedIndexedIndirect;
   std::vector<ReplayCommand> m_replayCommands;
+  std::vector<std::vector<std::byte>> m_rootConstantReplayStorage;
+  size_t m_rootConstantReplayStorageCount{0};
   bool m_replaying{false};
 
   StageFlags m_pendingProducer{StageFlags::none};

@@ -485,11 +485,15 @@ void MetalRenderEncoder::setRootConstants(
   root->constants.assign(data.begin(), data.end());
   root->pointer = {};
   m_bindings.dirty = true;
-  std::vector<std::byte> replayData(data.begin(), data.end());
-  m_owner->recordCommand(
-    [stages, slot, replayData = std::move(replayData)](MetalCommandBuffer& owner) {
-      owner.m_renderEncoder.setRootConstants(stages, slot, replayData);
-    });
+  if(!m_owner->m_replaying)
+  {
+    const size_t replayDataIndex = m_owner->storeRootConstantReplayData(data);
+    m_owner->recordCommand(
+      [stages, slot, replayDataIndex](MetalCommandBuffer& owner) {
+        owner.m_renderEncoder.setRootConstants(
+          stages, slot, owner.rootConstantReplayData(replayDataIndex));
+      });
+  }
 }
 
 void MetalRenderEncoder::setRootPointer(
@@ -941,11 +945,15 @@ void MetalComputeEncoder::setRootConstants(
   root->constants.assign(data.begin(), data.end());
   root->pointer = {};
   m_bindings.dirty = true;
-  std::vector<std::byte> replayData(data.begin(), data.end());
-  m_owner->recordCommand(
-    [slot, replayData = std::move(replayData)](MetalCommandBuffer& owner) {
-      owner.m_computeEncoder.setRootConstants(slot, replayData);
-    });
+  if(!m_owner->m_replaying)
+  {
+    const size_t replayDataIndex = m_owner->storeRootConstantReplayData(data);
+    m_owner->recordCommand(
+      [slot, replayDataIndex](MetalCommandBuffer& owner) {
+        owner.m_computeEncoder.setRootConstants(
+          slot, owner.rootConstantReplayData(replayDataIndex));
+      });
+  }
 }
 
 void MetalComputeEncoder::setRootPointer(uint32_t slot, GpuPtr ptr)
@@ -1347,7 +1355,7 @@ void MetalCommandBuffer::begin(CommandAllocator& allocatorValue)
   try
   {
     if(!m_replaying)
-      m_replayCommands.clear();
+      clearReplayCommands();
     releaseRetainedResources();
     clearTracking();
     m_commandBuffer->beginCommandBuffer(m_allocator->nativeAllocator());
@@ -2211,6 +2219,33 @@ void MetalCommandBuffer::recordCommand(ReplayCommand command)
     m_replayCommands.push_back(std::move(command));
 }
 
+size_t MetalCommandBuffer::storeRootConstantReplayData(
+  std::span<const std::byte> data)
+{
+  require(!m_replaying && !data.empty(),
+          "Metal root-constant replay storage requires recording data");
+  const size_t index = m_rootConstantReplayStorageCount;
+  if(index == m_rootConstantReplayStorage.size())
+    m_rootConstantReplayStorage.emplace_back();
+  m_rootConstantReplayStorage[index].assign(data.begin(), data.end());
+  ++m_rootConstantReplayStorageCount;
+  return index;
+}
+
+std::span<const std::byte> MetalCommandBuffer::rootConstantReplayData(
+  size_t index) const
+{
+  require(index < m_rootConstantReplayStorageCount,
+          "Metal root-constant replay storage index is invalid");
+  return m_rootConstantReplayStorage[index];
+}
+
+void MetalCommandBuffer::clearReplayCommands()
+{
+  m_replayCommands.clear();
+  m_rootConstantReplayStorageCount = 0;
+}
+
 MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
   MetalEncoderBindingState& state, MetalPipelineKind expectedKind)
 {
@@ -2964,7 +2999,7 @@ void MetalCommandBuffer::markReusable()
   }
   releaseRetainedResources();
   clearTracking();
-  m_replayCommands.clear();
+  clearReplayCommands();
   m_active = EncoderKind::none;
   m_nativeRenderEncoder = nullptr;
   m_nativeComputeEncoder = nullptr;
