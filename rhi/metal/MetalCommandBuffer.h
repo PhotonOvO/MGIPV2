@@ -300,6 +300,9 @@ private:
   std::vector<const MTL::Allocation*> m_nativeAllocations;
   std::vector<NS::Object*> m_retainedResources;
   std::vector<const MTL::Allocation*> m_automaticResidencyAllocations;
+  std::vector<const MTL::Allocation*> m_automaticResidencyScratchAllocations;
+  std::vector<const MTL::Allocation*> m_automaticResidencyRemovalScratch;
+  std::vector<const MTL::Allocation*> m_automaticResidencyAdditionScratch;
   std::vector<MetalArgumentTableSnapshotSource> m_argumentTableSnapshotSources;
   std::vector<MetalPreparedIndexedIndirect> m_preparedIndexedIndirect;
   std::vector<ReplayCommand> m_replayCommands;

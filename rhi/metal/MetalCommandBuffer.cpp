@@ -2574,7 +2574,9 @@ void MetalCommandBuffer::rebuildAutomaticResidencySet()
 {
   require(m_automaticResidencySet != nullptr,
           "Metal command buffer has no automatic residency set");
-  std::vector<const MTL::Allocation*> next;
+  std::vector<const MTL::Allocation*>& next =
+    m_automaticResidencyScratchAllocations;
+  next.clear();
   m_allocator->appendScratchAllocations(next);
 
   for(BufferHandle handle : m_buffers)
@@ -2627,8 +2629,12 @@ void MetalCommandBuffer::rebuildAutomaticResidencySet()
   std::sort(next.begin(), next.end(), less);
   next.erase(std::unique(next.begin(), next.end()), next.end());
 
-  std::vector<const MTL::Allocation*> removals;
-  std::vector<const MTL::Allocation*> additions;
+  std::vector<const MTL::Allocation*>& removals =
+    m_automaticResidencyRemovalScratch;
+  std::vector<const MTL::Allocation*>& additions =
+    m_automaticResidencyAdditionScratch;
+  removals.clear();
+  additions.clear();
   std::set_difference(
     m_automaticResidencyAllocations.begin(), m_automaticResidencyAllocations.end(),
     next.begin(), next.end(), std::back_inserter(removals), less);
@@ -2642,7 +2648,7 @@ void MetalCommandBuffer::rebuildAutomaticResidencySet()
   if(!additions.empty())
     m_automaticResidencySet->addAllocations(additions.data(), additions.size());
   m_automaticResidencySet->commit();
-  m_automaticResidencyAllocations = std::move(next);
+  m_automaticResidencyAllocations.swap(next);
 }
 
 void MetalCommandBuffer::retainNative(NS::Object* object)
