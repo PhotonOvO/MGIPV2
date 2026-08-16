@@ -238,6 +238,27 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
         history_war = trace.index("rhi::HazardFlags::readBeforeWrite")
         self.assertLess(publish, history_war)
 
+    def test_distance_to_irradiance_is_war_but_cascade_history_is_raw(self) -> None:
+        execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
+        distance = braced_source(
+            execute,
+            'cmd.beginEvent("DDGI.UpdateDistance")',
+        )
+        update_start = execute.index("rhi::ComputeEncoder* updateEncoder")
+        update_loop = braced_source(
+            execute[update_start:],
+            "for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount;",
+        )
+        cascade_boundary = braced_source(
+            update_loop,
+            "if(cascadeIndex + 1u < cascadeCount)",
+        )
+
+        self.assertIn("rhi::HazardFlags::readBeforeWrite", distance)
+        self.assertNotIn("rhi::HazardFlags::textureWrites", distance)
+        self.assertIn("rhi::HazardFlags::textureWrites", cascade_boundary)
+        self.assertNotIn("rhi::HazardFlags::readBeforeWrite", cascade_boundary)
+
     def test_distance_and_irradiance_publish_both_physical_histories(self) -> None:
         execute = braced_source(FLAX_PASS, "void FlaxDDGIPass::execute(")
         update_start = execute.index("rhi::ComputeEncoder* updateEncoder")

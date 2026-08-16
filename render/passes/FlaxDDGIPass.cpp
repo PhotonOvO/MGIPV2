@@ -1537,7 +1537,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
         if(updateIrradianceRequested)
         {
           cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                      rhi::HazardFlags::textureWrites);
+                      rhi::HazardFlags::readBeforeWrite);
         }
       }
       cmd.endEvent();

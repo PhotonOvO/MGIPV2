@@ -319,9 +319,9 @@ inline MTL::Stages toMetalStages(StageFlags stages)
 
 inline MTL4::VisibilityOptions toMetalVisibility(HazardFlags hazards)
 {
-  (void)hazards;
-  NS::UInteger result = MTL4::VisibilityOptionDevice;
-  return static_cast<MTL4::VisibilityOptions>(result);
+  if(hazards == HazardFlags::readBeforeWrite)
+    return MTL4::VisibilityOptionNone;
+  return MTL4::VisibilityOptionDevice;
 }
 
 inline MTL::SamplerMinMagFilter toMetalFilter(Filter filter)
