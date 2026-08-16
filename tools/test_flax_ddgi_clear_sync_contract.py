@@ -203,6 +203,8 @@ class FlaxDDGIClearSyncContractTests(unittest.TestCase):
         init_args = braced_source(execute, 'cmd.beginEvent("DDGI.InitArgs")')
 
         self.assertNotIn("cmd.endEncoding()", compact_loop)
+        self.assertNotIn("cmd.barrier(", compact_loop)
+        self.assertEqual(len(barrier_calls(compact)), 1)
         self.assertIn("rhi::HazardFlags::bufferWrites", compact)
         self.assertIn(
             "rhi::HazardFlags::storageBufferReadWrite",

@@ -1436,12 +1436,6 @@ void FlaxDDGIPass::execute(const PassContext& context) const
       setupEncoder->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       setupEncoder->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       setupEncoder->dispatch({1, 1, 1});
-      if(cascadeIndex + 1u < cascadeCount)
-      {
-        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                    rhi::HazardFlags::bufferWrites
-                      | rhi::HazardFlags::storageBufferReadWrite);
-      }
     }
     cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
                 rhi::HazardFlags::bufferWrites
