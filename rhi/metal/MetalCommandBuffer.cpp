@@ -2429,10 +2429,12 @@ MTL4::ArgumentTable* MetalCommandBuffer::materializeArgumentTable(
       {
         throw std::runtime_error("Metal root constants do not match the pipeline schema");
       }
-      std::vector<std::byte> padded(placement.size);
-      std::copy(value->constants.begin(), value->constants.end(), padded.begin());
-      const MetalRootDataAllocation allocation = allocator().allocateRootData(
-        padded, std::max(placement.alignment, 16u));
+      const MetalRootDataAllocation allocation =
+        allocator().allocateArgumentData(
+          placement.size, std::max(placement.alignment, 16u));
+      std::memcpy(
+        static_cast<std::byte*>(allocation.buffer->contents()) + allocation.offset,
+        value->constants.data(), value->constants.size());
       snapshot->setAddress(allocation.gpuAddress, placement.bufferIndex);
     }
     else if(placement.kind == RootBindingKind::gpuPointer)
