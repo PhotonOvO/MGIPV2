@@ -389,9 +389,48 @@ public:
       }
 
       demo::RenderParams frameParams{};
+      const bool renderUi = !m_automationOptions.noUi;
+      const bool buildUiFrame = renderUi || !isAutomationEnabled();
       {
       demo::profiling::ScopedCpuRange appPreRecordRange("AppPreRecord");
 
+      glm::vec4 viewportImageRect{
+        0.0f,
+        0.0f,
+        static_cast<float>(m_viewportSize.width),
+        static_cast<float>(m_viewportSize.height)
+      };
+      framePhase = "ViewportResize";
+      {
+        demo::profiling::ScopedCpuRange viewportResizeRange("AppPreRecord.ViewportResize");
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        if(!SDL_GetWindowSizeInPixels(m_window.get(), &framebufferWidth, &framebufferHeight))
+        {
+          throw std::runtime_error(
+              std::string("SDL_GetWindowSizeInPixels failed: ") + SDL_GetError());
+        }
+        const demo::rhi::Extent2D requestedViewportSize{
+          static_cast<uint32_t>(std::max(framebufferWidth, 0)),
+          static_cast<uint32_t>(std::max(framebufferHeight, 0))
+        };
+        if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
+           && (requestedViewportSize.width != m_viewportSize.width || requestedViewportSize.height != m_viewportSize.height))
+        {
+          m_viewportSize = requestedViewportSize;
+          m_renderer.resize(m_viewportSize);
+          m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
+          // Camera uniforms were populated before viewport handling. Refresh them
+          // without reapplying or advancing the automation pose/history so every
+          // render pass consumes the resized projection in this same frame.
+          refreshActiveCameraUniforms();
+        }
+        viewportImageRect.z = static_cast<float>(m_viewportSize.width);
+        viewportImageRect.w = static_cast<float>(m_viewportSize.height);
+      }
+
+      if(buildUiFrame)
+      {
       framePhase = "ImGuiNewFrame";
       {
         demo::profiling::ScopedCpuRange imguiNewFrameRange("AppPreRecord.ImGuiNewFrame");
@@ -453,32 +492,8 @@ public:
         }
       }
 
-      glm::vec4 viewportImageRect{0.0f};
       {
         demo::profiling::ScopedCpuRange viewportPanelRange("AppPreRecord.FullWindowViewport");
-        int framebufferWidth = 0;
-        int framebufferHeight = 0;
-        if(!SDL_GetWindowSizeInPixels(m_window.get(), &framebufferWidth, &framebufferHeight))
-        {
-          throw std::runtime_error(
-              std::string("SDL_GetWindowSizeInPixels failed: ") + SDL_GetError());
-        }
-        const demo::rhi::Extent2D requestedViewportSize{
-          static_cast<uint32_t>(std::max(framebufferWidth, 0)),
-          static_cast<uint32_t>(std::max(framebufferHeight, 0))
-        };
-        if(requestedViewportSize.width > 0 && requestedViewportSize.height > 0
-           && (requestedViewportSize.width != m_viewportSize.width || requestedViewportSize.height != m_viewportSize.height))
-        {
-          m_viewportSize = requestedViewportSize;
-          m_renderer.resize(m_viewportSize);
-          m_camera.setPerspective(45.0f, static_cast<float>(m_viewportSize.width) / static_cast<float>(m_viewportSize.height), 0.1f, 100.0f);
-          // Camera uniforms were populated before viewport handling. Refresh them
-          // without reapplying or advancing the automation pose/history so every
-          // render pass consumes the resized projection in this same frame.
-          refreshActiveCameraUniforms();
-        }
-
         const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
         ImVec2 viewportImageMin = mainViewport->WorkPos;
         ImVec2 viewportImageMax(mainViewport->WorkPos.x + mainViewport->WorkSize.x,
@@ -1048,6 +1063,7 @@ public:
         demo::profiling::ScopedCpuRange sceneGraphUiRange("AppPreRecord.SceneGraphUI");
         drawSceneGraphUI();
       }
+      }
 
       framePhase = "Render";
       {
@@ -1056,8 +1072,10 @@ public:
         frameParams.deltaTime      = isAutomationEnabled()
                                    ? m_automationOptions.fixedDeltaSeconds
                                    : ImGui::GetIO().DeltaTime;
-        frameParams.timeSeconds    = m_automationStarted
-                                   ? static_cast<float>(m_automationFrame) * m_automationOptions.fixedDeltaSeconds
+        frameParams.timeSeconds    = isAutomationEnabled()
+                                   ? (m_automationStarted
+                                        ? static_cast<float>(m_automationFrame) * m_automationOptions.fixedDeltaSeconds
+                                        : 0.0f)
                                    : static_cast<float>(ImGui::GetTime());
         frameParams.materialHandle = m_selectedMaterial;
         frameParams.clearColor     = m_clearColor;
@@ -1118,16 +1136,21 @@ public:
                 + " frame=" + std::to_string(m_automationFrame);
           }
         }
-        frameParams.renderUi       = !m_automationOptions.noUi;
-        frameParams.recordUi       = [hideUi = m_automationOptions.noUi]() {
-          demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
-          if(hideUi)
-          {
-            ImGui::EndFrame();
-            return;
-          }
-          ImGui::Render();
-        };
+        frameParams.renderUi       = renderUi;
+        if(buildUiFrame)
+        {
+          frameParams.recordUi = [renderUi]() {
+            demo::profiling::ScopedCpuRange renderImguiDrawDataRange("RecordCommandBuffer.RenderImGuiDrawData");
+            if(renderUi)
+            {
+              ImGui::Render();
+            }
+            else
+            {
+              ImGui::EndFrame();
+            }
+          };
+        }
       }
       }
 
@@ -1154,15 +1177,18 @@ public:
         onAutomationFrameRendered();
       }
 
+      if(buildUiFrame)
       {
-        demo::profiling::ScopedCpuRange imguiEndFrameRange("AppPostRecord.ImGuiEndFrame");
-        ImGui::EndFrame();
-      }
-      if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
-      {
-        demo::profiling::ScopedCpuRange platformWindowsRange("AppPostRecord.ImGuiPlatformWindows");
-        ImGui::UpdatePlatformWindows();
-        ImGui::RenderPlatformWindowsDefault();
+        {
+          demo::profiling::ScopedCpuRange imguiEndFrameRange("AppPostRecord.ImGuiEndFrame");
+          ImGui::EndFrame();
+        }
+        if((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
+        {
+          demo::profiling::ScopedCpuRange platformWindowsRange("AppPostRecord.ImGuiPlatformWindows");
+          ImGui::UpdatePlatformWindows();
+          ImGui::RenderPlatformWindowsDefault();
+        }
       }
       }
       catch(const std::exception& e)
