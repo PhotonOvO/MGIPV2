@@ -3114,8 +3114,8 @@ namespace demo
 			.handle = kPassCSMShadowHandle,
 			.rhiTexture = m_csmShadowResources.getCascadeImage(),
 			.aspect = rhi::TextureAspect::depth,
-			// The CSM pass clears the cascade array at the start of each frame.
-			.initialState = rhi::ResourceState::Undefined,
+			// Stable CSM layers retain their contents across frames.
+			.initialState = textureStates.csmShadow,
 			.isSwapchain = false,
 		});
 		passExecutor.bindTexture({

@@ -257,6 +257,9 @@ namespace demo
 		rhi::BufferHandle shadowPackedIndexBuffer{};
 		const ShadowPackedMesh* shadowPackedMeshes{nullptr};
 		uint32_t shadowPackedMeshCount{0};
+		// Scene topology or caster-transform changes advance this non-zero version.
+		// External scene providers may leave it at zero to disable shadow caching.
+		uint64_t shadowContentVersion{0};
 		glm::vec3 sceneBoundsMin{0.0f};
 		glm::vec3 sceneBoundsMax{0.0f};
 		bool sceneBoundsValid{false};

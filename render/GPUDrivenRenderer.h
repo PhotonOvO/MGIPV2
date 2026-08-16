@@ -1312,6 +1312,7 @@ namespace demo
 		void uploadPendingMeshletsAfterIdle();
 		void flushPendingSceneUploads();
 		void advanceSceneTopologyVersion();
+		void advanceShadowContentVersion();
 		void invalidateSortedBootstrapStates();
 		void invalidateSortedBootstrapState(uint32_t frameIndex);
 		void recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity);
@@ -1550,6 +1551,7 @@ namespace demo
 		std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
 		std::vector<RawCullingBootstrapFrameState> m_rawCullingBootstrapFrames;
 		uint64_t m_sceneTopologyVersion{1};
+		uint64_t m_shadowContentVersion{1};
 		bool m_enableExperimentalMeshletPath{false};
 		bool m_suspendSceneRendering{false};
 		bool m_meshletUploadDirty{false};
@@ -1579,6 +1581,7 @@ namespace demo
 		std::array<PersistentTextureState, 3> m_gbufferResourceStates{};
 		PersistentTextureState m_sceneColorHdrResourceState{};
 		PersistentTextureState m_velocityResourceState{};
+		PersistentTextureState m_csmResourceState{};
 		// These arrays are also physical-resource state: resize/lifecycle recreation
 		// resets them to SceneResources' real post-create layout (General).
 		std::array<rhi::ResourceState, 2> m_sceneColorHistoryStates{

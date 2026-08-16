@@ -547,6 +547,7 @@ namespace demo
 		m_gbufferResourceStates.fill(PersistentTextureState{});
 		m_sceneColorHdrResourceState = {};
 		m_velocityResourceState = {};
+		m_csmResourceState = {};
 	}
 
 	void GPUDrivenRenderer::trackPersistentTextureIdentity(PersistentTextureState& textureState,
@@ -590,6 +591,9 @@ namespace demo
 		textureStates.sceneColorHdr = m_sceneColorHdrResourceState.state;
 		trackPersistentTextureIdentity(m_velocityResourceState, getVelocityImage());
 		textureStates.velocity = m_velocityResourceState.state;
+		trackPersistentTextureIdentity(
+			m_csmResourceState, getCSMShadowResources().getCascadeImage());
+		textureStates.csmShadow = m_csmResourceState.state;
 
 		m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
 		m_renderer.bindStaticPassResources(m_passExecutor, textureStates);
@@ -1598,6 +1602,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		std::array<rhi::TextureHandle, 3> preparedGBufferImages{};
 		rhi::TextureHandle preparedSceneColorHdrImage{};
 		rhi::TextureHandle preparedVelocityImage{};
+		rhi::TextureHandle preparedCSMImage{};
 		const bool frameSubmitted = submitPassGraph(
 			gpuParams,
 			[&](uint32_t frameIndex)
@@ -1633,6 +1638,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				}
 				preparedSceneColorHdrImage = m_sceneView.sceneColorHdrImage;
 				preparedVelocityImage = m_sceneView.velocityImage;
+				preparedCSMImage = getCSMShadowResources().getCascadeImage();
 				const uint32_t historyWriteIndex = m_taaHistoryWriteIndex;
 				const uint32_t historyReadIndex = historyWriteIndex ^ 1u;
 				preparedHistoryReadIndex = historyReadIndex;
@@ -1782,6 +1788,9 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		                             rhi::ResourceState::ShaderRead);
 		commitPersistentTextureState(m_velocityResourceState,
 		                             preparedVelocityImage,
+		                             rhi::ResourceState::ShaderRead);
+		commitPersistentTextureState(m_csmResourceState,
+		                             preparedCSMImage,
 		                             rhi::ResourceState::ShaderRead);
 		// Pass dependencies still establish the physical ShaderRead terminal layout
 		// for every bound history image even when TAA itself no-ops. Track layout and
@@ -2156,6 +2165,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return;
 		}
+		advanceShadowContentVersion();
 
 		const glm::vec4 boundsSphere(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
 		for (SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
@@ -2267,6 +2277,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return;
 		}
+		advanceShadowContentVersion();
 
 		if (drawRecordIndex >= m_transformHistoryByDrawRecord.size())
 		{
@@ -3413,8 +3424,18 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	void GPUDrivenRenderer::advanceSceneTopologyVersion()
 	{
 		++m_sceneTopologyVersion;
+		advanceShadowContentVersion();
 		invalidateSortedBootstrapStates();
 		invalidateRawCullingBootstrapStates();
+	}
+
+	void GPUDrivenRenderer::advanceShadowContentVersion()
+	{
+		++m_shadowContentVersion;
+		if (m_shadowContentVersion == 0u)
+		{
+			++m_shadowContentVersion;
+		}
 	}
 
 	void GPUDrivenRenderer::invalidateSortedBootstrapStates()
@@ -3947,6 +3968,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			m_activeUploadResult != nullptr
 				? static_cast<uint32_t>(m_activeUploadResult->shadowPackedMeshes.size())
 				: 0;
+		m_sceneView.shadowContentVersion = m_shadowContentVersion;
 		m_sceneView.sceneBoundsMin = glm::vec3(0.0f);
 		m_sceneView.sceneBoundsMax = glm::vec3(0.0f);
 		m_sceneView.sceneBoundsValid = false;

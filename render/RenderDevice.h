@@ -50,6 +50,7 @@ namespace demo
 			};
 			rhi::ResourceState sceneColorHdr{rhi::ResourceState::General};
 			rhi::ResourceState velocity{rhi::ResourceState::General};
+			rhi::ResourceState csmShadow{rhi::ResourceState::General};
 		};
 
 		using FrameSlotReadyCallback = std::function<void(uint32_t)>;

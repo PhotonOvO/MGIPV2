@@ -140,13 +140,54 @@ namespace demo
 			&& hasShadowPipelines && !computePipeline.isNull() && !computeTable.isNull()
 			&& !materialTable.isNull() && !cameraTable.isNull() && hasDrawArgumentTables
 			&& hasShadowIndirectBuffer && hasGeometryBuffers && shadowIndirectCapacity >= shadowMeshCount;
-
+		const CSMShadowResources::FrameData& csmFrameData = csm.getFrameData();
+		const CSMShadowCacheIdentity cacheIdentity{
+			.cascadeTexture = csm.getCascadeImage(),
+			.vertexBuffer = vertexBufferRHI,
+			.indexBuffer = indexBufferRHI,
+			.shadowContentVersion = sceneView != nullptr ? sceneView->shadowContentVersion : 0u,
+			.shadowMeshCount = shadowMeshCount,
+			.opaqueShadowMeshCount = opaqueShadowMeshCount,
+			.cascadeCount = cascadeCount,
+		};
+		CSMShadowCacheIdentity commandWarmupIdentity = cacheIdentity;
+		commandWarmupIdentity.shadowContentVersion = 0u;
+		if (commandWarmupIdentity != m_commandWarmupIdentity)
+		{
+			m_commandWarmupIdentity = commandWarmupIdentity;
+			m_commandWarmupPassCounts.fill(0u);
+		}
+		const uint32_t activeCascadeMask =
+			cascadeCount == 0u ? 0u : (1u << cascadeCount) - 1u;
+		// The first pass can coincide with scene activation, when sibling draw passes
+		// are still absent. A second cycle warms the frame allocator's combined workload.
+		constexpr uint8_t commandWarmupPassesPerSlot = 2u;
+		const bool commandWarmupRequired =
+			frameIndex < m_commandWarmupPassCounts.size()
+			&& m_commandWarmupPassCounts[frameIndex] < commandWarmupPassesPerSlot;
+		uint32_t dirtyCascadeMask =
+			hasShadowCasters && shadowData != nullptr
+				? m_cache.dirtyCascadeMask(csmFrameData, cacheIdentity)
+				: 0u;
+		if (commandWarmupRequired && hasShadowCasters && shadowData != nullptr)
+		{
+			dirtyCascadeMask |= activeCascadeMask;
+		}
 		context.commandBuffer->beginEvent("GPUDrivenCSMShadow");
 		const bool hasAutomationDebugMarker =
 			context.params != nullptr && !context.params->automationDebugMarker.empty();
 		if (hasAutomationDebugMarker)
 		{
 			context.commandBuffer->beginEvent(context.params->automationDebugMarker.c_str());
+		}
+		if (dirtyCascadeMask == 0u && hasShadowCasters && shadowData != nullptr)
+		{
+			if (hasAutomationDebugMarker)
+			{
+				context.commandBuffer->endEvent();
+			}
+			context.commandBuffer->endEvent();
+			return;
 		}
 		if (!canDrawShadows)
 		{
@@ -161,6 +202,7 @@ namespace demo
 			{
 				LOGW("Clearing GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
 			}
+			m_cache.invalidate();
 			recordClearOnlyCascades(
 				*context.commandBuffer, *m_renderer, csm.getCascadeImage(), cascadeExtent, cascadeCount);
 			if (hasAutomationDebugMarker)
@@ -171,10 +213,15 @@ namespace demo
 			return;
 		}
 
-		const CSMShadowResources::FrameData& csmFrameData = csm.getFrameData();
+		bool recordedPreviousCascade = false;
 		for (uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
 		{
-			if (cascadeIndex > 0u)
+			const uint32_t cascadeBit = 1u << cascadeIndex;
+			if ((dirtyCascadeMask & cascadeBit) == 0u)
+			{
+				continue;
+			}
+			if (recordedPreviousCascade)
 			{
 				// The previous cascade consumed this frame's indirect arguments at commandInput;
 				// wait before current compute overwrites them. The Vulkan readBeforeWrite source
@@ -284,6 +331,13 @@ namespace demo
 			}
 
 			context.commandBuffer->endEncoding();
+			recordedPreviousCascade = true;
+		}
+		m_cache.publish(csmFrameData, cacheIdentity, dirtyCascadeMask);
+		if (frameIndex < m_commandWarmupPassCounts.size()
+			&& m_commandWarmupPassCounts[frameIndex] < commandWarmupPassesPerSlot)
+		{
+			++m_commandWarmupPassCounts[frameIndex];
 		}
 
 		if (hasAutomationDebugMarker)
