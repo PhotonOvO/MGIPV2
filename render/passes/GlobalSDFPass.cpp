@@ -304,12 +304,16 @@ namespace demo
 		                                  "kernelGlobalSDFMipmap", m_mipmapLayout,
 		                                  sizeof(shaderio::GlobalSDFDispatchPush), 0x7403u);
 #endif
+		++m_contentVersion;
+		m_builtContentVersion = 0;
 	}
 
 	void GlobalSDFPass::shutdownResources()
 	{
 		if (m_device == nullptr)
 		{
+			m_contentVersion = 0;
+			m_builtContentVersion = 0;
 			return;
 		}
 
@@ -369,12 +373,15 @@ namespace demo
 		m_volume = {};
 
 		m_layoutInitialized = false;
+		m_contentVersion = 0;
+		m_builtContentVersion = 0;
 		m_frameCount = 0;
 		m_device = nullptr;
 	}
 
 	void GlobalSDFPass::setMeshSDFList(const GlobalSDFMeshEntry* entries, uint32_t count)
 	{
+		++m_contentVersion;
 		destroyMeshViews();
 		m_meshEntries.clear();
 
@@ -595,6 +602,11 @@ namespace demo
 			return;
 		}
 
+		if (m_builtContentVersion == m_contentVersion)
+		{
+			return;
+		}
+
 		rhi::CommandBuffer& cmd = *context.commandBuffer;
 		cmd.beginEvent("GlobalSDFPass");
 
@@ -694,5 +706,6 @@ namespace demo
 		cmd.endEvent();
 
 		cmd.endEvent(); // GlobalSDFPass
+		m_builtContentVersion = m_contentVersion;
 	}
 } // namespace demo

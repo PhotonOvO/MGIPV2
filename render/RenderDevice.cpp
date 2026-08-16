@@ -2331,8 +2331,6 @@ namespace demo
 		frameUserData.shadowCullingScratchDrawData.resize(objectCount);
 		auto& objects = frameUserData.shadowCullingScratchObjects;
 		auto& drawData = frameUserData.shadowCullingScratchDrawData;
-		std::vector<shaderio::GPUCullIndirectCommand>
-			bootstrapCommands(objectCount, shaderio::GPUCullIndirectCommand{});
 		std::fill(objects.begin(), objects.end(), shaderio::ShadowCullObject{});
 		std::fill(drawData.begin(), drawData.end(), shaderio::DrawUniforms{});
 
@@ -2361,13 +2359,6 @@ namespace demo
 				.vertexOffset = packedMesh.vertexOffset,
 				.firstInstance = meshIndex,
 			};
-			bootstrapCommands[meshIndex] = shaderio::GPUCullIndirectCommand{
-				.indexCount = packedMesh.indexCount,
-				.instanceCount = 1u,
-				.firstIndex = packedMesh.firstIndex,
-				.vertexOffset = packedMesh.vertexOffset,
-				.firstInstance = meshIndex,
-			};
 			drawData[meshIndex] = packedMesh.boundsSphere.w > 0.0f
 				                      ? packedMesh.drawData
 				                      : buildShadowDrawUniforms(*meshRecord);
@@ -2377,45 +2368,6 @@ namespace demo
 		{
 			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingObjectBuffer, objects.data(),
 			                       sizeof(shaderio::ShadowCullObject) * objectCount);
-			const uint32_t bootstrapStride = getGPUCullingIndirectCommandStride();
-			const uint64_t bootstrapSize =
-				static_cast<uint64_t>(bootstrapStride) * objectCount;
-			std::vector<std::byte> bootstrapBytes(static_cast<size_t>(bootstrapSize));
-			for (uint32_t commandIndex = 0; commandIndex < objectCount; ++commandIndex)
-			{
-				std::byte* destination =
-					bootstrapBytes.data() + static_cast<size_t>(bootstrapStride) * commandIndex;
-				if (m_backend == rhi::BackendType::d3d12)
-				{
-					const uint32_t drawIndex = bootstrapCommands[commandIndex].firstInstance;
-					std::memcpy(destination, &drawIndex, sizeof(drawIndex));
-					destination += sizeof(drawIndex);
-				}
-				std::memcpy(destination, &bootstrapCommands[commandIndex],
-				            sizeof(shaderio::GPUCullIndirectCommand));
-			}
-			BatchUploadContext bootstrapUpload;
-			bootstrapUpload.init(*m_device.device, bootstrapSize);
-			const BatchUploadContext::Slice bootstrapSlice =
-				bootstrapUpload.allocate(bootstrapSize, 16u);
-			std::memcpy(bootstrapSlice.cpuPtr, bootstrapBytes.data(),
-			            static_cast<size_t>(bootstrapSize));
-			bootstrapUpload.recordBufferUpload(
-				bootstrapSlice, frameUserData.shadowCullingIndirectBuffer, 0u,
-				bootstrapSize);
-			const auto recordBootstrapUpload = [&](rhi::CommandBuffer& commandBuffer)
-			{
-				bootstrapUpload.executeUploads(commandBuffer);
-			};
-			if (m_backend == rhi::BackendType::d3d12)
-				m_perFrame.uploadManager.execute(recordBootstrapUpload);
-			else
-				m_perFrame.uploadManager.executeTransfer(recordBootstrapUpload);
-			if (rhi::BufferHandle staging = bootstrapUpload.releaseStagingBuffer();
-			    !staging.isNull())
-			{
-				m_device.rhiStagingBuffers.push_back(staging);
-			}
 			writeHostVisibleBuffer(*m_device.device, frameUserData.shadowCullingDrawDataBuffer, drawData.data(),
 			                       sizeof(shaderio::DrawUniforms) * objectCount);
 		}

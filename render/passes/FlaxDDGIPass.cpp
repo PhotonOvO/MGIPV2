@@ -1412,31 +1412,39 @@ void FlaxDDGIPass::execute(const PassContext& context) const
 
   cmd.beginEvent("DDGI.Classify");
   {
+    rhi::ComputeEncoder* enc = cmd.beginComputePass();
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const FlaxDDGICascadePush cascadePush{cascadeIndex};
-      rhi::ComputeEncoder* enc = cmd.beginComputePass();
       enc->setPipeline(m_classifyPipeline);
       enc->setArgumentTable(0, m_classifyTables[
         frameCascadeTableIndex(frameIndex, cascadeIndex)]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
       enc->dispatch({(totalProbes + 31u) / 32u, 1, 1});
-      cmd.endEncoding();
 
-      const std::array<rhi::TextureHandle, 1> probesDataWrite{
-        m_flaxResources->getProbesData(),
-      };
-      recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
-      cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                  rhi::HazardFlags::bufferWrites
-                    | rhi::HazardFlags::storageBufferReadWrite);
+      if(cascadeIndex + 1u < cascadeCount)
+      {
+        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                    rhi::HazardFlags::textureWrites
+                      | rhi::HazardFlags::bufferWrites
+                      | rhi::HazardFlags::storageBufferReadWrite);
+      }
     }
+    cmd.endEncoding();
+    const std::array<rhi::TextureHandle, 1> probesDataWrite{
+      m_flaxResources->getProbesData(),
+    };
+    recordTextureWriteDependency(cmd, probesDataWrite, flaxTextureRange);
+    cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                rhi::HazardFlags::bufferWrites
+                  | rhi::HazardFlags::storageBufferReadWrite);
   }
   cmd.endEvent();
   if (stopAfter(FlaxGIDebugStage::classify, false)) return;
 
   cmd.beginEvent("DDGI.Compact");
   {
+    rhi::ComputeEncoder* enc = cmd.beginComputePass();
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1448,16 +1456,21 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      rhi::ComputeEncoder* enc = cmd.beginComputePass();
       enc->setPipeline(m_compactPipeline);
       enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       enc->dispatch({1, 1, 1});
-      cmd.endEncoding();
-      cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                  rhi::HazardFlags::bufferWrites
-                    | rhi::HazardFlags::storageBufferReadWrite);
+      if(cascadeIndex + 1u < cascadeCount)
+      {
+        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                    rhi::HazardFlags::bufferWrites
+                      | rhi::HazardFlags::storageBufferReadWrite);
+      }
     }
+    cmd.endEncoding();
+    cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                rhi::HazardFlags::bufferWrites
+                  | rhi::HazardFlags::storageBufferReadWrite);
   }
   cmd.endEvent();
 
@@ -1465,6 +1478,7 @@ void FlaxDDGIPass::execute(const PassContext& context) const
   {
     // Dispatch cascades in order with an explicit barrier so each one consumes
     // only the slack left by the preceding deterministic allocations.
+    rhi::ComputeEncoder* enc = cmd.beginComputePass();
     for(uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
     {
       const uint32_t baseUpdateBudget = computeFlaxGICascadeUpdateBudget(
@@ -1476,18 +1490,25 @@ void FlaxDDGIPass::execute(const PassContext& context) const
           cascadeIndex, FlaxDDGIResources::IndirectPass::Trace),
         .scratchOffset = argsScratchOffset,
       };
-      rhi::ComputeEncoder* enc = cmd.beginComputePass();
       enc->setPipeline(m_initArgsPipeline);
       enc->setArgumentTable(0, m_initArgsTables[cascadeIndex]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&initArgs, 1}));
       enc->dispatch({1, 1, 1});
-      cmd.endEncoding();
-      cmd.barrier(rhi::StageFlags::compute,
-                  rhi::StageFlags::compute | rhi::StageFlags::commandInput,
-                  rhi::HazardFlags::bufferWrites
-                    | rhi::HazardFlags::storageBufferReadWrite
-                    | rhi::HazardFlags::drawArguments);
+      if(cascadeIndex + 1u < cascadeCount)
+      {
+        cmd.barrier(rhi::StageFlags::compute,
+                    rhi::StageFlags::compute,
+                    rhi::HazardFlags::bufferWrites
+                      | rhi::HazardFlags::storageBufferReadWrite
+                      | rhi::HazardFlags::drawArguments);
+      }
     }
+    cmd.endEncoding();
+    cmd.barrier(rhi::StageFlags::compute,
+                rhi::StageFlags::compute | rhi::StageFlags::commandInput,
+                rhi::HazardFlags::bufferWrites
+                  | rhi::HazardFlags::storageBufferReadWrite
+                  | rhi::HazardFlags::drawArguments);
   }
   cmd.endEvent();
   if (stopAfter(FlaxGIDebugStage::initArgs, true)) return;
@@ -1521,26 +1542,27 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     const uint32_t historyIndex =
       historyTableIndex(frameIndex, cascadeIndex, updateParity);
 
+    rhi::ComputeEncoder* enc = nullptr;
     cmd.beginEvent("DDGI.TraceRays");
     {
-      rhi::ComputeEncoder* enc = cmd.beginComputePass();
+      enc = cmd.beginComputePass();
       enc->setPipeline(m_traceRaysPipeline);
       enc->setArgumentTable(0, m_traceRaysTables[frameCascadeIndex]);
       enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
       enc->dispatchIndirect({
         m_flaxResources->getUpdateProbesInitArgs(),
         indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Trace)});
-      cmd.endEncoding();
-      const std::array<rhi::TextureHandle, 1> traceWrite{
-        m_flaxResources->getProbesTrace(),
-      };
-      recordTextureWriteDependency(cmd, traceWrite, flaxTextureRange);
+      if(updateDistanceRequested || updateIrradianceRequested)
+      {
+        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                    rhi::HazardFlags::textureWrites);
 
-      // Trace both writes the shared trace atlas and reads history. Keep its
-      // producer-write dependency separate from the history read -> write WAR
-      // dependency because readBeforeWrite intentionally selects read sources.
-      cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
-                  rhi::HazardFlags::readBeforeWrite);
+        // Trace both writes the shared trace atlas and reads history. Keep its
+        // producer-write dependency separate from the history read -> write WAR
+        // dependency because readBeforeWrite intentionally selects read sources.
+        cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                    rhi::HazardFlags::readBeforeWrite);
+      }
     }
     cmd.endEvent();
 
@@ -1548,19 +1570,17 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     {
       cmd.beginEvent("DDGI.UpdateDistance");
       {
-        rhi::ComputeEncoder* enc = cmd.beginComputePass();
         enc->setPipeline(m_distancePipeline);
         enc->setArgumentTable(0, m_distanceTables[historyIndex]);
         enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
         enc->dispatchIndirect({
           m_flaxResources->getUpdateProbesInitArgs(),
           indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Distance)});
-        cmd.endEncoding();
-        const std::array<rhi::TextureHandle, 2> distanceWrites{
-          m_flaxResources->getProbesDistanceWrite(0),
-          m_flaxResources->getProbesDistanceRead(0),
-        };
-        recordTextureWriteDependency(cmd, distanceWrites, flaxTextureRange);
+        if(updateIrradianceRequested)
+        {
+          cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                      rhi::HazardFlags::textureWrites);
+        }
       }
       cmd.endEvent();
     }
@@ -1569,22 +1589,41 @@ void FlaxDDGIPass::execute(const PassContext& context) const
     {
       cmd.beginEvent("DDGI.UpdateIrradiance");
       {
-        rhi::ComputeEncoder* enc = cmd.beginComputePass();
         enc->setPipeline(m_irradiancePipeline);
         enc->setArgumentTable(0, m_irradianceTables[historyIndex]);
         enc->setRootConstants(kPrimaryRootConstantsSlot, std::as_bytes(std::span{&cascadePush, 1}));
         enc->dispatchIndirect({
           m_flaxResources->getUpdateProbesInitArgs(),
           indirectOffset(cascadeIndex, FlaxDDGIResources::IndirectPass::Irradiance)});
-        cmd.endEncoding();
-        const std::array<rhi::TextureHandle, 3> irradianceWrites{
-          m_flaxResources->getProbesData(),
-          m_flaxResources->getProbesIrradianceWrite(0),
-          m_flaxResources->getProbesIrradianceRead(0),
-        };
-        recordTextureWriteDependency(cmd, irradianceWrites, flaxTextureRange);
       }
       cmd.endEvent();
+    }
+    cmd.endEncoding();
+    if(updateIrradianceRequested)
+    {
+      const std::array<rhi::TextureHandle, 3> irradianceWrites{
+        m_flaxResources->getProbesData(),
+        m_flaxResources->getProbesIrradianceWrite(0),
+        m_flaxResources->getProbesIrradianceRead(0),
+      };
+      recordTextureWriteDependency(cmd, irradianceWrites, flaxTextureRange);
+    }
+    else if(updateDistanceRequested)
+    {
+      const std::array<rhi::TextureHandle, 2> distanceWrites{
+        m_flaxResources->getProbesDistanceWrite(0),
+        m_flaxResources->getProbesDistanceRead(0),
+      };
+      recordTextureWriteDependency(cmd, distanceWrites, flaxTextureRange);
+    }
+    else
+    {
+      const std::array<rhi::TextureHandle, 1> traceWrite{
+        m_flaxResources->getProbesTrace(),
+      };
+      recordTextureWriteDependency(cmd, traceWrite, flaxTextureRange);
+      cmd.barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
+                  rhi::HazardFlags::readBeforeWrite);
     }
   }
 

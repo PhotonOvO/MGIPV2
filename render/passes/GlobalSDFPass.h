@@ -4,8 +4,9 @@
 //
 // Owns the single-cascade global SDF volume (R16F 256^3 with a min-filtered mip
 // chain on the same texture) and the three compute pipelines that rebuild it
-// each frame: Clear (write max normalized distance) -> Compose (min over the
-// registered mesh SDF list) -> Mipmap (per-level 2x2x2 min downsample).
+// when the registered mesh SDF list changes: Clear (write max normalized
+// distance) -> Compose (min over the list) -> Mipmap (per-level 2x2x2 min
+// downsample).
 //
 // All resources go through rhi:: only — no native graphics types (DDGI hard
 // constraint 1). The whole pass is gated on DDGIConfig::enabled (default
@@ -113,5 +114,8 @@ namespace demo
 
 		// Lazily transitions the volume Undefined -> General on first record.
 		mutable bool m_layoutInitialized{false};
+		// Static scene content only needs recomposition when its inputs change.
+		uint64_t m_contentVersion{0};
+		mutable uint64_t m_builtContentVersion{0};
 	};
 } // namespace demo
