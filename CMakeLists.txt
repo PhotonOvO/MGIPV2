@@ -294,6 +294,8 @@ target_link_libraries(scene_editor_document PRIVATE tinygltf)
 if(BUILD_TESTING)
   target_compile_definitions(scene_editor_document PRIVATE
     MGIF_EDITOR_TESTING=1)
+endif()
+
 option(USE_SLANG "Use Slang shaders instead of GLSL" ON)
 if(APPLE AND DEMO_ENABLE_METAL4 AND NOT USE_SLANG)
   message(FATAL_ERROR
@@ -2922,7 +2924,6 @@ if(TARGET editor_ui_os_replay_acceptance)
     texture_converter
     copy_demo_resources
     check_rhi_boundary)
-endif()
 endif()
 
 # P6 desktop ownership is appended after every frozen custom-command line so
