@@ -22,8 +22,13 @@ DemoMetalSampler2D getBindlessTexture(uint index)
     return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
 }
 #else
+// Vulkan spelling of the same table. The capacity has to match the descriptor
+// count the CPU binds at (LSetTextures, LBindTextures): updateLightingArgumentTable
+// sizes that binding with kGPUDrivenLightPassTextureCount (== LLightingTextureCapacity)
+// and only ever writes that many elements. The Metal path above uses the same
+// capacity for the same table.
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[LMaterialTextureCapacity];
+Sampler2D inTexture[LLightingTextureCapacity];
 #define getBindlessTexture(index) inTexture[index]
 #endif
 
