@@ -1333,11 +1333,13 @@ function(mgif_finalize_editor_dependency_targets)
       )
       set(DEMO_EXPECTED_IMGUI_LINKS android)
     else()
+      # The platform layer moved from GLFW to SDL3 (see app/GlfwSdl3Compat.h),
+      # so the canonical non-Android source set is the SDL3 backend.
       list(APPEND DEMO_EXPECTED_IMGUI_SOURCES
-        "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
-        "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.h"
+        "${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
+        "${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.h"
       )
-      set(DEMO_EXPECTED_IMGUI_LINKS glfw)
+      set(DEMO_EXPECTED_IMGUI_LINKS SDL3::SDL3)
     endif()
     get_target_property(DEMO_FINAL_IMGUI_SOURCES imgui_demo SOURCES)
     if(NOT "${DEMO_FINAL_IMGUI_SOURCES}" STREQUAL "${DEMO_EXPECTED_IMGUI_SOURCES}")
