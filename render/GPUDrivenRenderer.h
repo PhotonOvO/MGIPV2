@@ -1816,6 +1816,13 @@ namespace demo
 		std::vector<uint32_t> m_opaqueDrawIndices;
 		std::vector<uint32_t> m_alphaTestDrawIndices;
 		std::vector<uint32_t> m_transparentDrawIndices;
+
+		// Static portion of the visibility sort input, rebuilt only when the scene
+		// topology version changes. Owned here because the GPU-driven visibility
+		// diagnostic and the sort both consume it.
+		std::vector<uint32_t> m_cachedStaticVisibilitySortObjects;
+		std::vector<uint32_t> m_cachedStaticVisibilitySortKeys;
+		uint64_t m_cachedStaticVisibilitySortTopologyVersion{0};
 		rhi::ArgumentLayoutHandle m_visibilitySortArgumentLayout{};
 		PipelineHandle m_visibilitySortPipelineHandle{};
 		std::vector<VisibilitySortFrameResources> m_visibilitySortFrames;

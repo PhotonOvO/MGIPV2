@@ -74,6 +74,8 @@ namespace demo
 		constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
 		constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
 		constexpr uint32_t kVisibilitySortKeyMask = 0x3fffffffu;
+		constexpr uint32_t kVisibilitySortCategoryOpaque = 0x00000000u;
+		constexpr uint32_t kVisibilitySortCategoryAlpha = 0x40000000u;
 		constexpr uint32_t kVisibilitySortCategoryTransparent = 0x80000000u;
 		constexpr uint32_t kMobileMaxTransparentDraws = 2048u;
 		constexpr float kGPUDrivenHiZDepthEpsilon = 2.0e-3f;

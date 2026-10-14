@@ -212,6 +212,7 @@ namespace demo
 		{
 			const rhi::ArgumentTableHandle cameraTable = m_renderer->getCameraArgumentTable(context.frameIndex);
 			const rhi::ArgumentTableHandle drawTable = m_renderer->getDrawArgumentTable(context.frameIndex);
+			const TransientAllocator::Allocation& cameraAlloc = context.cameraAlloc;
 				const auto drawRecords = m_renderer->getActiveSceneTransactionDrawRecords();
 				const auto drawUniforms = m_renderer->getActivePersistentDrawUniforms();
 				const rhi::BufferHandle transientBuffer = context.transientAllocator->getBufferHandle();

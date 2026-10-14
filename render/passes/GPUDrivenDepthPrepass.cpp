@@ -86,7 +86,8 @@ namespace demo
 			uint32_t previousOpaqueCapacity = 0u;
 			uint32_t previousAlphaCapacity = 0u;
 			const bool previousSortedBootstrapValid =
-			&& !directDrawReady && previousRawBootstrap.valid
+				!directDrawReady
+				&& previousRawBootstrap.valid
 				&& m_renderer->getPreviousSortedBootstrapState(context.frameIndex, previousOpaqueCapacity,
 				                                               previousAlphaCapacity);
 			const rhi::BufferHandle previousBootstrapIndirectBuffer = previousSortedBootstrapValid
