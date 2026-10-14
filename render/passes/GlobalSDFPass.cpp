@@ -143,14 +143,18 @@ namespace demo
 			.debugName = "global-sdf-clear",
 		});
 
-		const std::array<rhi::ArgumentBinding, 5> composeBindings{
-			{
+		const bool useSeparateSamplerBindings =
+			device.getBackendInfo().type == rhi::BackendType::metal;
+		std::vector<rhi::ArgumentBinding> composeBindings{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
 				rhi::ArgumentBinding{
-					.binding = 1, .type = rhi::ArgumentType::combinedImageSampler,
+					.binding = 1,
+					.type = useSeparateSamplerBindings
+						? rhi::ArgumentType::sampledTexture
+						: rhi::ArgumentType::combinedImageSampler,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = kMaxMeshSDFs
 				},
 				rhi::ArgumentBinding{
@@ -162,11 +166,24 @@ namespace demo
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
 				rhi::ArgumentBinding{
-					.binding = 4, .type = rhi::ArgumentType::combinedImageSampler,
+					.binding = 4,
+					.type = useSeparateSamplerBindings
+						? rhi::ArgumentType::sampledTexture
+						: rhi::ArgumentType::combinedImageSampler,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = kMaxMeshSDFs
 				},
-			}
 		};
+		if (useSeparateSamplerBindings)
+		{
+			composeBindings.push_back(rhi::ArgumentBinding{
+				.binding = 5, .type = rhi::ArgumentType::sampler,
+				.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+			});
+			composeBindings.push_back(rhi::ArgumentBinding{
+				.binding = 6, .type = rhi::ArgumentType::sampler,
+				.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+			});
+		}
 		m_composeLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
 			.bindings = composeBindings,
 			.debugName = "global-sdf-compose",
@@ -270,9 +287,10 @@ namespace demo
 					.library = loadEmbeddedSpirvLibrary(
 						device, spirv, wordCount * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
-				},
-				.bindingSchema = bindingSchema.view(),
-				.specializationVariant = variant,
+					},
+					.bindingSchema = bindingSchema.view(),
+					.threadgroupSize = {4, 4, 4},
+					.specializationVariant = variant,
 			};
 			return device.createComputePipeline(desc);
 		};
@@ -286,12 +304,16 @@ namespace demo
 		                                  "kernelGlobalSDFMipmap", m_mipmapLayout,
 		                                  sizeof(shaderio::GlobalSDFDispatchPush), 0x7403u);
 #endif
+		++m_contentVersion;
+		m_builtContentVersion = 0;
 	}
 
 	void GlobalSDFPass::shutdownResources()
 	{
 		if (m_device == nullptr)
 		{
+			m_contentVersion = 0;
+			m_builtContentVersion = 0;
 			return;
 		}
 
@@ -351,12 +373,15 @@ namespace demo
 		m_volume = {};
 
 		m_layoutInitialized = false;
+		m_contentVersion = 0;
+		m_builtContentVersion = 0;
 		m_frameCount = 0;
 		m_device = nullptr;
 	}
 
 	void GlobalSDFPass::setMeshSDFList(const GlobalSDFMeshEntry* entries, uint32_t count)
 	{
+		++m_contentVersion;
 		destroyMeshViews();
 		m_meshEntries.clear();
 
@@ -482,7 +507,12 @@ namespace demo
 
 	void GlobalSDFPass::updateComposeArgumentTable(uint32_t frameIndex, uint32_t meshCount) const
 	{
-		std::array<rhi::ArgumentWrite, kMaxMeshSDFs * 2u + 3u> writes{};
+		const bool useSeparateSamplerBindings =
+			m_device->getBackendInfo().type == rhi::BackendType::metal;
+		const rhi::ArgumentType sampledType = useSeparateSamplerBindings
+			? rhi::ArgumentType::sampledTexture
+			: rhi::ArgumentType::combinedImageSampler;
+		std::array<rhi::ArgumentWrite, kMaxMeshSDFs * 2u + 5u> writes{};
 		uint32_t writeCount = 0;
 		writes[writeCount++] = rhi::ArgumentWrite{
 			.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -498,9 +528,9 @@ namespace demo
 			const uint32_t sourceIndex = std::min(i, meshCount - 1u);
 			writes[writeCount++] = rhi::ArgumentWrite{
 				.binding = 1, .arrayElement = i,
-				.type = rhi::ArgumentType::combinedImageSampler,
+				.type = sampledType,
 				.textureView = m_meshViews[sourceIndex],
-				.sampler = m_meshSDFSampler,
+				.sampler = useSeparateSamplerBindings ? rhi::SamplerHandle{} : m_meshSDFSampler,
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
 		}
@@ -519,10 +549,21 @@ namespace demo
 			const uint32_t sourceIndex = std::min(i, meshCount - 1u);
 			writes[writeCount++] = rhi::ArgumentWrite{
 				.binding = 4, .arrayElement = i,
-				.type = rhi::ArgumentType::combinedImageSampler,
+				.type = sampledType,
 				.textureView = m_meshAlbedoViews[sourceIndex],
-				.sampler = m_meshAlbedoSampler,
+				.sampler = useSeparateSamplerBindings ? rhi::SamplerHandle{} : m_meshAlbedoSampler,
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
+			};
+		}
+		if (useSeparateSamplerBindings)
+		{
+			writes[writeCount++] = rhi::ArgumentWrite{
+				.binding = 5, .type = rhi::ArgumentType::sampler,
+				.sampler = m_meshSDFSampler,
+			};
+			writes[writeCount++] = rhi::ArgumentWrite{
+				.binding = 6, .type = rhi::ArgumentType::sampler,
+				.sampler = m_meshAlbedoSampler,
 			};
 		}
 		m_device->updateArgumentTable(m_composeTables[frameIndex], rhi::ArgumentWriteBatch{writes.data(), writeCount});
@@ -558,6 +599,11 @@ namespace demo
 				     m_composePipeline.isNull() ? 0 : 1, m_mipmapPipeline.isNull() ? 0 : 1);
 				s_logged = true;
 			}
+			return;
+		}
+
+		if (m_builtContentVersion == m_contentVersion)
+		{
 			return;
 		}
 
@@ -660,5 +706,6 @@ namespace demo
 		cmd.endEvent();
 
 		cmd.endEvent(); // GlobalSDFPass
+		m_builtContentVersion = m_contentVersion;
 	}
 } // namespace demo

@@ -31,25 +31,13 @@ namespace demo
 	}
 
 	void DrawStreamRecorder::recordIndexedIndirectCount(rhi::RenderEncoder& encoder,
-	                                                    const IndexedIndirectCountRecordDesc& desc)
+	                                                    const rhi::DrawIndirectCountDesc& desc)
 	{
-		encoder.drawIndexedIndirectCount(rhi::DrawIndirectCountDesc{
-			.argsBuffer = desc.argsBuffer,
-			.argsOffset = desc.argsOffset,
-			.countBuffer = desc.countBuffer,
-			.countBufferOffset = desc.countBufferOffset,
-			.maxDrawCount = desc.maxDrawCount,
-			.stride = desc.stride,
-		});
+		encoder.drawIndexedIndirectCount(desc);
 	}
 
 	void DrawStreamRecorder::recordIndexedIndirect(rhi::RenderEncoder& encoder, const IndexedIndirectRecordDesc& desc)
 	{
-		encoder.drawIndexedIndirect(rhi::DrawIndirectDesc{
-			.argsBuffer = desc.argsBuffer,
-			.offset = desc.offset,
-			.drawCount = desc.drawCount,
-			.stride = desc.stride,
-		});
+		encoder.drawIndexedIndirect(desc);
 	}
 } // namespace demo

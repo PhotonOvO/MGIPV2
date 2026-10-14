@@ -183,10 +183,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					*m_rhiDevice, spirvCode, spirvSize, entryPoint),
 				.entryPoint = entryPoint,
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = variant,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {8, 8, 1},
+				.specializationVariant = variant,
+			};
 		return m_rhiDevice->createComputePipeline(desc);
 	}
 

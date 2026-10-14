@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 namespace demo
@@ -336,6 +337,40 @@ namespace demo
 		return std::min(
 			maximumProbeCount,
 			baseBudget + (cascadeIndex < remainder ? 1u : 0u));
+	}
+
+	[[nodiscard]] constexpr uint32_t computeFlaxGICascadeUpdatePeriod(
+		uint32_t innerCascadePeriod, uint32_t cascadeIndex) noexcept
+	{
+		const uint32_t basePeriod = std::max(innerCascadePeriod, 1u);
+		const uint32_t shift = std::min(cascadeIndex, 30u);
+		return basePeriod > (std::numeric_limits<uint32_t>::max() >> shift)
+			? std::numeric_limits<uint32_t>::max()
+			: basePeriod << shift;
+	}
+
+	[[nodiscard]] constexpr bool shouldUpdateFlaxGICascade(
+		uint64_t frameIndex, uint32_t innerCascadePeriod, uint32_t cascadeIndex,
+		bool dirty, bool forceUpdate) noexcept
+	{
+		if(forceUpdate || dirty) return true;
+		const uint32_t period = computeFlaxGICascadeUpdatePeriod(
+			innerCascadePeriod, cascadeIndex);
+		return period != 0u && frameIndex % period == 0u;
+	}
+
+	[[nodiscard]] constexpr bool shouldClassifyFlaxGICascade(
+		uint64_t frameIndex, uint32_t innerCascadePeriod,
+		uint32_t classificationFrequency, uint32_t cascadeIndex,
+		bool dirty, bool forceUpdate) noexcept
+	{
+		if(forceUpdate || dirty) return true;
+		const uint64_t updatePeriod = computeFlaxGICascadeUpdatePeriod(
+			innerCascadePeriod, cascadeIndex);
+		const uint64_t classificationPeriod = updatePeriod
+			* static_cast<uint64_t>(std::max(classificationFrequency, 1u));
+		return classificationPeriod != 0u
+			&& frameIndex % classificationPeriod == 0u;
 	}
 
 	[[nodiscard]] constexpr FlaxGIIndirectDispatch computeFlaxGIIndirectDispatch(

@@ -3,7 +3,13 @@
 
 #ifdef __ANDROID__
 #include <vulkan/vulkan_android.h>
+#else
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 #endif
+
+#include <string>
+#include <stdexcept>
 
 namespace demo {
 namespace rhi {
@@ -26,8 +32,11 @@ void VulkanSurface::initVulkan(VkInstance instance, VkPhysicalDevice physicalDev
   };
   VK_CHECK(vkCreateAndroidSurfaceKHR(m_instance, &surfaceInfo, nullptr, &m_surface));
 #else
-  GLFWwindow* glfwWindow = static_cast<GLFWwindow*>(window.nativeWindow);
-  VK_CHECK(glfwCreateWindowSurface(m_instance, glfwWindow, nullptr, &m_surface));
+  SDL_Window* sdlWindow = static_cast<SDL_Window*>(window.nativeWindow);
+  if(!SDL_Vulkan_CreateSurface(sdlWindow, m_instance, nullptr, &m_surface))
+  {
+    throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
+  }
 #endif
 }
 
@@ -35,7 +44,11 @@ void VulkanSurface::deinit()
 {
   if(m_surface != VK_NULL_HANDLE)
   {
+#ifdef __ANDROID__
     vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+#else
+    SDL_Vulkan_DestroySurface(m_instance, m_surface, nullptr);
+#endif
     m_surface = VK_NULL_HANDLE;
   }
 }

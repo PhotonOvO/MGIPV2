@@ -138,6 +138,7 @@ namespace demo
 		int flaxGIDebugMode{0}; // 0=Off, 1=Irradiance, 2=No visibility, 3=Diffuse, 4=Gate, 5=Direct atlas
 		float flaxGIDebugScale{1.0f};
 		int flaxGIRayDebugMode{0}; // 0=Normal, 1=Hit albedo, 2=Branch colors
+		bool flaxGIDebugTelemetryEnabled{true};
 		bool flaxGIDebugOverlayEnabled{true};
 		uint32_t flaxGIDebugViewMask{0xffu};
 		float flaxGIDebugSDFSlice{0.5f};
@@ -267,6 +268,9 @@ namespace demo
 		rhi::BufferHandle shadowPackedIndexBuffer{};
 		const ShadowPackedMesh* shadowPackedMeshes{nullptr};
 		uint32_t shadowPackedMeshCount{0};
+		// Scene topology or caster-transform changes advance this non-zero version.
+		// External scene providers may leave it at zero to disable shadow caching.
+		uint64_t shadowContentVersion{0};
 		glm::vec3 sceneBoundsMin{0.0f};
 		glm::vec3 sceneBoundsMax{0.0f};
 		bool sceneBoundsValid{false};
@@ -354,6 +358,7 @@ namespace demo
 		std::optional<editor::SceneMaterialColorPreview> editorMaterialColorPreview;
 		rhi::ClearColorValue clearColor{0.2F, 0.2F, 0.3F, 1.0F};
 		std::function<void()> recordUi;
+		bool renderUi{true};
 		glm::vec4 viewportImageRect{0.0f}; // x, y, width, height in ImGui screen space
 		// glTF model data for rendering
 		const SceneUploadResult* gltfModel{nullptr};

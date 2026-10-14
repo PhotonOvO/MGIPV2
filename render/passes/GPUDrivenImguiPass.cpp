@@ -28,7 +28,6 @@ namespace demo
 			return;
 		}
 
-		context.commandBuffer->beginEvent("GPUDrivenImgui");
 		m_renderer->executeImGuiPass(*context.commandBuffer, *context.params);
 		// The dependency transitions the offscreen output from General to
 		// ShaderRead for the viewport image. Once ImGui has issued its final sampled
@@ -52,6 +51,5 @@ namespace demo
 			};
 			context.commandBuffer->resourceBarrier(barriers, {});
 		}
-		context.commandBuffer->endEvent();
 	}
 } // namespace demo

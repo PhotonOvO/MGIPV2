@@ -4,82 +4,74 @@
 
 #include <vector>
 
+namespace CA {
+class MetalDrawable;
+class MetalLayer;
+}
+
+namespace MTL {
+class ResidencySet;
+}
+
 namespace demo::rhi::metal {
 
-class MetalSwapchain final : public demo::rhi::Swapchain
+class MetalDevice;
+class MetalQueue;
+class MetalSurface;
+
+class MetalSwapchain final : public Swapchain
 {
 public:
   MetalSwapchain() = default;
+  ~MetalSwapchain() override;
 
-  void init(void* nativeDevice, void* nativeQueue, void* nativeSurface, void* nativeLayer, uint32_t maxFramesInFlight);
-  void deinit();
+  void init(MetalDevice& device, MetalQueue& queue, MetalSurface& surface,
+            bool vSync, uint32_t maxFramesInFlight = 3);
+  void deinit() override;
 
-  void          requestRebuild() override;
-  bool          needsRebuild() const override;
-  void          rebuild() override;
-  AcquireResult acquireNextImage() override;
-  PresentResult present() override;
-  TextureHandle currentTexture() const override;
-  Extent2D      getExtent() const override;
-  uint32_t      getMaxFramesInFlight() const override;
-
-  // Metal-native accessors (for backend interop)
-  // NOTES: Returns opaque handles to Metal objects
-  void* metalLayer() const { return m_metalLayer; }  // id<CAMetalLayer>
-  void* currentDrawable() const;                     // id<CAMetalDrawable>
+  void setVSync(bool vSync) override;
+  [[nodiscard]] const char* getPresentModeName() const override;
+  void requestRebuild() override;
+  [[nodiscard]] bool needsRebuild() const override;
+  void rebuild() override;
+  [[nodiscard]] AcquireResult acquireNextImage() override;
+  void encodePresent(CommandBuffer& commandBuffer) override;
+  [[nodiscard]] PresentResult present() override;
+  [[nodiscard]] TextureHandle currentTexture() const override;
+  [[nodiscard]] TextureViewHandle textureView(uint32_t imageIndex) const override;
+  [[nodiscard]] Extent2D getExtent() const override;
+  [[nodiscard]] uint32_t getMaxFramesInFlight() const override;
+  [[nodiscard]] uint32_t getRequestedImageCount() const override;
+  [[nodiscard]] TextureFormat getFormat() const override;
 
 private:
   struct ImageResource
   {
-    void*         texture{nullptr};  // id<MTLTexture>
-    TextureHandle handle{};
+    TextureHandle texture{};
+    TextureViewHandle view{};
+    MTL::ResidencySet* presentResidencySet{nullptr};
+    CA::MetalDrawable* pendingDrawable{nullptr};
+    SubmissionToken presentSubmission{};
   };
 
-  struct FrameResource
-  {
-    // NOTES: Metal uses command buffer completion handlers instead of semaphores
-    // No binary semaphores needed like Vulkan
-    // Track completion via MTLCommandBuffer addCompletedHandler
-  };
+  void createImageResources();
+  void destroyImageResources();
+  void retireImagePresentation(ImageResource& image);
+  void releaseCurrentDrawable() noexcept;
 
-  Extent2D createResources();
-  void     destroyResources();
-
-  // NOTES: CAMetalLayer vs Swapchain mapping
-  // Metal doesn't have a swapchain object like Vulkan
-  // Instead, CAMetalLayer manages drawable acquisition
-  // - CAMetalLayer is configured with pixelFormat, framebufferOnly, etc.
-  // - nextDrawable returns a CAMetalDrawable with current texture
-  // - Drawable must be presented after rendering completes
-  //
-  // Initialization:
-  // 1. Get CAMetalLayer from view/window (nativeLayer parameter)
-  // 2. Set layer.device = metalDevice
-  // 3. Set layer.pixelFormat (MTLPixelFormatBGRA8Unorm for sRGB)
-  // 4. Set layer.framebufferOnly = YES (optimization)
-  // 5. Configure drawableSize to match window size
-  //
-  // Acquisition:
-  // id<CAMetalDrawable> drawable = [metalLayer nextDrawable];
-  // MTLTexture* texture = drawable.texture;
-  //
-  // Presentation:
-  // [commandBuffer presentDrawable:drawable];
-  // [commandBuffer commit];
-
-  void* m_metalDevice{nullptr};      // id<MTLDevice>
-  void* m_metalQueue{nullptr};       // id<MTLCommandQueue>
-  void* m_metalLayer{nullptr};       // id<CAMetalLayer>
-  void* m_currentDrawable{nullptr};  // id<CAMetalDrawable> (current frame)
-
+  MetalDevice* m_device{nullptr};
+  MetalQueue* m_queue{nullptr};
+  MetalSurface* m_surface{nullptr};
+  CA::MetalLayer* m_layer{nullptr};
+  CA::MetalDrawable* m_currentDrawable{nullptr};
   std::vector<ImageResource> m_images;
-  std::vector<FrameResource> m_frameResources;
-
-  uint32_t m_frameResourceIndex{0};
   uint32_t m_frameImageIndex{0};
   uint32_t m_maxFramesInFlight{3};
   Extent2D m_extent{};
-  bool     m_needsRebuild{false};
+  bool m_vSync{true};
+  bool m_hasAcquiredImage{false};
+  bool m_presentEncoded{false};
+  bool m_needsRebuild{true};
 };
 
 }  // namespace demo::rhi::metal

@@ -117,6 +117,7 @@ namespace demo
 		uint32_t maxMobileTransparentDraws{0};
 		bool depthUsesPreviousFrameIndirect{false};
 		bool depthUsesSortedBootstrap{false};
+		bool gbufferUsesRawCullingStream{false};
 		bool gbufferOpaqueAlphaPatchDispatched{false};
 		bool transparentPatchDispatched{false};
 		bool transparentOrderingCpuSeeded{false};
@@ -746,6 +747,11 @@ namespace demo
 			return m_renderer.getCSMShadowPipelineHandle();
 		}
 
+		[[nodiscard]] PipelineHandle getCSMShadowOpaquePipelineHandle() const
+		{
+			return m_renderer.getCSMShadowOpaquePipelineHandle();
+		}
+
 		[[nodiscard]] PipelineHandle getShadowCullingPipelineHandle() const
 		{
 			return m_renderer.getShadowCullingPipelineHandle();
@@ -1056,6 +1062,7 @@ namespace demo
 		                                        uint32_t previousObjectCount,
 		                                        uint32_t opaqueMaxDrawCount,
 		                                        uint32_t alphaMaxDrawCount);
+		void recordGBufferRawVisibilitySource(bool usedRawCullingStream, uint32_t objectCount);
 		void recordGBufferVisibilityPatch(bool patched, uint32_t opaqueCapacity, uint32_t alphaCapacity);
 		void recordForwardVisibilityPatch(bool patched, uint32_t transparentCapacity, uint32_t totalPersistentCapacity);
 		[[nodiscard]] uint32_t getActivePointLightCount() const { return m_lightResources.getActivePointLightCount(); }
@@ -1421,9 +1428,10 @@ namespace demo
 
 		bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
 		                                       uint32_t frameIndex,
-		                                       rhi::BufferHandle targetIndirectBuffer,
-		                                       uint32_t categoryValue,
-		                                       uint32_t outputOffset);
+			                                       rhi::BufferHandle targetIndirectBuffer,
+			                                       uint32_t categoryValue,
+			                                       uint32_t outputOffset,
+			                                       uint32_t outputCapacity);
 
 	private:
 #if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
@@ -1614,6 +1622,7 @@ namespace demo
 		void uploadPendingMeshletsAfterIdle();
 		void flushPendingSceneUploads();
 		void advanceSceneTopologyVersion();
+		void advanceShadowContentVersion();
 		void invalidateSortedBootstrapStates();
 		void invalidateSortedBootstrapState(uint32_t frameIndex);
 		void recordSortedBootstrapState(uint32_t frameIndex, uint32_t opaqueCapacity, uint32_t alphaCapacity);
@@ -1703,9 +1712,6 @@ namespace demo
 		std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
 		std::vector<uint32_t> m_visibilitySortInputObjects;
 		std::vector<uint32_t> m_visibilitySortInputKeys;
-		std::vector<uint32_t> m_cachedStaticVisibilitySortObjects;
-		std::vector<uint32_t> m_cachedStaticVisibilitySortKeys;
-		uint64_t m_cachedStaticVisibilitySortTopologyVersion{0};
 		std::vector<shaderio::DrawUniforms> m_persistentDrawData;
 		std::vector<SceneUploadResult::SceneDrawRecord> m_sceneDrawRecords;
 		std::vector<SubmittedTransformHistory> m_transformHistoryByDrawRecord;
@@ -1925,6 +1931,7 @@ namespace demo
 		std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
 		std::vector<RawCullingBootstrapFrameState> m_rawCullingBootstrapFrames;
 		uint64_t m_sceneTopologyVersion{1};
+		uint64_t m_shadowContentVersion{1};
 		bool m_enableExperimentalMeshletPath{false};
 		bool m_suspendSceneRendering{false};
 		bool m_meshletUploadDirty{false};
@@ -1954,6 +1961,7 @@ namespace demo
 		std::array<PersistentTextureState, 3> m_gbufferResourceStates{};
 		PersistentTextureState m_sceneColorHdrResourceState{};
 		PersistentTextureState m_velocityResourceState{};
+		PersistentTextureState m_csmResourceState{};
 		// These arrays are also physical-resource state: resize/lifecycle recreation
 		// resets them to SceneResources' real post-create layout (General).
 		std::array<rhi::ResourceState, 2> m_sceneColorHistoryStates{

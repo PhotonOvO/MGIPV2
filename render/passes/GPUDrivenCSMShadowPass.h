@@ -1,6 +1,9 @@
 #pragma once
 
+#include "../CSMShadowCache.h"
 #include "../Pass.h"
+
+#include <array>
 
 namespace demo
 {
@@ -17,5 +20,8 @@ namespace demo
 
 	private:
 		GPUDrivenRenderer* m_renderer{nullptr};
+		mutable CSMShadowCache m_cache{};
+		mutable CSMShadowCacheIdentity m_commandWarmupIdentity{};
+		mutable std::array<uint8_t, 64> m_commandWarmupPassCounts{};
 	};
 } // namespace demo

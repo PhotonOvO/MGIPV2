@@ -6,11 +6,27 @@
 #include "ddgi_sample_probe.slang"
 #include "flax_ddgi_common.slang"
 
-[[vk::binding(0, 0)]]
-Sampler2D inTexture[];
+#if defined(DEMO_METAL) && !defined(GPU_DRIVEN_SPLIT_SUM_IBL)
+// Metal uses one argument-table layout for both lighting modules. Keep the
+// optional IBL resources active so later texture and sampler slots stay fixed.
+#define GPU_DRIVEN_SPLIT_SUM_IBL 1
+#endif
 
-[[vk::binding(LBindShadowMap, LSetTextures)]]
-Sampler2DArray shadowMap;
+#ifdef DEMO_METAL
+[[vk::binding(LBindTextures, LSetTextures)]]
+Texture2D<float4> inTextureResources[LLightingTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define getBindlessTexture(index) inTexture[index]
+#endif
+
 #ifdef GPU_DRIVEN_SPLIT_SUM_IBL
 [[vk::binding(LBindIBLIrradiance, LSetTextures)]]
 SamplerCube iblIrradianceMap;
@@ -19,11 +35,11 @@ SamplerCube iblPrefilteredMap;
 [[vk::binding(LBindIBLBrdfLut, LSetTextures)]]
 Sampler2D iblBrdfLut;
 #endif
+[[vk::binding(LBindShadowMap, LSetTextures)]]
+Sampler2DArray shadowMap;
 // Cube maps for split-sum IBL
 [[vk::binding(2, 0)]]
 StructuredBuffer<LightData> pointLightBuffer;
-[[vk::binding(8, 0)]]
-StructuredBuffer<LightData> spotLightBuffer;
 
 [[vk::binding(3, 0)]]
 StructuredBuffer<uint16_t4> pointLightXYCoarseCullIndicesBuffer;
@@ -39,6 +55,9 @@ StructuredBuffer<uint> clusterLightIndices;
 
 [[vk::binding(7, 0)]]
 ConstantBuffer<ClusteredLightUniforms> clusteredLight;
+
+[[vk::binding(8, 0)]]
+StructuredBuffer<LightData> spotLightBuffer;
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -149,34 +168,22 @@ float2 directionToEquirectUv(vec3 direction)
 
 vec3 sampleEquirectEnvironment(vec3 direction, float mipLevel)
 {
-    return max(inTexture[kIBLEnvironmentIndex].SampleLevel(directionToEquirectUv(direction), mipLevel).rgb, 0.0);
+    return max(getBindlessTexture(kIBLEnvironmentIndex).SampleLevel(directionToEquirectUv(direction), mipLevel).rgb, 0.0);
 }
 
 float2 clipPositionToFramebufferUv(float2 clipPosition)
 {
-    float2 uv = clipPosition * 0.5 + 0.5;
-#ifdef DEMO_D3D12
-    uv.y = 1.0 - uv.y;
-#endif
-    return uv;
+    return demoClipPositionToFramebufferUv(clipPosition);
 }
 
 float2 framebufferUvToNdc(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-#ifdef DEMO_D3D12
-    ndc.y = -ndc.y;
-#endif
-    return ndc;
+    return demoFramebufferUvToNdc(uv);
 }
 
 float2 ndcToFramebufferUv(float2 ndc)
 {
-    float2 uv = ndc * 0.5 + 0.5;
-#ifdef DEMO_D3D12
-    uv.y = 1.0 - uv.y;
-#endif
-    return uv;
+    return demoNdcToFramebufferUv(ndc);
 }
 
 vec3 reconstructWorldPosition(float2 uv, float depth)
@@ -291,10 +298,7 @@ float4 projectCSMShadowCascade(vec3 worldPos, int cascadeIdx)
         return float4(0.0);
 
     float3 shadowNdc = shadowClip.xyz / shadowClip.w;
-#ifdef DEMO_D3D12
-    shadowNdc.y = -shadowNdc.y;
-#endif
-    float2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
+    float2 shadowUv = demoNdcToFramebufferUv(shadowNdc.xy);
     const float texelSize = max(lighting.light.shadowMetrics.x, 1.0e-7);
     const float pcfSafeMarginUv = (float(LCascadePcfRadius) + 0.5) * texelSize;
     const float edgeDistanceUv = min(
@@ -630,14 +634,16 @@ FlaxDDGIData buildFlaxDDGIData(LightingUniforms lighting)
     ddgi.probesOriginAndSpacing = lighting.light.ddgiFlaxOriginAndSpacing;
     ddgi.blendOrigin = lighting.light.ddgiFlaxBlendOrigin;
     ddgi.probesScrollOffsets = lighting.light.ddgiFlaxScrollOffsets;
-    ddgi.probesCounts = lighting.light.ddgiFlaxCountsAndRays.xyz;
-    ddgi.cascadesCount = uint(lighting.light.ddgiFlaxEnabledAndCascades.y);
+    ddgi.probesCounts = uint4(
+        lighting.light.ddgiFlaxCountsAndRays.xyz,
+        uint(lighting.light.ddgiFlaxEnabledAndCascades.y));
     ddgi.irradianceGamma = lighting.light.ddgiFlaxGammaWeightMaxDist.x;
     ddgi.probeHistoryWeight = lighting.light.ddgiFlaxGammaWeightMaxDist.y;
     ddgi.rayMaxDistance = lighting.light.ddgiFlaxGammaWeightMaxDist.z;
     ddgi.indirectLightingIntensity = lighting.light.ddgiFlaxGammaWeightMaxDist.w;
-    ddgi.viewPos = lighting.light.ddgiFlaxBlendOrigin[0].xyz;
-    ddgi.raysCount = uint(lighting.light.ddgiFlaxCountsAndRays.w);
+    ddgi.viewPos = float4(
+        lighting.light.ddgiFlaxBlendOrigin[0].xyz,
+        lighting.light.ddgiFlaxCountsAndRays.w);
     ddgi.fallbackIrradiance = lighting.light.ddgiFlaxFallbackIrradiance;
     return ddgi;
 }
@@ -680,15 +686,15 @@ vec3 sampleSharedDDGIProbeIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 {
     DDGISampleVolume volume = buildSharedDDGISampleVolume();
     return sampleDDGIIrradiance(volume, worldPos, N, Wo,
-                                inTexture[kDDGIIrradianceAtlasIndex],
-                                inTexture[kDDGIDepthAtlasIndex]);
+                                getBindlessTexture(kDDGIIrradianceAtlasIndex),
+                                getBindlessTexture(kDDGIDepthAtlasIndex));
 }
 
 vec3 sampleSharedDDGIProbeIrradianceNoVisibility(vec3 worldPos, vec3 N, vec3 Wo)
 {
     DDGISampleVolume volume = buildSharedDDGISampleVolume();
     return sampleDDGIIrradianceNoVisibility(volume, worldPos, N, Wo,
-                                            inTexture[kDDGIIrradianceAtlasIndex]);
+                                            getBindlessTexture(kDDGIIrradianceAtlasIndex));
 }
 
 vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
@@ -731,7 +737,7 @@ vec3 sampleSharedDDGIProbeIrradianceDirect(vec3 worldPos, vec3 N)
     const float3 dir = length(N) > 0.0001 ? normalize(N) : float3(0.0, 1.0, 0.0);
     const float2 texCoord = ddgiTextureCoordFromDirection(
         dir, probeIdx, volume.irradianceAtlasSize, volume.irradianceSideLength);
-    float3 probeIrradiance = inTexture[kDDGIIrradianceAtlasIndex].SampleLevel(texCoord, 0.0).rgb;
+    float3 probeIrradiance = getBindlessTexture(kDDGIIrradianceAtlasIndex).SampleLevel(texCoord, 0.0).rgb;
     probeIrradiance = pow(probeIrradiance,
                           float3(volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5, volume.ddgiGamma * 0.5));
     probeIrradiance *= probeIrradiance;
@@ -752,9 +758,9 @@ vec3 evaluateFlaxDDGIIrradiance(vec3 worldPos, vec3 N, vec3 Wo)
 
     return sampleFlaxDDGIIrradiance(
         ddgi,
-        inTexture[kFlaxDDGIProbesDataIndex],
-        inTexture[kFlaxDDGIProbesDistanceIndex],
-        inTexture[kFlaxDDGIProbesIrradianceIndex],
+        getBindlessTexture(kFlaxDDGIProbesDataIndex),
+        getBindlessTexture(kFlaxDDGIProbesDistanceIndex),
+        getBindlessTexture(kFlaxDDGIProbesIrradianceIndex),
         worldPos, N, Wo, normalBias, viewBias,
         cascadeBlendDist);
 }
@@ -958,7 +964,7 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     const int2 ssrMaxCoord   = int2(int(ssrWidth) - 1, int(ssrHeight) - 1);
     const int2 depthMaxCoord = int2(int(depthWidth) - 1, int(depthHeight) - 1);
 
-    const float refNdc = inTexture[kGBufferDepthIndex].SampleLevel(uv, 0.0).r;
+    const float refNdc = getBindlessTexture(kGBufferDepthIndex).SampleLevel(uv, 0.0).r;
     const float refViewZ = linearizeViewZ(max(refNdc, 1.0e-7));
 
     // Bilinear footprint in half-res texel space.
@@ -968,7 +974,7 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     const int2 baseCoord = int2(baseTexel);
 
     const int2 centerCoord = clamp(int2(texelPos + 0.5), int2(0, 0), ssrMaxCoord);
-    const float4 centerTap = combinedTextureLoad(inTexture[kSSRTextureIndex], int3(centerCoord, 0));
+    const float4 centerTap = combinedTextureLoad(getBindlessTexture(kSSRTextureIndex), int3(centerCoord, 0));
 
     float4 sum = float4(0.0);
     float weightSum = 0.0;
@@ -977,9 +983,9 @@ float4 evaluateSSR(float2 uv, vec3 N, vec3 V, vec3 baseColor, float metallic, fl
     {
         const int2 offset = int2(i & 1, i >> 1);
         const int2 tapCoord = clamp(baseCoord + offset, int2(0, 0), ssrMaxCoord);
-        const float4 tap = combinedTextureLoad(inTexture[kSSRTextureIndex], int3(tapCoord, 0));
+        const float4 tap = combinedTextureLoad(getBindlessTexture(kSSRTextureIndex), int3(tapCoord, 0));
         const int2 tapFullCoord = clamp(tapCoord * 2 + int2(1, 1), int2(0, 0), depthMaxCoord);
-        const float tapNdc = combinedTextureLoad(inTexture[kGBufferDepthIndex], int3(tapFullCoord, 0)).r;
+        const float tapNdc = combinedTextureLoad(getBindlessTexture(kGBufferDepthIndex), int3(tapFullCoord, 0)).r;
         const float tapViewZ = linearizeViewZ(max(tapNdc, 1.0e-7));
         const float bilinearWeight = (offset.x == 1 ? lerpW.x : 1.0 - lerpW.x)
                                    * (offset.y == 1 ? lerpW.y : 1.0 - lerpW.y);
@@ -1072,10 +1078,10 @@ VSOutput vertexMain(uint vertexIndex : SV_VertexID)
 [shader("fragment")]
 float4 fragmentMain(VSOutput input) : SV_Target
 {
-    float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
-    float4 packedSample    = inTexture[kGBufferPackedNormalMaterialIndex].Sample(input.uv);
-    float4 emissiveSample  = inTexture[kGBufferEmissiveIndex].Sample(input.uv);
-    float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    float4 baseColorSample = getBindlessTexture(kGBufferBaseColorIndex).Sample(input.uv);
+    float4 packedSample    = getBindlessTexture(kGBufferPackedNormalMaterialIndex).Sample(input.uv);
+    float4 emissiveSample  = getBindlessTexture(kGBufferEmissiveIndex).Sample(input.uv);
+    float  depthSample     = getBindlessTexture(kGBufferDepthIndex).Sample(input.uv).r;
 
     if(lightCoarseCulling.debugInfo.x > 0.5)
     {
@@ -1096,7 +1102,7 @@ float4 fragmentMain(VSOutput input) : SV_Target
     float ao = saturate(packedSample.a);
     if(lighting.light.phase7Info.x > 0.5)
     {
-        ao *= saturate(inTexture[kAOTextureIndex].SampleLevel(input.uv, 0.0).r);
+        ao *= saturate(getBindlessTexture(kAOTextureIndex).SampleLevel(input.uv, 0.0).r);
     }
     float viewDepth = computeViewDepth(worldPos);
 
@@ -1121,10 +1127,10 @@ float4 fragmentMain(VSOutput input) : SV_Target
 [shader("fragment")]
 float4 fragmentHdrMain(VSOutput input) : SV_Target
 {
-    float4 baseColorSample = inTexture[kGBufferBaseColorIndex].Sample(input.uv);
-    float4 packedSample    = inTexture[kGBufferPackedNormalMaterialIndex].Sample(input.uv);
-    float4 emissiveSample  = inTexture[kGBufferEmissiveIndex].Sample(input.uv);
-    float  depthSample     = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    float4 baseColorSample = getBindlessTexture(kGBufferBaseColorIndex).Sample(input.uv);
+    float4 packedSample    = getBindlessTexture(kGBufferPackedNormalMaterialIndex).Sample(input.uv);
+    float4 emissiveSample  = getBindlessTexture(kGBufferEmissiveIndex).Sample(input.uv);
+    float  depthSample     = getBindlessTexture(kGBufferDepthIndex).Sample(input.uv).r;
 
     if(lightCoarseCulling.debugInfo.x > 0.5)
     {
@@ -1145,7 +1151,7 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     float ao = saturate(packedSample.a);
     if(lighting.light.phase7Info.x > 0.5)
     {
-        ao *= saturate(inTexture[kAOTextureIndex].SampleLevel(input.uv, 0.0).r);
+        ao *= saturate(getBindlessTexture(kAOTextureIndex).SampleLevel(input.uv, 0.0).r);
     }
     float viewDepth = computeViewDepth(worldPos);
 
@@ -1190,7 +1196,7 @@ int selectTemporalSceneColorIndex()
 
 float3 samplePostTexture(int textureIndex, float2 uv)
 {
-    return max(inTexture[textureIndex].Sample(uv).rgb, 0.0);
+    return max(getBindlessTexture(textureIndex).Sample(uv).rgb, 0.0);
 }
 
 float luminance(float3 color)
@@ -1267,7 +1273,7 @@ float computeAdaptiveExposure()
         for(int x = 0; x < 4; ++x)
         {
             float2 uv = float2((float(x) + 0.5) * 0.25, (float(y) + 0.5) * 0.25);
-            total += luminance(inTexture[selectTemporalSceneColorIndex()].Sample(uv).rgb);
+            total += luminance(getBindlessTexture(selectTemporalSceneColorIndex()).Sample(uv).rgb);
         }
     }
     float averageLum = max(total * (1.0 / 16.0), 1.0e-4);
@@ -1348,12 +1354,12 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
 {
     if(postProcess.params5.w > 0.5)
     {
-        float2 velocity = inTexture[kVelocityIndex].Sample(input.uv).rg;
+        float2 velocity = getBindlessTexture(kVelocityIndex).Sample(input.uv).rg;
         float magnitude = saturate(length(velocity) * 64.0);
         return float4(magnitude, magnitude, magnitude, 1.0);
     }
 
-    float3 hdrColor = inTexture[selectTemporalSceneColorIndex()].Sample(input.uv).rgb;
+    float3 hdrColor = getBindlessTexture(selectTemporalSceneColorIndex()).Sample(input.uv).rgb;
     float3 bloom = samplePostTexture(kBloomOutputIndex, input.uv);
     if(luminance(bloom) <= 1.0e-6)
     {
@@ -1390,7 +1396,7 @@ float4 fragmentFinalColorMain(VSOutput input) : SV_Target
 [shader("fragment")]
 float4 fragmentVelocityMain(VSOutput input) : SV_Target
 {
-    float depthSample = inTexture[kGBufferDepthIndex].Sample(input.uv).r;
+    float depthSample = getBindlessTexture(kGBufferDepthIndex).Sample(input.uv).r;
     if(depthSample <= 0.0001)
     {
         return float4(0.0, 0.0, 0.0, 1.0);
@@ -1461,11 +1467,11 @@ float3 sampleCatmullRom5Tap(int texIdx, float2 uv, float2 texSize)
     float k2 = w12.x * w12.y;
     float k3 = w3.x  * w12.y;
     float k4 = w12.x * w3.y;
-    float3 s0 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos0.y),  0).rgb;
-    float3 s1 = inTexture[texIdx].SampleLevel(float2(texPos0.x,  texPos12.y), 0).rgb;
-    float3 s2 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos12.y), 0).rgb;
-    float3 s3 = inTexture[texIdx].SampleLevel(float2(texPos3.x,  texPos12.y), 0).rgb;
-    float3 s4 = inTexture[texIdx].SampleLevel(float2(texPos12.x, texPos3.y),  0).rgb;
+    float3 s0 = getBindlessTexture(texIdx).SampleLevel(float2(texPos12.x, texPos0.y),  0).rgb;
+    float3 s1 = getBindlessTexture(texIdx).SampleLevel(float2(texPos0.x,  texPos12.y), 0).rgb;
+    float3 s2 = getBindlessTexture(texIdx).SampleLevel(float2(texPos12.x, texPos12.y), 0).rgb;
+    float3 s3 = getBindlessTexture(texIdx).SampleLevel(float2(texPos3.x,  texPos12.y), 0).rgb;
+    float3 s4 = getBindlessTexture(texIdx).SampleLevel(float2(texPos12.x, texPos3.y),  0).rgb;
     float3 result = k0*s0 + k1*s1 + k2*s2 + k3*s3 + k4*s4;
     float kSum = k0 + k1 + k2 + k3 + k4;
     return max(float3(0), result / kSum);
@@ -1503,7 +1509,7 @@ float3 taaClipToBox(float3 boxMin, float3 boxMax, float3 filtered, float3 histor
 float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
 {
     const float4 currentSceneColor =
-        inTexture[kSceneColorHdrIndex].SampleLevel(input.uv, 0.0);
+        getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv, 0.0);
     float3 currentColor = currentSceneColor.rgb;
     // The producer writes [0,1]. Treat malformed/uninitialized alpha as neutral
     // so the reactive path fails safe instead of rejecting history everywhere.
@@ -1530,16 +1536,16 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     // filterInput=true 时 resolve 重建未抖动像素中心，velocity 需在当前抖动覆盖位置采样；
     // filterInput=false 时当前样本代表 input.uv + jitterUv，对应 velocity 直接采 input.uv。
     const float2 targetCurrentUv  = useFilterInput ? input.uv : input.uv + jitterUv;
-    float2 velocity  = inTexture[kVelocityIndex].SampleLevel(targetCurrentUv - jitterUv, 0.0).xy;
+    float2 velocity  = getBindlessTexture(kVelocityIndex).SampleLevel(targetCurrentUv - jitterUv, 0.0).xy;
     float2 historyUv = targetCurrentUv - velocity;
 
     // --- 2. 历史采样（Catmull-Rom 5-tap 或双线性）---
     float2 texSize = 1.0 / texel;
     float3 historyRgb = useCatmullRom
         ? sampleCatmullRom5Tap(kSceneColorHistoryReadIndex, historyUv, texSize)
-        : inTexture[kSceneColorHistoryReadIndex].SampleLevel(historyUv, 0).rgb;
+        : getBindlessTexture(kSceneColorHistoryReadIndex).SampleLevel(historyUv, 0).rgb;
     const float historyAlpha =
-        inTexture[kSceneColorHistoryReadIndex].SampleLevel(historyUv, 0.0).a;
+        getBindlessTexture(kSceneColorHistoryReadIndex).SampleLevel(historyUv, 0.0).a;
     const float historyShadowSignal =
         historyAlpha >= 0.0 && historyAlpha <= 1.0 ? historyAlpha : 1.0;
     const float shadowSignalDelta = abs(currentShadowSignal - historyShadowSignal);
@@ -1557,15 +1563,15 @@ float4 fragmentTAAResolveMain(VSOutput input) : SV_Target
     // --- 3. 3x3 邻域采样（保留 RGB，供输入滤波与 clamp 盒共用）---
     // 顺序：[-1,-1][0,-1][1,-1][-1,0][0,0][1,0][-1,1][0,1][1,1]
     float3 rgbS[9];
-    rgbS[0] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x, -texel.y), 0).rgb;
-    rgbS[1] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( 0.0,     -texel.y), 0).rgb;
-    rgbS[2] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x, -texel.y), 0).rgb;
-    rgbS[3] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x,  0.0    ), 0).rgb;
+    rgbS[0] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2(-texel.x, -texel.y), 0).rgb;
+    rgbS[1] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2( 0.0,     -texel.y), 0).rgb;
+    rgbS[2] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2( texel.x, -texel.y), 0).rgb;
+    rgbS[3] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2(-texel.x,  0.0    ), 0).rgb;
     rgbS[4] = currentColor;
-    rgbS[5] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x,  0.0    ), 0).rgb;
-    rgbS[6] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2(-texel.x,  texel.y), 0).rgb;
-    rgbS[7] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( 0.0,      texel.y), 0).rgb;
-    rgbS[8] = inTexture[kSceneColorHdrIndex].SampleLevel(input.uv + float2( texel.x,  texel.y), 0).rgb;
+    rgbS[5] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2( texel.x,  0.0    ), 0).rgb;
+    rgbS[6] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2(-texel.x,  texel.y), 0).rgb;
+    rgbS[7] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2( 0.0,      texel.y), 0).rgb;
+    rgbS[8] = getBindlessTexture(kSceneColorHdrIndex).SampleLevel(input.uv + float2( texel.x,  texel.y), 0).rgb;
 
     // --- 4. filterInput：以 jitter 为中心的 Lanczos 核重建像素中心的“未抖动”当前值 ---
     // 本引擎 jitter 经 projection[2][0/1] 加偏移后，渲染图 R(p) = 真实场景 S(p + jitterPx)，

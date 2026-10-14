@@ -44,6 +44,31 @@ namespace demo::clipspace
 		}
 	}
 
+	constexpr bool framebufferUvFlipsNdcY(BackendConvention backend)
+	{
+		return backend == BackendConvention::d3d12 || backend == BackendConvention::metal;
+	}
+
+	inline glm::vec2 ndcToFramebufferUv(glm::vec2 ndc, BackendConvention backend)
+	{
+		glm::vec2 uv = ndc * 0.5f + 0.5f;
+		if (framebufferUvFlipsNdcY(backend))
+		{
+			uv.y = 1.0f - uv.y;
+		}
+		return uv;
+	}
+
+	inline glm::vec2 framebufferUvToNdc(glm::vec2 uv, BackendConvention backend)
+	{
+		glm::vec2 ndc = uv * 2.0f - 1.0f;
+		if (framebufferUvFlipsNdcY(backend))
+		{
+			ndc.y = -ndc.y;
+		}
+		return ndc;
+	}
+
 	inline glm::mat4 applyProjectionConvention(glm::mat4 projection, const ProjectionConvention& convention)
 	{
 		if (convention.flipY)

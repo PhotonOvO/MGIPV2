@@ -1,39 +1,42 @@
 #pragma once
 
-#include "../RHIPipeline.h"
+#include "MetalResourceTable.h"
+
+namespace MTL {
+class ComputePipelineState;
+class Device;
+class Function;
+}
+
+namespace MTL4 {
+class Compiler;
+}
 
 namespace demo::rhi::metal {
 
-enum class PipelineShaderIdentity : uint32_t
+[[nodiscard]] MetalPipelineBindingLayout buildMetalPipelineBindingLayout(
+  const PipelineBindingSchemaDesc& schema, const VertexInputLayoutDesc& vertexInput,
+  const MetalResourceTable& resources, bool useNestedResourceArgumentBuffer = false);
+
+[[nodiscard]] MetalPipelineRecord compileMetalGraphicsPipeline(
+  MTL::Device& device, MTL4::Compiler& compiler, const GraphicsPipelineDesc& desc,
+  const MetalResourceTable& resources, bool enableShaderValidation);
+
+[[nodiscard]] MetalPipelineRecord compileMetalComputePipeline(
+  MTL4::Compiler& compiler, const ComputePipelineDesc& desc,
+  const MetalResourceTable& resources, bool enableShaderValidation);
+
+struct MetalBuiltinPipelines
 {
-  raster = 0,
-  compute,
+  MTL::ComputePipelineState* blit{nullptr};
+  MTL::ComputePipelineState* indexedIndirectUInt32{nullptr};
+  MTL::ComputePipelineState* indexedIndirectUInt16{nullptr};
+  MTL::Function* indexedIndirectFunction{nullptr};
 };
 
-struct PipelineKey
-{
-  PipelineShaderIdentity shaderIdentity{PipelineShaderIdentity::raster};
-  uint32_t               specializationVariant{0};
-};
-
-struct GraphicsPipelineCreateInfo
-{
-  PipelineKey          key{};
-  GraphicsPipelineDesc desc{};
-};
-
-struct ComputePipelineCreateInfo
-{
-  PipelineKey         key{};
-  ComputePipelineDesc desc{};
-};
-
-// Stub helpers consume the public RHI pipeline descriptors. A future Metal
-// implementation will lower PipelineBindingSchemaDesc to argument
-// buffers/tables, encoder bytes or buffers for root constants, and explicit
-// GpuPtr/dynamic-buffer bindings inside the backend. No Vulkan pipeline-layout
-// or push-constant byte-offset model is part of this contract.
-void* createGraphicsPipeline(void* nativeDevice, const GraphicsPipelineCreateInfo& createInfo);
-void* createComputePipeline(void* nativeDevice, const ComputePipelineCreateInfo& createInfo);
+// Loads the build-time Slang metallib and creates backend-private pipelines.
+// Every returned object is owned by the caller.
+[[nodiscard]] MetalBuiltinPipelines compileMetalBuiltinPipelines(
+  MTL::Device& device, MTL4::Compiler& compiler, bool enableShaderValidation);
 
 }  // namespace demo::rhi::metal

@@ -19,27 +19,12 @@ namespace demo
 			virtual bool drawIndexed(rhi::RenderEncoder& encoder, const DrawStreamDecoder::DecodedDraw& draw) = 0;
 		};
 
-		struct IndexedIndirectCountRecordDesc
-		{
-			rhi::BufferHandle argsBuffer{};
-			uint64_t argsOffset{0};
-			rhi::BufferHandle countBuffer{};
-			uint64_t countBufferOffset{0};
-			uint32_t maxDrawCount{0};
-			uint32_t stride{0};
-		};
-
-		struct IndexedIndirectRecordDesc
-		{
-			rhi::BufferHandle argsBuffer{};
-			uint64_t offset{0};
-			uint32_t drawCount{1};
-			uint32_t stride{0};
-		};
+		using IndexedIndirectRecordDesc = rhi::DrawIndirectDesc;
 
 		[[nodiscard]] bool record(const DrawStream& stream, rhi::RenderEncoder& encoder, Resolver& resolver) const;
 
-		static void recordIndexedIndirectCount(rhi::RenderEncoder& encoder, const IndexedIndirectCountRecordDesc& desc);
+		static void recordIndexedIndirectCount(rhi::RenderEncoder& encoder,
+		                                       const rhi::DrawIndirectCountDesc& desc);
 		static void recordIndexedIndirect(rhi::RenderEncoder& encoder, const IndexedIndirectRecordDesc& desc);
 	};
 } // namespace demo

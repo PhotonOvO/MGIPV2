@@ -50,6 +50,10 @@ namespace demo::rhi
 		virtual RenderEncoder* beginRenderPass(const RenderPassDesc& desc) = 0;
 		virtual ComputeEncoder* beginComputePass() = 0;
 		virtual void endEncoding() = 0;
+		virtual void prepareIndexedIndirect(
+			const PrepareIndexedIndirectDesc&) {}
+		virtual void prepareIndexedIndirectCount(
+			const PrepareIndexedIndirectCountDesc&) {}
 		virtual RHIResult useResidencySet(ResidencySetHandle)
 		{
 			return RHIResult::fail(RHIErrorCode::unsupported, "Explicit residency is unsupported" );

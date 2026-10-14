@@ -12,7 +12,7 @@
 #ifdef __ANDROID__
 #  include <backends/imgui_impl_android.h>
 #else
-#  include <backends/imgui_impl_glfw.h>
+#  include <backends/imgui_impl_sdl3.h>
 #endif
 
 #include <algorithm>
@@ -60,6 +60,7 @@ namespace demo
   struct ImGuiRhiRenderer::Impl
   {
     rhi::Device* device{nullptr};
+    rhi::BackendType backend{rhi::BackendType::vulkan};
     uint32_t frameCount{0};
     bool initialized{false};
 
@@ -410,7 +411,8 @@ namespace demo
 
       const ui::Projection projection = ui::makeProjection(
         {drawData.DisplayPos.x, drawData.DisplayPos.y},
-        {drawData.DisplaySize.x, drawData.DisplaySize.y});
+        {drawData.DisplaySize.x, drawData.DisplaySize.y},
+        backend);
       encoder.setRootConstants(rhi::ShaderStage::vertex, kProjectionRootSlot, std::as_bytes(std::span{&projection, 1}));
     }
 
@@ -419,7 +421,8 @@ namespace demo
       ImDrawData& drawData,
       const FrameBuffers& buffers,
       uint32_t framebufferWidth,
-      uint32_t framebufferHeight)
+      uint32_t framebufferHeight,
+      ui::Float2 framebufferScale)
     {
       setupRenderState(
         encoder,
@@ -471,7 +474,7 @@ namespace demo
               command.ClipRect.w,
             },
             {drawData.DisplayPos.x, drawData.DisplayPos.y},
-            {drawData.FramebufferScale.x, drawData.FramebufferScale.y},
+            framebufferScale,
             framebufferWidth,
             framebufferHeight);
           if (!scissor.has_value())
@@ -574,6 +577,7 @@ namespace demo
     ASSERT(info.frameCount > 0, "ImGui RHI renderer requires at least one frame");
     Impl& impl = *m_impl;
     impl.device = info.device;
+    impl.backend = info.device->getBackendInfo().type;
     impl.frameCount = info.frameCount;
     impl.frameBuffers.resize(info.frameCount);
 
@@ -583,7 +587,24 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_Init(static_cast<ANativeWindow*>(info.window));
 #else
-    ImGui_ImplGlfw_InitForOther(static_cast<GLFWwindow*>(info.window), true);
+    SDL_Window* window = static_cast<SDL_Window*>(info.window);
+    bool platformInitialized = false;
+    switch (impl.backend)
+    {
+    case rhi::BackendType::vulkan:
+      platformInitialized = ImGui_ImplSDL3_InitForVulkan(window);
+      break;
+    case rhi::BackendType::d3d12:
+      platformInitialized = ImGui_ImplSDL3_InitForD3D(window);
+      break;
+    case rhi::BackendType::metal:
+      platformInitialized = ImGui_ImplSDL3_InitForMetal(window);
+      break;
+    }
+    if (!platformInitialized)
+    {
+      throw std::runtime_error("Failed to initialize ImGui SDL3 platform backend");
+    }
 #endif
 
     const rhi::ArgumentBinding textureBinding{
@@ -765,7 +786,7 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_Shutdown();
 #else
-    ImGui_ImplGlfw_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
 #endif
     ImGui::DestroyContext();
 
@@ -784,7 +805,7 @@ namespace demo
 #ifdef __ANDROID__
     ImGui_ImplAndroid_NewFrame();
 #else
-    ImGui_ImplGlfw_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
 #endif
     ImGui::NewFrame();
   }
@@ -807,10 +828,11 @@ namespace demo
     {
       return;
     }
-    const uint32_t framebufferWidth = static_cast<uint32_t>(
-      drawData->DisplaySize.x * drawData->FramebufferScale.x);
-    const uint32_t framebufferHeight = static_cast<uint32_t>(
-      drawData->DisplaySize.y * drawData->FramebufferScale.y);
+    const uint32_t framebufferWidth = targetExtent.width;
+    const uint32_t framebufferHeight = targetExtent.height;
+    const ui::Float2 framebufferScale = ui::makeFramebufferScale(
+      {drawData->DisplaySize.x, drawData->DisplaySize.y},
+      targetExtent);
 
     FrameBuffers& buffers = impl.frameBuffers[frameIndex % impl.frameBuffers.size()];
     for (uint32_t index = 0; index < buffers.uploadStagingCount; ++index)
@@ -851,7 +873,8 @@ namespace demo
         *drawData,
         buffers,
         framebufferWidth,
-        framebufferHeight);
+        framebufferHeight,
+        framebufferScale);
     }
     if (encoder != nullptr)
     {

@@ -179,9 +179,9 @@ namespace demo
 
 		// --- Pipelines ---
 #ifdef USE_SLANG
-		const auto createPipeline = [&](const uint32_t* spirv, size_t wordCount, const char* entryPoint,
-		                                rhi::ArgumentLayoutHandle layout, uint32_t pushSize,
-		                                uint32_t variant)
+			const auto createPipeline = [&](const uint32_t* spirv, size_t wordCount, const char* entryPoint,
+			                                rhi::ArgumentLayoutHandle layout, uint32_t pushSize,
+			                                rhi::Extent3D threadgroupSize, uint32_t variant)
 		{
 			const std::array<rhi::ArgumentLayoutHandle, 1> layouts{{layout}};
 			const std::array<rhi::RootBindingDesc, 1> rootBindings{{
@@ -203,27 +203,28 @@ namespace demo
 					.library = loadEmbeddedSpirvLibrary(
 						device, spirv, wordCount * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
-				},
-				.bindingSchema = bindingSchema.view(),
-				.specializationVariant = variant,
+					},
+					.bindingSchema = bindingSchema.view(),
+					.threadgroupSize = threadgroupSize,
+					.specializationVariant = variant,
 			};
 			return device.createComputePipeline(desc);
 		};
 
-		m_irradianceUpdatePipeline = createPipeline(
-			ddgi_irradiance_probe_update_slang, std::size(ddgi_irradiance_probe_update_slang),
-			"kernelDDGIIrradianceProbeUpdate", m_updateLayout,
-			sizeof(shaderio::DDGIProbeUpdatePush), 0x7405u);
-		m_depthUpdatePipeline = createPipeline(
-			ddgi_depth_probe_update_slang, std::size(ddgi_depth_probe_update_slang),
-			"kernelDDGIDepthProbeUpdate", m_updateLayout,
-			sizeof(shaderio::DDGIProbeUpdatePush), 0x7406u);
-		m_irradianceBorderPipeline = createPipeline(
-			ddgi_irradiance_border_update_slang, std::size(ddgi_irradiance_border_update_slang),
-			"kernelDDGIIrradianceBorderUpdate", m_borderLayout, 0u, 0x7407u);
-		m_depthBorderPipeline = createPipeline(
-			ddgi_depth_border_update_slang, std::size(ddgi_depth_border_update_slang),
-			"kernelDDGIDepthBorderUpdate", m_borderLayout, 0u, 0x7408u);
+			m_irradianceUpdatePipeline = createPipeline(
+				ddgi_irradiance_probe_update_slang, std::size(ddgi_irradiance_probe_update_slang),
+				"kernelDDGIIrradianceProbeUpdate", m_updateLayout,
+				sizeof(shaderio::DDGIProbeUpdatePush), {8, 8, 1}, 0x7405u);
+			m_depthUpdatePipeline = createPipeline(
+				ddgi_depth_probe_update_slang, std::size(ddgi_depth_probe_update_slang),
+				"kernelDDGIDepthProbeUpdate", m_updateLayout,
+				sizeof(shaderio::DDGIProbeUpdatePush), {16, 16, 1}, 0x7406u);
+			m_irradianceBorderPipeline = createPipeline(
+				ddgi_irradiance_border_update_slang, std::size(ddgi_irradiance_border_update_slang),
+				"kernelDDGIIrradianceBorderUpdate", m_borderLayout, 0u, {8, 4, 1}, 0x7407u);
+			m_depthBorderPipeline = createPipeline(
+				ddgi_depth_border_update_slang, std::size(ddgi_depth_border_update_slang),
+				"kernelDDGIDepthBorderUpdate", m_borderLayout, 0u, {8, 8, 1}, 0x7408u);
 #endif
 	}
 

@@ -17,8 +17,17 @@
 #include "shader_io.h"
 #include "ddgi_sample_probe.slang"
 
-[[vk::binding(0, 0)]]
-Sampler2D irradianceAtlas;
+#ifdef DEMO_METAL
+[[vk::binding(0, 0)]] Texture2D<float4> irradianceAtlasTexture;
+[[vk::binding(0, 0)]] SamplerState irradianceAtlasSampler;
+DemoMetalSampler2D getIrradianceAtlas()
+{
+    return makeDemoMetalSampler2D(irradianceAtlasTexture, irradianceAtlasSampler);
+}
+#else
+[[vk::binding(0, 0)]] Sampler2D irradianceAtlas;
+#define getIrradianceAtlas() irradianceAtlas
+#endif
 
 [[vk::binding(1, 0)]]
 ConstantBuffer<DDGIProbeVisualizationUniforms> probeVisUniforms;
@@ -102,7 +111,7 @@ float2 flaxProbeTextureCoordFromDirection(float3 dir, uint physicalProbeIndex)
 
 float3 decodeProbeVisIrradiance(float2 uv)
 {
-    float3 irradiance = irradianceAtlas.SampleLevel(uv, 0.0).rgb;
+    float3 irradiance = getIrradianceAtlas().SampleLevel(uv, 0.0).rgb;
     // Gamma decode: pow(x, gamma * 0.5) then square (LuxGI DDGICommon.glsl
     // storage convention, same as the lighting SampleProbe path).
     const float halfGamma = probeVisUniforms.ddgiGamma * 0.5;

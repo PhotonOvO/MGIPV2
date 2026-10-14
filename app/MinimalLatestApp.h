@@ -4,12 +4,12 @@
 #include "../common/FrameDeferredValue.h"
 #include "../common/ProfilerMarkers.h"
 
+#include "GlfwSdl3Compat.h"
+#include <backends/imgui_impl_sdl3.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
-#include <GLFW/glfw3.h>
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
 #if defined(_MSC_VER)
 #pragma comment(lib, "Comdlg32.lib")
 #endif
@@ -226,6 +226,15 @@ public:
     }
     m_surface = m_renderer.createSurface();
     m_renderer.init(m_window, *m_surface, m_vSync);
+    // The app layer pumps SDL events through glfwPollEvents() (see
+    // app/GlfwSdl3Compat.h). Forward every event to the ImGui SDL3 backend
+    // before the compat layer dispatches it to the editor's own callbacks.
+    mgif_sdl::eventSink = [](const SDL_Event* event) {
+      if (ImGui::GetCurrentContext() != nullptr)
+      {
+        ImGui_ImplSDL3_ProcessEvent(event);
+      }
+    };
     if(m_editorVisualEnabled
 #if defined(MGIF_EDITOR_LIVE_REPLAY)
        || m_editorLiveEnabled
@@ -837,7 +846,7 @@ private:
 
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
       {
-        ImGui_ImplGlfw_Sleep(10);
+        SDL_Delay(10);
         return;
       }
 

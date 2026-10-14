@@ -105,12 +105,14 @@ namespace demo
 		});
 		context.commandBuffer->endEncoding();
 
-		// Return the offscreen output to the graph's persistent General boundary.
-		// GPUDrivenImgui declares the following sampled-read transition and restores
-		// General after its draw, keeping the physical and graph states closed.
+		// Leave the swapchain in General only when ImGui will consume it. Headless
+		// automation can transition directly to Present in this existing barrier.
+		const rhi::ResourceState swapchainAfterBlit = context.params->renderUi
+			? rhi::ResourceState::General
+			: rhi::ResourceState::Present;
 		const rhi::TextureBarrier fromBlit[] = {
 			{
-				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = rhi::ResourceState::General,
+				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = swapchainAfterBlit,
 				.range = colorRange
 			},
 			{

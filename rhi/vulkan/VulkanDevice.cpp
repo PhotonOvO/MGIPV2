@@ -25,6 +25,10 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#ifndef __ANDROID__
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#endif
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(__linux__) || defined(__ANDROID__)
@@ -136,11 +140,18 @@ namespace demo::rhi::vulkan
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR
 		};
 		// Window-system-integration surface extensions per platform.
-		m_createInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 #ifdef __ANDROID__
+		m_createInfo.instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 		m_createInfo.instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
-#elif defined(_WIN32)
-		m_createInfo.instanceExtensions.push_back("VK_KHR_win32_surface");
+#else
+		Uint32 sdlExtensionCount = 0;
+		const char* const* sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+		ensure(sdlExtensions != nullptr && sdlExtensionCount > 0,
+		       "SDL failed to provide Vulkan instance extensions");
+		for(Uint32 index = 0; index < sdlExtensionCount; ++index)
+		{
+			pushUnique(m_createInfo.instanceExtensions, sdlExtensions[index]);
+		}
 #endif
 		// Debug utils for event markers (RenderDoc, PIX, etc.)
 		m_createInfo.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -756,6 +767,12 @@ namespace demo::rhi::vulkan
 		{
 			pushUnique(enabledInstanceExtensions, VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 		}
+#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+		if (extensionAvailable(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, m_availableInstanceExtensions))
+		{
+			pushUnique(enabledInstanceExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+		}
+#endif
 
 		for (const char* ext : enabledInstanceExtensions)
 		{
@@ -785,9 +802,22 @@ namespace demo::rhi::vulkan
 		// Validation settings with GPU-assisted validation enabled
 		utils::ValidationSettings validationSettings{};
 
+		VkInstanceCreateFlags instanceFlags = 0;
+#ifdef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+		if(std::any_of(enabledInstanceExtensions.begin(), enabledInstanceExtensions.end(),
+		               [](const char* extension)
+		               {
+			               return cstrEqual(extension, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+		               }))
+		{
+			instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+		}
+#endif
+
 		const VkInstanceCreateInfo instanceCreateInfo{
 			.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
 			.pNext = m_createInfo.base.enableValidationLayers ? validationSettings.buildPNextChain() : nullptr,
+			.flags = instanceFlags,
 			.pApplicationInfo = &appInfo,
 			.enabledLayerCount = static_cast<uint32_t>(enabledLayers.size()),
 			.ppEnabledLayerNames = enabledLayers.data(),

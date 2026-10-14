@@ -31,11 +31,26 @@ ConstantBuffer<DDGIRayTraceUniforms> rayTraceUniforms;
 
 // Infinite bounce (Wave D4-1): LAST frame's probe atlases (the C++ side binds
 // the parity-selected read pair; cf. DDGIProbeVolume::getIrradianceAtlasRead).
-[[vk::binding(3, 0)]]
-Sampler2D historyIrradianceAtlas;
-
-[[vk::binding(4, 0)]]
-Sampler2D historyDepthAtlas;
+#ifdef DEMO_METAL
+[[vk::binding(3, 0)]] Texture2D<float4> historyIrradianceAtlasTexture;
+[[vk::binding(3, 0)]] SamplerState historyIrradianceAtlasSampler;
+[[vk::binding(4, 0)]] Texture2D<float4> historyDepthAtlasTexture;
+[[vk::binding(4, 0)]] SamplerState historyDepthAtlasSampler;
+DemoMetalSampler2D getHistoryIrradianceAtlas()
+{
+    return makeDemoMetalSampler2D(
+        historyIrradianceAtlasTexture, historyIrradianceAtlasSampler);
+}
+DemoMetalSampler2D getHistoryDepthAtlas()
+{
+    return makeDemoMetalSampler2D(historyDepthAtlasTexture, historyDepthAtlasSampler);
+}
+#else
+[[vk::binding(3, 0)]] Sampler2D historyIrradianceAtlas;
+[[vk::binding(4, 0)]] Sampler2D historyDepthAtlas;
+#define getHistoryIrradianceAtlas() historyIrradianceAtlas
+#define getHistoryDepthAtlas() historyDepthAtlas
+#endif
 
 [[vk::binding(5, 0)]]
 Sampler3D<float4> globalAlbedoTexture;
@@ -190,7 +205,7 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
                 volume.probePositionAddress = rayTraceUniforms.probePositionAddress;
                 const float3 indirectIrradiance = sampleDDGIIrradiance(
                     volume, hitPosition, hitNormal, -rayDirection,
-                    historyIrradianceAtlas, historyDepthAtlas);
+                    getHistoryIrradianceAtlas(), getHistoryDepthAtlas());
                 radiance += (albedo / kDDGIRaysPi) * indirectIrradiance;
             }
             else

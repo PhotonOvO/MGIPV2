@@ -17,7 +17,11 @@
 RWTexture3D<float> dstVolume;
 
 [[vk::binding(1, 0)]]
+#ifdef DEMO_METAL
+Texture3D<float> meshSDFTextures[LGlobalSDFMaxMeshSDFs];
+#else
 Sampler3D<float> meshSDFTextures[LGlobalSDFMaxMeshSDFs];
+#endif
 
 [[vk::binding(2, 0)]]
 ConstantBuffer<GlobalSDFComposeUniforms> composeUniforms;
@@ -26,7 +30,17 @@ ConstantBuffer<GlobalSDFComposeUniforms> composeUniforms;
 RWTexture3D<float4> dstAlbedo;
 
 [[vk::binding(4, 0)]]
+#ifdef DEMO_METAL
+Texture3D<float4> meshAlbedoTextures[LGlobalSDFMaxMeshSDFs];
+
+[[vk::binding(5, 0)]]
+SamplerState meshSDFSampler;
+
+[[vk::binding(6, 0)]]
+SamplerState meshAlbedoSampler;
+#else
 Sampler3D<float4> meshAlbedoTextures[LGlobalSDFMaxMeshSDFs];
+#endif
 
 float distanceToAABB(float3 p, float3 boundsMin, float3 boundsMax)
 {
@@ -75,11 +89,19 @@ void kernelGlobalSDFCompose(uint3 dispatchThreadId : SV_DispatchThreadID)
                 composeUniforms.meshTextureDimensions[i].xyz, float3(1.0, 1.0, 1.0));
             const float3 centeredUVW =
                 (uvw * max(textureDimensions - 1.0, 0.0) + 0.5) / textureDimensions;
+#ifdef DEMO_METAL
+            const float encoded = meshSDFTextures[i].SampleLevel(meshSDFSampler, centeredUVW, 0.0);
+#else
             const float encoded = meshSDFTextures[i].SampleLevel(centeredUVW, 0.0);
+#endif
             meshDistance = (encoded * 2.0 - 1.0) * meshMaxDistance;
             if (meshDistance < minDistance)
             {
+#ifdef DEMO_METAL
+                nearestAlbedo = meshAlbedoTextures[i].SampleLevel(meshAlbedoSampler, centeredUVW, 0.0);
+#else
                 nearestAlbedo = meshAlbedoTextures[i].SampleLevel(centeredUVW, 0.0);
+#endif
             }
         }
         if (aabbDistance > 0.0 && meshDistance < minDistance)
@@ -91,7 +113,11 @@ void kernelGlobalSDFCompose(uint3 dispatchThreadId : SV_DispatchThreadID)
                 float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
             const float3 centeredUVW =
                 (clampedUVW * max(textureDimensions - 1.0, 0.0) + 0.5) / textureDimensions;
+#ifdef DEMO_METAL
+            nearestAlbedo = meshAlbedoTextures[i].SampleLevel(meshAlbedoSampler, centeredUVW, 0.0);
+#else
             nearestAlbedo = meshAlbedoTextures[i].SampleLevel(centeredUVW, 0.0);
+#endif
         }
         minDistance = min(minDistance, meshDistance);
     }

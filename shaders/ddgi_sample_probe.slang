@@ -81,7 +81,8 @@ float2 ddgiTextureCoordFromDirection(float3 dir, int probeIndex, int2 atlasSize,
 // Returns world-space irradiance (already includes the 2*pi factor); the
 // caller applies its own albedo/BRDF energy convention.
 float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
-                             Sampler2D irradianceAtlas, Sampler2D depthAtlas)
+                             DEMO_BINDLESS_SAMPLER2D irradianceAtlas,
+                             DEMO_BINDLESS_SAMPLER2D depthAtlas)
 {
 #ifdef DEMO_D3D12
     return float3(0.0, 0.0, 0.0);
@@ -170,7 +171,7 @@ float3 sampleDDGIIrradiance(DDGISampleVolume volume, float3 P, float3 N, float3 
 }
 
 float3 sampleDDGIIrradianceNoVisibility(DDGISampleVolume volume, float3 P, float3 N, float3 Wo,
-                                         Sampler2D irradianceAtlas)
+                                         DEMO_BINDLESS_SAMPLER2D irradianceAtlas)
 {
 #ifdef DEMO_D3D12
     return float3(0.0, 0.0, 0.0);

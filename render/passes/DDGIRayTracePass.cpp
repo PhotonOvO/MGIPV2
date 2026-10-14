@@ -322,10 +322,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					device, ddgi_gi_sdf_rays_slang, "ddgi-ray-trace"),
 				.entryPoint = "kernelDDGIRayTrace",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x7404u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {16, 1, 1},
+				.specializationVariant = 0x7404u,
+			};
 		m_pipeline = device.createComputePipeline(desc);
 
 		const std::array<rhi::ArgumentLayoutHandle, 1> relocationLayouts{{m_relocationLayout}};
@@ -337,10 +338,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					device, ddgi_probe_relocate_slang, "ddgi-probe-relocate"),
 				.entryPoint = "kernelDDGIProbeRelocate",
-			},
-			.bindingSchema = relocationBindingSchema.view(),
-			.specializationVariant = 0x7409u,
-		};
+				},
+				.bindingSchema = relocationBindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x7409u,
+			};
 		m_relocationPipeline = device.createComputePipeline(relocationDesc);
 #endif
 	}

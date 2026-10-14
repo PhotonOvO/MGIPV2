@@ -1,370 +1,286 @@
-# Metal Backend Implementation Guide
+# Metal 4 RHI Backend
 
-This directory contains the Metal 3+ backend scaffold for the Demo RHI (Render Hardware Interface). This is an **INTERFACE ONLY** implementation - all methods are stubs with detailed Metal mapping strategy notes.
+This directory contains the Apple-platform Metal 4 implementation of the Demo
+RHI. It targets the Metal 4 core API introduced with macOS 26 and iOS 26 and is
+compiled with Xcode 26 or newer.
 
-## Metal 3+ Requirements
+Authoritative references:
 
-- **Minimum OS**: macOS 14+ or iOS 17+
-- **Metal API**: Metal 3+ (argument buffers, dynamic libraries, indirect drawing)
-- **Feature Set**: Apple GPU Family 3+ for full Tier 3 support
+- Apple, Understanding the Metal 4 core API:
+  <https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api>
+- Slang, Metal-specific functionalities:
+  <https://shader-slang.org/slang/user-guide/metal-target-specific>
+- metal-cpp: <https://github.com/bkaradzic/metal-cpp>
+- Pinned metal-cpp commit: `9a8bc57c0318b84863bec2faf6605594877c5f5d`
+- Pinned archive SHA-256:
+  `46736574f7afd977d7d35a13aa781edb595a43650d437b50f5779ec750879530`
 
-## Metal Architecture Overview
+## Requirements
 
-Metal has significant architectural differences from Vulkan:
+- Xcode 26 or newer with a macOS 26 or newer SDK
+- The optional Xcode Metal Toolchain component for production shader builds
+- A Metal 4 runtime for execution and smoke testing
+- C++20
 
-| Concept | Vulkan | Metal |
-|---------|--------|-------|
-| Device | Instance + PhysicalDevice + LogicalDevice | id<MTLDevice> |
-| Queues | Separate graphics/compute/transfer queue families | Single command queue with encoders |
-| Synchronization | Timeline semaphores, fences | Completion handlers, MTLSharedEvent |
-| Command Recording | Command buffers (begin/end) | Command buffers with encoders |
-| Bindless | Descriptor indexing | Argument buffers |
-| Pipeline State | PSO with pipeline layout | PSO with implicit layout |
-| Presentation | Swapchain with semaphores | CAMetalLayer with drawables |
+The CMake configuration rejects SDKs older than macOS 26. The deployment host
+may be older for compile-only validation, but Metal 4 executables must only be
+run on a host where `queryMetal4Availability()` reports the SDK contract,
+runtime protocols, and a device as available.
 
-## Bindless Resource Mapping Strategy
+## Core API Contract
 
-### Argument Buffers vs Descriptor Indexing
+The CPU command path is implemented in `.cpp` files and uses these Metal 4
+command types exclusively through metal-cpp:
 
-Metal uses **argument buffers** for bindless resource access, not descriptor indexing:
+- `MTL4::CommandQueue`
+- `MTL4::CommandAllocator`
+- `MTL4::CommandBuffer`
+- `MTL4::RenderCommandEncoder`
+- `MTL4::ComputeCommandEncoder`
 
-```cpp
-// Vulkan approach (descriptor indexing)
-vkCmdBindDescriptorSets(..., descriptorSet, ...);
+`tests/metal4_source_contract.cmake` scans the backend and fails if a legacy
+command family, Objective-C runtime call, runtime MSL source path, `.mm` file,
+hand-authored `.metal` file, or legacy drawable submission call is introduced.
 
-// Metal approach (argument buffers)
-[encoder setBuffer:argumentBuffer offset:0 atIndex:0];
-// Shader: [[buffer(0)]] ArgumentBuffer argBuffer;
+Apple's Metal 4 command-buffer lifecycle is represented directly:
+
+1. The device creates reusable command buffers.
+2. `beginCommandBuffer(allocator)` attaches allocator storage.
+3. Encoders record render, compute, copy, blit, and acceleration work.
+4. `endCommandBuffer()` makes the buffer executable.
+5. a compatible Metal 4 queue commits the executable buffer.
+6. after GPU completion, allocator reset makes its command buffers reusable.
+
+Metal 4 command buffers do not retain referenced resources. The backend retains
+native objects while recorded work is executable or pending and retires RHI
+objects only after every recorded submission token has completed.
+
+## Vulkan Mapping
+
+| RHI / Vulkan behavior | Metal 4 implementation |
+| --- | --- |
+| device and physical capabilities | `MTL::Device` capability queries |
+| graphics, compute, transfer queues | three `MTL4::CommandQueue` wrappers |
+| command pool | `MTL4::CommandAllocator` |
+| reusable command buffer | `MTL4::CommandBuffer` begin/end lifecycle |
+| graphics commands | `MTL4::RenderCommandEncoder` |
+| compute and transfer commands | `MTL4::ComputeCommandEncoder` |
+| descriptor sets | logical RHI tables composed into `MTL4::ArgumentTable` snapshots |
+| timeline synchronization | `MTL::SharedEvent` values and RHI submission tokens |
+| pipeline barriers | Metal 4 stage and hazard barriers |
+| explicit residency | `MTL::ResidencySet` |
+| timestamp query pool | `MTL4::CounterHeap` |
+| image views | `MTL::TextureViewPool` resource IDs |
+| SPIR-V shader module | embedded native metallib selected from the same Slang source |
+
+Metal 4 treats resources as untracked. `resourceBarrier()` maintains RHI
+subresource state and lowers producer stages, consumer stages, and write hazards
+to Metal 4 barriers before the next encoder consumes the resource.
+
+## Argument Tables
+
+Pipeline reflection is lowered into one composed Metal 4 binding layout with
+separate buffer, texture, and sampler indices. Logical RHI table slots never
+leak native binding indices into renderer code.
+
+Each dispatch or draw uses an allocator-owned `MTL4::ArgumentTable` snapshot.
+The snapshot records the logical tables and their versions. Metal 4 consumes
+the table contents when a draw or dispatch is encoded, so changing a snapshot
+after `endCommandBuffer()` cannot update already encoded work. The backend also
+records a lightweight RHI replay stream. Immediately before queue submission,
+it rebuilds the native `MTL4::CommandBuffer` when any source table version has
+changed, then collects resource validation, residency, and pending-use tracking
+from the final versions. Command buffers whose tables did not change keep their
+original native encoding. This matches the RHI contract that a table may be
+updated while work is executable but not yet submitted.
+
+Updates are rejected while a table is referenced by incomplete GPU work.
+Texture-view bindings validate both the view and its parent texture and retain
+the native view and parent storage through completion.
+
+## Pipelines And Shaders
+
+Graphics and compute pipelines are compiled with `MTL4::Compiler` and Metal 4
+pipeline descriptors. Validation-enabled devices request
+`MTL::ShaderValidationEnabled` in pipeline options.
+
+Slang remains the only shader source of truth. A production Apple build
+performs the following offline build pipeline:
+
+```text
+Slang -> generated MSL -> AIR -> metallib -> embedded C++ bytes
 ```
 
-### Argument Buffer Structure
+At runtime `EmbeddedShaderLibrary` selects the metallib corresponding to the
+same embedded SPIR-V module used by Vulkan. Every compute pipeline supplies an
+explicit Metal threads-per-threadgroup size.
 
-```metal
-// Metal shader declaration
-struct ArgumentBuffer {
-  texture2d<float> textures[MAX_TEXTURES];
-  device Buffer     buffers[MAX_BUFFERS];
-  sampler           samplers[MAX_SAMPLERS];
-};
+Metal-specific blit and indexed-indirect-count kernels live in
+`MetalBuiltins.slang`. Slang's Metal target generates temporary `.metal` files
+only in the build directory; Xcode compiles them to one embedded metallib.
+Runtime code loads those bytes with metal-cpp and creates pipeline states with
+`MTL4::Compiler`. It never compiles MSL source at runtime.
 
-[[buffer(N)]] ArgumentBuffer argBuffer;
+The indexed-indirect builder uses Slang's target interoperation facilities.
+`__target_intrinsic(metal, ...)` maps Slang wrapper types to Metal shader-side
+`command_buffer` and `render_command`, and `ParameterBlock<T>` lowers to the
+argument buffer that carries the ICB reference. These are GPU shader types used
+to write ICB commands. They are unrelated to the CPU-side
+`MTL4::CommandBuffer` and `MTL4::RenderCommandEncoder` objects.
+
+Render pipelines that opt into GPU-generated commands select a second Slang
+Metal variant compiled with `DEMO_METAL_ICB=1`. That variant places the material
+texture array and shared sampler in a `ParameterBlock`, because Xcode 27 rejects
+fragment ICB pipelines with those resources at top level. The Metal RHI encodes
+the existing material argument table into that nested argument buffer and binds
+its GPU address through the ordinary Metal 4 argument table. Renderer binding
+schemas and the Vulkan/D3D12 shader variants are unchanged.
+
+## Copy, Blit, And Mipmaps
+
+The Metal 4 compute encoder handles copies, fills, and blits.
+
+- Equal-size, forward, same-format 2D regions use `copyFromTexture`.
+- Scaling or a negative source/destination extent uses the private Metal 4
+  compute pipeline with bilinear filtering.
+- The compute path binds source texture, destination texture, and constants
+  through `MTL4::ArgumentTable` and dispatches 8 by 8 threads.
+- Mipmap generation uses the same compute path between adjacent mip levels.
+- Color aspect, mip bounds, layer bounds, offsets, sample count, usage flags,
+  compressed formats, overlapping subresources, and 2D texture type are
+  validated before encoding.
+
+The current portable blit contract is color-only, single-sample, single-layer
+2D. Block-compressed textures support exact copies but not scaling or flipping.
+
+## Drawable Presentation
+
+`CAMetalLayer` uses `framebufferOnly = false` because the final copy writes its
+drawable texture from a Metal 4 compute encoder. The RHI-visible swapchain
+images are per-frame, offscreen BGRA8 composition textures. Scene scaling and
+flipping plus ImGui rendering target those composition textures, so the backend
+never uses a drawable texture as a render attachment and never issues a draw
+command against one.
+
+Before the frame command buffer is submitted, `MetalSwapchain::encodePresent()`
+appends an equal-size `copyFromTexture` from the completed composition texture to
+the drawable. This folds presentation into the frame's existing Metal 4 command
+buffer instead of allocating and committing a second command buffer every frame.
+Each presentation slot owns a residency set containing its composition texture.
+The frame command buffer also binds `CAMetalLayer::residencySet()`. Metal updates
+that set as drawable backing resources change, including during a window resize;
+without it, a valid copy submission can target a drawable whose resources are not
+resident and intermittently present an empty frame.
+
+The layer also sets `allowsNextDrawableTimeout = false`. During live resize,
+returning `nil` from a timed-out `nextDrawable()` would skip presentation just as
+Core Animation replaces the layer backing, exposing an empty refresh between
+valid frames. Zero-sized and iconified windows are rejected before acquisition,
+so blocking here cannot turn those states into a drawable wait.
+
+The required order is:
+
+```text
+wait(drawable) -> encode scene/UI work -> encode drawable compute copy
+-> commit frame command buffer -> signalDrawable(drawable)
+-> drawable->present()
 ```
 
-### Bind Table Mapping
+`MetalSwapchain::acquireNextImage()` waits for the drawable before exposing the
+corresponding composition texture. `Queue::submit()` commits the encoded frame
+and signals its drawable. `MetalSwapchain::present()` then presents it.
 
-| RHI Concept | Metal Implementation |
-|-------------|---------------------|
-| DescriptorTableLayout | MTLArgumentEncoder |
-| DescriptorTable | MTLBuffer (containing resource pointers) |
-| Logical Index | Array index in argument buffer |
-| Update | MTLArgumentEncoder setTexture/setBuffer/setSampler |
+The queue's presentation completion event is scheduled after `signalDrawable`.
+Consequently, waiting for a presentation token (including `waitIdle()` during
+resize) covers both the copy command buffer and the drawable signal before the
+layer backing or retained drawable is released.
 
-### Example Metal API Usage
+## Validation Smoke Test
 
-```objc
-// Create argument encoder
-MTLArgumentDescriptor* texArgDesc = [MTLArgumentDescriptor argumentDescriptor];
-texArgDesc.dataType = MTLDataTypeTexture;
-texArgDesc.arrayLength = MAX_TEXTURES;
-MTLArgumentEncoder* encoder = [device newArgumentEncoderWithArguments:@[texArgDesc]];
+`metal4_validation_smoke_tests` enables validation before any Metal device is
+created:
 
-// Create argument buffer
-id<MTLBuffer> argBuffer = [device newBufferWithLength:encoder.encodedLength options:0];
-
-// Update resources
-[encoder setArgumentBuffer:argBuffer offset:0];
-[encoder setTexture:texture0 atIndex:0];
-[encoder setTexture:texture1 atIndex:1];
-
-// Bind during rendering
-[renderEncoder setBuffer:argBuffer offset:0 atIndex:0];
+```text
+MTL_DEBUG_LAYER=1
+MTL_DEBUG_LAYER_ERROR_MODE=assert
+MTL_SHADER_VALIDATION=1
+MTL_SHADER_VALIDATION_DEFAULT_STATE=all
+MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1
 ```
 
-## Command Recording Architecture
+`MetalDevice::init()` applies the same settings when
+`DeviceCreateInfo::enableValidationLayers` is true. The smoke test additionally
+verifies:
 
-### Encoder Hierarchy
+- buffer upload and readback through the Metal 4 compute encoder;
+- scaled, horizontally flipped mip generation through the private compute
+  pipeline;
+- compute and render argument-table updates after command-buffer end and before
+  queue submit, including destruction of the replaced buffer;
+- direct indexed, ordinary indexed-indirect, and GPU-count/ICB indexed draws in
+  three independent viewport regions;
+- an offscreen Metal 4 render pass, draw, render-to-transfer barrier, and texture
+  readback without issuing any draw command against a drawable;
+- API and shader validation while the work executes.
 
-Metal uses a hierarchical encoder system:
+The executable returns `77` when the Metal 4 runtime or device is unavailable,
+and CTest declares `SKIP_RETURN_CODE 77`. This lets an Xcode 26 compile-only host
+produce the test, while a separate macOS 26 host performs GPU validation.
 
-```
-MTLCommandQueue
-  └─ MTLCommandBuffer
-      ├─ MTLRenderCommandEncoder (rendering commands)
-      ├─ MTLComputeCommandEncoder (compute commands)
-      └─ MTLBlitCommandEncoder (copy operations)
-```
+## Xcode Project Generation
 
-### Key Differences from Vulkan
+Use the repository generator instead of assigning `DEVELOPER_DIR` manually:
 
-1. **No explicit begin/end**: Command buffers are created from queues
-2. **Encoder boundaries**: Different work types require different encoders
-3. **Implicit synchronization**: Metal tracks resource dependencies automatically
-4. **No barriers**: Resource state transitions are implicit
-
-### Example Command Recording
-
-```objc
-// Create command buffer
-id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-
-// Create render encoder
-MTLRenderPassDescriptor* renderDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-renderDesc.colorAttachments[0].texture = colorTexture;
-id<MTLRenderCommandEncoder> renderEncoder = [cmdBuffer renderCommandEncoderWithDescriptor:renderDesc];
-
-// Record commands
-[renderEncoder setRenderPipelineState:pipeline];
-[renderEncoder setViewport:viewport];
-[renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-
-// End encoding
-[renderEncoder endEncoding];
-
-// Submit with completion handler
-[cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
-    // Frame complete
-}];
-[cmdBuffer commit];
+```sh
+./tools/generate_xcode_project.py --platform macos
 ```
 
-## Presentation Architecture
+The generator scans the system and user application directories, including
+`~/Downloads`, and selects the highest installed Xcode version supported by the
+backend. Xcode prerelease applications are eligible, so an Xcode 27 Beta is
+preferred over an Xcode 26 release. The default output directory includes the
+selected major version, for example `build-macos-xcode27`, so a project never
+reuses an older Xcode's CMake cache.
 
-### CAMetalLayer vs Swapchain
+Inspect the selection without generating files:
 
-Metal uses `CAMetalLayer` for presentation, not a swapchain object:
-
-| Vulkan Concept | Metal Equivalent |
-|----------------|-----------------|
-| VkSwapchainKHR | CAMetalLayer |
-| vkAcquireNextImageKHR | [layer nextDrawable] |
-| vkQueuePresentKHR | [cmdBuffer presentDrawable:] |
-| ImageAvailable semaphore | Not needed (implicit) |
-| RenderFinished semaphore | Not needed (implicit) |
-
-### Presentation Flow
-
-```objc
-// Initialize CAMetalLayer
-CAMetalLayer* layer = (CAMetalLayer*)view.layer;
-layer.device = device;
-layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-layer.framebufferOnly = YES;
-
-// Acquire (frame start)
-id<CAMetalDrawable> drawable = [layer nextDrawable];
-MTLTexture* texture = drawable.texture;
-
-// Render to texture
-// ... render commands ...
-
-// Present (frame end)
-[cmdBuffer presentDrawable:drawable];
-[cmdBuffer commit];
+```sh
+./tools/generate_xcode_project.py --platform macos --dry-run
 ```
 
-## Synchronization Strategy
+Force a particular installation when needed:
 
-### Timeline Semaphore Emulation
-
-Metal doesn't have timeline semaphores. Use completion handlers:
-
-```objc
-// Frame tracking with monotonic counter
-uint64_t frameCounter = 0;
-
-[cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
-    // Update completion tracking
-    frameComplete[frameCounter] = true;
-}];
-
-[cmdBuffer commit];
-frameCounter++;
+```sh
+./tools/generate_xcode_project.py \
+  --xcode '/Applications/Xcode 26.app' \
+  --platform macos
 ```
 
-### MTLSharedEvent (Alternative)
+The same entry point supports `ios-simulator` and `ios-device`. Additional
+CMake options may be passed after `--`.
 
-For cross-queue synchronization, use `MTLSharedEvent`:
+## Metal Toolchain
 
-```objc
-id<MTLSharedEvent> sharedEvent = [device newSharedEvent];
+Install the optional shader tools once:
 
-// Signal
-[commandBuffer encodeSignalEvent:sharedEvent value:signalValue];
-
-// Wait
-[commandBuffer encodeWaitForEvent:sharedEvent value:waitValue];
+```sh
+DEVELOPER_DIR='/path/to/Xcode.app/Contents/Developer' \
+  xcodebuild -downloadComponent MetalToolchain
 ```
 
-## Pipeline Creation
+After generation, use the selected developer directory printed by the script
+when building from a terminal. The script also prints the exact build and
+`open -a` commands for the selected Xcode application.
 
-### Graphics Pipeline
-
-```objc
-MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor renderPipelineDescriptor];
-desc.vertexFunction = vertexFunction;
-desc.fragmentFunction = fragmentFunction;
-desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-
-// Vertex descriptor (input layout)
-MTLVertexDescriptor* vertexDesc = [MTLVertexDescriptor vertexDescriptor];
-vertexDesc.attributes[0].format = MTLVertexFormatFloat3;
-desc.vertexDescriptor = vertexDesc;
-
-// Create PSO
-id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+```sh
+DEVELOPER_DIR='/path/to/Xcode.app/Contents/Developer' \
+  cmake --build build-macos-xcode27 --target Demo --parallel
 ```
 
-### Compute Pipeline
+Compile-only validation must not invoke the produced Metal executables. Move or
+rebuild the artifacts on the macOS 26 machine and run:
 
-```objc
-MTLComputePipelineDescriptor* desc = [MTLComputePipelineDescriptor computePipelineDescriptor];
-desc.computeFunction = computeFunction;
-
-id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:computeFunction error:&error];
+```sh
+ctest --test-dir build-macos-xcode27 -R 'metal4_(source_contract|validation_smoke)' \
+  --output-on-failure
 ```
-
-### Pipeline Layout
-
-Metal doesn't have explicit pipeline layout objects. Layout is defined by shader function signatures:
-
-```metal
-// Shader declares argument buffer binding
-[[buffer(0)]] ArgumentBuffer argBuffer;
-[[buffer(1)]] constant UniformData& uniforms;
-[[texture(0)]] texture2d<float> colorTexture;
-```
-
-## Capability Mapping
-
-### Metal Feature Sets to RHI Tiers
-
-| Metal Feature Set | RHI Capability Tier | Features |
-|------------------|---------------------|----------|
-| Apple GPU Family 3+ | Tier 3 (Full) | Full Metal 3+, argument buffers, mesh shaders (emulated) |
-| Apple GPU Family 2+ | Tier 2 (Enhanced) | Argument buffers, indirect drawing |
-| Other Apple GPUs | Tier 1 (Basic) | Core Metal features |
-
-### Feature Detection
-
-```objc
-// Check GPU family
-if ([device supportsFamily:MTLGPUFamilyApple3]) {
-    // Tier 3 capabilities
-}
-
-// Check specific features
-BOOL supportsArgumentBuffers = [device supportsArgumentBuffers];
-BOOL supportsDynamicLibraries = [device supportsDynamicLibraries];
-BOOL supportsIndirectDrawing = [device supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily5];
-```
-
-## Memory Model
-
-### Unified Memory Architecture
-
-Metal uses a unified memory model (CPU and GPU share same address space):
-
-- **No separate heaps**: All memory is accessible from both CPU and GPU
-- **Storage modes**:
-  - `MTLStorageModeShared`: CPU and GPU accessible (default)
-  - `MTLStorageModePrivate`: GPU-only (requires staging)
-  - `MTLStorageModeManaged`: CPU writes, GPU reads (macOS only)
-
-### Buffer Allocation
-
-```objc
-// Shared mode (CPU/GPU accessible)
-id<MTLBuffer> buffer = [device newBufferWithLength:byteLength options:0];
-
-// Private mode (GPU-only, requires staging)
-id<MTLBuffer> privateBuffer = [device newBufferWithLength:byteLength options:MTLResourceStorageModePrivate];
-
-// Managed mode (macOS only)
-id<MTLBuffer> managedBuffer = [device newBufferWithLength:byteLength options:MTLResourceStorageModeManaged];
-```
-
-## Push Constants
-
-Metal doesn't have push constants. Use alternatives:
-
-1. **setVertexBytes/setFragmentBytes** (max 4KB):
-```objc
-[renderEncoder setVertexBytes:constants length:size atIndex:0];
-```
-
-2. **Inline argument buffer data**:
-```objc
-[encoder setBuffer:inlineBuffer offset:0 atIndex:0];
-```
-
-3. **Uniform buffer**:
-```objc
-[renderEncoder setVertexBuffer:uniformBuffer offset:0 atIndex:0];
-```
-
-## Dynamic State
-
-Metal supports dynamic state differently:
-
-| State | Vulkan | Metal |
-|-------|--------|-------|
-| Viewport | vkCmdSetViewport | setViewport: |
-| Scissor | vkCmdSetScissor | setScissorRect: |
-| Blend Constants | vkCmdSetBlendConstants | Not dynamic (in PSO) |
-| Depth Bias | vkCmdSetDepthBias | Not dynamic (in PSO) |
-| Stencil Reference | vkCmdSetStencilReference | setStencilReferenceValue: |
-
-## Implementation Notes
-
-### ARC (Automatic Reference Counting)
-
-Metal uses Objective-C ARC for memory management:
-
-```objc
-// Objects are automatically retained/released
-id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-// ARC handles release when device goes out of scope
-```
-
-### Interop with C++
-
-```cpp
-// Cast to/from Objective-C types
-id<MTLDevice> device = (__bridge id<MTLDevice>)nativeDeviceHandle;
-void* handle = (__bridge_retained void*)device;
-```
-
-### Thread Safety
-
-- **MTLCommandQueue**: Thread-safe, can be used from any thread
-- **MTLCommandBuffer**: Not thread-safe, use from one thread
-- **MTLResources**: Thread-safe for read, write requires synchronization
-
-## Resources
-
-- [Metal Programming Guide](https://developer.apple.com/metal/Metal-Programming-Guide/)
-- [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
-- [Metal Feature Set Tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)
-
-## Implementation Status
-
-- ✅ Interface scaffold created
-- ⏳ Full implementation pending
-- ⏳ Testing required on Apple hardware
-
-## Known Limitations
-
-1. **No timeline semaphores**: Use completion handlers or MTLSharedEvent
-2. **No mesh shaders**: Emulate with compute + render pass
-3. **No ray tracing**: Use Metal Ray Tracing (separate API)
-4. **Push constants limited**: Use setVertexBytes/setFragmentBytes (4KB max)
-5. **Dynamic state limited**: Most state must be in PSO
-
-## Future Work
-
-- [ ] Full Metal API implementation
-- [ ] Shader compilation pipeline (Metal Shading Language)
-- [ ] Argument buffer optimization
-- [ ] Multi-queue support (if applicable)
-- [ ] Async compute scheduling
-- [ ] MTLSharedEvent integration for cross-queue sync

@@ -1,6 +1,12 @@
 #ifndef HOST_DEVICE_H
 #define HOST_DEVICE_H
 
+#if defined(DEMO_D3D12) || defined(DEMO_METAL)
+#define DEMO_FRAMEBUFFER_Y_FLIP 1
+#else
+#define DEMO_FRAMEBUFFER_Y_FLIP 0
+#endif
+
 #ifdef DEMO_D3D12
 #define DEMO_DRAW_INSTANCE_SEMANTIC SV_InstanceID
 #else
@@ -17,6 +23,74 @@ typealias uvec4 = uint4;
 typealias mat4 = float4x4;
 #define STATIC_CONST static const
 
+float2 demoClipPositionToFramebufferUv(float2 clipPosition)
+{
+  float2 uv = clipPosition * 0.5 + 0.5;
+#if DEMO_FRAMEBUFFER_Y_FLIP
+  uv.y = 1.0 - uv.y;
+#endif
+  return uv;
+}
+
+float2 demoFramebufferUvToNdc(float2 uv)
+{
+  float2 ndc = uv * 2.0 - 1.0;
+#if DEMO_FRAMEBUFFER_Y_FLIP
+  ndc.y = -ndc.y;
+#endif
+  return ndc;
+}
+
+float2 demoNdcToFramebufferUv(float2 ndc)
+{
+  float2 uv = ndc * 0.5 + 0.5;
+#if DEMO_FRAMEBUFFER_Y_FLIP
+  uv.y = 1.0 - uv.y;
+#endif
+  return uv;
+}
+
+#ifdef DEMO_METAL
+#define DEMO_REGISTER(binding)
+#define DEMO_NON_UNIFORM_RESOURCE_INDEX(index) (index)
+
+struct DemoMetalSampler2D
+{
+  Texture2D<float4> texture;
+  SamplerState sampler;
+
+  float4 Sample(float2 uv)
+  {
+    return texture.Sample(sampler, uv);
+  }
+
+  float4 SampleLevel(float2 uv, float level)
+  {
+    return texture.SampleLevel(sampler, uv, level);
+  }
+};
+
+DemoMetalSampler2D makeDemoMetalSampler2D(
+  Texture2D<float4> texture, SamplerState sampler)
+{
+  DemoMetalSampler2D result;
+  result.texture = texture;
+  result.sampler = sampler;
+  return result;
+}
+
+#define DEMO_BINDLESS_SAMPLER2D DemoMetalSampler2D
+
+__target_intrinsic(metal, "discard_fragment()")
+void demoDiscardFragment();
+#define DEMO_DISCARD_FRAGMENT() demoDiscardFragment()
+#else
+#define DEMO_REGISTER(binding) : register(binding)
+#define DEMO_NON_UNIFORM_RESOURCE_INDEX(index) NonUniformResourceIndex(index)
+#define DEMO_BINDLESS_SAMPLER2D Sampler2D
+#define DEMO_DISCARD_FRAGMENT() discard
+#endif
+
 __target_intrinsic(hlsl, "$0.Load($2)")
 T combinedTextureLoad<T>(Sampler2D<T> textureSampler, int3 location) where T : ITexelElement
 {
@@ -28,6 +102,19 @@ void combinedTextureGetDimensions<T>(Sampler2D<T> textureSampler, out uint width
 {
   textureSampler.GetDimensions(width, height);
 }
+
+#ifdef DEMO_METAL
+float4 combinedTextureLoad(DemoMetalSampler2D textureSampler, int3 location)
+{
+  return textureSampler.texture.Load(location);
+}
+
+void combinedTextureGetDimensions(
+  DemoMetalSampler2D textureSampler, out uint width, out uint height)
+{
+  textureSampler.texture.GetDimensions(width, height);
+}
+#endif
 #else
 #include <cstddef>
 #include <cstdint>
@@ -49,10 +136,21 @@ using mat4 = glm::mat4;
 // Set 0: Pass-global textures (bindless)
 STATIC_CONST int LSetTextures  = 0;
 STATIC_CONST int LBindTextures = 0;
-STATIC_CONST int LBindShadowMap = 1;
+// Metal uses binding 1 for the sampler shared by a fixed texture array. Keep
+// the shadow map after the other lighting resources so both the compact Metal
+// layout and Vulkan's combined-image-sampler layout have deterministic slots.
+STATIC_CONST int LBindSharedTextureSampler = 1;
 STATIC_CONST int LBindIBLIrradiance = 9;
 STATIC_CONST int LBindIBLPrefiltered = 10;
 STATIC_CONST int LBindIBLBrdfLut = 11;
+STATIC_CONST int LBindShadowMap = 13;
+STATIC_CONST int LMetalMaterialTextureCapacity = 128;
+STATIC_CONST int LLightingTextureCapacity = 26;
+#ifdef DEMO_METAL
+STATIC_CONST int LMaterialTextureCapacity = LMetalMaterialTextureCapacity;
+#else
+STATIC_CONST int LMaterialTextureCapacity = 512;
+#endif
 
 // Set 1: Scene-level uniform buffers
 STATIC_CONST int LSetScene      = 1;
@@ -226,6 +324,7 @@ STATIC_CONST int LTileSizeX        = 16;
 STATIC_CONST int LTileSizeY        = 16;
 STATIC_CONST int LMaxLightsPerTile = 32;
 STATIC_CONST int LDepthPyramidMaxMips = 32;
+STATIC_CONST int LMetalDepthPyramidWriteMipCount = 5;
 
 // Mobile clustered lighting constants
 STATIC_CONST uint32_t LClusterGridSizeX = 16u;
@@ -233,6 +332,7 @@ STATIC_CONST uint32_t LClusterGridSizeY = 9u;
 STATIC_CONST uint32_t LClusterGridSizeZ = 24u;
 STATIC_CONST uint32_t LClusterCount = LClusterGridSizeX * LClusterGridSizeY * LClusterGridSizeZ;
 STATIC_CONST uint32_t LMaxLightsPerCluster = 32u;
+STATIC_CONST uint32_t LClusterStatsPeriod = 30u;
 STATIC_CONST uint32_t LClusterOverflowBit = 0x80000000u;
 STATIC_CONST uint32_t LClusterCountMask = 0x7fffffffu;
 STATIC_CONST uint32_t LClusterLightTypePointBit = 0x00000000u;
@@ -423,7 +523,7 @@ struct ClusteredLightUniforms
   vec4 screenSizeAndClusterInfo;  // xy = render extent, z = clusterCountX, w = clusterCountY
   vec4 clusterZAndLightInfo;      // x = clusterCountZ, y = max lights/cluster, z = point count, w = spot count
   vec4 clipInfo;                  // x = near, y = far, z = z slicing scale, w = z slicing bias
-  vec4 debugInfo;                 // x = enabled, y = heatmap, z = overflow highlight, w = fallback
+  vec4 debugInfo;                 // x = enabled, y = heatmap, z = overflow highlight, w = collect stats
   mat4 viewMatrix;
   mat4 projectionMatrix;
   mat4 invProjectionMatrix;
@@ -548,7 +648,7 @@ struct TransparentVisibilityPatchPushConstants
   uint32_t mode;
   uint32_t scanOffset;
   uint32_t scanBufferIndex;
-  uint32_t _padding0;
+  uint32_t outputCapacity;
 };
 
 struct Meshlet
@@ -616,14 +716,15 @@ struct FlaxDDGIData
   vec4 blendOrigin[LFlaxDDGIMaxCascades];             // xyz = blend origin, w unused
   ivec4 probesScrollOffsets[LFlaxDDGIMaxCascades];     // xyz = cumulative ring offset, w unused
   ivec4 probesScrollDeltas[LFlaxDDGIMaxCascades];      // xyz = current-frame origin delta, w unused
-  uvec3 probesCounts;                                   // grid resolution per cascade
-  uint32_t cascadesCount;                               // active cascade count (1-4)
+  // Keep cross-backend ABI fields in complete 16-byte lanes. Metal's natural
+  // layout gives three-component vectors a 16-byte size, while the host GLM
+  // types use 12 bytes; packing the scalar in .w avoids divergent offsets.
+  uvec4 probesCounts;                                   // xyz = grid resolution, w = cascade count
   float irradianceGamma;
   float probeHistoryWeight;
   float rayMaxDistance;
   float indirectLightingIntensity;
-  vec3 viewPos;
-  uint32_t raysCount;
+  vec4 viewPos;                                         // xyz = view position, w = rays per probe
   vec4 fallbackIrradiance;                              // rgb = fallback color, a unused
 	vec4 sdfBoundsMinAndVoxel;                            // xyz = bounds min, w = voxel size
 	vec4 sdfBoundsMaxAndRes;                              // xyz = bounds max, w = resolution as float

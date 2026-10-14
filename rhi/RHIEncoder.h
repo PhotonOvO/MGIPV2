@@ -49,6 +49,27 @@ namespace demo::rhi
 		uint32_t stride{0};
 	};
 
+	// Backends that lower indirect draws through a prepared command stream
+	// (Metal ICB) consume these before the render pass begins. Backends with
+	// native multi-draw indirect support may treat them as no-ops.
+	struct PrepareIndexedIndirectDesc
+	{
+		DrawIndirectDesc draw{};
+		BufferHandle indexBuffer{};
+		uint64_t indexBufferOffset{0};
+		IndexFormat indexFormat{IndexFormat::uint32};
+		PrimitiveTopology topology{PrimitiveTopology::triangleList};
+	};
+
+	struct PrepareIndexedIndirectCountDesc
+	{
+		DrawIndirectCountDesc draw{};
+		BufferHandle indexBuffer{};
+		uint64_t indexBufferOffset{0};
+		IndexFormat indexFormat{IndexFormat::uint32};
+		PrimitiveTopology topology{PrimitiveTopology::triangleList};
+	};
+
 	struct DispatchDesc
 	{
 		uint32_t groupCountX{1};

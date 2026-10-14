@@ -74,8 +74,6 @@ namespace demo
 		constexpr uint32_t kLightCoarseCullingThreadCount = 64u;
 		constexpr uint32_t kVisibilitySortCategoryMask = 0xc0000000u;
 		constexpr uint32_t kVisibilitySortKeyMask = 0x3fffffffu;
-		constexpr uint32_t kVisibilitySortCategoryOpaque = 0x00000000u;
-		constexpr uint32_t kVisibilitySortCategoryAlpha = 0x40000000u;
 		constexpr uint32_t kVisibilitySortCategoryTransparent = 0x80000000u;
 		constexpr uint32_t kMobileMaxTransparentDraws = 2048u;
 		constexpr float kGPUDrivenHiZDepthEpsilon = 2.0e-3f;
@@ -110,6 +108,8 @@ namespace demo
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDataIndex = kPackedGBufferTargetCount + 20u;
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesDistanceIndex = kPackedGBufferTargetCount + 21u;
 		constexpr uint32_t kGPUDrivenLightPassFlaxProbesIrradianceIndex = kPackedGBufferTargetCount + 22u;
+		static_assert(kGPUDrivenLightPassTextureCount == shaderio::LLightingTextureCapacity,
+		              "Metal lighting texture array must match the RHI lighting table");
 		constexpr rhi::TextureFormat kGPUDrivenAOFormat          = rhi::TextureFormat::r16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenSSRFormat         = rhi::TextureFormat::rgba16Sfloat;
 		constexpr rhi::TextureFormat kGPUDrivenShadowAtlasFormat = rhi::TextureFormat::d32Sfloat;
@@ -186,6 +186,7 @@ namespace demo
 			case rhi::TextureFormat::bgra8Unorm:
 			case rhi::TextureFormat::rgba8Unorm:
 			case rhi::TextureFormat::rgba8Srgb:
+			case rhi::TextureFormat::r11g11b10Ufloat:
 				return 4u;
 			case rhi::TextureFormat::rg16Sfloat:
 				return 4u;
@@ -215,6 +216,8 @@ namespace demo
 				return "R8G8B8A8_SRGB";
 			case rhi::TextureFormat::rgba16Sfloat:
 				return "R16G16B16A16_SFLOAT";
+			case rhi::TextureFormat::r11g11b10Ufloat:
+				return "B10G11R11_UFLOAT";
 			case rhi::TextureFormat::rg16Sfloat:
 				return "R16G16_SFLOAT";
 			case rhi::TextureFormat::undefined:
@@ -7290,6 +7293,7 @@ namespace demo
 		m_gbufferResourceStates.fill(PersistentTextureState{});
 		m_sceneColorHdrResourceState = {};
 		m_velocityResourceState = {};
+		m_csmResourceState = {};
 	}
 
 	void GPUDrivenRenderer::trackPersistentTextureIdentity(PersistentTextureState& textureState,
@@ -7333,6 +7337,9 @@ namespace demo
 		textureStates.sceneColorHdr = m_sceneColorHdrResourceState.state;
 		trackPersistentTextureIdentity(m_velocityResourceState, getVelocityImage());
 		textureStates.velocity = m_velocityResourceState.state;
+		trackPersistentTextureIdentity(
+			m_csmResourceState, getCSMShadowResources().getCascadeImage());
+		textureStates.csmShadow = m_csmResourceState.state;
 
 		m_passExecutor.setResourceTable(&m_renderer.getRHIDevice());
 		m_renderer.bindStaticPassResources(m_passExecutor, textureStates);
@@ -8298,14 +8305,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					m_cachedStaticVisibilitySortObjects.size() + transparentDrawIndices.size();
 				m_visibilitySortInputObjects.clear();
 				m_visibilitySortInputKeys.clear();
-				m_visibilitySortInputObjects.reserve(totalSortInputCount);
-				m_visibilitySortInputKeys.reserve(totalSortInputCount);
-				m_visibilitySortInputObjects.insert(m_visibilitySortInputObjects.end(),
-				                                    m_cachedStaticVisibilitySortObjects.begin(),
-				                                    m_cachedStaticVisibilitySortObjects.end());
-				m_visibilitySortInputKeys.insert(m_visibilitySortInputKeys.end(),
-				                                 m_cachedStaticVisibilitySortKeys.begin(),
-				                                 m_cachedStaticVisibilitySortKeys.end());
+				m_visibilitySortInputObjects.reserve(m_transparentDrawIndices.size());
+				m_visibilitySortInputKeys.reserve(m_transparentDrawIndices.size());
 				const auto appendTransparentDraws = [&](std::span<const uint32_t> drawIndices)
 				{
 					for (uint32_t drawIndex : drawIndices)
@@ -8469,6 +8470,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		rhi::TextureHandle preparedSceneColorHdrImage{};
 		rhi::TextureHandle preparedVelocityImage{};
 		bool preparedClusterStatsProducer = false;
+		rhi::TextureHandle preparedCSMImage{};
 		const bool frameSubmitted = submitPassGraph(
 			gpuParams,
 			[&](uint32_t frameIndex)
@@ -8508,6 +8510,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				}
 				preparedSceneColorHdrImage = m_sceneView.sceneColorHdrImage;
 				preparedVelocityImage = m_sceneView.velocityImage;
+				preparedCSMImage = getCSMShadowResources().getCascadeImage();
 				const uint32_t historyWriteIndex = m_taaHistoryWriteIndex;
 				const uint32_t historyReadIndex = historyWriteIndex ^ 1u;
 				preparedHistoryReadIndex = historyReadIndex;
@@ -8687,6 +8690,9 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		commitPersistentTextureState(m_velocityResourceState,
 		                             preparedVelocityImage,
 		                             rhi::ResourceState::ShaderRead);
+		commitPersistentTextureState(m_csmResourceState,
+		                             preparedCSMImage,
+		                             rhi::ResourceState::ShaderRead);
 		// Pass dependencies still establish the physical ShaderRead terminal layout
 		// for every bound history image even when TAA itself no-ops. Track layout and
 		// content validity separately: only an actual resolve draw publishes history
@@ -8858,6 +8864,10 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					              : (getIBLEnvironmentLoaded() ? "equirect_fallback" : "flat_ambient"),
 				.status = getIBLEnvironmentStatus(),
 			};
+			if ((m_temporalFrameCounter % shaderio::LClusterStatsPeriod) == 0u)
+			{
+				m_lightResources.cacheClusterStats(frameIndex);
+			}
 			const GPUDrivenLightResources::Diagnostics lightDiagnostics = m_lightResources.getDiagnostics();
 			m_runtimeStats.clusteredLightingDiagnostics = GPUDrivenClusteredLightingDiagnostics{
 				.gridX = lightDiagnostics.clusterGridX,
@@ -9060,6 +9070,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return;
 		}
+		advanceShadowContentVersion();
 
 		const glm::vec4 boundsSphere(meshRecord->worldBoundsCenter, meshRecord->worldBoundsRadius);
 		for (SceneUploadResult::SceneDrawRecord& drawRecord : m_sceneDrawRecords)
@@ -9171,6 +9182,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return;
 		}
+		advanceShadowContentVersion();
 
 		if (drawRecordIndex >= m_transformHistoryByDrawRecord.size())
 		{
@@ -10336,9 +10348,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_persistentDrawFrameUploads.clear();
 		m_visibilitySortInputObjects.clear();
 		m_visibilitySortInputKeys.clear();
-		m_cachedStaticVisibilitySortObjects.clear();
-		m_cachedStaticVisibilitySortKeys.clear();
-		m_cachedStaticVisibilitySortTopologyVersion = 0;
 		m_objectHandleByMeshHandle.clear();
 		m_objectHandlesByMeshHandle.clear();
 		m_drawIndexByMeshHandle.clear();
@@ -10434,8 +10443,18 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 	void GPUDrivenRenderer::advanceSceneTopologyVersion()
 	{
 		++m_sceneTopologyVersion;
+		advanceShadowContentVersion();
 		invalidateSortedBootstrapStates();
 		invalidateRawCullingBootstrapStates();
+	}
+
+	void GPUDrivenRenderer::advanceShadowContentVersion()
+	{
+		++m_shadowContentVersion;
+		if (m_shadowContentVersion == 0u)
+		{
+			++m_shadowContentVersion;
+		}
 	}
 
 	void GPUDrivenRenderer::invalidateSortedBootstrapStates()
@@ -11091,6 +11110,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			m_activeUploadResult != nullptr
 				? static_cast<uint32_t>(m_activeUploadResult->shadowPackedMeshes.size())
 				: 0;
+		m_sceneView.shadowContentVersion = m_shadowContentVersion;
 		m_sceneView.sceneBoundsMin = glm::vec3(0.0f);
 		m_sceneView.sceneBoundsMax = glm::vec3(0.0f);
 		m_sceneView.sceneBoundsValid = false;
@@ -11287,6 +11307,16 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		}
 	}
 
+	void GPUDrivenRenderer::recordGBufferRawVisibilitySource(bool usedRawCullingStream, uint32_t objectCount)
+	{
+		m_runtimeStats.visibilityDiagnostics.gbufferUsesRawCullingStream = usedRawCullingStream;
+		if (usedRawCullingStream)
+		{
+			m_runtimeStats.visibilityDiagnostics.sameFrameOpaqueCapacity = objectCount;
+			m_runtimeStats.visibilityDiagnostics.sameFrameAlphaCapacity = objectCount;
+		}
+	}
+
 	void GPUDrivenRenderer::recordForwardVisibilityPatch(bool patched,
 	                                                     uint32_t transparentCapacity,
 	                                                     uint32_t)
@@ -11388,13 +11418,29 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				},
 			}
 		};
+		std::vector<ArgumentLayoutEntry> backendLightingEntries(
+			lightingEntries.begin(), lightingEntries.end());
+		if (getRHIDevice().getBackendInfo().type == rhi::BackendType::metal)
+		{
+			backendLightingEntries.front().type = rhi::BindlessResourceType::sampledImage;
+			backendLightingEntries.push_back(ArgumentLayoutEntry{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.visibility = rhi::ShaderStage::fragment,
+				.type = rhi::BindlessResourceType::sampler,
+				.count = 1,
+			});
+		}
 		m_lightingArgumentLayout = m_renderer.createArgumentLayout(
 			ArgumentLayoutDesc{
-				.entries = lightingEntries.data(), .entryCount = static_cast<uint32_t>(lightingEntries.size())
+				.entries = backendLightingEntries.data(),
+				.entryCount = static_cast<uint32_t>(backendLightingEntries.size())
 			});
 
-		// lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting/culling UBO.
-		const std::array<ArgumentLayoutEntry, 4> sceneEntries{
+		// lighting-scene set (set LSetScene): camera/postProcess dynamic UBO + lighting UBO.
+		// LightCoarseCullingUniforms belongs to set LSetTextures binding 4 above. Keeping
+		// an unused set-1 binding here shifts every later Metal buffer index away from
+		// Slang's declaration-order ABI.
+		const std::array<ArgumentLayoutEntry, 3> sceneEntries{
 			{
 				ArgumentLayoutEntry{
 					.binding = shaderio::LBindCamera, .visibility = rhi::ShaderStage::allGraphics,
@@ -11402,12 +11448,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				},
 				ArgumentLayoutEntry{
 					.binding = shaderio::LBindLighting, .visibility = rhi::ShaderStage::fragment,
-					.type = rhi::BindlessResourceType::uniformBuffer, .count = 1
-				},
-				ArgumentLayoutEntry{
-					.binding = shaderio::LBindLightCulling,
-					.visibility = static_cast<rhi::ShaderStage>(static_cast<uint32_t>(rhi::ShaderStage::fragment) |
-						static_cast<uint32_t>(rhi::ShaderStage::compute)),
 					.type = rhi::BindlessResourceType::uniformBuffer, .count = 1
 				},
 				ArgumentLayoutEntry{
@@ -11594,7 +11634,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		}
 
 		// Owned RHI ArgumentTables for the lighting-scene set (camera/postProcess dynamic UBO +
-		// lighting/culling UBO). Written once below from stable buffers; dynamic offsets supplied
+		// lighting UBO). Written once below from stable buffers; dynamic offsets supplied
 		// at bind time via setDynamicBuffer.
 		m_lightingSceneArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		for (uint32_t i = 0; i < frameCount; ++i)
@@ -11604,9 +11644,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 			const rhi::BufferHandle transientHandle = m_renderer.getTransientBufferHandle(i);
 			const rhi::BufferHandle lightingHandle = m_lightResources.getLightingUniformBuffer(i);
-			const rhi::BufferHandle coarseHandle = m_lightResources.getCoarseUniformBuffer(i);
 
-			const std::array<rhi::ArgumentWrite, 4> sceneWrites{
+			const std::array<rhi::ArgumentWrite, 3> sceneWrites{
 				{
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindCamera, .type = rhi::ArgumentType::uniformBuffer,
@@ -11615,10 +11654,6 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindLighting, .type = rhi::ArgumentType::uniformBuffer,
 						.buffer = lightingHandle, .size = sizeof(shaderio::LightingUniforms)
-					},
-					rhi::ArgumentWrite{
-						.binding = shaderio::LBindLightCulling, .type = rhi::ArgumentType::uniformBuffer,
-						.buffer = coarseHandle, .size = sizeof(shaderio::LightCoarseCullingUniforms)
 					},
 					rhi::ArgumentWrite{
 						.binding = shaderio::LBindPostProcess, .type = rhi::ArgumentType::uniformBuffer,
@@ -12145,10 +12180,11 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 						getRHIDevice(), static_cast<const uint32_t*>(shaderData),
 						shaderSize * sizeof(uint32_t), entryPoint),
 					.entryPoint = entryPoint,
-				},
-			.bindingSchema = bindingSchema.view(),
-				.specializationVariant = variant,
-			};
+					},
+					.bindingSchema = bindingSchema.view(),
+					.threadgroupSize = {8, 8, 1},
+					.specializationVariant = variant,
+				};
 			return getRHIDevice().createComputePipeline(desc);
 		};
 
@@ -12671,7 +12707,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.debugInfo = glm::vec4(params.debugOptions.enableClusteredLighting ? 1.0f : 0.0f,
 			                       params.debugOptions.showClusteredLightingHeatmap ? 1.0f : 0.0f,
 			                       params.debugOptions.showClusteredLightingOverflow ? 1.0f : 0.0f,
-			                       0.0f),
+			                       (getTemporalFrameCounter() % shaderio::LClusterStatsPeriod) == 0u
+			                         ? 1.0f : 0.0f),
 			.viewMatrix = view,
 			.projectionMatrix = projection,
 			.invProjectionMatrix = glm::inverse(projection),
@@ -12782,13 +12819,30 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			                                         ? m_linearClampSamplerHandle
 			                                         : m_iblLutSamplerHandle;
 
+		const bool useSeparateSamplerBinding =
+			getRHIDevice().getBackendInfo().type == rhi::BackendType::metal;
 		std::vector<rhi::ArgumentWrite> writes;
-		writes.reserve(kGPUDrivenLightPassTextureCount + 4);
+		writes.reserve(kGPUDrivenLightPassTextureCount + 5);
 		for (uint32_t i = 0; i < kGPUDrivenLightPassTextureCount; ++i)
 		{
 			writes.push_back(rhi::ArgumentWrite{
-				.binding = shaderio::LBindTextures, .arrayElement = i, .type = rhi::ArgumentType::combinedImageSampler,
-				.textureView = texViews[i], .sampler = m_linearClampSamplerHandle
+				.binding = shaderio::LBindTextures,
+				.arrayElement = i,
+				.type = useSeparateSamplerBinding
+					? rhi::ArgumentType::sampledTexture
+					: rhi::ArgumentType::combinedImageSampler,
+				.textureView = texViews[i],
+				.sampler = useSeparateSamplerBinding
+					? rhi::SamplerHandle{}
+					: m_linearClampSamplerHandle,
+			});
+		}
+		if (useSeparateSamplerBinding)
+		{
+			writes.push_back(rhi::ArgumentWrite{
+				.binding = shaderio::LBindSharedTextureSampler,
+				.type = rhi::ArgumentType::sampler,
+				.sampler = m_linearClampSamplerHandle,
 			});
 		}
 		// DDGI atlases live in the General resource state (the probe update
@@ -12985,10 +13039,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 						.stage = rhi::ShaderStage::compute,
 						.library = lightCullingLibrary,
 						.entryPoint = entryPoint,
-					},
-					.bindingSchema = cullingBindingSchema.view(),
-					.specializationVariant = variant,
-				};
+						},
+						.bindingSchema = cullingBindingSchema.view(),
+						.threadgroupSize = {64, 1, 1},
+						.specializationVariant = variant,
+					};
 				return getRHIDevice().createComputePipeline(desc);
 			};
 			m_pointLightCoarseCullingPipeline =
@@ -13003,10 +13058,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 					.library = loadEmbeddedSpirvLibrary(
 						getRHIDevice(), clustered_light_cull_slang, "clustered-light-culling"),
 					.entryPoint = "kernelClusteredLightCulling",
-				},
+					},
 					.bindingSchema = cullingBindingSchema.view(),
-				.specializationVariant = 0x6203u,
-			};
+					.threadgroupSize = {64, 1, 1},
+					.specializationVariant = 0x6203u,
+				};
 			m_clusteredLightCullingPipeline = getRHIDevice().createComputePipeline(clusteredDesc);
 		}
 #endif
@@ -13094,7 +13150,10 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		const bool transparentVisibilityAuthoritative =
 			m_runtimeStats.visibilityDiagnostics.transparentCapacity == 0u
 			|| m_runtimeStats.visibilityDiagnostics.transparentPatchDispatched;
-		if (hasCurrentVisibility && m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched
+		const bool gbufferVisibilityAuthoritative =
+			m_runtimeStats.visibilityDiagnostics.gbufferUsesRawCullingStream
+			|| m_runtimeStats.visibilityDiagnostics.gbufferOpaqueAlphaPatchDispatched;
+		if (hasCurrentVisibility && gbufferVisibilityAuthoritative
 			&& transparentVisibilityAuthoritative)
 		{
 			m_runtimeStats.visibilityOwnership = GPUDrivenVisibilityOwnership::gpuOwned;
@@ -13141,7 +13200,9 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			                  ? GPUDrivenOwnershipState::gpuOwned
 			                  : GPUDrivenOwnershipState::disabled,
 		                  m_visibilitySortPass != nullptr
-			                  ? "GPU sort executes; transparent distance keys are still CPU-seeded"
+			                  ? (m_runtimeStats.visibilityDiagnostics.sortInputCount > 0u
+				                  ? "GPU sort executes for transparent distance ordering"
+				                  : "No transparent draws; visibility sort is a no-op")
 			                  : "Visibility sort pass is not registered");
 		addPassDiagnostic("GPUDrivenLightCulling",
 		                  m_runtimeStats.clusteredLightingDiagnostics.resourcesOwned
@@ -13265,10 +13326,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 				.library = loadEmbeddedSpirvLibrary(
 					getRHIDevice(), shader_bitonic_sort_slang, "bitonic-sort"),
 				.entryPoint = "bitonicSortMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x6401u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x6401u,
+			};
 		m_visibilitySortPipelineHandle = getRHIDevice().createComputePipeline(desc);
 #endif
 
@@ -13344,10 +13406,11 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 					getRHIDevice(), shader_transparent_visibility_patch_slang,
 					"transparent-visibility-patch"),
 				.entryPoint = "transparentVisibilityPatchMain",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x7001u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x7001u,
+			};
 		m_transparentVisibilityPatchPipelineHandle = getRHIDevice().createComputePipeline(desc);
 #endif
 
@@ -13466,7 +13529,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 	                                                          uint32_t frameIndex,
 	                                                          rhi::BufferHandle targetIndirectBuffer,
 	                                                          uint32_t categoryValue,
-	                                                          uint32_t outputOffset)
+	                                                          uint32_t outputOffset,
+	                                                          uint32_t outputCapacity)
 	{
 		if (frameIndex >= m_transparentVisibilityPatchFrames.size()
 			|| frameIndex >= m_visibilitySortFrames.size()
@@ -13523,7 +13587,7 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 			.mode = 0u,
 			.scanOffset = 0u,
 			.scanBufferIndex = 0u,
-			._padding0 = 0u,
+				.outputCapacity = outputCapacity,
 		};
 
 		// Each dispatch records in its own compute-pass scope so the inter-dispatch barriers

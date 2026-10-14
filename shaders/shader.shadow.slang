@@ -16,8 +16,33 @@ struct VertexOutput
     float2 uv       : TEXCOORD0;
 };
 
+#if defined(DEMO_METAL_ICB)
+struct MetalIcbMaterialResources
+{
+    Texture2D<float4> textures[LMaterialTextureCapacity];
+    SamplerState sampler;
+};
 [[vk::binding(LBindTextures, LSetTextures)]]
-Sampler2D inTexture[];
+ParameterBlock<MetalIcbMaterialResources> materialResources;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(
+        materialResources.textures[index], materialResources.sampler);
+}
+#elif defined(DEMO_METAL)
+[[vk::binding(LBindTextures, LSetTextures)]]
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
+[[vk::binding(LBindTextures, LSetTextures)]]
+Sampler2D inTexture[LMaterialTextureCapacity];
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -31,6 +56,16 @@ StructuredBuffer<DrawUniformsStorage> drawData;
 #ifdef DEMO_D3D12
 [[vk::push_constant]]
 ConstantBuffer<MdiDrawIndexPushConstants> mdiDrawIndex;
+#endif
+
+#ifdef DEMO_D3D12
+#ifndef DEMO_SPECIALIZATION_0
+#define DEMO_SPECIALIZATION_0 0
+#endif
+static const bool mdiAlphaTestEnabled = (DEMO_SPECIALIZATION_0 != 0);
+#else
+[[vk::constant_id(0)]]
+const bool mdiAlphaTestEnabled = false;
 #endif
 
 float3 safeNormalizeShadowVector(float3 value, float3 fallback)
@@ -147,11 +182,11 @@ void fragmentMain(VertexOutput input)
         return;
     }
 
-    uint baseColorTextureIndex = NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
-    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * draw.baseColorFactor.a;
+    uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
+    float alpha = getBindlessTexture(baseColorTextureIndex).Sample(input.uv).a * draw.baseColorFactor.a;
     if(alpha < draw.alphaCutoff)
     {
-        discard;
+        DEMO_DISCARD_FRAGMENT();
     }
 }
 
@@ -159,15 +194,15 @@ void fragmentMain(VertexOutput input)
 void fragmentMdiMain(VertexOutputMdi input)
 {
     const DrawUniformsStorage mdiDraw = drawData[input.drawIndex];
-    if(mdiDraw.alphaMode != LAlphaMask || mdiDraw.baseColorTextureIndex < 0)
+    if(!mdiAlphaTestEnabled || mdiDraw.alphaMode != LAlphaMask || mdiDraw.baseColorTextureIndex < 0)
     {
         return;
     }
 
-    uint baseColorTextureIndex = NonUniformResourceIndex(uint(mdiDraw.baseColorTextureIndex));
-    float alpha = inTexture[baseColorTextureIndex].Sample(input.uv).a * mdiDraw.baseColorFactor.a;
+    uint baseColorTextureIndex = DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(mdiDraw.baseColorTextureIndex));
+    float alpha = getBindlessTexture(baseColorTextureIndex).Sample(input.uv).a * mdiDraw.baseColorFactor.a;
     if(alpha < mdiDraw.alphaCutoff)
     {
-        discard;
+        DEMO_DISCARD_FRAGMENT();
     }
 }

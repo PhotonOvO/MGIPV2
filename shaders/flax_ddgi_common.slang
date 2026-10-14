@@ -332,8 +332,8 @@ uint2 getProbeTexelCoords(FlaxDDGIData ddgi, uint cascadeIndex, uint probeIndex)
 
 uint getScrollingProbeIndex(FlaxDDGIData ddgi, uint cascadeIndex, uint3 probeCoords)
 {
-    int3 offset = int3(ddgi.probesCounts) + ddgi.probesScrollOffsets[cascadeIndex].xyz;
-    uint3 scrolled = (probeCoords + uint3(offset)) % ddgi.probesCounts;
+    int3 offset = int3(ddgi.probesCounts.xyz) + ddgi.probesScrollOffsets[cascadeIndex].xyz;
+    uint3 scrolled = (probeCoords + uint3(offset)) % ddgi.probesCounts.xyz;
     return getProbeIndex(ddgi, scrolled);
 }
 
@@ -343,7 +343,7 @@ uint getScrollingProbeIndex(FlaxDDGIData ddgi, uint cascadeIndex, uint3 probeCoo
 uint3 getLogicalProbeCoordsFromDataTexel(
     FlaxDDGIData ddgi, uint cascadeIndex, uint2 texelCoord)
 {
-    int3 counts = int3(ddgi.probesCounts);
+    int3 counts = int3(ddgi.probesCounts.xyz);
     int3 scrolledCoords = int3(
         texelCoord.x % ddgi.probesCounts.x,
         texelCoord.x / ddgi.probesCounts.x,
@@ -357,7 +357,7 @@ float3 getProbeWorldPosition(FlaxDDGIData ddgi, uint cascadeIndex, uint3 probeCo
 {
     float3 origin = ddgi.probesOriginAndSpacing[cascadeIndex].xyz;
     float spacing = ddgi.probesOriginAndSpacing[cascadeIndex].w;
-    float3 gridOffset = spacing * float3(ddgi.probesCounts - 1) * 0.5f;
+    float3 gridOffset = spacing * float3(ddgi.probesCounts.xyz - 1) * 0.5f;
     return origin + float3(probeCoords) * spacing - gridOffset;
 }
 
@@ -407,7 +407,7 @@ bool fallbackCoordsValid(FlaxDDGIData ddgi, float3 data)
     if (any(data <= float3(0,0,0)))
         return false;
     uint3 coords = decodeFallbackCoords(data);
-    return all(coords < ddgi.probesCounts);
+    return all(coords < ddgi.probesCounts.xyz);
 }
 
 // --- Texture UV helpers ---
@@ -419,7 +419,7 @@ float2 getProbeUV(FlaxDDGIData ddgi, uint cascadeIndex, uint probeIndex,
     float probeTexelSize = float(resolution + 2);
     float2 textureSize = float2(
         ddgi.probesCounts.x * ddgi.probesCounts.y * probeTexelSize,
-        ddgi.probesCounts.z * ddgi.cascadesCount * probeTexelSize);
+        ddgi.probesCounts.z * ddgi.probesCounts.w * probeTexelSize);
     float2 uv = float2(coords.x, coords.y) * probeTexelSize + probeTexelSize * 0.5f;
     uv += octahedralCoords * float2(resolution * 0.5f);
     return uv / textureSize;
@@ -433,9 +433,9 @@ float2 getProbeUV(FlaxDDGIData ddgi, uint cascadeIndex, uint probeIndex,
 // biasedWorldPosition = worldPosition + worldNormal * normalBias
 float3 sampleFlaxDDGIIrradianceCascade(
     FlaxDDGIData ddgi,
-    Sampler2D<float4> probesData,
-    Sampler2D<float4> probesDistance,
-    Sampler2D<float4> probesIrradiance,
+    DEMO_BINDLESS_SAMPLER2D probesData,
+    DEMO_BINDLESS_SAMPLER2D probesDistance,
+    DEMO_BINDLESS_SAMPLER2D probesIrradiance,
     float3 worldPosition,
     float3 worldNormal,
     uint cascadeIndex,
@@ -443,14 +443,14 @@ float3 sampleFlaxDDGIIrradianceCascade(
     float3 biasedWorldPosition)
 {
     // Clamp cascade index
-    if (cascadeIndex >= ddgi.cascadesCount)
-        cascadeIndex = ddgi.cascadesCount - 1;
+    if (cascadeIndex >= ddgi.probesCounts.w)
+        cascadeIndex = ddgi.probesCounts.w - 1;
 
-    uint3 probeCountsEnd = ddgi.probesCounts - 1;
+    uint3 probeCountsEnd = ddgi.probesCounts.xyz - 1;
 
     // Get base probe coordinates from biased position
     float3 probesOrigin = ddgi.probesOriginAndSpacing[cascadeIndex].xyz;
-    float3 probesExtent = probesSpacing * float3(ddgi.probesCounts - 1) * 0.5f;
+    float3 probesExtent = probesSpacing * float3(ddgi.probesCounts.xyz - 1) * 0.5f;
 
     uint3 baseProbeCoords = uint3(clamp(
         (biasedWorldPosition - probesOrigin + probesExtent) / probesSpacing,
@@ -582,9 +582,9 @@ float3 sampleFlaxDDGIIrradianceCascade(
 // Main entry: sample cascaded DDGI irradiance with cascade blending
 float3 sampleFlaxDDGIIrradiance(
     FlaxDDGIData ddgi,
-    Sampler2D<float4> probesData,
-    Sampler2D<float4> probesDistance,
-    Sampler2D<float4> probesIrradiance,
+    DEMO_BINDLESS_SAMPLER2D probesData,
+    DEMO_BINDLESS_SAMPLER2D probesDistance,
+    DEMO_BINDLESS_SAMPLER2D probesIrradiance,
     float3 worldPosition,
     float3 worldNormal,
     float3 worldToCameraDirection,
@@ -603,19 +603,19 @@ float3 sampleFlaxDDGIIrradiance(
         + safeNormal * normalBias
         + safeViewDirection * viewBias;
 
-    for (uint c = 0; c < ddgi.cascadesCount; c++)
+    for (uint c = 0; c < ddgi.probesCounts.w; c++)
     {
         float spacing = ddgi.probesOriginAndSpacing[c].w;
         // Coverage and cross-cascade blending follow the continuous camera
         // origin. Probe lookup below remains anchored to the snapped grid.
         float3 blendOrigin = ddgi.blendOrigin[c].xyz;
-        float3 extent = spacing * float3(ddgi.probesCounts - 1) * 0.5f;
+        float3 extent = spacing * float3(ddgi.probesCounts.xyz - 1) * 0.5f;
         float3 edgeDistances = extent - abs(biasedPos - blendOrigin);
         if (any(edgeDistances < float3(0,0,0)))
             continue;
 
         float edgeDistance = min(min(edgeDistances.x, edgeDistances.y), edgeDistances.z);
-        bool isLastCascade = c + 1u == ddgi.cascadesCount;
+        bool isLastCascade = c + 1u == ddgi.probesCounts.w;
         float blendWidth = max(cascadeBlendDistance * spacing, spacing);
         float cascadeWeight = isLastCascade
             ? remainingWeight : remainingWeight * saturate(edgeDistance / blendWidth);

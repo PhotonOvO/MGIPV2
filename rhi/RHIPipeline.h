@@ -285,12 +285,16 @@ struct GraphicsPipelineDesc
 
   PipelineBindingSchemaDesc bindingSchema{};
   uint32_t                  specializationVariant{0};
+  bool                      supportsGpuGeneratedCommands{false};
 };
 
 struct ComputePipelineDesc
 {
   ShaderEntry               shaderStage{};
   PipelineBindingSchemaDesc bindingSchema{};
+  // Metal requires the dispatch-time threads-per-threadgroup value. Vulkan and
+  // D3D12 keep using the shader-declared local size and ignore this field.
+  Extent3D                  threadgroupSize{1, 1, 1};
   uint32_t                  specializationVariant{0};
   uint64_t                        pipelineFlags{0};
 };

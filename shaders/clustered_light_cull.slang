@@ -19,6 +19,8 @@ RWStructuredBuffer<uint> clusterLightIndices;
 [[vk::binding(8, 0)]]
 RWStructuredBuffer<uint> clusterLightStats;
 
+STATIC_CONST uint kClusterCullingThreadCount = 64u;
+
 float linearSliceDepth(uint z, uint clusterCountZ)
 {
     const float nearPlane = max(clusteredLight.clipInfo.x, 0.001);
@@ -29,10 +31,7 @@ float linearSliceDepth(uint z, uint clusterCountZ)
 
 float3 reconstructViewRay(float2 uv)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-#ifdef DEMO_D3D12
-    ndc.y = -ndc.y;
-#endif
+    float2 ndc = demoFramebufferUvToNdc(uv);
     const float4 clip = float4(ndc, 1.0, 1.0);
     const float4 view = mul(clusteredLight.invProjectionMatrix, clip);
     const float3 viewPos = view.xyz / max(abs(view.w), 1.0e-5);
@@ -84,15 +83,52 @@ bool sphereOverlapsAabb(float3 center, float radius, float3 minView, float3 maxV
     return dot(delta, delta) <= radius * radius;
 }
 
-bool localLightOverlapsCluster(LightData light, uint3 clusterCoord)
+bool localLightOverlapsCluster(LightData light, float3 minView, float3 maxView)
 {
-    float3 minView;
-    float3 maxView;
-    computeClusterViewAabb(clusterCoord, minView, maxView);
-
     const float4 centerView4 = mul(clusteredLight.viewMatrix, float4(light.positionOrDirection, 1.0));
     const float radius = max(light.range, 0.0);
     return sphereOverlapsAabb(centerView4.xyz, radius, minView, maxView);
+}
+
+bool clusterOverlapsCoarseBounds(uint3 clusterCoord, uint16_t4 bounds)
+{
+    const uint lightTileCountX = uint(bounds.y);
+    const uint lightTileCountY = uint(bounds.w);
+    // Empty coarse bounds are ambiguous for lights crossing the near plane.
+    // Preserve correctness by falling through to the exact sphere/AABB test.
+    if(lightTileCountX == 0u || lightTileCountY == 0u)
+    {
+        return true;
+    }
+
+    const uint tileCountX = max(uint(lightCoarse.screenTileInfo.z), 1u);
+    const uint tileCountY = max(uint(lightCoarse.screenTileInfo.w), 1u);
+    const uint clusterCountX = max(uint(clusteredLight.screenSizeAndClusterInfo.z), 1u);
+    const uint clusterCountY = max(uint(clusteredLight.screenSizeAndClusterInfo.w), 1u);
+
+    const uint clusterTileStartX = clusterCoord.x * tileCountX / clusterCountX;
+    const uint clusterTileEndX =
+        ((clusterCoord.x + 1u) * tileCountX + clusterCountX - 1u) / clusterCountX;
+    const uint clusterTileStartY = clusterCoord.y * tileCountY / clusterCountY;
+    const uint clusterTileEndY =
+        ((clusterCoord.y + 1u) * tileCountY + clusterCountY - 1u) / clusterCountY;
+
+    // The coarse projector samples a sphere at five cardinal points. Expand by
+    // one full cluster so it remains a conservative prefilter near projection
+    // extrema; the precise view-space test below decides final membership.
+    const uint paddingX = (tileCountX + clusterCountX - 1u) / clusterCountX;
+    const uint paddingY = (tileCountY + clusterCountY - 1u) / clusterCountY;
+    const uint lightTileStartX = uint(bounds.x) > paddingX
+        ? uint(bounds.x) - paddingX : 0u;
+    const uint lightTileEndX = min(
+        uint(bounds.x) + lightTileCountX + paddingX, tileCountX);
+    const uint lightTileStartY = uint(bounds.z) > paddingY
+        ? uint(bounds.z) - paddingY : 0u;
+    const uint lightTileEndY = min(
+        uint(bounds.z) + lightTileCountY + paddingY, tileCountY);
+
+    return clusterTileStartX < lightTileEndX && clusterTileEndX > lightTileStartX
+        && clusterTileStartY < lightTileEndY && clusterTileEndY > lightTileStartY;
 }
 
 uint appendClusterLight(uint clusterId, inout uint visibleCount, inout bool overflow, uint encodedLightIndex)
@@ -108,7 +144,7 @@ uint appendClusterLight(uint clusterId, inout uint visibleCount, inout bool over
     return 1u;
 }
 
-[numthreads(64, 1, 1)]
+[numthreads(kClusterCullingThreadCount, 1, 1)]
 void kernelClusteredLightCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     const uint clusterCountX = max(uint(clusteredLight.screenSizeAndClusterInfo.z), 1u);
@@ -123,31 +159,37 @@ void kernelClusteredLightCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint pointCount = uint(clusteredLight.clusterZAndLightInfo.z);
     const uint spotCount = uint(clusteredLight.clusterZAndLightInfo.w);
-    if(clusterId == 0u)
+    const bool collectStats = clusteredLight.debugInfo.w > 0.5;
+    if(collectStats && clusterId == 0u)
     {
         clusterLightStats[3] = pointCount;
         clusterLightStats[4] = spotCount;
     }
 
+    uint visibleCount = 0u;
+    uint appendedCount = 0u;
+    bool overflow = false;
     const uint z = clusterId / (clusterCountX * clusterCountY);
     const uint xy = clusterId - z * clusterCountX * clusterCountY;
     const uint y = xy / clusterCountX;
     const uint x = xy - y * clusterCountX;
     const uint3 clusterCoord = uint3(x, y, z);
-
-    uint visibleCount = 0u;
-    uint appendedCount = 0u;
-    bool overflow = false;
+    float3 minView;
+    float3 maxView;
+    computeClusterViewAabb(clusterCoord, minView, maxView);
 
     for(uint lightIndex = 0u; lightIndex < pointCount; ++lightIndex)
     {
         const LightData light = pointLightBuffer[lightIndex];
-        if(!localLightOverlapsCluster(light, clusterCoord))
+        if(!clusterOverlapsCoarseBounds(clusterCoord, pointLightBounds[lightIndex])
+            || !localLightOverlapsCluster(light, minView, maxView))
         {
             continue;
         }
 
-        appendedCount += appendClusterLight(clusterId, visibleCount, overflow, lightIndex & LClusterLightIndexMask);
+        appendedCount += appendClusterLight(
+            clusterId, visibleCount, overflow,
+            lightIndex & LClusterLightIndexMask);
         if(overflow)
         {
             break;
@@ -159,15 +201,15 @@ void kernelClusteredLightCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
         for(uint lightIndex = 0u; lightIndex < spotCount; ++lightIndex)
         {
             const LightData light = spotLightBuffer[lightIndex];
-            if(!localLightOverlapsCluster(light, clusterCoord))
+            if(!clusterOverlapsCoarseBounds(clusterCoord, spotLightBounds[lightIndex])
+                || !localLightOverlapsCluster(light, minView, maxView))
             {
                 continue;
             }
 
-            appendedCount += appendClusterLight(clusterId,
-                                               visibleCount,
-                                               overflow,
-                                               LClusterLightTypeSpotBit | (lightIndex & LClusterLightIndexMask));
+            appendedCount += appendClusterLight(
+                clusterId, visibleCount, overflow,
+                LClusterLightTypeSpotBit | (lightIndex & LClusterLightIndexMask));
             if(overflow)
             {
                 break;
@@ -179,15 +221,19 @@ void kernelClusteredLightCulling(uint3 dispatchThreadId : SV_DispatchThreadID)
     if(overflow)
     {
         storedCount |= LClusterOverflowBit;
-        uint ignored;
-        InterlockedAdd(clusterLightStats[1], 1u, ignored);
     }
-
     clusterLightCounts[clusterId] = storedCount;
 
-    uint ignoredMax;
-    InterlockedMax(clusterLightStats[0], visibleCount, ignoredMax);
-
-    uint ignoredAdd;
-    InterlockedAdd(clusterLightStats[2], appendedCount, ignoredAdd);
+    if(collectStats)
+    {
+        uint ignoredMax;
+        InterlockedMax(clusterLightStats[0], visibleCount, ignoredMax);
+        if(overflow)
+        {
+            uint ignoredOverflow;
+            InterlockedAdd(clusterLightStats[1], 1u, ignoredOverflow);
+        }
+        uint ignoredAdd;
+        InterlockedAdd(clusterLightStats[2], appendedCount, ignoredAdd);
+    }
 }

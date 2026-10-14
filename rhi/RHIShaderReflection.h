@@ -139,23 +139,36 @@ struct PushConstantRange
 // Specialization Constant
 //--------------------------------------------------------------------------------------------------
 // Represents a specialization constant that can be set at pipeline creation time
+enum class SpecializationConstantType : uint8_t
+{
+  boolean,
+  signedInteger,
+  unsignedInteger,
+  floatingPoint,
+};
+
 struct SpecializationConstant
 {
-  uint32_t constantId;  // Constant ID (must match shader [[vk::constant_id(ID)]])
-  uint32_t offset;      // Byte offset in specialization data
-  uint32_t size;        // Size in bytes
+  uint32_t                   constantId;  // Must match shader [[vk::constant_id(ID)]].
+  uint32_t                   offset;      // Byte offset in specialization data.
+  uint32_t                   size;        // Size in bytes.
+  SpecializationConstantType type;
 
   SpecializationConstant()
       : constantId(0)
       , offset(0)
       , size(0)
+      , type(SpecializationConstantType::unsignedInteger)
   {
   }
 
-  SpecializationConstant(uint32_t constantId_, uint32_t offset_, uint32_t size_)
+  SpecializationConstant(uint32_t constantId_, uint32_t offset_, uint32_t size_,
+                         SpecializationConstantType type_ =
+                           SpecializationConstantType::unsignedInteger)
       : constantId(constantId_)
       , offset(offset_)
       , size(size_)
+      , type(type_)
   {
   }
 };

@@ -7,7 +7,6 @@
 #include "../../shaders/shader_io.h"
 
 #include <array>
-#include <cstring>
 
 namespace demo
 {
@@ -85,7 +84,8 @@ namespace demo
 			&& sceneView->shadowPackedMeshes != nullptr && shadowMeshCount > 0u
 			&& !sceneView->shadowPackedVertexBuffer.isNull() && !sceneView->shadowPackedIndexBuffer.isNull();
 		shaderio::ShadowUniforms* shadowData = m_renderer->getShadowUniformsData();
-		const PipelineHandle csmPipeline = m_renderer->getCSMShadowPipelineHandle();
+		const PipelineHandle csmOpaquePipeline = m_renderer->getCSMShadowOpaquePipelineHandle();
+		const PipelineHandle csmAlphaTestPipeline = m_renderer->getCSMShadowPipelineHandle();
 		const PipelineHandle computePipeline = m_renderer->getShadowCullingPipelineHandle();
 		const rhi::ArgumentTableHandle computeTable = m_renderer->getShadowCullingArgumentTable(frameIndex);
 		const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
@@ -95,6 +95,34 @@ namespace demo
 		const rhi::BufferHandle vertexBufferRHI = m_renderer->getShadowPackedVertexBufferRHIHandle();
 		const rhi::BufferHandle indexBufferRHI = m_renderer->getShadowPackedIndexBufferRHIHandle();
 		const uint32_t shadowIndirectCapacity = m_renderer->getShadowCullingMeshCapacity(frameIndex);
+		uint32_t opaqueShadowMeshCount = 0u;
+		bool alphaTestPrefixReached = false;
+		bool shadowMeshesPartitioned = true;
+		if (sceneView != nullptr && sceneView->shadowPackedMeshes != nullptr)
+		{
+			for (uint32_t meshIndex = 0; meshIndex < shadowMeshCount; ++meshIndex)
+			{
+				const bool alphaTest =
+					sceneView->shadowPackedMeshes[meshIndex].drawData.alphaMode == shaderio::LAlphaMask;
+				alphaTestPrefixReached = alphaTestPrefixReached || alphaTest;
+				if (!alphaTestPrefixReached)
+				{
+					++opaqueShadowMeshCount;
+				}
+				else if (!alphaTest)
+				{
+					shadowMeshesPartitioned = false;
+					break;
+				}
+			}
+		}
+		if (!shadowMeshesPartitioned)
+		{
+			// Preserve alpha-cutout correctness for external scene sources that do
+			// not provide the opaque-prefix ordering used by the built-in loaders.
+			opaqueShadowMeshCount = 0u;
+		}
+		const uint32_t alphaTestShadowMeshCount = shadowMeshCount - opaqueShadowMeshCount;
 		std::array<rhi::ArgumentTableHandle, shaderio::LCascadeCount> drawTables{};
 		bool hasDrawArgumentTables = cascadeCount > 0u;
 		for (uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
@@ -105,17 +133,61 @@ namespace demo
 
 		const bool hasShadowIndirectBuffer = shadowIndirectBufferRHI.isValid();
 		const bool hasGeometryBuffers = vertexBufferRHI.isValid() && indexBufferRHI.isValid();
+		const bool hasShadowPipelines =
+			(opaqueShadowMeshCount == 0u || !csmOpaquePipeline.isNull())
+			&& (alphaTestShadowMeshCount == 0u || !csmAlphaTestPipeline.isNull());
 		const bool canDrawShadows = hasPassInputs && hasShadowCasters && shadowData != nullptr
-			&& !csmPipeline.isNull() && !computePipeline.isNull() && !computeTable.isNull()
+			&& hasShadowPipelines && !computePipeline.isNull() && !computeTable.isNull()
 			&& !materialTable.isNull() && !cameraTable.isNull() && hasDrawArgumentTables
 			&& hasShadowIndirectBuffer && hasGeometryBuffers && shadowIndirectCapacity >= shadowMeshCount;
-
+		const CSMShadowResources::FrameData& csmFrameData = csm.getFrameData();
+		const CSMShadowCacheIdentity cacheIdentity{
+			.cascadeTexture = csm.getCascadeImage(),
+			.vertexBuffer = vertexBufferRHI,
+			.indexBuffer = indexBufferRHI,
+			.shadowContentVersion = sceneView != nullptr ? sceneView->shadowContentVersion : 0u,
+			.shadowMeshCount = shadowMeshCount,
+			.opaqueShadowMeshCount = opaqueShadowMeshCount,
+			.cascadeCount = cascadeCount,
+		};
+		CSMShadowCacheIdentity commandWarmupIdentity = cacheIdentity;
+		commandWarmupIdentity.shadowContentVersion = 0u;
+		if (commandWarmupIdentity != m_commandWarmupIdentity)
+		{
+			m_commandWarmupIdentity = commandWarmupIdentity;
+			m_commandWarmupPassCounts.fill(0u);
+		}
+		const uint32_t activeCascadeMask =
+			cascadeCount == 0u ? 0u : (1u << cascadeCount) - 1u;
+		// The first pass can coincide with scene activation, when sibling draw passes
+		// are still absent. A second cycle warms the frame allocator's combined workload.
+		constexpr uint8_t commandWarmupPassesPerSlot = 2u;
+		const bool commandWarmupRequired =
+			frameIndex < m_commandWarmupPassCounts.size()
+			&& m_commandWarmupPassCounts[frameIndex] < commandWarmupPassesPerSlot;
+		uint32_t dirtyCascadeMask =
+			hasShadowCasters && shadowData != nullptr
+				? m_cache.dirtyCascadeMask(csmFrameData, cacheIdentity)
+				: 0u;
+		if (commandWarmupRequired && hasShadowCasters && shadowData != nullptr)
+		{
+			dirtyCascadeMask |= activeCascadeMask;
+		}
 		context.commandBuffer->beginEvent("GPUDrivenCSMShadow");
 		const bool hasAutomationDebugMarker =
 			context.params != nullptr && !context.params->automationDebugMarker.empty();
 		if (hasAutomationDebugMarker)
 		{
 			context.commandBuffer->beginEvent(context.params->automationDebugMarker.c_str());
+		}
+		if (dirtyCascadeMask == 0u && hasShadowCasters && shadowData != nullptr)
+		{
+			if (hasAutomationDebugMarker)
+			{
+				context.commandBuffer->endEvent();
+			}
+			context.commandBuffer->endEvent();
+			return;
 		}
 		if (!canDrawShadows)
 		{
@@ -130,6 +202,7 @@ namespace demo
 			{
 				LOGW("Clearing GPUDrivenCSMShadow: shadow indirect culling pipeline is unavailable");
 			}
+			m_cache.invalidate();
 			recordClearOnlyCascades(
 				*context.commandBuffer, *m_renderer, csm.getCascadeImage(), cascadeExtent, cascadeCount);
 			if (hasAutomationDebugMarker)
@@ -140,10 +213,15 @@ namespace demo
 			return;
 		}
 
-		const CSMShadowResources::FrameData& csmFrameData = csm.getFrameData();
+		bool recordedPreviousCascade = false;
 		for (uint32_t cascadeIndex = 0; cascadeIndex < cascadeCount; ++cascadeIndex)
 		{
-			if (cascadeIndex > 0u)
+			const uint32_t cascadeBit = 1u << cascadeIndex;
+			if ((dirtyCascadeMask & cascadeBit) == 0u)
+			{
+				continue;
+			}
+			if (recordedPreviousCascade)
 			{
 				// The previous cascade consumed this frame's indirect arguments at commandInput;
 				// wait before current compute overwrites them. The Vulkan readBeforeWrite source
@@ -171,6 +249,39 @@ namespace demo
 			// consumed by drawIndexedIndirect below inside the same cascade pass.
 			context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::commandInput,
 			                               rhi::HazardFlags::drawArguments);
+			const uint32_t indirectCommandStride = m_renderer->getGPUCullingIndirectCommandStride();
+			const rhi::DrawIndirectDesc opaqueShadowDraw{
+				.argsBuffer = shadowIndirectBufferRHI,
+				.offset = 0,
+				.drawCount = opaqueShadowMeshCount,
+				.stride = indirectCommandStride,
+			};
+			const rhi::DrawIndirectDesc alphaTestShadowDraw{
+				.argsBuffer = shadowIndirectBufferRHI,
+				.offset = static_cast<uint64_t>(opaqueShadowMeshCount) * indirectCommandStride,
+				.drawCount = alphaTestShadowMeshCount,
+				.stride = indirectCommandStride,
+			};
+			if (opaqueShadowMeshCount > 0u)
+			{
+				context.commandBuffer->prepareIndexedIndirect(rhi::PrepareIndexedIndirectDesc{
+					.draw = opaqueShadowDraw,
+					.indexBuffer = indexBufferRHI,
+					.indexBufferOffset = 0,
+					.indexFormat = rhi::IndexFormat::uint32,
+					.topology = rhi::PrimitiveTopology::triangleList,
+				});
+			}
+			if (alphaTestShadowMeshCount > 0u)
+			{
+				context.commandBuffer->prepareIndexedIndirect(rhi::PrepareIndexedIndirectDesc{
+					.draw = alphaTestShadowDraw,
+					.indexBuffer = indexBufferRHI,
+					.indexBufferOffset = 0,
+					.indexFormat = rhi::IndexFormat::uint32,
+					.topology = rhi::PrimitiveTopology::triangleList,
+				});
+			}
 
 			rhi::RenderEncoder* enc =
 				beginCascadeDepthPass(
@@ -182,22 +293,15 @@ namespace demo
 				});
 			enc->setScissor(rhi::Rect2D{{0, 0}, cascadeExtent});
 
-			enc->setPipeline(csmPipeline);
+			enc->setPipeline(
+				opaqueShadowMeshCount > 0u ? csmOpaquePipeline : csmAlphaTestPipeline);
 			enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, materialTable);
 
 			shaderio::CameraUniforms cascadeCamera{};
+			// The shadow shaders consume only the cascade transform and caster-bias fields.
+			// Leave the remaining camera fields value-initialized instead of deriving
+			// unused inverse and temporal matrices for every cascade.
 			cascadeCamera.viewProjection = shadowData->cascadeViewProjection[cascadeIndex];
-			cascadeCamera.projection = cascadeCamera.viewProjection;
-			cascadeCamera.view = glm::mat4(1.0f);
-			cascadeCamera.inverseViewProjection = glm::inverse(cascadeCamera.viewProjection);
-			cascadeCamera.prevView = cascadeCamera.view;
-			cascadeCamera.prevProjection = cascadeCamera.projection;
-			cascadeCamera.prevViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.unjitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.unjitteredInverseViewProjection = cascadeCamera.inverseViewProjection;
-			cascadeCamera.prevUnjitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.prevJitteredViewProjection = cascadeCamera.viewProjection;
-			cascadeCamera.cameraPosition = glm::vec3(0.0f);
 			const float casterNormalBias = csmFrameData.normalBiasWorld;
 			const glm::vec3 dirToLight = -csmFrameData.lightDirection;
 			cascadeCamera.shadowConstantBias = 0.0f; // Receiver depth bias is applied once in LightPass.
@@ -216,14 +320,24 @@ namespace demo
 			constexpr uint64_t vertexOffset = 0;
 			enc->bindVertexBuffer(0, vertexBufferRHI, vertexOffset);
 			enc->bindIndexBuffer(indexBufferRHI, 0, rhi::IndexFormat::uint32);
-			DrawStreamRecorder::recordIndexedIndirect(*enc, DrawStreamRecorder::IndexedIndirectRecordDesc{
-				                                          .argsBuffer = shadowIndirectBufferRHI,
-				                                          .offset = 0,
-				                                          .drawCount = shadowMeshCount,
-				                                          .stride = m_renderer->getGPUCullingIndirectCommandStride(),
-			                                          });
+			if (opaqueShadowMeshCount > 0u)
+			{
+				DrawStreamRecorder::recordIndexedIndirect(*enc, opaqueShadowDraw);
+			}
+			if (alphaTestShadowMeshCount > 0u)
+			{
+				enc->setPipeline(csmAlphaTestPipeline);
+				DrawStreamRecorder::recordIndexedIndirect(*enc, alphaTestShadowDraw);
+			}
 
 			context.commandBuffer->endEncoding();
+			recordedPreviousCascade = true;
+		}
+		m_cache.publish(csmFrameData, cacheIdentity, dirtyCascadeMask);
+		if (frameIndex < m_commandWarmupPassCounts.size()
+			&& m_commandWarmupPassCounts[frameIndex] < commandWarmupPassesPerSlot)
+		{
+			++m_commandWarmupPassCounts[frameIndex];
 		}
 
 		if (hasAutomationDebugMarker)

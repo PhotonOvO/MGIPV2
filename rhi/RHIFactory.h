@@ -14,7 +14,11 @@ namespace demo::rhi
 
 	[[nodiscard]] constexpr BackendType defaultBackend()
 	{
+#if defined(DEMO_DEFAULT_RHI_METAL)
+		return BackendType::metal;
+#else
 		return BackendType::vulkan;
+#endif
 	}
 
 	[[nodiscard]] const char* toString(BackendType backend);

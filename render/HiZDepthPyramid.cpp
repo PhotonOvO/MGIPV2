@@ -70,6 +70,9 @@ namespace demo
 
 		m_rhiDevice = &device;
 		m_frameCount = std::max(frameCount, 1u);
+		m_storageMipCount = device.getBackendInfo().type == rhi::BackendType::metal
+			? static_cast<uint32_t>(shaderio::LMetalDepthPyramidWriteMipCount)
+			: static_cast<uint32_t>(shaderio::LDepthPyramidMaxMips);
 		m_mobilePolicy = MobilePolicy{
 			.downsampleDivisor = 2u,
 			.maxMipCount = shaderio::LDepthPyramidMaxMips,
@@ -105,7 +108,7 @@ namespace demo
 				},
 				rhi::ArgumentBinding{
 					.binding = 1, .type = rhi::ArgumentType::storageTexture, .visibility = rhi::ShaderStage::compute,
-					.arrayCount = shaderio::LDepthPyramidMaxMips
+					.arrayCount = m_storageMipCount
 				},
 				rhi::ArgumentBinding{
 					.binding = 2, .type = rhi::ArgumentType::uniformBuffer, .visibility = rhi::ShaderStage::compute,
@@ -131,10 +134,11 @@ namespace demo
 				.library = loadEmbeddedSpirvLibrary(
 					*m_rhiDevice, shader_depth_pyramid_slang, "depth-pyramid"),
 				.entryPoint = "depthPyramid",
-			},
-			.bindingSchema = bindingSchema.view(),
-			.specializationVariant = 0x7101u,
-		};
+				},
+				.bindingSchema = bindingSchema.view(),
+				.threadgroupSize = {16, 16, 1},
+				.specializationVariant = 0x7101u,
+			};
 		m_pipeline = m_rhiDevice->createComputePipeline(pipelineDesc);
 
 		recreateResources();
@@ -178,6 +182,7 @@ namespace demo
 		m_layoutInitialized = false;
 		m_frameCount = 0;
 		m_mipCount = 0;
+		m_storageMipCount = 0;
 		m_fullMipCount = 0;
 		m_size = {};
 		m_sourceSize = {};
@@ -272,7 +277,7 @@ namespace demo
 			._padding1 = 0u,
 			.pyramidWidth = m_size.width,
 			.pyramidHeight = m_size.height,
-			.mipCount = std::min<uint32_t>(m_mipCount, shaderio::LDepthPyramidMaxMips),
+			.mipCount = std::min(m_mipCount, m_storageMipCount),
 			._padding2 = 0u,
 		};
 
@@ -371,7 +376,7 @@ namespace demo
 			.textureView = sourceDepthView,
 			.accessIntent = rhi::ArgumentAccessIntent::sampledRead,
 		};
-		for (uint32_t i = 0; i < shaderio::LDepthPyramidMaxMips; ++i)
+		for (uint32_t i = 0; i < m_storageMipCount; ++i)
 		{
 			writes[writeCount++] = rhi::ArgumentWrite{
 				.binding = 1,

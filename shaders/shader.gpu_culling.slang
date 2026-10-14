@@ -242,8 +242,10 @@ bool isOccluded(float3 center, float radius)
     const float2 pyramidSize = gpuCullingUniforms.screenSizeAndPyramidSize.zw;
     const uint mipCount = uint(gpuCullingUniforms.cullingInfo.y);
 
-    const float2 minPixel = (minNdc * 0.5 + 0.5) * screenSize;
-    const float2 maxPixel = (maxNdc * 0.5 + 0.5) * screenSize;
+    const float2 framebufferCorner0 = demoNdcToFramebufferUv(minNdc);
+    const float2 framebufferCorner1 = demoNdcToFramebufferUv(maxNdc);
+    const float2 minPixel = min(framebufferCorner0, framebufferCorner1) * screenSize;
+    const float2 maxPixel = max(framebufferCorner0, framebufferCorner1) * screenSize;
     uint mipLevel;
     int2 sampleMin;
     int2 sampleMax;

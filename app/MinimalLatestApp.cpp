@@ -1,10 +1,19 @@
 #include "MinimalLatestApp.h"
 #include "editor/EditorTransactionPath.h"
 
+#if defined(DEMO_PLATFORM_IOS)
+#include <SDL3/SDL_main.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <initializer_list>
 #include <limits>
@@ -17,6 +26,41 @@ namespace
 {
 using AutomationMode = MinimalLatestApp::AutomationMode;
 using AutomationOptions = MinimalLatestApp::AutomationOptions;
+
+class SdlSession
+{
+public:
+	SdlSession()
+	{
+		if(!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
+		{
+			throw std::runtime_error(std::string("SDL_Init failed: ") + SDL_GetError());
+		}
+
+#if defined(DEMO_PLATFORM_IOS)
+		const char* basePath = SDL_GetBasePath();
+		if(basePath == nullptr)
+		{
+			throw std::runtime_error(std::string("SDL_GetBasePath failed: ") + SDL_GetError());
+		}
+
+		std::error_code pathError;
+		std::filesystem::current_path(std::filesystem::path(basePath) / "assets", pathError);
+		if(pathError)
+		{
+			throw std::runtime_error("Could not select the iOS asset directory: " + pathError.message());
+		}
+#endif
+	}
+
+	~SdlSession()
+	{
+		SDL_Quit();
+	}
+
+	SdlSession(const SdlSession&) = delete;
+	SdlSession& operator=(const SdlSession&) = delete;
+};
 
 [[nodiscard]] std::string_view optionValue(std::string_view argument, std::string_view name)
 {
@@ -110,6 +154,7 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 		{
 			if(value == "vulkan") options.backend = demo::rhi::BackendType::vulkan;
 			else if(value == "d3d12") options.backend = demo::rhi::BackendType::d3d12;
+			else if(value == "metal") options.backend = demo::rhi::BackendType::metal;
 			else throw std::invalid_argument("Unknown --backend value: " + std::string(value));
 		}
 		else if(const std::string_view value = optionValue(argument, "--automation"); !value.empty())
@@ -145,6 +190,10 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 		else if(argument == "--no-ddgi")
 		{
 			options.noDdgi = true;
+		}
+		else if(argument == "--ddgi-smoke")
+		{
+			options.ddgiSmoke = true;
 		}
 		else if(argument == "--taa")
 		{
@@ -268,6 +317,14 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 	{
 		throw std::invalid_argument("--no-ddgi requires --automation");
 	}
+	if(options.ddgiSmoke && options.mode == AutomationMode::none)
+	{
+		throw std::invalid_argument("--ddgi-smoke requires --automation");
+	}
+	if(options.noDdgi && options.ddgiSmoke)
+	{
+		throw std::invalid_argument("--no-ddgi and --ddgi-smoke cannot be used together");
+	}
 	// The capture-sync protocol publishes one ready/continue marker per application frame.
 	// hold=2 would place arm-settled on first-still, so require a distinct pre-settled
 	// frame. The production RenderDoc run uses warmup=8, motion=24, hold=8.
@@ -360,11 +417,11 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 void printUsage()
 {
 	std::cout
-	    << "Usage: Demo [--backend=vulkan|d3d12]\n"
+	    << "Usage: Demo [--backend=vulkan|d3d12|metal]\n"
 	    << "            [--automation=csm-translate-stop|csm-rotate-stop]\n"
 	    << "            [--fixed-dt=SECONDS] [--warmup-frames=N]\n"
 	    << "            [--motion-frames=N] [--hold-frames=N]\n"
-	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi] [--auto-exit]\n"
+	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi|--ddgi-smoke] [--auto-exit]\n"
 	    << "            [--capture-sync-dir=PATH] [--capture-sync-timeout-ms=N]\n"
 	    << "            [--capture-control-frame] [--metrics-output=PATH]\n"
 	    << "            [--editor-empty|--editor-scene=PATH]\n"
@@ -400,13 +457,15 @@ int main(int argc, char** argv)
 			return 0;
 		}
 
-		ASSERT(glfwInit() == GLFW_TRUE, "Could not initialize GLFW!");
-		ASSERT(glfwVulkanSupported() == GLFW_TRUE, "GLFW: Vulkan not supported!");
-
-		MinimalLatestApp app({1920, 1080}, automationOptions);
+		SdlSession sdl;
+		const demo::rhi::Extent2D initialWindowSize =
+#if defined(DEMO_PLATFORM_IOS)
+		    {1280, 720};
+#else
+		    {1920, 1080};
+#endif
+		MinimalLatestApp app(initialWindowSize, automationOptions);
 		app.run();
-
-		glfwTerminate();
 	}
 	catch (const std::exception& e)
 	{

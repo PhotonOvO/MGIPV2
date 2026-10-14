@@ -71,6 +71,7 @@ namespace demo
 		rhi::Extent2D m_size{};
 		uint32_t m_fullMipCount{0};
 		uint32_t m_mipCount{0};
+		uint32_t m_storageMipCount{0};
 		rhi::TextureHandle m_imageHandle{};
 		TextureHandle m_sourceDepth{};
 		std::vector<rhi::TextureViewHandle> m_mipViews;

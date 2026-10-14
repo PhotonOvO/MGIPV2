@@ -1,11 +1,18 @@
 #include "RHIFactory.h"
 
+#if defined(DEMO_HAS_VULKAN)
 #include "vulkan/VulkanDevice.h"
 #include "vulkan/VulkanSurface.h"
+#endif
 
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 #include "d3d12/D3D12Device.h"
 #include "d3d12/D3D12Surface.h"
+#endif
+
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+#include "metal/MetalDevice.h"
+#include "metal/MetalSurface.h"
 #endif
 
 #include <stdexcept>
@@ -29,7 +36,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return true;
+#else
+			return false;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return true;
@@ -37,7 +48,11 @@ namespace demo::rhi
 			return false;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return true;
+#else
 			return false;
+#endif
 		}
 		return false;
 	}
@@ -47,7 +62,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return std::make_unique<vulkan::VulkanDevice>();
+#else
+			break;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return std::make_unique<d3d12::D3D12Device>();
@@ -55,7 +74,11 @@ namespace demo::rhi
 			break;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return std::make_unique<metal::MetalDevice>();
+#else
 			break;
+#endif
 		}
 		throw std::runtime_error(std::string("RHI backend is not available in this build: ") + toString(backend));
 	}
@@ -65,7 +88,11 @@ namespace demo::rhi
 		switch (backend)
 		{
 		case BackendType::vulkan:
+#if defined(DEMO_HAS_VULKAN)
 			return std::make_unique<vulkan::VulkanSurface>();
+#else
+			break;
+#endif
 		case BackendType::d3d12:
 #if defined(_WIN32) && defined(DEMO_HAS_D3D12)
 			return std::make_unique<d3d12::D3D12Surface>();
@@ -73,7 +100,11 @@ namespace demo::rhi
 			break;
 #endif
 		case BackendType::metal:
+#if defined(__APPLE__) && defined(DEMO_HAS_METAL4)
+			return std::make_unique<metal::MetalSurface>();
+#else
 			break;
+#endif
 		}
 		throw std::runtime_error(std::string("RHI backend is not available in this build: ") + toString(backend));
 	}
