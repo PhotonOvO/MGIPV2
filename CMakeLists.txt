@@ -1759,7 +1759,17 @@ endif()
 # separate image/sampler arrays; the renderer supplies a Vulkan-only public RHI
 # layout for those two bindings while every other pass keeps the authoritative
 # Slang SPIR-V module.
-if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12)
+# Off by default after the SDL3/Metal merge. Upstream reworked shader.light to use
+# separated Texture2D + SamplerState bindings so Metal can bind them independently,
+# which changes the HLSL resource list. This path pins every HLSL resource with an
+# explicit -fvk-bind-register argument, so it has to be re-derived each time those
+# bindings move. Enable only after updating the list below against a fresh
+# `slangc -target hlsl` dump. With it off, the final-color pass uses the same
+# slangc -emit-spirv-directly module as every other pass.
+option(DEMO_USE_DXC_FINAL_COLOR
+  "Compile the final-color pass through DXC for D3D12-identical float codegen" OFF)
+
+if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12 AND DEMO_USE_DXC_FINAL_COLOR)
   get_filename_component(_VULKAN_TOOL_DIR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}" DIRECTORY)
   find_program(DEMO_DXC_SPIRV_EXECUTABLE
     NAMES dxc

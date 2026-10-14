@@ -2,10 +2,8 @@
 
 #include <mgif/scene_editor/SceneChangeCanonicalizer.h>
 
-#include <GLFW/glfw3.h>
+#include "../GlfwSdl3Compat.h"
 #ifdef _WIN32
-#define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
 #include <windows.h>
 #endif
 

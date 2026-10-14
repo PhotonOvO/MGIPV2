@@ -87,6 +87,7 @@ public:
     bool noUi{false};
     bool noPost{false};
     bool noDdgi{false};
+    bool ddgiSmoke{false};
     bool taa{false};
     bool autoExit{false};
     bool captureControlFrame{false};

@@ -106,6 +106,7 @@ struct GLFWmonitor
 
 #define GLFW_CLIENT_API 0x00022001
 #define GLFW_NO_API 0
+#define GLFW_VISIBLE 0x00020004
 #define GLFW_DECORATED 0x00020005
 #define GLFW_FLOATING 0x00020007
 #define GLFW_FOCUSED 0x00020001
@@ -146,6 +147,19 @@ inline void glfwWindowHint(int hint, int value)
 	mgif_sdl::hints()[hint] = value;
 }
 
+// Video/event subsystem lifecycle. The standalone editor entry points call
+// these around MinimalLatestApp; SDL_Init is safe to call more than once and
+// the app's own SDL_Quit/SDL_Init pair is unaffected.
+inline int glfwInit()
+{
+	return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD) ? GLFW_TRUE : GLFW_FALSE;
+}
+
+inline void glfwTerminate()
+{
+	SDL_Quit();
+}
+
 inline GLFWwindow* glfwCreateWindow(int width, int height, const char* title, GLFWmonitor* /*monitor*/,
                                     GLFWwindow* /*share*/)
 {
@@ -154,6 +168,11 @@ inline GLFWwindow* glfwCreateWindow(int width, int height, const char* title, GL
 		it != mgif_sdl::hints().end() && it->second == GLFW_FALSE)
 	{
 		flags |= SDL_WINDOW_BORDERLESS;
+	}
+	if (auto it = mgif_sdl::hints().find(GLFW_VISIBLE);
+		it != mgif_sdl::hints().end() && it->second == GLFW_FALSE)
+	{
+		flags |= SDL_WINDOW_HIDDEN;
 	}
 	SDL_Window* window = SDL_CreateWindow(title, width, height, flags);
 	mgif_sdl::state().window = window;
@@ -184,14 +203,16 @@ inline void glfwSetWindowShouldClose(GLFWwindow* /*window*/, int value)
 }
 
 // ---- user pointer --------------------------------------------------------
+// SDL3 exposes per-window user data through string-keyed properties, which is
+// the portable spelling of GLFW's single opaque window pointer.
 inline void glfwSetWindowUserPointer(GLFWwindow* window, void* pointer)
 {
-	SDL_SetWindowData(window, "mgif_user_pointer", pointer);
+	SDL_SetPointerProperty(SDL_GetWindowProperties(window), "mgif_user_pointer", pointer);
 }
 
 inline void* glfwGetWindowUserPointer(GLFWwindow* window)
 {
-	return SDL_GetWindowData(window, "mgif_user_pointer");
+	return SDL_GetPointerProperty(SDL_GetWindowProperties(window), "mgif_user_pointer", nullptr);
 }
 
 // ---- callbacks -----------------------------------------------------------
