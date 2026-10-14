@@ -1,18 +1,67 @@
 #pragma once
 
-#include "../common/Common.h"
 #include "../rhi/RHITypes.h"
-#include "../rhi/RHIDevice.h"
+#include "../common/ImmutableByteBuffer.h"
 #include "SceneCamera.h"
 #include "SceneLight.h"
 
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdint>
+#include <limits>
+#include <span>
+#include <cassert>
 #include <string>
 #include <vector>
 
 namespace demo {
+
+struct SceneRootTransformMetadata {
+  glm::vec3 translation = glm::vec3(0.0f);
+  glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+  glm::vec3 scale = glm::vec3(1.0f);
+  glm::mat4 matrix = glm::mat4(1.0f);
+  bool frozen = false;
+  uint64_t hierarchyEpoch = 0;
+};
+
+struct ScenePrimitiveVariant {
+  int32_t materialIndex = -1;
+  std::vector<uint32_t> variantIndices;
+};
+
+struct ScenePrimitive {
+  uint32_t meshIndex = 0;
+  uint32_t nodeIndex = 0;
+  uint32_t documentMeshIndex = 0;
+  uint32_t documentPrimitiveIndex = 0;
+  int32_t materialIndex = -1;
+  bool localVisible = true;
+  bool effectiveVisible = true;
+  uint64_t runtimeIdentity = 0;
+  std::vector<ScenePrimitiveVariant> variants;
+  std::string extensionsJson;
+  std::string extrasJson;
+};
+
+struct SceneAnimationSampler {
+  int32_t inputAccessor = -1;
+  int32_t outputAccessor = -1;
+  std::string interpolation;
+};
+
+struct SceneAnimationChannel {
+  int32_t documentNodeIndex = -1;
+  int32_t projectedNodeIndex = -1;
+  int32_t samplerIndex = -1;
+  std::string path;
+};
+
+struct SceneAnimation {
+  std::string name;
+  std::vector<SceneAnimationSampler> samplers;
+  std::vector<SceneAnimationChannel> channels;
+};
 
 // ---------------------------------------------------------------------------
 // SceneAsset: renderer-agnostic scene representation
@@ -40,6 +89,14 @@ struct SceneMesh {
 
   // Pre-computed world transform at export time (used for initial bounds / priority)
   glm::mat4 exportTransform = glm::mat4(1.0f);
+
+  // Source identity and runtime handle are derived projection metadata.
+  uint32_t sourceNodeIndex = 0;
+  uint32_t sourceMeshIndex = 0;
+  uint32_t sourcePrimitiveIndex = 0;
+  uint64_t runtimeIdentity = 0;
+  bool localVisible = true;
+  bool effectiveVisible = true;
 };
 
 struct SceneMaterial {
@@ -63,6 +120,8 @@ struct SceneMaterial {
 
   bool    doubleSided = false;
   std::string name;
+  std::string extensionsJson;
+  std::string extrasJson;
 };
 
 struct SceneTexture {
@@ -77,6 +136,7 @@ struct SceneTexture {
 
   bool isKtx2 = false;         // true = KTX2/BasisU compressed payload
   std::string uri;             // original URI for debugging
+  uint32_t sourceImageIndex = std::numeric_limits<uint32_t>::max();
 };
 
 struct SceneDependency {
@@ -103,6 +163,13 @@ struct SceneNode {
 
   // Cached world transform (rebuilt by TransformSystem)
   glm::mat4 worldTransform = glm::mat4(1.0f);
+
+  uint32_t sourceNodeIndex = 0;
+  uint64_t runtimeIdentity = 0;
+  bool localVisible = true;
+  bool effectiveVisible = true;
+  std::string extensionsJson;
+  std::string extrasJson;
 };
 
 struct SceneAsset {
@@ -110,13 +177,26 @@ struct SceneAsset {
   std::string sourcePath;
 
   std::vector<SceneMesh>     meshes;
+  std::vector<ScenePrimitive> primitives;
   std::vector<SceneMaterial> materials;
   std::vector<SceneTexture>  textures;
   std::vector<SceneNode>     nodes;
   std::vector<SceneCamera>   cameras;
   std::vector<SceneLight>    lights;
   std::vector<uint32_t>      rootNodes;
+  std::vector<uint8_t>       sceneRootTransformApplyToRoot;
   std::vector<SceneDependency> dependencies;
+  std::vector<std::string> materialVariantNames;
+  std::vector<SceneAnimation> animations;
+
+  // Semantic identity of the source document at projection time. This is
+  // metadata only; the mutable document remains the save authority.
+  std::string documentSemanticHash;
+  uint64_t documentRevision = 0;
+
+  // Runtime-only scene transform metadata. It is intentionally not part of
+  // the glTF semantic authority or save format.
+  SceneRootTransformMetadata sceneRootTransform;
 
   // --- GPU-ready bulk payloads --------------------------------------------
 
@@ -125,14 +205,14 @@ struct SceneAsset {
   //   float3 normal
   //   float2 texCoord
   //   float4 tangent
-  std::vector<uint8_t> vertexPayload;
+  ImmutableByteBuffer vertexPayload;
 
   // Index data: uint32_t per index
-  std::vector<uint8_t> indexPayload;
+  ImmutableByteBuffer indexPayload;
 
   // Texture data: concatenated payloads, each texture's data lives at
   // texture[i].payloadOffset with size texture[i].payloadSize
-  std::vector<uint8_t> texturePayload;
+  ImmutableByteBuffer texturePayload;
 
   // --- Meshlet data (optional, populated by builder when enabled) ---------
   struct MeshletPayload {

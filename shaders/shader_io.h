@@ -112,6 +112,30 @@ struct DrawUniforms
   int32_t materialWorkflow;        // 0=metallic-roughness, 1=specular-glossiness approximation
 };
 
+// Slang 2026.x decorates a type used by ConstantBuffer as a Block. Reusing
+// that decorated type as a StructuredBuffer element creates a nested Block
+// runtime array, which Vulkan validation rejects. Keep the MDI storage type
+// layout identical while giving it an independent resource type.
+struct DrawUniformsStorage
+{
+  mat4 modelMatrix;
+  mat4 prevModelMatrix;
+  vec4 baseColorFactor;
+  int32_t baseColorTextureIndex;
+  int32_t normalTextureIndex;
+  int32_t metallicRoughnessTextureIndex;
+  int32_t occlusionTextureIndex;
+  float metallicFactor;
+  float roughnessFactor;
+  float normalScale;
+  float occlusionStrength;
+  vec4 emissiveFactor;
+  int32_t alphaMode;
+  float alphaCutoff;
+  int32_t emissiveTextureIndex;
+  int32_t materialWorkflow;
+};
+
 struct SceneInfo
 {
   uint64_t dataBufferAddress;

@@ -22,7 +22,8 @@ public:
   void reset(SubmissionToken completedToken = {}) override;
   [[nodiscard]] std::unique_ptr<CommandBuffer> createCommandBuffer() override;
 
-  void noteSubmitted(VulkanCommandBuffer& commandBuffer, SubmissionToken token);
+  [[nodiscard]] bool owns(const VulkanCommandBuffer& commandBuffer) const noexcept;
+  void noteSubmitted(SubmissionToken token) noexcept;
   void releaseCommandBuffer(VulkanCommandBuffer& commandBuffer,
                             VkCommandBuffer nativeCommandBuffer) noexcept;
 

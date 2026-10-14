@@ -149,6 +149,7 @@ private:
   void               selectQueues();
   void               detectCapabilities();
   RHICapabilityError validateCapabilities() const;
+  [[nodiscard]] VkDescriptorSetLayout ensureEmptyDescriptorSetLayout();
 
   static bool extensionAvailable(const char* name, const std::vector<VkExtensionProperties>& extensions);
   static bool layerAvailable(const char* name, const std::vector<VkLayerProperties>& layers);
@@ -217,6 +218,9 @@ private:
   std::unique_ptr<VulkanResourceTable> m_resourceTable;
   VmaAllocator         m_allocator{nullptr};
   VkDescriptorPool     m_argumentPool{VK_NULL_HANDLE};  // active pool for new argument tables
+  // Backend-owned empty layout used to fill gaps in sparse logical argument
+  // slots when lowering to Vulkan descriptor-set indices.
+  VkDescriptorSetLayout m_emptyDescriptorSetLayout{VK_NULL_HANDLE};
   uint32_t             m_combinedImageSamplerPoolCapacity{16384};
   std::vector<VkDescriptorPool> m_argumentPools;
   std::unordered_map<uint64_t, VkDescriptorPool> m_argumentSetPools;

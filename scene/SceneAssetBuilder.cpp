@@ -1,8 +1,6 @@
 #include "SceneAssetBuilder.h"
 
 #include "../common/ProfilerMarkers.h"
-#include "../render/MeshPool.h"
-#include "../render/MeshletConverter.h"
 
 #include <algorithm>
 #include <cstring>
@@ -19,8 +17,7 @@ void buildInterleavedVertexData(const GltfMeshData& meshData,
                                 std::span<uint8_t> vertexData)
 {
   const uint32_t vertexCount = static_cast<uint32_t>(meshData.positions.size() / 3);
-  ASSERT(vertexData.size() == static_cast<size_t>(vertexCount) * kInterleavedVertexStride,
-         "Interleaved vertex buffer size mismatch");
+  assert(vertexData.size() == static_cast<size_t>(vertexCount) * kInterleavedVertexStride);
 
   outLocalBoundsMin = glm::vec3(std::numeric_limits<float>::max());
   outLocalBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
@@ -81,6 +78,30 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
   SceneAsset asset;
   asset.name = model.name;
   asset.sourcePath = model.sourcePath;
+  asset.materialVariantNames = model.materialVariantNames;
+  asset.animations.reserve(model.animations.size());
+  for(const GltfAnimationData& animation : model.animations) {
+    SceneAnimation projected;
+    projected.name = animation.name;
+    projected.samplers.reserve(animation.samplers.size());
+    for(const GltfAnimationSamplerData& sampler : animation.samplers) {
+      projected.samplers.push_back(SceneAnimationSampler{
+          .inputAccessor = sampler.inputAccessor,
+          .outputAccessor = sampler.outputAccessor,
+          .interpolation = sampler.interpolation,
+      });
+    }
+    projected.channels.reserve(animation.channels.size());
+    for(const GltfAnimationChannelData& channel : animation.channels) {
+      projected.channels.push_back(SceneAnimationChannel{
+          .documentNodeIndex = channel.nodeIndex,
+          .projectedNodeIndex = -1,
+          .samplerIndex = channel.samplerIndex,
+          .path = channel.path,
+      });
+    }
+    asset.animations.push_back(std::move(projected));
+  }
   asset.dependencies.reserve(model.dependencies.size());
   for(const GltfDependencyData& dependency : model.dependencies) {
     asset.dependencies.push_back(SceneDependency{
@@ -95,8 +116,29 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
   buildMaterials(asset, model);
   buildTextures(asset, model);
   buildNodes(asset, model);
+  for(ScenePrimitive& primitive : asset.primitives) {
+    const auto nodeIt = std::find_if(asset.nodes.begin(), asset.nodes.end(),
+        [&primitive](const SceneNode& node) { return node.sourceNodeIndex == primitive.nodeIndex; });
+    primitive.nodeIndex = nodeIt == asset.nodes.end()
+        ? 0u
+        : static_cast<uint32_t>(std::distance(asset.nodes.begin(), nodeIt));
+  }
   asset.cameras = model.cameras;
   asset.lights = model.lights;
+
+  for(SceneAnimation& animation : asset.animations) {
+    for(SceneAnimationChannel& channel : animation.channels) {
+      if(channel.documentNodeIndex < 0) {
+        continue;
+      }
+      for(std::size_t nodeIndex = 0; nodeIndex < model.nodes.size(); ++nodeIndex) {
+        if(model.nodes[nodeIndex].documentNodeIndex == channel.documentNodeIndex) {
+          channel.projectedNodeIndex = static_cast<int32_t>(nodeIndex);
+          break;
+        }
+      }
+    }
+  }
 
   if(options.buildMeshlets) {
     buildMeshlets(asset, model);
@@ -120,8 +162,8 @@ void SceneAssetBuilder::buildMeshes(SceneAsset& asset, const GltfModel& model, c
     totalIndexBytes += static_cast<size_t>(gltfMesh.indices.size()) * sizeof(uint32_t);
   }
 
-  asset.vertexPayload.resize(totalVertexBytes);
-  asset.indexPayload.resize(totalIndexBytes);
+  std::vector<uint8_t> vertexPayload(totalVertexBytes);
+  std::vector<uint8_t> indexPayload(totalIndexBytes);
 
   size_t vertexByteOffset = 0;
   size_t indexByteOffset = 0;
@@ -132,23 +174,41 @@ void SceneAssetBuilder::buildMeshes(SceneAsset& asset, const GltfModel& model, c
     mesh.indexOffset  = static_cast<uint32_t>(indexByteOffset);
     mesh.vertexCount  = static_cast<uint32_t>(gltfMesh.positions.size() / 3);
     mesh.indexCount   = static_cast<uint32_t>(gltfMesh.indices.size());
-    mesh.materialIndex = static_cast<uint32_t>(std::max(gltfMesh.materialIndex, 0));
+    int effectiveMaterialIndex = gltfMesh.materialIndex;
+    if(options.activeVariant) {
+      for(const GltfVariantBinding& binding : gltfMesh.variantBindings) {
+        if(std::find(binding.variantIndices.begin(), binding.variantIndices.end(),
+                     *options.activeVariant) != binding.variantIndices.end()) {
+          effectiveMaterialIndex = binding.materialIndex;
+          break;
+        }
+      }
+    }
+    mesh.materialIndex = static_cast<uint32_t>(std::max(effectiveMaterialIndex, 0));
     mesh.exportTransform = gltfMesh.transform;
+    mesh.sourceNodeIndex = gltfMesh.documentNodeIndex < 0
+        ? 0u : static_cast<uint32_t>(gltfMesh.documentNodeIndex);
+    mesh.sourceMeshIndex = gltfMesh.documentMeshIndex < 0
+        ? 0u : static_cast<uint32_t>(gltfMesh.documentMeshIndex);
+    mesh.sourcePrimitiveIndex = gltfMesh.documentPrimitiveIndex < 0
+        ? 0u : static_cast<uint32_t>(gltfMesh.documentPrimitiveIndex);
+    mesh.localVisible = gltfMesh.localVisible;
+    mesh.effectiveVisible = gltfMesh.effectiveVisible;
 
     const size_t vertexDataSize = static_cast<size_t>(mesh.vertexCount) * kInterleavedVertexStride;
     const size_t indexDataSize  = static_cast<size_t>(mesh.indexCount) * sizeof(uint32_t);
 
-    std::span<uint8_t> vertexSpan(asset.vertexPayload.data() + vertexByteOffset, vertexDataSize);
+    std::span<uint8_t> vertexSpan(vertexPayload.data() + vertexByteOffset, vertexDataSize);
     buildInterleavedVertexData(gltfMesh, mesh.localBoundsMin, mesh.localBoundsMax, vertexSpan);
 
     if(!gltfMesh.indices.empty()) {
-      std::memcpy(asset.indexPayload.data() + indexByteOffset,
+      std::memcpy(indexPayload.data() + indexByteOffset,
                   gltfMesh.indices.data(),
                   indexDataSize);
     }
 
-    if(gltfMesh.materialIndex >= 0 && gltfMesh.materialIndex < static_cast<int>(model.materials.size())) {
-      const GltfMaterialData& mat = model.materials[gltfMesh.materialIndex];
+    if(effectiveMaterialIndex >= 0 && effectiveMaterialIndex < static_cast<int>(model.materials.size())) {
+      const GltfMaterialData& mat = model.materials[effectiveMaterialIndex];
       mesh.alphaMode = mat.alphaMode;
       mesh.alphaCutoff = mat.alphaCutoff;
     }
@@ -157,7 +217,27 @@ void SceneAssetBuilder::buildMeshes(SceneAsset& asset, const GltfModel& model, c
     indexByteOffset  += indexDataSize;
 
     asset.meshes.push_back(mesh);
+
+    ScenePrimitive primitive{};
+    primitive.meshIndex = static_cast<uint32_t>(asset.meshes.size() - 1u);
+    primitive.nodeIndex = mesh.sourceNodeIndex;
+    primitive.documentMeshIndex = mesh.sourceMeshIndex;
+    primitive.documentPrimitiveIndex = mesh.sourcePrimitiveIndex;
+    primitive.materialIndex = effectiveMaterialIndex;
+    primitive.localVisible = gltfMesh.localVisible;
+    primitive.effectiveVisible = gltfMesh.effectiveVisible;
+    primitive.extensionsJson = gltfMesh.extensionsJson;
+    primitive.extrasJson = gltfMesh.extrasJson;
+    for(const GltfVariantBinding& binding : gltfMesh.variantBindings) {
+      primitive.variants.push_back(ScenePrimitiveVariant{
+          .materialIndex = binding.materialIndex,
+          .variantIndices = binding.variantIndices,
+      });
+    }
+    asset.primitives.push_back(std::move(primitive));
   }
+  asset.vertexPayload = std::move(vertexPayload);
+  asset.indexPayload = std::move(indexPayload);
 }
 
 void SceneAssetBuilder::buildMaterials(SceneAsset& asset, const GltfModel& model)
@@ -183,6 +263,8 @@ void SceneAssetBuilder::buildMaterials(SceneAsset& asset, const GltfModel& model
     mat.materialWorkflow   = gltfMat.materialWorkflow;
     mat.doubleSided        = gltfMat.doubleSided;
     mat.name               = gltfMat.name;
+    mat.extensionsJson     = gltfMat.extensionsJson;
+    mat.extrasJson         = gltfMat.extrasJson;
 
     asset.materials.push_back(mat);
   }
@@ -192,7 +274,7 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
 {
   VKDEMO_CPU_SCOPE("Scene.Asset.Build.Textures");
   asset.textures.reserve(model.images.size());
-  asset.texturePayload.clear();
+  std::vector<uint8_t> texturePayload;
 
   size_t payloadOffset = 0;
 
@@ -205,6 +287,9 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
         : rhi::TextureFormat::rgba8Unorm;  // KTX2 path overrides in upload
     tex.isKtx2 = gltfImage.isKtx2;
     tex.uri    = gltfImage.uri;
+    if(gltfImage.documentImageIndex >= 0) {
+      tex.sourceImageIndex = static_cast<uint32_t>(gltfImage.documentImageIndex);
+    }
 
     const std::vector<uint8_t>* sourceData = nullptr;
     if(gltfImage.isKtx2 && !gltfImage.ktx2Data.empty()) {
@@ -217,7 +302,7 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
     if(sourceData) {
       tex.payloadOffset = payloadOffset;
       tex.payloadSize   = sourceData->size();
-      asset.texturePayload.insert(asset.texturePayload.end(), sourceData->begin(), sourceData->end());
+      texturePayload.insert(texturePayload.end(), sourceData->begin(), sourceData->end());
       payloadOffset += sourceData->size();
     } else {
       tex.payloadOffset = 0;
@@ -226,6 +311,7 @@ void SceneAssetBuilder::buildTextures(SceneAsset& asset, const GltfModel& model)
 
     asset.textures.push_back(tex);
   }
+  asset.texturePayload = std::move(texturePayload);
 }
 
 void SceneAssetBuilder::buildNodes(SceneAsset& asset, const GltfModel& model)
@@ -255,6 +341,12 @@ void SceneAssetBuilder::buildNodes(SceneAsset& asset, const GltfModel& model)
     node.scale       = gltfNode.scale;
     node.localTransform = gltfNode.localTransform;
     node.worldTransform = gltfNode.worldTransform;
+    node.sourceNodeIndex = gltfNode.documentNodeIndex < 0
+        ? 0u : static_cast<uint32_t>(gltfNode.documentNodeIndex);
+    node.localVisible = gltfNode.localVisible;
+    node.effectiveVisible = gltfNode.effectiveVisible;
+    node.extensionsJson = gltfNode.extensionsJson;
+    node.extrasJson = gltfNode.extrasJson;
 
     // Build meshRefs from firstMeshIndex + meshCount
     const uint32_t meshEnd = gltfNode.firstMeshIndex + gltfNode.meshCount;

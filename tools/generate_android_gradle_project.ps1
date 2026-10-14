@@ -121,7 +121,6 @@ addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_VOLK", new File(cachedDeps, "volk-
 addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_TINYGLTF", new File(cachedDeps, "tinygltf-src"))
 addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_MESHOPTIMIZER", new File(cachedDeps, "meshoptimizer-src"))
 addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_VULKANMEMORYALLOCATOR", new File(cachedDeps, "vulkanmemoryallocator-src"))
-addCmakePathIfExists("FETCHCONTENT_SOURCE_DIR_IMGUI", new File(cachedDeps, "imgui-src"))
 
 def vulkanSdkRoot = new File("C:/VulkanSDK")
 if (vulkanSdkRoot.exists()) {

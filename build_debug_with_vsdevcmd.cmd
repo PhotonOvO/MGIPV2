@@ -26,7 +26,7 @@ cd /d "%~dp0"
 if errorlevel 1 exit /b %errorlevel%
 
 for %%I in ("%CD%") do set "MGIF_CANONICAL_ROOT=%%~fI"
-set "MGIF_BUILD_DIR=%MGIF_CANONICAL_ROOT%\out\build\x64-debug"
+if not defined MGIF_BUILD_DIR set "MGIF_BUILD_DIR=%TEMP%\MGIF\mgif-x64-debug"
 set "MGIF_CACHE_FILE=%MGIF_BUILD_DIR%\CMakeCache.txt"
 set "MGIF_BUILD_GRAPH=%MGIF_BUILD_DIR%\build.ninja"
 set "MGIF_DEMO_EXE=%MGIF_BUILD_DIR%\Demo.exe"

@@ -66,6 +66,39 @@ class GpuSmokeRegressionTests(unittest.TestCase):
         self.assertIn("raysPerProbe{256u}", ddgi_config)
         self.assertIn("ddgiWeight{1.0f}", ddgi_config)
 
+    def test_clustered_stats_barrier_covers_fill_dispatch_lighting_and_readback(self) -> None:
+        source = read("render/passes/GPUDrivenClusteredLightCullingPass.cpp")
+        execute = braced_source(
+            source,
+            r"\bvoid\s+GPUDrivenClusteredLightCullingPass::execute\s*\(",
+        )
+
+        fill = execute.index("clear->fillBuffer")
+        dispatch = execute.index("enc->dispatch", fill)
+        copy = execute.index("copy->copyBuffer", dispatch)
+        post_dispatch = execute[dispatch:copy]
+        barrier = re.search(
+            r"context\.commandBuffer->barrier\s*\(\s*"
+            r"(?P<producer>[^,]+?)\s*,\s*"
+            r"(?P<consumer>[^,]+?)\s*,\s*"
+            r"rhi::HazardFlags::bufferWrites\s*\)",
+            post_dispatch,
+            re.DOTALL,
+        )
+
+        self.assertIsNotNone(barrier)
+        self.assertLess(fill, dispatch)
+        self.assertLess(dispatch, dispatch + barrier.start())
+        self.assertLess(dispatch + barrier.end(), copy)
+        self.assertEqual(
+            re.sub(r"\s+", "", barrier.group("producer")),
+            "rhi::StageFlags::transfer|rhi::StageFlags::compute",
+        )
+        self.assertEqual(
+            re.sub(r"\s+", "", barrier.group("consumer")),
+            "rhi::StageFlags::fragmentShader|rhi::StageFlags::transfer",
+        )
+
     def test_flax_active_probe_metadata_and_budget_scratch_are_reset(self) -> None:
         source = read("render/passes/FlaxDDGIPass.cpp")
         execute = source[source.index("void FlaxDDGIPass::execute") :]
@@ -411,6 +444,262 @@ class GpuSmokeRegressionTests(unittest.TestCase):
             post_submit,
             r"\bconst\s+uint32_t\s+frameIndex\s*=\s*getCurrentFrameIndexHint\s*\(",
         )
+
+    def test_cluster_stats_readback_waits_for_exact_frame_slot_retirement(self) -> None:
+        source = read("render/GPUDrivenRenderer.cpp")
+        light_header = read("render/GPUDrivenLightResources.h")
+        light_source = read("render/GPUDrivenLightResources.cpp")
+        pass_source = read("render/passes/GPUDrivenClusteredLightCullingPass.cpp")
+        scheduler_source = read("render/FrameScheduler.cpp")
+        render_device_source = read("render/RenderDevice.cpp")
+        render = braced_source(
+            source,
+            r"\bvoid\s+GPUDrivenRenderer::render\s*\(\s*const\s+RenderParams&\s+params\s*\)",
+        )
+        submit = render.index("submitPassGraph(")
+        submit_region = render[submit:]
+        slot_ready = braced_source(
+            submit_region,
+            r"\[\s*&\s*\]\s*\(\s*uint32_t\s+frameIndex\s*\)",
+        )
+        post_slot_ready = submit_region[
+            submit_region.index(slot_ready) + len(slot_ready) :
+        ]
+        # Producer validity is a submit result, never slot-preparation state.
+        mark_call_pattern = (
+            r"\bm_lightResources\.markClusterStatsProducerSubmitted\s*\(\s*"
+            r"frameIndex\s*,\s*preparedClusterStatsProducer\s*\)\s*;"
+        )
+        render_without_comments = without_cpp_comments(render)
+        any_mark_call_pattern = (
+            r"\bm_lightResources\.markClusterStatsProducerSubmitted\s*\("
+        )
+        self.assertEqual(
+            len(re.findall(any_mark_call_pattern, render_without_comments)),
+            1,
+        )
+        self.assertEqual(len(re.findall(mark_call_pattern, render_without_comments)), 1)
+        self.assertNotRegex(without_cpp_comments(slot_ready), any_mark_call_pattern)
+
+        cache_calls = re.findall(
+            r"\bm_lightResources\.cacheClusterStats\s*\(\s*([^)]*?)\s*\)",
+            render,
+        )
+        self.assertEqual(cache_calls, ["frameIndex"])
+
+        cache = re.search(
+            r"\bm_lightResources\.cacheClusterStats\s*\(\s*frameIndex\s*\)",
+            slot_ready,
+        )
+        update_lights = re.search(
+            r"\bupdateGPUDrivenLights\s*\(\s*params\s*,\s*frameIndex\s*\)",
+            slot_ready,
+        )
+        self.assertIsNotNone(cache)
+        self.assertIsNotNone(update_lights)
+        self.assertLess(cache.start(), update_lights.start())
+
+        producer_assignment = re.search(
+            r"\bpreparedClusterStatsProducer\s*=\s*(?P<condition>.*?);",
+            slot_ready,
+            re.DOTALL,
+        )
+        prepared_frame = re.search(
+            r"\bpreparedFrameIndex\s*=\s*frameIndex\s*;",
+            slot_ready,
+        )
+        self.assertIsNotNone(producer_assignment)
+        self.assertIsNotNone(prepared_frame)
+        self.assertLess(update_lights.end(), producer_assignment.start())
+        self.assertLess(producer_assignment.end(), prepared_frame.start())
+        producer_condition = re.sub(r"\s+", "", producer_assignment.group("condition"))
+        self.assertEqual(
+            producer_condition,
+            "gpuParams.debugOptions.enableClusteredLighting"
+            "&&!getClusteredLightCullingPipelineHandle().isNull()"
+            "&&!getLightCoarseCullingArgumentTable(frameIndex).isNull()"
+            "&&!getClusterStatsBufferHandle(frameIndex).isNull()"
+            "&&!getClusterStatsReadbackBufferHandle(frameIndex).isNull()",
+        )
+
+        failed_submit = re.search(
+            r"(?s)\bif\s*\(\s*!frameSubmitted\s*\)\s*\{.*?\breturn\s*;\s*\}",
+            post_slot_ready,
+        )
+        submitted_frame_index = re.search(
+            r"\bconst\s+uint32_t\s+frameIndex\s*=\s*preparedFrameIndex\s*;",
+            post_slot_ready,
+        )
+        mark_submitted = re.search(
+            mark_call_pattern,
+            post_slot_ready,
+        )
+        diagnostics = re.search(
+            r"\bm_lightResources\.getDiagnostics\s*\(\s*\)",
+            post_slot_ready,
+        )
+        self.assertIsNotNone(failed_submit)
+        self.assertIsNotNone(submitted_frame_index)
+        self.assertIsNotNone(mark_submitted)
+        self.assertIsNotNone(diagnostics)
+        self.assertLess(failed_submit.end(), submitted_frame_index.start())
+        self.assertLess(submitted_frame_index.end(), mark_submitted.start())
+        self.assertLess(mark_submitted.end(), diagnostics.start())
+        self.assertNotRegex(
+            without_cpp_comments(render),
+            r"\b(?:waitForAllFrames|waitForIdle|waitForFrame)\s*\(",
+        )
+
+        pass_execute = braced_source(
+            pass_source,
+            r"\bvoid\s+GPUDrivenClusteredLightCullingPass::execute\s*\(",
+        )
+        pass_without_comments = without_cpp_comments(pass_execute)
+        readback_lookups = re.findall(
+            r"\bgetClusterStatsReadbackBufferHandle\s*\((.*?)\)",
+            pass_without_comments,
+            re.DOTALL,
+        )
+        self.assertEqual(
+            [re.sub(r"\s+", "", argument) for argument in readback_lookups],
+            ["context.frameIndex"],
+        )
+        producer_lookups = re.findall(
+            r"\bgetClusterStatsBufferHandle\s*\((.*?)\)",
+            pass_without_comments,
+            re.DOTALL,
+        )
+        self.assertEqual(
+            [re.sub(r"\s+", "", argument) for argument in producer_lookups],
+            ["context.frameIndex"],
+        )
+        pass_copy_guards = [
+            "context.params->debugOptions.enableClusteredLighting",
+            "!pipeline.isNull()",
+            "!argumentTable.isNull()",
+            "!statsBuffer.isNull()",
+            "!statsReadback.isNull()",
+        ]
+        for guard in pass_copy_guards:
+            with self.subTest(copy_guard=guard):
+                self.assertIn(guard, pass_execute)
+        self.assertLess(
+            pass_execute.index("context.params->debugOptions.enableClusteredLighting"),
+            pass_execute.index("copy->copyBuffer"),
+        )
+        copy_guard_pattern = (
+            r"\bif\s*\(\s*!statsBuffer\.isNull\s*\(\s*\)\s*&&\s*"
+            r"!statsReadback\.isNull\s*\(\s*\)\s*\)"
+        )
+        copy_block = braced_source(pass_without_comments, copy_guard_pattern)
+        copy_body = copy_block[copy_block.index("{") + 1 : copy_block.rindex("}")]
+        self.assertNotRegex(copy_body, r"\b(?:if|for|while|switch)\s*\(")
+        self.assertNotRegex(copy_body, r"\b(?:return|break|continue)\b")
+        copy_calls = re.findall(
+            r"\bcopy->copyBuffer\s*\((.*?)\)\s*;",
+            copy_block,
+            re.DOTALL,
+        )
+        self.assertEqual(len(re.findall(r"\bcopy->copyBuffer\s*\(", pass_without_comments)), 1)
+        self.assertEqual(len(copy_calls), 1)
+        self.assertEqual(
+            re.sub(r"\s+", "", copy_calls[0]),
+            "statsBuffer,0u,statsReadback,0u,"
+            "sizeof(GPUDrivenLightResources::ClusterStats)",
+        )
+
+        scheduler_begin = braced_source(
+            scheduler_source,
+            r"\brhi::CommandBuffer&\s+FrameScheduler::beginFrame\s*\(",
+        )
+        exact_slot = scheduler_begin.index("m_frames[m_currentFrameIndex]")
+        valid_token = scheduler_begin.index("frame.submission.isValid()", exact_slot)
+        exact_wait = scheduler_begin.index("m_queue->wait(frame.submission)", valid_token)
+        reset_slot = scheduler_begin.index("frame.allocator->reset(frame.submission)", exact_wait)
+        self.assertLess(exact_slot, valid_token)
+        self.assertLess(valid_token, exact_wait)
+        self.assertLess(exact_wait, reset_slot)
+        self.assertNotIn("waitForAllFrames", scheduler_begin)
+        self.assertNotIn("waitIdle", scheduler_begin)
+
+        render_with_passes = braced_source(
+            render_device_source,
+            r"\bbool\s+RenderDevice::renderWithPassExecutor\s*\(",
+        )
+        prepare = render_with_passes.index("prepareFrameResources()")
+        callback = render_with_passes.index("onFrameSlotReady(preparedFrameIndex)", prepare)
+        recording = render_with_passes.index("beginCommandRecording()", callback)
+        self.assertLess(prepare, callback)
+        self.assertLess(callback, recording)
+
+        self.assertIn("bool clusterStatsProducerSubmitted{false}", light_header)
+        init = braced_source(
+            light_source,
+            r"\bvoid\s+GPUDrivenLightResources::init\s*\(",
+        )
+        cache_stats = braced_source(
+            light_source,
+            r"\bvoid\s+GPUDrivenLightResources::cacheClusterStats\s*\(",
+        )
+        mark_stats = braced_source(
+            light_source,
+            r"\bvoid\s+GPUDrivenLightResources::markClusterStatsProducerSubmitted\s*\(",
+        )
+        readback_create = init.index("GPUDrivenClusterStatsReadbackBuffer")
+        readback_zero = init.index("updateMappedBuffer", readback_create)
+        self.assertLess(readback_create, readback_zero)
+        invalid_producer = cache_stats.index("!frame.clusterStatsProducerSubmitted")
+        consume_producer = cache_stats.index(
+            "frame.clusterStatsProducerSubmitted = false", invalid_producer
+        )
+        host_map = cache_stats.index("m_device->mapBuffer", consume_producer)
+        host_read = cache_stats.index("std::memcpy", host_map)
+        self.assertLess(invalid_producer, consume_producer)
+        self.assertLess(consume_producer, host_map)
+        self.assertLess(host_map, host_read)
+        self.assertRegex(
+            mark_stats,
+            r"(?s)clusterStatsProducerSubmitted\s*=\s*producerSubmitted\s*;"
+            r".*?if\s*\(\s*!producerSubmitted\s*\).*?m_lastClusterStats\s*=\s*\{\}\s*;",
+        )
+        self.assertNotRegex(
+            without_cpp_comments(light_header + "\n" + light_source),
+            r"\b(?:waitIdle|waitForIdle|waitForAllFrames|waitForFrame|wait)\s*\(",
+        )
+
+    def test_cluster_stats_native_ring_model_is_wired_into_ctest(self) -> None:
+        cmake = read("CMakeLists.txt")
+        native_target = read("tests/gpu_scene_registry_model_tests.cpp")
+        native_model = read("tests/gpu_cluster_stats_ring_model_tests.h")
+
+        self.assertRegex(
+            cmake,
+            r"(?s)add_executable\(gpu_scene_registry_model_tests\s+"
+            r"tests/gpu_scene_registry_model_tests\.cpp\s*\)"
+            r".*?add_test\(NAME\s+gpu_scene_registry_model\s+"
+            r"COMMAND\s+gpu_scene_registry_model_tests\s*\)",
+        )
+        self.assertIn('#include "gpu_cluster_stats_ring_model_tests.h"', native_target)
+        self.assertIn("runClusterStatsRingModel();", native_target)
+        self.assertIn("FrameScheduler scheduler", native_model)
+        self.assertIn("resources.init(device", native_model)
+        self.assertIn("resources.cacheClusterStats(expectedSlot)", native_model)
+        self.assertIn("resources.markClusterStatsProducerSubmitted", native_model)
+        self.assertIn("statsBuffers[expectedSlot]", native_model)
+        self.assertIn("recordedCopy.destination == readbacks[expectedSlot]", native_model)
+        self.assertIn("submittedCommandBuffer->executeCopies()", native_model)
+        self.assertIn("producerMarkCount == marksBeforeSubmit + 1u", native_model)
+        self.assertIn("device.waitIdleCount == 0u", native_model)
+        self.assertNotIn(
+            "writeClusterStats(device, readbacks[expectedSlot]",
+            native_model,
+        )
+        self.assertRegex(
+            native_target,
+            r"void\s+waitIdle\s*\(\s*\)\s*override\s*\{\s*\+\+waitIdleCount;\s*\}",
+        )
+        self.assertIn("first-use diagnostics exposed unproduced readback bytes", native_model)
+        self.assertIn("frame submit serialized on a queue wait", native_model)
 
     def test_meshlet_upload_waits_for_all_frames_only_when_data_changed(self) -> None:
         source = read("render/GPUDrivenRenderer.cpp")

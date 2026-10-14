@@ -5,14 +5,25 @@
 // consumers can depend on the data types without pulling in the full device header.
 
 #include "../common/Handles.h"
-#include "../shaders/shader_io.h"
 #include "../rhi/RHIHandles.h"
 #include "../rhi/RHITypes.h"
 #include "../scene/SceneLight.h"
 #include "../scene/SceneAsset.h"
 #include "../loader/GltfLoader.h"
+#include <mgif/scene_editor/SceneMaterialPreview.h>
 #include "FlaxGIDebugModel.h"
 #include "Pass.h"
+#include "ShaderInterop.h"
+#if !defined(__ANDROID__)
+#include <mgif/scene_editor/SceneRenderOccurrenceMapping.h>
+#include "editor/EditorOverlayTypes.h"
+#include "editor/EditorViewportMetrics.h"
+#endif
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+#include "../scene/SceneUploadPlan.h"
+#include "editor/SceneRuntimePublisher.h"
+#endif
 
 #include <array>
 #include <cmath>
@@ -313,12 +324,34 @@ namespace demo
 		bool depthPyramidValid{false};
 	};
 
+#if !defined(__ANDROID__)
+	// CPU-owned, revision-bound editor overlay input. The app retains this value
+	// for the synchronous RendererFacade::render() call; the RHI pass copies its
+	// spans into the authoritative frame slot before recording begins.
+	struct EditorOverlayFrameSnapshot final
+	{
+		std::uint64_t frameSerial{0u};
+		std::uint64_t documentRevision{0u};
+		std::uint64_t selectionRevision{0u};
+		std::uint64_t mappingEpoch{0u};
+		editor::EditorViewportMetrics viewport{};
+		editor::OverlayMatrix4 viewProjection{};
+		bool gridVisible{false};
+		editor::GridDrawPacket grid{};
+		std::vector<editor::GridLinePacket> gridLines{};
+		std::vector<editor::GridLinePacket> gridAxes{};
+		bool gizmoVisible{false};
+		editor::GizmoDrawPacket gizmo{};
+	};
+#endif
+
 	struct RenderParams
 	{
 		rhi::Extent2D viewportSize{};
 		float deltaTime{0.0F};
 		float timeSeconds{0.0F};
 		MaterialHandle materialHandle{};
+		std::optional<editor::SceneMaterialColorPreview> editorMaterialColorPreview;
 		rhi::ClearColorValue clearColor{0.2F, 0.2F, 0.3F, 1.0F};
 		std::function<void()> recordUi;
 		glm::vec4 viewportImageRect{0.0f}; // x, y, width, height in ImGui screen space
@@ -337,7 +370,33 @@ namespace demo
 		// This stays backend-agnostic and does not require RenderDoc headers.
 		std::string automationDebugMarker{};
 		const GPUDrivenSceneView* gpuDrivenSceneView{nullptr};
+#if !defined(__ANDROID__)
+		const editor::EditorViewportMetrics* editorViewportMetrics{nullptr};
+		const EditorOverlayFrameSnapshot* editorOverlayFrame{nullptr};
+#endif
 	};
+
+#if !defined(__ANDROID__)
+	struct EditorHighlightShaderPushConstants
+	{
+		std::array<uint32_t, 4> viewport{};
+		std::array<uint32_t, 4> counts{};
+		std::array<float, 4> color{1.0f, 0.72f, 0.08f, 1.0f};
+	};
+	static_assert(sizeof(EditorHighlightShaderPushConstants) == 48u);
+	static_assert(offsetof(EditorHighlightShaderPushConstants, viewport) == 0u);
+	static_assert(offsetof(EditorHighlightShaderPushConstants, counts) == 16u);
+	static_assert(offsetof(EditorHighlightShaderPushConstants, color) == 32u);
+
+	struct EditorPickingShaderPushConstants
+	{
+		uint32_t drawIndex{0u};
+		uint32_t framebufferToken{0u};
+	};
+	static_assert(sizeof(EditorPickingShaderPushConstants) == 8u);
+	static_assert(offsetof(EditorPickingShaderPushConstants, drawIndex) == 0u);
+	static_assert(offsetof(EditorPickingShaderPushConstants, framebufferToken) == 4u);
+#endif
 
 	[[nodiscard]] constexpr bool shouldUpdateCSMCascadeMatrices(const RenderParams& params) noexcept
 	{
@@ -430,7 +489,7 @@ namespace demo
 
 	struct SceneUploadResult
 	{
-		struct SceneDrawRecord
+			struct SceneDrawRecord
 		{
 			uint32_t instanceIndex{UINT32_MAX};
 			uint32_t meshIndex{UINT32_MAX};
@@ -440,7 +499,12 @@ namespace demo
 			glm::mat4 worldTransform{1.0f};
 			glm::vec4 boundsSphere{0.0f};
 			uint32_t alphaMode{0u};
-			float alphaCutoff{0.5f};
+				float alphaCutoff{0.5f};
+				bool doubleSided{false};
+#if !defined(__ANDROID__)
+				editor::RenderOccurrenceId occurrence{};
+				editor::FramebufferPickToken pickToken{};
+#endif
 		};
 
 		std::vector<MeshHandle> meshes;
@@ -473,6 +537,49 @@ namespace demo
 	};
 
 	using GltfUploadResult = SceneUploadResult;
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	struct RendererSceneTransactionInitialState
+	{
+		editor::RendererSceneInitialState publication;
+		SceneAsset activeAsset;
+		SceneUploadPlan activePlan;
+		editor::SceneProjectionOwnerCapability ownerCapability;
+	};
+
+	struct ApplyFullSceneSnapshotRequest
+	{
+		editor::ApplySceneChangeRequest transaction;
+		SceneAsset candidateAsset;
+		SceneUploadPlan candidatePlan;
+		editor::SceneProjectionOwnerCapability ownerCapability;
+	};
+
+	struct RendererSceneTransactionInitializationResult
+	{
+		bool initialized{false};
+		editor::SceneApplyError error{editor::SceneApplyError::InvalidState};
+		std::string message;
+	};
+
+	struct RendererSceneStateSnapshot
+	{
+		bool initialized{false};
+		std::optional<editor::RendererTargetFence> fence;
+		editor::SceneDigest activeGenerationDigest{};
+		uint64_t generation{0};
+		uint64_t descriptorGeneration{0};
+		size_t mappingEntryCount{0};
+		size_t meshCount{0};
+		size_t textureCount{0};
+		size_t materialCount{0};
+			size_t nodeCount{0};
+			uint64_t occurrenceGeneration{0};
+			size_t occurrenceCount{0};
+
+		bool operator==(const RendererSceneStateSnapshot&) const = default;
+	};
+#endif
 
 	struct RuntimeProfileSnapshot
 	{

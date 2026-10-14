@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace demo {
@@ -28,6 +29,11 @@ struct SceneCamera
   // Orthographic values are the positive half extents from glTF.
   float horizontalMagnification{1.0f};
   float verticalMagnification{1.0f};
+
+  // Projection-owned source identity. The document index proves the source
+  // relationship while runtimeIdentity binds the full stable editor ID.
+  uint32_t sourceCameraIndex{std::numeric_limits<uint32_t>::max()};
+  uint64_t runtimeIdentity{0u};
 };
 
 }  // namespace demo

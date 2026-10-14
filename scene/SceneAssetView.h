@@ -4,17 +4,26 @@
 
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace demo {
 
 struct SceneAssetView {
   std::span<const SceneMesh> meshes;
+  std::span<const ScenePrimitive> primitives;
   std::span<const SceneMaterial> materials;
   std::span<const SceneTexture> textures;
   std::span<const SceneNode> nodes;
   std::span<const SceneCamera> cameras;
   std::span<const SceneLight> lights;
   std::span<const uint32_t> rootNodes;
+  std::span<const uint8_t> sceneRootTransformApplyToRoot;
+  std::span<const std::string> materialVariantNames;
+  std::span<const SceneAnimation> animations;
+
+  std::string_view documentSemanticHash;
+  uint64_t documentRevision = 0;
+  SceneRootTransformMetadata sceneRootTransform;
 
   std::span<const uint8_t> vertexPayload;
   std::span<const uint8_t> indexPayload;
@@ -30,12 +39,19 @@ struct SceneAssetValidationResult {
 {
   return SceneAssetView{
       .meshes = asset.meshes,
+      .primitives = asset.primitives,
       .materials = asset.materials,
       .textures = asset.textures,
       .nodes = asset.nodes,
       .cameras = asset.cameras,
       .lights = asset.lights,
       .rootNodes = asset.rootNodes,
+      .sceneRootTransformApplyToRoot = asset.sceneRootTransformApplyToRoot,
+      .materialVariantNames = asset.materialVariantNames,
+      .animations = asset.animations,
+      .documentSemanticHash = asset.documentSemanticHash,
+      .documentRevision = asset.documentRevision,
+      .sceneRootTransform = asset.sceneRootTransform,
       .vertexPayload = asset.vertexPayload,
       .indexPayload = asset.indexPayload,
       .texturePayload = asset.texturePayload,
@@ -50,6 +66,30 @@ struct SceneAssetValidationResult {
 
 [[nodiscard]] inline SceneAssetValidationResult validateSceneAssetView(const SceneAssetView& asset)
 {
+  for(size_t primitiveIndex = 0; primitiveIndex < asset.primitives.size(); ++primitiveIndex) {
+    const ScenePrimitive& primitive = asset.primitives[primitiveIndex];
+    if(primitive.meshIndex >= asset.meshes.size() || primitive.nodeIndex >= asset.nodes.size()) {
+      return {false, "scene primitive source reference is out of bounds"};
+    }
+    if(primitive.materialIndex >= 0
+       && static_cast<size_t>(primitive.materialIndex) >= asset.materials.size()
+       && !asset.materials.empty()) {
+      return {false, "scene primitive material index is out of bounds"};
+    }
+    for(const ScenePrimitiveVariant& variant : primitive.variants) {
+      if(variant.materialIndex >= 0
+         && static_cast<size_t>(variant.materialIndex) >= asset.materials.size()
+         && !asset.materials.empty()) {
+        return {false, "scene primitive variant material index is out of bounds"};
+      }
+      for(const uint32_t variantIndex : variant.variantIndices) {
+        if(variantIndex >= asset.materialVariantNames.size()) {
+          return {false, "scene primitive variant index is out of bounds"};
+        }
+      }
+    }
+  }
+
   for(size_t meshIndex = 0; meshIndex < asset.meshes.size(); ++meshIndex) {
     const SceneMesh& mesh = asset.meshes[meshIndex];
     const uint64_t vertexBytes = static_cast<uint64_t>(mesh.vertexCount) * 48ull;

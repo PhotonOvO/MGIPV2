@@ -1,0 +1,77 @@
+# Line-ending policy (2026-09-08 hygiene pass)
+#
+# Every blob in HEAD is LF-only: no tracked file in the committed tree contains
+# a CR.  `core.autocrlf` and `core.eol` are unset, so git itself never converted
+# anything; the churn came from Windows-side writing tools (PowerShell
+# `Set-Content`/`Out-File`, patch utilities) that rewrote whole files with CRLF.
+# Before this pass, 342 of 414 modified tracked files differed from HEAD by line
+# endings alone.  Pinning normalization here keeps future adds and checkouts LF.
+* text=auto eol=lf
+
+# The parity ledger tree is hash-bound.  Validators recompute SHA-256 over these
+# exact bytes, and two of them currently contain CRLF
+# (docs/editor-parity/manifest.json is bound as
+# a5182ddaeb88368b293ee55931e6dd7deec989eb62cda57d5c9c09c65b38b053 by the frozen
+# legacy state, and docs/editor-parity/schemas/progress-ledger.schema.json also
+# carries CRLF).  Converting them on add or checkout would invalidate the frozen
+# bindings, so this subtree is stored byte-for-byte.
+docs/editor-parity/** -text
+docs/gltf-scene-editor-parity-task.md -text
+docs/gltf-scene-editor-parity-progress.md -text
+docs/gltf-scene-editor-parity-local-progress.md -text
+
+# Binary payloads: never convert, never text-diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.tga binary
+*.psd binary
+*.glb binary
+*.bin binary
+*.ktx binary
+*.ktx2 binary
+*.dds binary
+*.hdr binary
+*.exr binary
+*.spv binary
+*.rdc binary
+*.pdb binary
+*.obj binary
+*.o binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+*.lib binary
+*.exp binary
+*.ilk binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.xz binary
+*.tar binary
+*.rar binary
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+*.mp3 binary
+*.mp4 binary
+*.wav binary
+*.ogg binary
+*.webm binary
+*.apk binary
+*.aab binary
+*.jar binary
+*.keystore binary
+*.icns binary
+
+# glTF JSON stays text; only its external buffers are binary (covered above).
+*.gltf text eol=lf

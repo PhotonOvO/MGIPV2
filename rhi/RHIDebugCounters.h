@@ -48,7 +48,37 @@ struct RHIHotPathCounters
            pipelineCreations == 0 && argumentLayoutCreations == 0 &&
            textureViewCreations == 0 && descriptorAllocations == 0;
   }
+
+  bool operator==(const RHIHotPathCounters&) const = default;
 };
+
+[[nodiscard]] constexpr RHIHotPathCounters hotPathCounterDelta(
+  const RHIHotPathCounters& before,
+  const RHIHotPathCounters& after) noexcept
+{
+  return RHIHotPathCounters{
+    .commandBufferBegins = after.commandBufferBegins - before.commandBufferBegins,
+    .encoderBegins = after.encoderBegins - before.encoderBegins,
+    .queueSubmits = after.queueSubmits - before.queueSubmits,
+    .submittedCommandBuffers = after.submittedCommandBuffers - before.submittedCommandBuffers,
+    .descriptorUpdates = after.descriptorUpdates - before.descriptorUpdates,
+    .descriptorAllocations = after.descriptorAllocations - before.descriptorAllocations,
+    .tableVersionAllocations = after.tableVersionAllocations - before.tableVersionAllocations,
+    .pipelineCreations = after.pipelineCreations - before.pipelineCreations,
+    .argumentLayoutCreations = after.argumentLayoutCreations - before.argumentLayoutCreations,
+    .textureViewCreations = after.textureViewCreations - before.textureViewCreations,
+    .commandRecordingHeapAllocations =
+      after.commandRecordingHeapAllocations - before.commandRecordingHeapAllocations,
+    .commandRecordingNativeObjectCreations =
+      after.commandRecordingNativeObjectCreations - before.commandRecordingNativeObjectCreations,
+  };
+}
+
+[[nodiscard]] constexpr bool hotPathCountersAreZero(
+  const RHIHotPathCounters& counters) noexcept
+{
+  return counters == RHIHotPathCounters{};
+}
 
 namespace detail {
 

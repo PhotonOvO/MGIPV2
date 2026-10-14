@@ -5,6 +5,7 @@
 #include "volk.h"
 
 #include <algorithm>
+#include <exception>
 #include <stdexcept>
 
 namespace demo::rhi::vulkan {
@@ -86,6 +87,8 @@ void VulkanCommandAllocator::reset(SubmissionToken completedToken)
 
 std::unique_ptr<CommandBuffer> VulkanCommandAllocator::createCommandBuffer()
 {
+  m_commandBuffers.reserve(m_commandBuffers.size() + 1);
+
   VkCommandBuffer native = VK_NULL_HANDLE;
   const VkCommandBufferAllocateInfo allocateInfo{
     .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -95,20 +98,33 @@ std::unique_ptr<CommandBuffer> VulkanCommandAllocator::createCommandBuffer()
   };
   checkVkResult(vkAllocateCommandBuffers(m_device, &allocateInfo, &native),
                 "VulkanCommandAllocator failed to allocate VkCommandBuffer");
-  auto commandBuffer =
-    std::make_unique<VulkanCommandBuffer>(*this, native, m_resourceTable);
-  m_commandBuffers.push_back(commandBuffer.get());
-  return commandBuffer;
+  try
+  {
+    auto commandBuffer =
+      std::make_unique<VulkanCommandBuffer>(*this, native, m_resourceTable);
+    m_commandBuffers.push_back(commandBuffer.get());
+
+    // Registration transfers native cleanup to VulkanCommandBuffer.
+    native = VK_NULL_HANDLE;
+    return commandBuffer;
+  }
+  catch(...)
+  {
+    if(native != VK_NULL_HANDLE)
+      vkFreeCommandBuffers(m_device, m_pool, 1, &native);
+    throw;
+  }
 }
 
-void VulkanCommandAllocator::noteSubmitted(
-  VulkanCommandBuffer& commandBuffer, SubmissionToken token)
+bool VulkanCommandAllocator::owns(
+  const VulkanCommandBuffer& commandBuffer) const noexcept
 {
-  require(std::find(m_commandBuffers.begin(), m_commandBuffers.end(),
-                    &commandBuffer) != m_commandBuffers.end(),
-          "VulkanCommandAllocator received an unknown command buffer");
-  require(token.queue == m_queue.identity(),
-          "VulkanCommandAllocator received a wrong-queue submission token");
+  return std::find(m_commandBuffers.begin(), m_commandBuffers.end(),
+                   &commandBuffer) != m_commandBuffers.end();
+}
+
+void VulkanCommandAllocator::noteSubmitted(SubmissionToken token) noexcept
+{
   if(!m_lastSubmission.isValid() || token.value > m_lastSubmission.value)
     m_lastSubmission = token;
 }
@@ -118,8 +134,9 @@ void VulkanCommandAllocator::releaseCommandBuffer(
 {
   const auto found =
     std::find(m_commandBuffers.begin(), m_commandBuffers.end(), &commandBuffer);
-  if(found != m_commandBuffers.end())
-    m_commandBuffers.erase(found);
+  if(found == m_commandBuffers.end())
+    return;
+  m_commandBuffers.erase(found);
   if(m_device != VK_NULL_HANDLE && m_pool != VK_NULL_HANDLE &&
      nativeCommandBuffer != VK_NULL_HANDLE)
   {

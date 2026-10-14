@@ -42,7 +42,7 @@ ConstantBuffer<CameraUniforms> camera;
 ConstantBuffer<DrawUniforms> draw;
 
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
-StructuredBuffer<DrawUniforms> drawData;
+StructuredBuffer<DrawUniformsStorage> drawData;
 
 #ifdef DEMO_D3D12
 [[vk::push_constant]]
@@ -111,7 +111,7 @@ VertexOutputMdi vertexMdiMain(VertexInput input)
 VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
 {
 #endif
-    const DrawUniforms mdiDraw = drawData[drawIndex];
+    const DrawUniformsStorage mdiDraw = drawData[drawIndex];
     VertexOutputMdi output;
 
     float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));
@@ -274,7 +274,7 @@ void fragmentMdiMain(
     out float4 outGBuffer1 : SV_Target1,
     out float4 outGBuffer2 : SV_Target2
 ) {
-    const DrawUniforms draw = drawData[input.drawIndex];
+    const DrawUniformsStorage draw = drawData[input.drawIndex];
     float4 color = draw.baseColorFactor;
     if(draw.baseColorTextureIndex >= 0)
     {

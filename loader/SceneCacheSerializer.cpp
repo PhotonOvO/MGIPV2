@@ -18,6 +18,8 @@ constexpr uint64_t kMaxReasonableVectorElements = 1ull << 22;
 constexpr uint32_t kMaxReasonableMeshCount = 1u << 16;
 constexpr uint32_t kMaxReasonableMaterialCount = 1u << 14;
 constexpr uint32_t kMaxReasonableImageCount = 1u << 14;
+constexpr uint32_t kMaxReasonableTextureCount = 1u << 14;
+constexpr uint32_t kMaxReasonableSamplerCount = 1u << 14;
 constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
 constexpr uint32_t kMaxReasonableCameraCount = 1u << 14;
 constexpr uint32_t kMaxReasonableLightCount = 1u << 14;
@@ -37,11 +39,15 @@ struct CacheHeader
   uint32_t meshCount{0};
   uint32_t materialCount{0};
   uint32_t imageCount{0};
+  uint32_t textureCount{0};
+  uint32_t samplerCount{0};
   uint32_t nodeCount{0};
   uint32_t cameraCount{0};
   uint32_t lightCount{0};
   uint32_t rootNodeCount{0};
   uint32_t dependencyCount{0};
+  uint32_t variantCount{0};
+  uint32_t animationCount{0};
 };
 
 [[nodiscard]] bool hasReasonableCounts(const CacheHeader& header)
@@ -49,11 +55,15 @@ struct CacheHeader
   return header.meshCount <= kMaxReasonableMeshCount
          && header.materialCount <= kMaxReasonableMaterialCount
          && header.imageCount <= kMaxReasonableImageCount
+         && header.textureCount <= kMaxReasonableTextureCount
+         && header.samplerCount <= kMaxReasonableSamplerCount
          && header.nodeCount <= kMaxReasonableNodeCount
          && header.cameraCount <= kMaxReasonableCameraCount
          && header.lightCount <= kMaxReasonableLightCount
          && header.rootNodeCount <= kMaxReasonableRootNodeCount
-         && header.dependencyCount <= kMaxReasonableDependencyCount;
+         && header.dependencyCount <= kMaxReasonableDependencyCount
+         && header.variantCount <= kMaxReasonableVectorElements
+         && header.animationCount <= kMaxReasonableVectorElements;
 }
 
 [[nodiscard]] bool hasReasonableModelShape(const GltfModel& model)
@@ -61,6 +71,8 @@ struct CacheHeader
   return model.meshes.size() <= kMaxReasonableMeshCount
          && model.materials.size() <= kMaxReasonableMaterialCount
          && model.images.size() <= kMaxReasonableImageCount
+         && model.textures.size() <= kMaxReasonableTextureCount
+         && model.samplers.size() <= kMaxReasonableSamplerCount
          && model.nodes.size() <= kMaxReasonableNodeCount
          && model.cameras.size() <= kMaxReasonableCameraCount
          && model.lights.size() <= kMaxReasonableLightCount
@@ -136,7 +148,29 @@ struct CacheHeader
 
   for(const GltfImageData& image : model.images)
   {
-    if(!hasReasonableImagePayload(image))
+    if(!hasReasonableImagePayload(image)
+       || (image.documentImageIndex != -1
+           && (image.documentImageIndex < 0
+               || static_cast<size_t>(image.documentImageIndex) >= model.images.size())))
+    {
+      return false;
+    }
+  }
+
+  const auto validImageIndex = [&model](int index) {
+    return index == -1 || (index >= 0 && static_cast<size_t>(index) < model.images.size());
+  };
+  const auto validSamplerIndex = [&model](int index) {
+    return index == -1 || (index >= 0 && static_cast<size_t>(index) < model.samplers.size());
+  };
+  for(const GltfTextureData& texture : model.textures)
+  {
+    if(!validImageIndex(texture.sourceImageIndex)
+       || !validImageIndex(texture.resolvedImageIndex)
+       || !validImageIndex(texture.canonicalImageIndex)
+       || !validImageIndex(texture.colorImageIndex)
+       || !validImageIndex(texture.linearImageIndex)
+       || !validSamplerIndex(texture.samplerIndex))
     {
       return false;
     }
@@ -281,17 +315,51 @@ void writeMesh(std::ostream& stream, const GltfMeshData& mesh)
   writeVector(stream, mesh.indices);
   writePod(stream, mesh.materialIndex);
   writePod(stream, mesh.transform);
+  writePod(stream, mesh.documentNodeIndex);
+  writePod(stream, mesh.documentMeshIndex);
+  writePod(stream, mesh.documentPrimitiveIndex);
+  writePod(stream, mesh.localVisible);
+  writePod(stream, mesh.effectiveVisible);
+  const uint64_t variantCount = static_cast<uint64_t>(mesh.variantBindings.size());
+  writePod(stream, variantCount);
+  for(const GltfVariantBinding& binding : mesh.variantBindings) {
+    writePod(stream, binding.materialIndex);
+    writeVector(stream, binding.variantIndices);
+  }
+  writeString(stream, mesh.extensionsJson);
+  writeString(stream, mesh.extrasJson);
 }
 
 bool readMesh(std::istream& stream, GltfMeshData& mesh)
 {
-  return readVector(stream, mesh.positions)
+  uint64_t variantCount = 0;
+  if(!(readVector(stream, mesh.positions)
          && readVector(stream, mesh.normals)
          && readVector(stream, mesh.texCoords)
          && readVector(stream, mesh.tangents)
          && readVector(stream, mesh.indices)
          && readPod(stream, mesh.materialIndex)
-         && readPod(stream, mesh.transform);
+         && readPod(stream, mesh.transform)
+         && readPod(stream, mesh.documentNodeIndex)
+         && readPod(stream, mesh.documentMeshIndex)
+         && readPod(stream, mesh.documentPrimitiveIndex)
+         && readPod(stream, mesh.localVisible)
+         && readPod(stream, mesh.effectiveVisible)
+         && readPod(stream, variantCount)
+         && variantCount <= kMaxReasonableVectorElements))
+  {
+    return false;
+  }
+  mesh.variantBindings.resize(static_cast<size_t>(variantCount));
+  for(GltfVariantBinding& binding : mesh.variantBindings)
+  {
+    if(!readPod(stream, binding.materialIndex) || !readVector(stream, binding.variantIndices))
+    {
+      return false;
+    }
+  }
+  return readString(stream, mesh.extensionsJson)
+      && readString(stream, mesh.extrasJson);
 }
 
 void writeMaterial(std::ostream& stream, const GltfMaterialData& material)
@@ -312,6 +380,8 @@ void writeMaterial(std::ostream& stream, const GltfMaterialData& material)
   writeString(stream, material.name);
   writePod(stream, material.alphaMode);
   writePod(stream, material.alphaCutoff);
+  writeString(stream, material.extensionsJson);
+  writeString(stream, material.extrasJson);
 }
 
 bool readMaterial(std::istream& stream, GltfMaterialData& material)
@@ -331,7 +401,9 @@ bool readMaterial(std::istream& stream, GltfMaterialData& material)
          && readPod(stream, material.doubleSided)
          && readString(stream, material.name)
          && readPod(stream, material.alphaMode)
-         && readPod(stream, material.alphaCutoff);
+         && readPod(stream, material.alphaCutoff)
+         && readString(stream, material.extensionsJson)
+         && readString(stream, material.extrasJson);
 }
 
 void writeImage(std::ostream& stream, const GltfImageData& image)
@@ -346,6 +418,7 @@ void writeImage(std::ostream& stream, const GltfImageData& image)
   writePod(stream, image.fallbackImage);
   writePod(stream, image.isKtx2);
   writePod(stream, image.isSrgb);
+  writePod(stream, image.documentImageIndex);
 }
 
 bool readImage(std::istream& stream, GltfImageData& image)
@@ -359,7 +432,58 @@ bool readImage(std::istream& stream, GltfImageData& image)
          && readString(stream, image.mimeType)
          && readPod(stream, image.fallbackImage)
          && readPod(stream, image.isKtx2)
-         && readPod(stream, image.isSrgb);
+         && readPod(stream, image.isSrgb)
+         && readPod(stream, image.documentImageIndex);
+}
+
+void writeTexture(std::ostream& stream, const GltfTextureData& texture)
+{
+  writePod(stream, texture.sourceImageIndex);
+  writePod(stream, texture.resolvedImageIndex);
+  writePod(stream, texture.canonicalImageIndex);
+  writePod(stream, texture.colorImageIndex);
+  writePod(stream, texture.linearImageIndex);
+  writePod(stream, texture.samplerIndex);
+  writePod(stream, texture.usage);
+  writeString(stream, texture.name);
+  writeString(stream, texture.extensionsJson);
+  writeString(stream, texture.extrasJson);
+}
+
+bool readTexture(std::istream& stream, GltfTextureData& texture)
+{
+  return readPod(stream, texture.sourceImageIndex)
+         && readPod(stream, texture.resolvedImageIndex)
+         && readPod(stream, texture.canonicalImageIndex)
+         && readPod(stream, texture.colorImageIndex)
+         && readPod(stream, texture.linearImageIndex)
+         && readPod(stream, texture.samplerIndex)
+         && readPod(stream, texture.usage)
+         && readString(stream, texture.name)
+         && readString(stream, texture.extensionsJson)
+         && readString(stream, texture.extrasJson);
+}
+
+void writeSampler(std::ostream& stream, const GltfSamplerData& sampler)
+{
+  writePod(stream, sampler.magFilter);
+  writePod(stream, sampler.minFilter);
+  writePod(stream, sampler.wrapS);
+  writePod(stream, sampler.wrapT);
+  writeString(stream, sampler.name);
+  writeString(stream, sampler.extensionsJson);
+  writeString(stream, sampler.extrasJson);
+}
+
+bool readSampler(std::istream& stream, GltfSamplerData& sampler)
+{
+  return readPod(stream, sampler.magFilter)
+         && readPod(stream, sampler.minFilter)
+         && readPod(stream, sampler.wrapS)
+         && readPod(stream, sampler.wrapT)
+         && readString(stream, sampler.name)
+         && readString(stream, sampler.extensionsJson)
+         && readString(stream, sampler.extrasJson);
 }
 
 void writeDependency(std::ostream& stream, const GltfDependencyData& dependency)
@@ -391,6 +515,11 @@ void writeNode(std::ostream& stream, const GltfNodeData& node)
   writePod(stream, node.worldTransform);
   writePod(stream, node.firstMeshIndex);
   writePod(stream, node.meshCount);
+  writePod(stream, node.documentNodeIndex);
+  writePod(stream, node.localVisible);
+  writePod(stream, node.effectiveVisible);
+  writeString(stream, node.extensionsJson);
+  writeString(stream, node.extrasJson);
 }
 
 bool readNode(std::istream& stream, GltfNodeData& node)
@@ -405,7 +534,12 @@ bool readNode(std::istream& stream, GltfNodeData& node)
          && readPod(stream, node.localTransform)
          && readPod(stream, node.worldTransform)
          && readPod(stream, node.firstMeshIndex)
-         && readPod(stream, node.meshCount);
+         && readPod(stream, node.meshCount)
+         && readPod(stream, node.documentNodeIndex)
+         && readPod(stream, node.localVisible)
+         && readPod(stream, node.effectiveVisible)
+         && readString(stream, node.extensionsJson)
+         && readString(stream, node.extrasJson);
 }
 
 void writeCamera(std::ostream& stream, const SceneCamera& camera)
@@ -445,6 +579,56 @@ void writeLight(std::ostream& stream, const SceneLight& light)
   writePod(stream, light.range);
   writePod(stream, light.innerConeAngle);
   writePod(stream, light.outerConeAngle);
+}
+
+void writeAnimation(std::ostream& stream, const GltfAnimationData& animation)
+{
+  writeString(stream, animation.name);
+  const uint64_t samplerCount = static_cast<uint64_t>(animation.samplers.size());
+  writePod(stream, samplerCount);
+  for(const GltfAnimationSamplerData& sampler : animation.samplers) {
+    writePod(stream, sampler.inputAccessor);
+    writePod(stream, sampler.outputAccessor);
+    writeString(stream, sampler.interpolation);
+  }
+  const uint64_t channelCount = static_cast<uint64_t>(animation.channels.size());
+  writePod(stream, channelCount);
+  for(const GltfAnimationChannelData& channel : animation.channels) {
+    writePod(stream, channel.nodeIndex);
+    writePod(stream, channel.samplerIndex);
+    writeString(stream, channel.path);
+  }
+}
+
+bool readAnimation(std::istream& stream, GltfAnimationData& animation)
+{
+  uint64_t samplerCount = 0;
+  uint64_t channelCount = 0;
+  if(!readString(stream, animation.name)
+      || !readPod(stream, samplerCount)
+      || samplerCount > kMaxReasonableVectorElements) {
+    return false;
+  }
+  animation.samplers.resize(static_cast<size_t>(samplerCount));
+  for(GltfAnimationSamplerData& sampler : animation.samplers) {
+    if(!readPod(stream, sampler.inputAccessor)
+       || !readPod(stream, sampler.outputAccessor)
+       || !readString(stream, sampler.interpolation)) {
+      return false;
+    }
+  }
+  if(!readPod(stream, channelCount) || channelCount > kMaxReasonableVectorElements) {
+    return false;
+  }
+  animation.channels.resize(static_cast<size_t>(channelCount));
+  for(GltfAnimationChannelData& channel : animation.channels) {
+    if(!readPod(stream, channel.nodeIndex)
+       || !readPod(stream, channel.samplerIndex)
+       || !readString(stream, channel.path)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool readLight(std::istream& stream, SceneLight& light)
@@ -499,11 +683,15 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   header.meshCount            = static_cast<uint32_t>(model.meshes.size());
   header.materialCount        = static_cast<uint32_t>(model.materials.size());
   header.imageCount           = static_cast<uint32_t>(model.images.size());
+  header.textureCount         = static_cast<uint32_t>(model.textures.size());
+  header.samplerCount         = static_cast<uint32_t>(model.samplers.size());
   header.nodeCount            = static_cast<uint32_t>(model.nodes.size());
   header.cameraCount          = static_cast<uint32_t>(model.cameras.size());
   header.lightCount           = static_cast<uint32_t>(model.lights.size());
   header.rootNodeCount        = static_cast<uint32_t>(model.rootNodes.size());
   header.dependencyCount      = static_cast<uint32_t>(model.dependencies.size());
+  header.variantCount         = static_cast<uint32_t>(model.materialVariantNames.size());
+  header.animationCount       = static_cast<uint32_t>(model.animations.size());
   writePod(stream, header);
 
   writeString(stream, model.name);
@@ -522,6 +710,14 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   {
     writeImage(stream, image);
   }
+  for(const GltfTextureData& texture : model.textures)
+  {
+    writeTexture(stream, texture);
+  }
+  for(const GltfSamplerData& sampler : model.samplers)
+  {
+    writeSampler(stream, sampler);
+  }
   for(const auto& node : model.nodes)
   {
     writeNode(stream, node);
@@ -538,6 +734,14 @@ bool SceneCacheSerializer::saveCache(const std::filesystem::path& cachePath,
   for(const GltfDependencyData& dependency : model.dependencies)
   {
     writeDependency(stream, dependency);
+  }
+  for(const std::string& variant : model.materialVariantNames)
+  {
+    writeString(stream, variant);
+  }
+  for(const GltfAnimationData& animation : model.animations)
+  {
+    writeAnimation(stream, animation);
   }
 
   if(!stream)
@@ -585,10 +789,14 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
     loadedModel.meshes.resize(header.meshCount);
     loadedModel.materials.resize(header.materialCount);
     loadedModel.images.resize(header.imageCount);
+    loadedModel.textures.resize(header.textureCount);
+    loadedModel.samplers.resize(header.samplerCount);
     loadedModel.nodes.resize(header.nodeCount);
     loadedModel.cameras.resize(header.cameraCount);
     loadedModel.lights.resize(header.lightCount);
     loadedModel.dependencies.resize(header.dependencyCount);
+    loadedModel.materialVariantNames.resize(header.variantCount);
+    loadedModel.animations.resize(header.animationCount);
 
     if(!readString(stream, loadedModel.name))
     {
@@ -622,6 +830,22 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
       if(!readImage(stream, image))
       {
         m_lastError = "Failed to read image payload";
+        return false;
+      }
+    }
+    for(GltfTextureData& texture : loadedModel.textures)
+    {
+      if(!readTexture(stream, texture))
+      {
+        m_lastError = "Failed to read texture payload";
+        return false;
+      }
+    }
+    for(GltfSamplerData& sampler : loadedModel.samplers)
+    {
+      if(!readSampler(stream, sampler))
+      {
+        m_lastError = "Failed to read sampler payload";
         return false;
       }
     }
@@ -661,6 +885,28 @@ bool SceneCacheSerializer::loadCache(const std::filesystem::path& cachePath, Glt
         m_lastError = "Failed to read dependency payload";
         return false;
       }
+    }
+    for(std::string& variant : loadedModel.materialVariantNames)
+    {
+      if(!readString(stream, variant))
+      {
+        m_lastError = "Failed to read material variant payload";
+        return false;
+      }
+    }
+    for(GltfAnimationData& animation : loadedModel.animations)
+    {
+      if(!readAnimation(stream, animation))
+      {
+        m_lastError = "Failed to read animation payload";
+        return false;
+      }
+    }
+
+    if(stream.peek() != std::char_traits<char>::eof())
+    {
+      m_lastError = "Cache payload contains trailing bytes";
+      return false;
     }
 
     if(!hasReasonableModelShape(loadedModel))
@@ -756,10 +1002,34 @@ bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, 
       return false;
     }
   }
+  for(uint32_t textureIndex = 0; textureIndex < header.textureCount; ++textureIndex)
+  {
+    GltfTextureData ignoredTexture;
+    if(!readTexture(stream, ignoredTexture))
+    {
+      return false;
+    }
+  }
+  for(uint32_t samplerIndex = 0; samplerIndex < header.samplerCount; ++samplerIndex)
+  {
+    GltfSamplerData ignoredSampler;
+    if(!readSampler(stream, ignoredSampler))
+    {
+      return false;
+    }
+  }
   for(uint32_t nodeIndex = 0; nodeIndex < header.nodeCount; ++nodeIndex)
   {
     GltfNodeData ignoredNode;
     if(!readNode(stream, ignoredNode))
+    {
+      return false;
+    }
+  }
+  for(uint32_t cameraIndex = 0; cameraIndex < header.cameraCount; ++cameraIndex)
+  {
+    SceneCamera ignoredCamera;
+    if(!readCamera(stream, ignoredCamera))
     {
       return false;
     }
@@ -784,6 +1054,27 @@ bool SceneCacheSerializer::isCacheValid(const std::filesystem::path& cachePath, 
     {
       return false;
     }
+  }
+  for(uint32_t variantIndex = 0; variantIndex < header.variantCount; ++variantIndex)
+  {
+    std::string ignoredVariant;
+    if(!readString(stream, ignoredVariant))
+    {
+      return false;
+    }
+  }
+  for(uint32_t animationIndex = 0; animationIndex < header.animationCount; ++animationIndex)
+  {
+    GltfAnimationData ignoredAnimation;
+    if(!readAnimation(stream, ignoredAnimation))
+    {
+      return false;
+    }
+  }
+
+  if(stream.peek() != std::char_traits<char>::eof())
+  {
+    return false;
   }
 
   const uint64_t sourceFileSize = std::filesystem::file_size(sourcePath);

@@ -242,6 +242,12 @@ namespace demo::rhi::vulkan
 			m_argumentPools.clear();
 			m_argumentSetPools.clear();
 			m_argumentPool = VK_NULL_HANDLE;
+			if (m_emptyDescriptorSetLayout != VK_NULL_HANDLE)
+			{
+				vkDestroyDescriptorSetLayout(
+					m_device, m_emptyDescriptorSetLayout, nullptr);
+				m_emptyDescriptorSetLayout = VK_NULL_HANDLE;
+			}
 			m_combinedImageSamplerPoolCapacity = kDefaultCombinedImageSamplerPoolCapacity;
 			// VMA allocator — destroyed after all retirements drained, before the device.
 			if (m_allocator != nullptr)
@@ -295,6 +301,22 @@ namespace demo::rhi::vulkan
 		m_rayTracingPipelineFeatures = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
 		m_initialized = false;
 		m_pendingRetirements.clear();
+	}
+
+	VkDescriptorSetLayout VulkanDevice::ensureEmptyDescriptorSetLayout()
+	{
+		if (m_emptyDescriptorSetLayout != VK_NULL_HANDLE)
+		{
+			return m_emptyDescriptorSetLayout;
+		}
+		const VkDescriptorSetLayoutCreateInfo info{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			.bindingCount = 0u,
+			.pBindings = nullptr,
+		};
+		VK_CHECK(vkCreateDescriptorSetLayout(
+			m_device, &info, nullptr, &m_emptyDescriptorSetLayout));
+		return m_emptyDescriptorSetLayout;
 	}
 
 	BackendInfo VulkanDevice::getBackendInfo() const
@@ -2030,7 +2052,8 @@ namespace demo::rhi::vulkan
 
 		VulkanPipelineLayoutBuildResult makePipelineLayoutFromPipelineDesc(
 			VkDevice device, const VulkanResourceTable& resourceTable,
-			const PipelineBindingSchemaDesc& bindingSchema)
+			const PipelineBindingSchemaDesc& bindingSchema,
+			VkDescriptorSetLayout emptyDescriptorSetLayout)
 		{
 			const PipelineBindingSchemaValidationResult validation = validatePipelineBindingSchema(bindingSchema);
 			ASSERT(validation.valid(), "Pipeline binding schema must be valid before Vulkan layout lowering");
@@ -2052,11 +2075,21 @@ namespace demo::rhi::vulkan
 				       "Pipeline argument slot layout must resolve to a native descriptor set layout");
 				setLayouts[slot.slot] = nativeLayout;
 			}
+			for (VkDescriptorSetLayout& layout : setLayouts)
+			{
+				if (layout == VK_NULL_HANDLE)
+				{
+					ASSERT(emptyDescriptorSetLayout != VK_NULL_HANDLE,
+					       "Sparse Vulkan pipeline slots require an empty descriptor layout");
+					layout = emptyDescriptorSetLayout;
+				}
+			}
 
 			while (!setLayouts.empty() && setLayouts.back() == VK_NULL_HANDLE)
 			{
 				setLayouts.pop_back();
-			}			std::vector<VkPushConstantRange> vkPushConstants;
+			}
+			std::vector<VkPushConstantRange> vkPushConstants;
 			std::vector<PipelineRecord::RootBindingLowering> rootLowering;
 			vkPushConstants.reserve(static_cast<uint32_t>(bindingSchema.rootBindings.size()));
 			rootLowering.reserve(static_cast<uint32_t>(bindingSchema.rootBindings.size()));
@@ -2105,19 +2138,25 @@ namespace demo::rhi::vulkan
 		}
 
 		[[nodiscard]] VulkanPipelineLayoutBuildResult makePipelineLayoutFromGraphicsDesc(
-			VkDevice device, const VulkanResourceTable& resourceTable, const GraphicsPipelineDesc& desc)
+			VkDevice device, const VulkanResourceTable& resourceTable,
+			const GraphicsPipelineDesc& desc,
+			VkDescriptorSetLayout emptyDescriptorSetLayout)
 		{
 			return makePipelineLayoutFromPipelineDesc(device,
 			                                          resourceTable,
-			                                          desc.bindingSchema);
+			                                          desc.bindingSchema,
+			                                          emptyDescriptorSetLayout);
 		}
 
 		[[nodiscard]] VulkanPipelineLayoutBuildResult makePipelineLayoutFromComputeDesc(
-			VkDevice device, const VulkanResourceTable& resourceTable, const ComputePipelineDesc& desc)
+			VkDevice device, const VulkanResourceTable& resourceTable,
+			const ComputePipelineDesc& desc,
+			VkDescriptorSetLayout emptyDescriptorSetLayout)
 		{
 			return makePipelineLayoutFromPipelineDesc(device,
 			                                          resourceTable,
-			                                          desc.bindingSchema);
+			                                          desc.bindingSchema,
+			                                          emptyDescriptorSetLayout);
 		}
 	} // namespace
 
@@ -2163,7 +2202,8 @@ namespace demo::rhi::vulkan
 			"VulkanDevice::setResourceTable must be called before createGraphicsPipeline");
 
 		VulkanPipelineLayoutBuildResult ownedLayout{};
-		ownedLayout = makePipelineLayoutFromGraphicsDesc(m_device, *m_resourceTable, desc);
+		ownedLayout = makePipelineLayoutFromGraphicsDesc(
+			m_device, *m_resourceTable, desc, ensureEmptyDescriptorSetLayout());
 		VkPipelineLayout nativeLayout = ownedLayout.layout;
 
 		std::vector<VkShaderModule> shaderModules;
@@ -2204,7 +2244,8 @@ namespace demo::rhi::vulkan
 			m_resourceTable != nullptr && "VulkanDevice::setResourceTable must be called before createComputePipeline");
 
 		VulkanPipelineLayoutBuildResult ownedLayout{};
-		ownedLayout = makePipelineLayoutFromComputeDesc(m_device, *m_resourceTable, desc);
+		ownedLayout = makePipelineLayoutFromComputeDesc(
+			m_device, *m_resourceTable, desc, ensureEmptyDescriptorSetLayout());
 		VkPipelineLayout nativeLayout = ownedLayout.layout;
 
 		const ShaderLibraryRecord* library =

@@ -1,0 +1,15 @@
+# Allow-list for tools/check_ninja_deps_orphans.py.
+#
+# An object may be listed here only when a zero-entry deps log cannot produce a
+# translation-unit layout mismatch, i.e. when the source includes no project
+# header at all. Every entry must state that evidence, because an object with
+# "#deps 0" never rebuilds when a project header changes and that is how the
+# editor_selection_picking_integration_tests Debug binary ended up linking a
+# stale EditorController layout against a fresh desktop_scene_editor_ui one.
+#
+# tests/gpu_visibility_depth_model_tests.cpp includes exactly eight C++ standard
+# headers (<algorithm>, <array>, <cmath>, <cstdint>, <initializer_list>,
+# <iostream>, <limits>, <vector>) and no project header, and a clean rebuild of
+# the single object reproduces "#deps 0", so the empty deps log is a property of
+# the translation unit rather than lost dependency information.
+CMakeFiles/gpu_visibility_depth_model_tests.dir/tests/gpu_visibility_depth_model_tests.cpp.obj

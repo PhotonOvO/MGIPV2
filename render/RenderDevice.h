@@ -28,6 +28,7 @@
 #include "../rhi/RHISurface.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -38,7 +39,9 @@
 #include <vector>
 
 namespace demo
-{	class RenderDevice
+{
+	class GPUDrivenSceneTransactionBridge;
+	class RenderDevice
 	{
 	public:
 		struct StaticPassTextureStates
@@ -60,6 +63,13 @@ namespace demo
 		explicit RenderDevice(rhi::BackendType backend = rhi::defaultBackend())
 			: m_backend(backend)
 		{
+		}
+		explicit RenderDevice(std::unique_ptr<rhi::Device> sceneTransactionDevice)
+			: m_backend(sceneTransactionDevice != nullptr
+				? sceneTransactionDevice->getBackendInfo().type
+				: rhi::defaultBackend())
+		{
+			m_device.device = std::move(sceneTransactionDevice);
 		}
 
 		void init(void* window, rhi::Surface& surface, bool vSync);
@@ -101,6 +111,30 @@ namespace demo
 		void initializeGltfUploadResult(const GltfModel& model, GltfUploadResult& outResult) const;
 		void destroyGltfResources(const GltfUploadResult& result);
 		void updateMeshTransform(MeshHandle handle, const glm::mat4& transform);
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		[[nodiscard]] rhi::BackendType sceneTransactionBackend() const noexcept { return m_backend; }
+		[[nodiscard]] bool sceneTransactionDeviceInitialized() const noexcept
+		{
+			return m_device.device != nullptr;
+		}
+		[[nodiscard]] bool isMaterialHandleLive(MaterialHandle handle) const noexcept;
+		[[nodiscard]] bool updateMaterialParameters(
+			MaterialHandle handle,
+			const editor::SceneMaterialParametersValue& parameters) noexcept;
+		[[nodiscard]] bool updateMaterialTextureBinding(
+			MaterialHandle handle,
+			editor::SceneTextureSemantic semantic,
+			TextureHandle texture) noexcept;
+		[[nodiscard]] const MeshRecord* tryGetSceneTransactionMesh(
+			MeshHandle handle) const noexcept;
+		void waitForIdle(editor::SceneDeviceIdleReason reason);
+		[[nodiscard]] const std::array<uint64_t, editor::kSceneDeviceIdleReasonCount>&
+		getSceneDeviceIdleCounts() const noexcept
+		{
+			return m_sceneDeviceIdleCounts;
+		}
+#endif
 
 		// Execute upload commands with internal command buffer management
 		void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn);
@@ -297,9 +331,12 @@ namespace demo
 			int32_t normal = -1;
 			int32_t metallicRoughness = -1;
 			int32_t occlusion = -1;
+			int32_t emissive = -1;
 			float metallicFactor = 1.0f;
 			float roughnessFactor = 1.0f;
 			float normalScale = 1.0f;
+			float occlusionStrength = 1.0f;
+			glm::vec3 emissiveFactor{0.0f};
 			int32_t alphaMode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
 			float alphaCutoff = 0.5f;
 		};
@@ -559,6 +596,8 @@ namespace demo
 		[[nodiscard]] bool hasRHIDevice() const { return m_device.device != nullptr; }
 
 	private:
+		friend class GPUDrivenSceneTransactionBridge;
+		friend class GPUDrivenRenderer;
 		// Created during RenderDevice::init() after feature negotiation.
 		// Destroyed during RenderDevice::shutdown() after the backend device is idle.
 		// Rebuild trigger: none while device is alive; recreated only on full renderer/device re-init.
@@ -858,6 +897,7 @@ namespace demo
 				// Alpha properties
 				int32_t alphaMode = 0; // 0=OPAQUE, 1=MASK, 2=BLEND
 				float alphaCutoff = 0.5f; // for MASK mode
+				bool doubleSided{false};
 
 				// Bindless descriptor slot
 				rhi::ResourceIndex descriptorIndex{0};
@@ -881,6 +921,60 @@ namespace demo
 			uint64_t materialDescriptorGeneration{0};
 			uint32_t maxTextures{10000};
 		};
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		// A complete resource generation constructed away from all legacy pools.
+		// The bridge publishes one shared pointer only after the immutable renderer
+		// generation has been accepted, so readers never observe partial tables.
+		struct SceneTransactionResources
+		{
+			struct FrameUseState
+			{
+				rhi::QueueIdentity queue{};
+				std::atomic<uint64_t> latestSubmissionValue{0u};
+				std::atomic<uint32_t> recordingCount{0u};
+			};
+
+			struct MeshEntry
+			{
+				MeshHandle handle{};
+				MeshRecord record{};
+			};
+			struct TextureEntry
+			{
+				TextureHandle handle{};
+				MaterialResources::TextureRecord record{};
+			};
+			struct MaterialEntry
+			{
+				MaterialHandle handle{};
+				MaterialResources::MaterialRecord record{};
+			};
+
+			std::vector<MeshEntry> meshes;
+			std::vector<TextureEntry> textures;
+			std::vector<MaterialEntry> materials;
+			rhi::ArgumentLayoutHandle descriptorLayout{};
+			rhi::ArgumentTableHandle descriptorTable{};
+			rhi::SamplerHandle sampler{};
+			uint64_t descriptorGeneration{0u};
+			uint64_t publicationGeneration{0u};
+			std::shared_ptr<FrameUseState> frameUse;
+		};
+
+		std::atomic<std::shared_ptr<SceneTransactionResources>>
+			m_sceneTransactionResources;
+		std::atomic<uint64_t> m_sceneTransactionPublishedGeneration{0u};
+		std::atomic<std::shared_ptr<SceneTransactionResources>>
+			m_sceneTransactionFrameResources;
+		rhi::SubmissionToken m_lastSubmittedFrameToken{};
+		[[nodiscard]] std::shared_ptr<SceneTransactionResources>
+			loadPublishedSceneTransactionResources() const noexcept;
+		void acquireSceneTransactionFrameResources(
+			std::shared_ptr<SceneTransactionResources> resources) noexcept;
+		void releaseSceneTransactionFrameResources(
+			rhi::SubmissionToken token) noexcept;
+#endif
 
 		void createFrameSubmission(uint32_t numFrames);
 		void rebuildSwapchainDependentResources(std::optional<rhi::Extent2D> requestedViewportSize = std::nullopt);
@@ -950,6 +1044,7 @@ namespace demo
 		                                        uint32_t height,
 		                                        const char* debugName);
 		const MaterialResources::MaterialRecord* tryGetMaterial(MaterialHandle handle) const;
+		MaterialResources::MaterialRecord* tryGetMaterial(MaterialHandle handle);
 		const MaterialResources::TextureHotData* tryGetTextureHot(TextureHandle handle) const;
 		const MaterialResources::TextureColdData* tryGetTextureCold(TextureHandle handle) const;
 		// Build an ArgumentTable from a layout, track it for teardown, and return the handle.
@@ -1015,6 +1110,9 @@ namespace demo
 
 		DeviceLifetimeResources m_device;
 		rhi::BackendType m_backend{rhi::defaultBackend()};
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		std::array<uint64_t, editor::kSceneDeviceIdleReasonCount> m_sceneDeviceIdleCounts{};
+#endif
 		SwapchainDependentResources m_swapchainDependent;
 		PerFrameResources m_perFrame;
 		PerPassResources m_perPass;

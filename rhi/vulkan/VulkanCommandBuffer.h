@@ -4,6 +4,9 @@
 #include "../RHIDebugValidation.h"
 #include "../RHIEncoder.h"
 #include "../RHIQueue.h"
+#include "VulkanResourceTable.h"
+
+#include <vector>
 
 struct VkCommandBuffer_T;
 struct VkPipelineLayout_T;
@@ -13,7 +16,6 @@ using VkPipelineLayout = VkPipelineLayout_T*;
 namespace demo::rhi::vulkan
 {
 	class VulkanCommandAllocator;
-	class VulkanResourceTable;
 	class VulkanCommandBuffer;
 
 	inline constexpr uint32_t kMaxArgumentSlots = 8;
@@ -91,7 +93,7 @@ namespace demo::rhi::vulkan
 	class VulkanCommandBuffer final : public CommandBuffer
 	{
 	public:
-		VulkanCommandBuffer() = default;
+		VulkanCommandBuffer();
 		VulkanCommandBuffer(VulkanCommandAllocator& allocator, VkCommandBuffer cmd,
 		                    VulkanResourceTable* table);
 		~VulkanCommandBuffer() override;
@@ -123,8 +125,8 @@ namespace demo::rhi::vulkan
 
 		[[nodiscard]] VkCommandBuffer nativeHandle() const { return m_cmd; }
 		[[nodiscard]] QueueClass queueClass() const noexcept;
-		void validateForSubmit() const;
-		void markSubmitted(SubmissionToken token);
+		void prepareForSubmit(SubmissionToken token);
+		void markSubmitted(SubmissionToken token) noexcept;
 		void requireQueueOperation(QueueOperation operation, const char* command) const;
 		void markReusable();
 		void trackArgumentTable(ArgumentTableHandle table);
@@ -144,6 +146,7 @@ namespace demo::rhi::vulkan
 		};
 
 		void requireRecording(const char* operation) const;
+		void clearTrackedBuffers() noexcept;
 
 		VkCommandBuffer m_cmd{nullptr};
 		VulkanResourceTable* m_table{nullptr};
@@ -153,16 +156,17 @@ namespace demo::rhi::vulkan
 		EncoderKind m_active{EncoderKind::none};
 		CommandBufferState m_state{CommandBufferState::idle};
 		SubmissionToken m_submission{};
+		VulkanSubmissionPlan m_submissionPlan{};
 		ArgumentTableHandle m_argumentTables[64]{};
 		uint32_t m_argumentTableCount{0};
 		PipelineHandle m_pipelines[64]{};
 		uint32_t m_pipelineCount{0};
-		BufferHandle m_buffers[512]{};
-		uint32_t m_bufferCount{0};
-		TextureHandle m_textures[256]{};
-		uint32_t m_textureCount{0};
-		TextureViewHandle m_textureViews[128]{};
-		uint32_t m_textureViewCount{0};
+		std::vector<BufferHandle> m_buffers;
+		// Dense per-slot generation marks make repeated draw-time buffer tracking
+		// O(1), while m_buffers retains the compact submission root list.
+		std::vector<uint32_t> m_trackedBufferGenerations;
+		std::vector<TextureHandle> m_textures;
+		std::vector<TextureViewHandle> m_textureViews;
 		QueryPoolHandle m_queryPools[16]{};
 		uint32_t m_queryPoolCount{0};
 		ResidencySetHandle m_residencySets[16]{};

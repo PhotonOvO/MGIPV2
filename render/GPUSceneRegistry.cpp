@@ -5,6 +5,7 @@
 #include "../rhi/RHIDevice.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -134,6 +135,8 @@ namespace demo
 		}
 		m_denseSlotIds.clear();
 		m_dirtyDenseIndices.clear();
+		m_sortedDirtyIndices.clear();
+		m_dirtyRanges.clear();
 		m_gpuObjects.clear();
 		m_cullObjects.clear();
 		m_dirty = true;
@@ -252,6 +255,123 @@ namespace demo
 		return true;
 	}
 
+	bool GPUSceneRegistry::registerObjectAt(
+		GPUSceneObjectHandle object,
+		const GPUSceneRegistrationDesc& desc)
+	{
+		if (object.index == 0u || object.generation == 0u)
+		{
+			return false;
+		}
+		if (object.index >= m_slots.size())
+		{
+			m_slots.resize(static_cast<size_t>(object.index) + 1u);
+		}
+		ObjectSlot& slot = m_slots[object.index];
+		if (slot.occupied)
+		{
+			return false;
+		}
+
+		slot.occupied = true;
+		slot.generation = object.generation;
+		slot.denseIndex = static_cast<uint32_t>(m_gpuObjects.size());
+		slot.desc = desc;
+		slot.gpuObject = packSceneObject(desc);
+		slot.cullObject = packCullObject(desc);
+		m_denseSlotIds.push_back(object.index);
+		m_gpuObjects.push_back(slot.gpuObject);
+		m_cullObjects.push_back(slot.cullObject);
+		markDirtyDenseIndex(slot.denseIndex);
+		m_dirty = true;
+
+		m_freeList.erase(
+			std::remove(m_freeList.begin(), m_freeList.end(), object.index),
+			m_freeList.end());
+		return true;
+	}
+
+	bool GPUSceneRegistry::updateTransform(GPUSceneObjectHandle object,
+	                                       const glm::mat4& newTransform)
+	{
+		if (!isLiveHandle(object))
+		{
+			return false;
+		}
+
+		const ObjectSlot& slot = m_slots[object.index];
+		glm::vec4 transformedSphere = slot.desc.boundsSphere;
+		const float determinant = glm::determinant(slot.desc.transform);
+		if (std::isfinite(determinant) && std::abs(determinant) > 1.0e-8f)
+		{
+			const glm::mat4 delta = newTransform * glm::inverse(slot.desc.transform);
+			const glm::vec4 center = delta * glm::vec4(glm::vec3(slot.desc.boundsSphere), 1.0f);
+			const float scale = std::max({
+				glm::length(glm::vec3(delta[0])),
+				glm::length(glm::vec3(delta[1])),
+				glm::length(glm::vec3(delta[2])),
+			});
+			if (std::isfinite(center.x) && std::isfinite(center.y) &&
+				std::isfinite(center.z) && std::isfinite(scale))
+			{
+				transformedSphere = glm::vec4(
+					glm::vec3(center), slot.desc.boundsSphere.w * scale);
+			}
+		}
+		return updateTransform(object, newTransform, transformedSphere);
+	}
+
+	bool GPUSceneRegistry::updateVisibility(GPUSceneObjectHandle object,
+	                                        bool visible)
+	{
+		if (!isLiveHandle(object))
+		{
+			return false;
+		}
+
+		ObjectSlot& slot = m_slots[object.index];
+		slot.desc.visible = visible;
+		rebuildPackedObject(object.index);
+		markDirtyDenseIndex(slot.denseIndex);
+		m_dirty = true;
+		return true;
+	}
+
+	bool GPUSceneRegistry::updateMaterialBinding(GPUSceneObjectHandle object,
+	                                             uint32_t materialIndex,
+	                                             uint32_t flags)
+	{
+		if (!isLiveHandle(object))
+		{
+			return false;
+		}
+
+		ObjectSlot& slot = m_slots[object.index];
+		slot.desc.materialIndex = materialIndex;
+		slot.desc.flags = flags;
+		rebuildPackedObject(object.index);
+		markDirtyDenseIndex(slot.denseIndex);
+		m_dirty = true;
+		return true;
+	}
+
+	bool GPUSceneRegistry::isLiveObject(GPUSceneObjectHandle object) const
+	{
+		return isLiveHandle(object);
+	}
+
+	bool GPUSceneRegistry::tryGetRegistrationDesc(
+		GPUSceneObjectHandle object,
+		GPUSceneRegistrationDesc& outDesc) const
+	{
+		if (!isLiveHandle(object))
+		{
+			return false;
+		}
+		outDesc = m_slots[object.index].desc;
+		return true;
+	}
+
 	bool GPUSceneRegistry::tryGetDenseIndex(GPUSceneObjectHandle object, uint32_t& outDenseIndex) const
 	{
 		if (!isLiveHandle(object))
@@ -293,13 +413,11 @@ namespace demo
 		}
 
 		ensureCapacity(objectCount);
-		std::vector<DirtyRange> dirtyRanges;
+		const std::array<DirtyRange, 1> fullRange{{DirtyRange{0u, objectCount}}};
+		std::span<const DirtyRange> dirtyRanges;
 		if (m_requiresFullUpload)
 		{
-			dirtyRanges.push_back(DirtyRange{
-				.startIndex = 0,
-				.count = objectCount,
-			});
+			dirtyRanges = fullRange;
 		}
 		else if (!m_dirtyDenseIndices.empty())
 		{
@@ -356,6 +474,62 @@ namespace demo
 		m_requiresFullUpload = false;
 		m_gpuBuffersInitialized = true;
 		m_dirtyDenseIndices.clear();
+	}
+
+	void GPUSceneRegistry::prepareGpuStorage()
+	{
+		const uint32_t objectCount = static_cast<uint32_t>(m_gpuObjects.size());
+		if (objectCount == 0u)
+		{
+			return;
+		}
+		ensureCapacity(objectCount);
+		const std::array<DirtyRange, 1> ranges{{DirtyRange{0u, objectCount}}};
+		uint64_t requiredStagingBytes = 0u;
+		requiredStagingBytes =
+			requiredStagingBytesForRanges<shaderio::GPUSceneObject>(requiredStagingBytes, ranges);
+		requiredStagingBytes =
+			requiredStagingBytesForRanges<shaderio::GPUCullObject>(requiredStagingBytes, ranges);
+		ensureStagingCapacity(requiredStagingBytes);
+	}
+
+	void GPUSceneRegistry::prepareUpdates(uint32_t updateCount)
+	{
+		const size_t required = m_dirtyDenseIndices.size() +
+			static_cast<size_t>(updateCount);
+		if (required > m_dirtyDenseIndices.capacity())
+		{
+			m_dirtyDenseIndices.reserve(required);
+		}
+		if (required > m_sortedDirtyIndices.capacity())
+		{
+			m_sortedDirtyIndices.reserve(required);
+		}
+		if (required > m_dirtyRanges.capacity())
+		{
+			m_dirtyRanges.reserve(required);
+		}
+	}
+
+	std::vector<rhi::ResourceHandle> GPUSceneRegistry::ownedResourceHandles() const
+	{
+		std::vector<rhi::ResourceHandle> result;
+		result.reserve(3u);
+		const auto append = [&result](rhi::BufferHandle handle)
+		{
+			if (!handle.isNull())
+			{
+				result.push_back(rhi::ResourceHandle{
+					.kind = rhi::ResourceKind::Buffer,
+					.index = handle.index,
+					.generation = handle.generation,
+				});
+			}
+		};
+		append(m_objectBufferRHI);
+		append(m_cullObjectBufferRHI);
+		append(m_updateBufferRHI);
+		return result;
 	}
 
 	void GPUSceneRegistry::ensureCapacity(uint32_t requiredCount)
@@ -450,30 +624,30 @@ namespace demo
 		}
 	}
 
-	std::vector<GPUSceneRegistry::DirtyRange> GPUSceneRegistry::buildDirtyRanges() const
+	std::span<const GPUSceneRegistry::DirtyRange> GPUSceneRegistry::buildDirtyRanges()
 	{
 		if (m_dirtyDenseIndices.empty())
 		{
 			return {};
 		}
 
-		std::vector<uint32_t> indices = m_dirtyDenseIndices;
-		std::sort(indices.begin(), indices.end());
+		m_sortedDirtyIndices.assign(
+			m_dirtyDenseIndices.begin(), m_dirtyDenseIndices.end());
+		std::sort(m_sortedDirtyIndices.begin(), m_sortedDirtyIndices.end());
 
-		std::vector<DirtyRange> ranges;
-		ranges.reserve(indices.size());
-		uint32_t rangeStart = indices.front();
-		uint32_t previous = indices.front();
-		for (size_t i = 1; i < indices.size(); ++i)
+		m_dirtyRanges.clear();
+		uint32_t rangeStart = m_sortedDirtyIndices.front();
+		uint32_t previous = m_sortedDirtyIndices.front();
+		for (size_t i = 1; i < m_sortedDirtyIndices.size(); ++i)
 		{
-			const uint32_t current = indices[i];
+			const uint32_t current = m_sortedDirtyIndices[i];
 			if (current == previous + 1u)
 			{
 				previous = current;
 				continue;
 			}
 
-			ranges.push_back(DirtyRange{
+			m_dirtyRanges.push_back(DirtyRange{
 				.startIndex = rangeStart,
 				.count = previous - rangeStart + 1u,
 			});
@@ -481,11 +655,11 @@ namespace demo
 			previous = current;
 		}
 
-		ranges.push_back(DirtyRange{
+		m_dirtyRanges.push_back(DirtyRange{
 			.startIndex = rangeStart,
 			.count = previous - rangeStart + 1u,
 		});
-		return ranges;
+		return m_dirtyRanges;
 	}
 
 	void GPUSceneRegistry::rebuildPackedObject(uint32_t objectID)
@@ -514,7 +688,7 @@ namespace demo
 	{
 		return shaderio::GPUCullObject{
 			.sphereCenterRadius = desc.boundsSphere,
-			.indexCount = desc.indexCount,
+			.indexCount = desc.visible ? desc.indexCount : 0u,
 			.firstIndex = desc.firstIndex,
 			.vertexOffset = desc.vertexOffset,
 			.flags = desc.flags,

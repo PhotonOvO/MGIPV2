@@ -87,6 +87,97 @@ namespace demo
 		const rhi::ArgumentTableHandle drawTable = m_renderer->getDrawArgumentTable(context.frameIndex);
 		MeshPool& meshPool = m_renderer->getMeshPool();
 
+		if (m_renderer->hasActiveSceneTransactionState())
+		{
+			// Transaction generations use private per-mesh buffers. Record a direct
+			// depth draw for each occurrence instead of attempting to bind the legacy
+			// shared-arena MDI stream.
+			const auto drawRecords = m_renderer->getActiveSceneTransactionDrawRecords();
+			const auto drawUniforms = m_renderer->getActivePersistentDrawUniforms();
+			const rhi::BufferHandle transientBuffer = context.transientAllocator->getBufferHandle();
+			const rhi::ArgumentTableHandle materialTable = m_renderer->getGraphicsMaterialArgumentTable();
+			const auto recordDirectDepth = [&](std::span<const uint32_t> indices,
+			                                  PipelineHandle pipeline)
+			{
+				if (pipeline.isNull() || materialTable.isNull() || cameraTable.isNull() ||
+					drawTable.isNull() || transientBuffer.isNull())
+				{
+					return;
+				}
+				enc->setPipeline(pipeline);
+				enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures,
+				                      materialTable);
+				enc->setDynamicBuffer(rhi::ShaderStage::allGraphics,
+				                      kSceneDynamicBufferTableSlot, {},
+				                      cameraAlloc.offset, 0u);
+				enc->setDynamicBuffer(rhi::ShaderStage::allGraphics,
+				                      kSceneDynamicBufferTableSlot, {}, 0u, 0u);
+				enc->setArgumentTable(rhi::ShaderStage::allGraphics,
+				                      kSceneDynamicBufferTableSlot, cameraTable);
+				rhi::BufferHandle boundVertexBuffer{};
+				std::uint64_t boundVertexOffset = 0u;
+				rhi::BufferHandle boundIndexBuffer{};
+				std::uint64_t boundIndexOffset = 0u;
+				for (const uint32_t drawIndex : indices)
+				{
+					if (drawIndex >= drawRecords.size() || drawIndex >= drawUniforms.size())
+					{
+						continue;
+					}
+					const auto& draw = drawRecords[drawIndex];
+					const MeshRecord* mesh = m_renderer->tryGetActiveSceneTransactionMesh(
+						draw.meshHandle);
+					if (mesh == nullptr || mesh->vertexBuffer.isNull() ||
+						mesh->indexBuffer.isNull() || mesh->indexCount == 0u)
+					{
+						continue;
+					}
+					const TransientAllocator::Allocation drawAlloc =
+						context.transientAllocator->allocateAndWrite(drawUniforms[drawIndex], 256u);
+					if (drawAlloc.cpuPtr == nullptr || drawAlloc.handle.isNull())
+					{
+						continue;
+					}
+					enc->setDynamicBuffer(rhi::ShaderStage::allGraphics,
+					                      shaderio::LSetDraw, transientBuffer,
+					                      drawAlloc.offset, 0u);
+					enc->setArgumentTable(rhi::ShaderStage::allGraphics,
+					                      shaderio::LSetDraw, drawTable);
+					if (mesh->vertexBuffer != boundVertexBuffer ||
+						mesh->vertexBufferOffset != boundVertexOffset)
+					{
+						enc->bindVertexBuffer(0u, mesh->vertexBuffer,
+						                      mesh->vertexBufferOffset);
+						boundVertexBuffer = mesh->vertexBuffer;
+						boundVertexOffset = mesh->vertexBufferOffset;
+					}
+					if (mesh->indexBuffer != boundIndexBuffer ||
+						mesh->indexBufferOffset != boundIndexOffset)
+					{
+						enc->bindIndexBuffer(mesh->indexBuffer,
+						                     mesh->indexBufferOffset,
+						                     rhi::IndexFormat::uint32);
+						boundIndexBuffer = mesh->indexBuffer;
+						boundIndexOffset = mesh->indexBufferOffset;
+					}
+					enc->drawIndexed(rhi::DrawIndexedDesc{
+						.indexCount = mesh->indexCount,
+						.instanceCount = 1u,
+						.firstIndex = mesh->firstIndex,
+						.vertexOffset = mesh->vertexOffset,
+						.firstInstance = 0u,
+					});
+				}
+			};
+			recordDirectDepth(m_renderer->getOpaqueDrawIndices(),
+			                  m_renderer->getDepthPrepassOpaquePipelineHandle());
+			recordDirectDepth(m_renderer->getAlphaTestDrawIndices(),
+			                  m_renderer->getDepthPrepassAlphaTestPipelineHandle());
+			context.commandBuffer->endEncoding();
+			context.commandBuffer->endEvent();
+			return;
+		}
+
 		const GPUDrivenRenderer::PreviousRawCullingBootstrap previousRawBootstrap =
 			m_renderer->getPreviousRawCullingBootstrap(context.frameIndex);
 		uint32_t previousOpaqueCapacity = 0u;

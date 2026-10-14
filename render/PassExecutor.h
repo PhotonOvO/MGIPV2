@@ -4,6 +4,7 @@
 #include "../rhi/RHITypes.h"
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace demo::rhi
@@ -16,6 +17,12 @@ namespace demo
 	class PassExecutor
 	{
 	public:
+		enum class MissingBindingPolicy : uint8_t
+		{
+			ignore = 0,
+			skipPass,
+		};
+
 		struct ExecutionHooks
 		{
 			virtual ~ExecutionHooks() = default;
@@ -42,22 +49,37 @@ namespace demo
 			rhi::TextureAspect aspect{rhi::TextureAspect::color};
 			rhi::ResourceState initialState{rhi::ResourceState::General};
 			bool isSwapchain{false};
+
+			bool operator==(const TextureBinding&) const = default;
 		};
 
 		struct BufferBinding
 		{
 			BufferHandle handle{};
 			rhi::BufferHandle rhiBuffer{};
+
+			bool operator==(const BufferBinding&) const = default;
 		};
 
 		void clear();
-		void addPass(const PassNode& pass);
+		void addPass(
+			const PassNode& pass,
+			MissingBindingPolicy missingBindingPolicy = MissingBindingPolicy::ignore);
+		[[nodiscard]] bool setPassEnabled(const PassNode& pass, bool enabled);
+		[[nodiscard]] bool isPassEnabled(const PassNode& pass) const;
+		[[nodiscard]] bool setMissingBindingPolicy(
+			const PassNode& pass, MissingBindingPolicy policy);
+		[[nodiscard]] MissingBindingPolicy getMissingBindingPolicy(
+			const PassNode& pass) const;
 		// Optional: when set, bindTexture mirrors each native image into the backend
 		// registry so explicit resource boundaries can use TextureHandles.
 		void setResourceTable(rhi::Device* device);
 		void clearResourceBindings();
 		void bindTexture(TextureBinding binding);
 		void bindBuffer(BufferBinding binding);
+		[[nodiscard]] std::optional<TextureBinding> getTextureBinding(TextureHandle handle) const;
+		[[nodiscard]] std::optional<BufferBinding> getBufferBinding(BufferHandle handle) const;
+		[[nodiscard]] bool hasBoundDependencies(const PassNode& pass) const;
 		[[nodiscard]] size_t getPassCount() const;
 		[[nodiscard]] const PassNode* getPass(size_t index) const;
 		// Resolvable RHI handle mirroring a bound pass attachment (null if unbound
@@ -67,6 +89,13 @@ namespace demo
 		void execute(const PassContext& context, const ExecutionHooks* hooks = nullptr) const;
 
 	private:
+		struct PassEntry
+		{
+			const PassNode* pass{nullptr};
+			bool enabled{true};
+			MissingBindingPolicy missingBindingPolicy{MissingBindingPolicy::ignore};
+		};
+
 		struct BufferUsageState
 		{
 			rhi::StageFlags stages{rhi::StageFlags::none};
@@ -99,7 +128,10 @@ namespace demo
 		[[nodiscard]] BufferUsageState* findBufferExecutionState(uint64_t key) const;
 		[[nodiscard]] TextureUsageState* findTextureExecutionState(uint64_t key) const;
 
-		std::vector<const PassNode*> m_passes;
+		[[nodiscard]] PassEntry* findPassEntry(const PassNode& pass);
+		[[nodiscard]] const PassEntry* findPassEntry(const PassNode& pass) const;
+
+		std::vector<PassEntry> m_passes;
 		std::vector<TextureBinding> m_textureBindings;
 		std::vector<BufferBinding> m_bufferBindings;
 		rhi::Device* m_device{nullptr};

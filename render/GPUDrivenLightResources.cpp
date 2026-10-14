@@ -28,6 +28,7 @@ namespace demo
 		const uint64_t clusterCountBytes = sizeof(uint32_t) * static_cast<uint64_t>(shaderio::LClusterCount);
 		const uint64_t clusterIndexBytes =
 			sizeof(uint32_t) * static_cast<uint64_t>(shaderio::LClusterCount) * shaderio::LMaxLightsPerCluster;
+		const ClusterStats zeroClusterStats{};
 
 		for (FrameResources& frame : m_frames)
 		{
@@ -53,6 +54,7 @@ namespace demo
 				.memoryUsage = rhi::MemoryUsage::gpuToCpu,
 				.debugName = "GPUDrivenClusterStatsReadbackBuffer",
 			});
+			updateMappedBuffer(frame.clusterStatsReadbackBuffer, &zeroClusterStats, sizeof(zeroClusterStats));
 		}
 	}
 
@@ -185,14 +187,25 @@ namespace demo
 
 	void GPUDrivenLightResources::cacheClusterStats(uint32_t frameIndex)
 	{
-		if (frameIndex >= m_frames.size())
+		if (frameIndex >= m_frames.size() || m_device == nullptr)
 		{
 			m_lastClusterStats = {};
 			return;
 		}
 
-		const rhi::BufferHandle buffer = m_frames[frameIndex].clusterStatsReadbackBuffer;
-		void* mapped = m_device != nullptr ? m_device->mapBuffer(buffer) : nullptr;
+		FrameResources& frame = m_frames[frameIndex];
+		if (!frame.clusterStatsProducerSubmitted)
+		{
+			m_lastClusterStats = {};
+			return;
+		}
+
+		// The caller has retired this physical slot. Consume the producer before
+		// reading so a failed map or a frame that records no replacement copy can
+		// never publish this slot's bytes a second time.
+		frame.clusterStatsProducerSubmitted = false;
+		const rhi::BufferHandle buffer = frame.clusterStatsReadbackBuffer;
+		void* mapped = buffer.isNull() ? nullptr : m_device->mapBuffer(buffer);
 		if (buffer.isNull() || mapped == nullptr)
 		{
 			m_lastClusterStats = {};
@@ -200,6 +213,23 @@ namespace demo
 		}
 
 		std::memcpy(&m_lastClusterStats, mapped, sizeof(m_lastClusterStats));
+	}
+
+	void GPUDrivenLightResources::markClusterStatsProducerSubmitted(uint32_t frameIndex, bool producerSubmitted)
+	{
+		if (frameIndex >= m_frames.size())
+		{
+			m_lastClusterStats = {};
+			return;
+		}
+
+		m_frames[frameIndex].clusterStatsProducerSubmitted = producerSubmitted;
+		if (!producerSubmitted)
+		{
+			// Disabled, unavailable, and other no-copy frames publish deterministic
+			// zero diagnostics instead of retaining an older slot's statistics.
+			m_lastClusterStats = {};
+		}
 	}
 
 	GPUDrivenLightResources::Diagnostics GPUDrivenLightResources::getDiagnostics() const

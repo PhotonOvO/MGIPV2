@@ -2,10 +2,12 @@
 
 #include "../common/Handles.h"
 #include "../rhi/RHIHandles.h"
+#include "../rhi/RHIResourceLifetime.h"
 #include "../rhi/RHITypes.h"
 #include "ShaderInterop.h"
 
 #include <cstdint>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -30,6 +32,7 @@ namespace demo
 		uint32_t indexCount{0};
 		uint32_t firstIndex{0};
 		int32_t vertexOffset{0};
+		bool visible{true};
 	};
 
 	struct GPUSceneObjectHandle
@@ -77,13 +80,36 @@ namespace demo
 		void clear();
 
 		[[nodiscard]] GPUSceneObjectHandle registerObject(const GPUSceneRegistrationDesc& desc);
+		// Registers a candidate object at the already-reserved renderer handle from
+		// RendererSceneMappingSnapshot. This is used only while constructing a
+		// private scene generation; it never aliases or mutates the active registry.
+		[[nodiscard]] bool registerObjectAt(
+			GPUSceneObjectHandle object,
+			const GPUSceneRegistrationDesc& desc);
 		[[nodiscard]] GPUSceneRemoveResult removeObject(GPUSceneObjectHandle object);
 		bool updateTransform(GPUSceneObjectHandle object,
 		                     const glm::mat4& newTransform,
 		                     const glm::vec4& newBoundsSphere);
+		bool updateTransform(GPUSceneObjectHandle object,
+		                     const glm::mat4& newTransform);
+		bool updateVisibility(GPUSceneObjectHandle object, bool visible);
+		bool updateMaterialBinding(GPUSceneObjectHandle object,
+		                           uint32_t materialIndex,
+		                           uint32_t flags);
+		[[nodiscard]] bool isLiveObject(GPUSceneObjectHandle object) const;
+		[[nodiscard]] bool tryGetRegistrationDesc(
+			GPUSceneObjectHandle object,
+			GPUSceneRegistrationDesc& outDesc) const;
 		[[nodiscard]] bool tryGetDenseIndex(GPUSceneObjectHandle object, uint32_t& outDenseIndex) const;
 
 		void syncToGpu(rhi::CommandBuffer& cmd);
+		// Allocates the private GPU/staging storage before a transaction resource
+		// journal is sealed. syncToGpu() is then allocation-free for this state.
+		void prepareGpuStorage();
+		// Reserves the CPU dirty journal before atomic publication so the
+		// post-publication record updates cannot allocate or fail.
+		void prepareUpdates(uint32_t updateCount);
+		[[nodiscard]] std::vector<rhi::ResourceHandle> ownedResourceHandles() const;
 
 		[[nodiscard]] rhi::GpuPtr getBufferAddress() const { return m_objectBufferAddress; }
 		[[nodiscard]] rhi::BufferHandle getBufferHandle() const { return m_objectBufferRHI; }
@@ -111,7 +137,7 @@ namespace demo
 		void ensureCapacity(uint32_t requiredCount);
 		void ensureStagingCapacity(uint64_t requiredBytes);
 		void markDirtyDenseIndex(uint32_t denseIndex);
-		[[nodiscard]] std::vector<DirtyRange> buildDirtyRanges() const;
+		[[nodiscard]] std::span<const DirtyRange> buildDirtyRanges();
 		void rebuildPackedObject(uint32_t objectID);
 		static shaderio::GPUSceneObject packSceneObject(const GPUSceneRegistrationDesc& desc);
 		static shaderio::GPUCullObject packCullObject(const GPUSceneRegistrationDesc& desc);
@@ -132,6 +158,8 @@ namespace demo
 		std::vector<uint32_t> m_freeList;
 		std::vector<uint32_t> m_denseSlotIds;
 		std::vector<uint32_t> m_dirtyDenseIndices;
+		std::vector<uint32_t> m_sortedDirtyIndices;
+		std::vector<DirtyRange> m_dirtyRanges;
 		std::vector<shaderio::GPUSceneObject> m_gpuObjects;
 		std::vector<shaderio::GPUCullObject> m_cullObjects;
 	};

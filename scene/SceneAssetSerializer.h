@@ -9,8 +9,10 @@ namespace demo {
 
 class SceneAssetSerializer {
 public:
-  // Bumped 8->9: raw color textures use an sRGB GPU format.
-  static constexpr uint32_t kCurrentVersion = 9;
+  // Bumped for projection identity, primitive, visibility, variant,
+  // animation, source semantic-hash, texture source-image, and camera/light
+  // source-identity fields.
+  static constexpr uint32_t kCurrentVersion = 12;
 
   [[nodiscard]] static std::filesystem::path buildAssetPath(const std::filesystem::path& sourcePath);
 

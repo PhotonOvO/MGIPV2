@@ -3,11 +3,14 @@
 #include "internal/VulkanCommon.h"
 #include "VulkanBarrierConversions.h"
 #include "VulkanCommandAllocator.h"
+#include "VulkanQueue.h"
 #include "VulkanResourceTable.h"
 #include "VulkanShaderConversions.h"
 #include "../RHIDebugCounters.h"
 
+#include <algorithm>
 #include <array>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <vulkan/vulkan.h>
@@ -36,8 +39,107 @@ namespace demo::rhi::vulkan
 			throw std::runtime_error("Vulkan root binding slot/kind mismatch");
 		}
 
+		[[nodiscard]] VkBuffer requireBufferForRecording(
+			const VulkanResourceTable* table, BufferHandle handle, const char* operation)
+		{
+			const BufferHotRecord* record =
+				table != nullptr && handle.isValid() ? table->tryGetBufferHot(handle) : nullptr;
+			if(record == nullptr || record->nativeBuffer == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null buffer handle");
+			return record->nativeBuffer;
+		}
+
+		[[nodiscard]] VkImage requireTextureForRecording(
+			const VulkanResourceTable* table, TextureHandle handle, const char* operation)
+		{
+			const TextureHotRecord* record =
+				table != nullptr && handle.isValid() ? table->tryGetTextureHot(handle) : nullptr;
+			if(record == nullptr || record->nativeImage == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null texture handle");
+			return record->nativeImage;
+		}
+
+		struct TextureViewForRecording
+		{
+			VkImageView native{VK_NULL_HANDLE};
+			TextureHandle parent{};
+		};
+
+		[[nodiscard]] TextureViewForRecording requireTextureViewForRecording(
+			const VulkanResourceTable* table, TextureViewHandle handle, const char* operation)
+		{
+			const TextureViewHotRecord* hot =
+				table != nullptr && handle.isValid() ? table->tryGetTextureViewHot(handle) : nullptr;
+			const TextureViewColdRecord* cold =
+				hot != nullptr ? table->tryGetTextureViewCold(handle) : nullptr;
+			if(hot == nullptr || cold == nullptr || hot->nativeView == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null texture-view handle");
+			if(!cold->parentTexture.isNull())
+				(void)requireTextureForRecording(table, cold->parentTexture, operation);
+			return TextureViewForRecording{hot->nativeView, cold->parentTexture};
+		}
+
+		[[nodiscard]] VkSampler requireSamplerForRecording(
+			const VulkanResourceTable* table, SamplerHandle handle, const char* operation)
+		{
+			const VkSampler native = table != nullptr && handle.isValid()
+				                         ? table->resolveSampler(handle)
+				                         : VK_NULL_HANDLE;
+			if(native == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null sampler handle");
+			return native;
+		}
+
+		struct PipelineForRecording
+		{
+			VkPipeline native{VK_NULL_HANDLE};
+			VkPipelineLayout layout{VK_NULL_HANDLE};
+		};
+
+		[[nodiscard]] PipelineForRecording requirePipelineForRecording(
+			const VulkanResourceTable* table, PipelineHandle handle,
+			VkPipelineBindPoint expectedBindPoint, const char* operation)
+		{
+			const PipelineRecord* record =
+				table != nullptr && handle.isValid() ? table->tryGetPipeline(handle) : nullptr;
+			if(record == nullptr || record->bindPoint != expectedBindPoint ||
+			   record->nativePipeline == VK_NULL_HANDLE || record->nativeLayout == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null pipeline handle");
+			return PipelineForRecording{record->nativePipeline, record->nativeLayout};
+		}
+
+		[[nodiscard]] VkDescriptorSet requireArgumentTableForRecording(
+			const VulkanResourceTable* table, ArgumentTableHandle handle, const char* operation)
+		{
+			const ArgumentTableRecord* record =
+				table != nullptr && handle.isValid() ? table->tryGetArgumentTable(handle) : nullptr;
+			if(record == nullptr || record->nativeSet == VK_NULL_HANDLE ||
+			   !table->validateArgumentTableForSubmit(handle))
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null argument-table handle");
+			return record->nativeSet;
+		}
+
+		[[nodiscard]] const QueryPoolRecord& requireQueryPoolForRecording(
+			const VulkanResourceTable* table, QueryPoolHandle handle, const char* operation)
+		{
+			const QueryPoolRecord* record = table != nullptr && handle.isValid()
+				                                ? table->tryGetQueryPool(handle)
+				                                : nullptr;
+			if(record == nullptr || record->nativePool == VK_NULL_HANDLE)
+				throw std::runtime_error(
+					std::string(operation) + " received a stale/null query-pool handle");
+			return *record;
+		}
+
 		inline constexpr uint32_t kMaxColorAttachmentsPerPass = 8;
 		inline constexpr uint32_t kMaxBarrierBatchSize = 16;
+		inline constexpr uint32_t kInitialTrackedBufferCapacity = 512;
 
 		template <typename Handle, size_t Capacity>
 		void trackHandle(
@@ -52,6 +154,7 @@ namespace demo::rhi::vulkan
 				throw std::runtime_error(capacityError);
 			handles[count++] = handle;
 		}
+
 	} // namespace
 
 	// ---------------------------------------------------------------------------
@@ -79,22 +182,21 @@ namespace demo::rhi::vulkan
 	void VulkanRenderEncoder::setPipeline(PipelineHandle pipeline)
 	{
 		requireActive();
-		m_layout = m_table->resolvePipelineLayout(pipeline);
-		const VkPipeline native = m_table->resolvePipeline(pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS);
-		if (m_layout == VK_NULL_HANDLE || native == VK_NULL_HANDLE)
-			throw std::runtime_error("VulkanRenderEncoder::setPipeline received a stale pipeline");
-		m_pipeline = pipeline;
+		const PipelineForRecording resolved = requirePipelineForRecording(
+			m_table, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			"VulkanRenderEncoder::setPipeline");
 		if (m_owner != nullptr) m_owner->trackPipeline(pipeline);
-		vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, native);
+		m_layout = resolved.layout;
+		m_pipeline = pipeline;
+		vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolved.native);
 	}
 	void VulkanRenderEncoder::setArgumentTable(ShaderStage /*stages*/, uint32_t slot, ArgumentTableHandle table)
 	{
 		requireActive();
 		if (m_layout == VK_NULL_HANDLE)
 			throw std::runtime_error("Vulkan argument-table binding requires a pipeline");
-		const VkDescriptorSet set = m_table->resolveArgumentTable(table);
-		if (set == VK_NULL_HANDLE)
-			throw std::runtime_error("Vulkan argument-table binding received a stale table");
+		const VkDescriptorSet set = requireArgumentTableForRecording(
+				m_table, table, "Vulkan render argument-table binding");
 		if (m_owner != nullptr) m_owner->trackArgumentTable(table);
 		const uint32_t dynCount = slot < kMaxArgumentSlots ? m_pendingDynCount[slot] : 0;
 		const uint32_t* dynOffsets = dynCount > 0 ? m_pendingDynOffsets[slot] : nullptr;
@@ -104,11 +206,16 @@ namespace demo::rhi::vulkan
 	void VulkanRenderEncoder::setDynamicBuffer(ShaderStage, uint32_t slot, BufferHandle buffer, uint64_t offset, uint64_t)
 	{
 		requireActive();
+		// A null handle is the Vulkan offset-only form used when the descriptor
+		// table already owns the buffer binding. Every non-null shape is required.
+		if(!buffer.isNull())
+			(void)requireBufferForRecording(
+				m_table, buffer, "Vulkan dynamic-buffer binding");
 		if (slot >= kMaxArgumentSlots || m_pendingDynCount[slot] >= kMaxDynOffsetPerSlot)
 			throw std::runtime_error("Vulkan dynamic-offset capacity exceeded");
 		if (offset > UINT32_MAX)
 			throw std::runtime_error("Vulkan dynamic offset exceeds uint32_t");
-		if (m_owner != nullptr && buffer.isValid()) m_owner->trackBuffer(buffer);
+		if (m_owner != nullptr && !buffer.isNull()) m_owner->trackBuffer(buffer);
 		m_pendingDynOffsets[slot][m_pendingDynCount[slot]++] = static_cast<uint32_t>(offset);
 	}
 	void VulkanRenderEncoder::setRootConstants(ShaderStage stage, uint32_t slot, std::span<const std::byte> data)
@@ -146,30 +253,30 @@ namespace demo::rhi::vulkan
 		const VkRect2D rect{{scissor.offset.x, scissor.offset.y}, {scissor.extent.width, scissor.extent.height}};
 		vkCmdSetScissorWithCount(m_cmd, 1, &rect);
 	}
-  void VulkanRenderEncoder::bindVertexBuffers(
-    uint32_t firstBinding, std::span<const VertexBufferBinding> bindings)
-  {
-		requireActive();
-    std::array<VkBuffer, 16> vkBuffers{};
-    std::array<VkDeviceSize, 16> vkOffsets{};
-    const uint32_t clamped = static_cast<uint32_t>((std::min)(bindings.size(), vkBuffers.size()));
-    for(uint32_t index = 0; index < clamped; ++index)
-    {
-      vkBuffers[index] = m_table->resolveBuffer(bindings[index].buffer);
-      if (vkBuffers[index] == VK_NULL_HANDLE)
-        throw std::runtime_error("Vulkan vertex binding received a stale buffer");
-      if (m_owner != nullptr) m_owner->trackBuffer(bindings[index].buffer);
-      vkOffsets[index] = bindings[index].offset;
-    }
-    vkCmdBindVertexBuffers(m_cmd, firstBinding, clamped, vkBuffers.data(), vkOffsets.data());
-  }
-
-  void VulkanRenderEncoder::bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format)
+	void VulkanRenderEncoder::bindVertexBuffers(
+		uint32_t firstBinding, std::span<const VertexBufferBinding> bindings)
 	{
 		requireActive();
-		const VkBuffer native = m_table->resolveBuffer(buffer);
-		if (native == VK_NULL_HANDLE)
-			throw std::runtime_error("Vulkan index binding received a stale buffer");
+		std::array<VkBuffer, 16> vkBuffers{};
+		std::array<VkDeviceSize, 16> vkOffsets{};
+		const uint32_t clamped = static_cast<uint32_t>((std::min)(bindings.size(), vkBuffers.size()));
+		for(uint32_t index = 0; index < clamped; ++index)
+		{
+			vkBuffers[index] = requireBufferForRecording(
+				m_table, bindings[index].buffer, "Vulkan vertex binding");
+			vkOffsets[index] = bindings[index].offset;
+		}
+		if(m_owner != nullptr)
+			for(uint32_t index = 0; index < clamped; ++index)
+				m_owner->trackBuffer(bindings[index].buffer);
+		vkCmdBindVertexBuffers(m_cmd, firstBinding, clamped, vkBuffers.data(), vkOffsets.data());
+	}
+
+	void VulkanRenderEncoder::bindIndexBuffer(BufferHandle buffer, uint64_t offset, IndexFormat format)
+	{
+		requireActive();
+		const VkBuffer native = requireBufferForRecording(
+			m_table, buffer, "Vulkan index binding");
 		if (m_owner != nullptr) m_owner->trackBuffer(buffer);
 		vkCmdBindIndexBuffer(m_cmd, native, offset,
 		                     format == IndexFormat::uint16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
@@ -202,32 +309,40 @@ namespace demo::rhi::vulkan
 	void VulkanRenderEncoder::drawIndexedIndirect(const DrawIndirectDesc& desc)
 	{
 		requireActive();
+		const VkBuffer argsBuffer = requireBufferForRecording(
+			m_table, desc.argsBuffer, "Vulkan indexed-indirect draw");
 		const uint32_t stride = indirectStride(desc.stride, desc.drawCount, sizeof(VkDrawIndexedIndirectCommand));
 		if (m_owner != nullptr) m_owner->trackBuffer(desc.argsBuffer);
-		vkCmdDrawIndexedIndirect(m_cmd, m_table->resolveBuffer(desc.argsBuffer), desc.offset, desc.drawCount,
+		vkCmdDrawIndexedIndirect(m_cmd, argsBuffer, desc.offset, desc.drawCount,
 		                         stride);
 	}
 
 	void VulkanRenderEncoder::drawIndexedIndirectCount(const DrawIndirectCountDesc& desc)
 	{
 		requireActive();
+		const VkBuffer argsBuffer = requireBufferForRecording(
+			m_table, desc.argsBuffer, "Vulkan indexed-indirect-count draw arguments");
+		const VkBuffer countBuffer = requireBufferForRecording(
+			m_table, desc.countBuffer, "Vulkan indexed-indirect-count draw counter");
 		const uint32_t stride = indirectStride(desc.stride, desc.maxDrawCount, sizeof(VkDrawIndexedIndirectCommand));
 		if (m_owner != nullptr)
 		{
 			m_owner->trackBuffer(desc.argsBuffer);
 			m_owner->trackBuffer(desc.countBuffer);
 		}
-		vkCmdDrawIndexedIndirectCount(m_cmd, m_table->resolveBuffer(desc.argsBuffer), desc.argsOffset,
-		                              m_table->resolveBuffer(desc.countBuffer), desc.countBufferOffset,
+		vkCmdDrawIndexedIndirectCount(m_cmd, argsBuffer, desc.argsOffset,
+		                              countBuffer, desc.countBufferOffset,
 		                              desc.maxDrawCount, stride);
 	}
 
 	void VulkanRenderEncoder::drawIndirect(const DrawIndirectDesc& desc)
 	{
 		requireActive();
+		const VkBuffer argsBuffer = requireBufferForRecording(
+			m_table, desc.argsBuffer, "Vulkan indirect draw");
 		const uint32_t stride = indirectStride(desc.stride, desc.drawCount, sizeof(VkDrawIndirectCommand));
 		if (m_owner != nullptr) m_owner->trackBuffer(desc.argsBuffer);
-		vkCmdDrawIndirect(m_cmd, m_table->resolveBuffer(desc.argsBuffer), desc.offset, desc.drawCount,
+		vkCmdDrawIndirect(m_cmd, argsBuffer, desc.offset, desc.drawCount,
 		                  stride);
 	}
 
@@ -243,12 +358,14 @@ namespace demo::rhi::vulkan
 	void VulkanRenderEncoder::drawMeshTasksIndirect(const DrawIndirectDesc& desc)
 	{
 		requireActive();
+		const VkBuffer argsBuffer = requireBufferForRecording(
+			m_table, desc.argsBuffer, "Vulkan mesh-indirect draw");
 		if (vkCmdDrawMeshTasksIndirectEXT != nullptr)
 		{
 			const uint32_t stride = indirectStride(desc.stride, desc.drawCount,
-			                                       sizeof(VkDrawMeshTasksIndirectCommandEXT));
+				                                       sizeof(VkDrawMeshTasksIndirectCommandEXT));
 			if (m_owner != nullptr) m_owner->trackBuffer(desc.argsBuffer);
-			vkCmdDrawMeshTasksIndirectEXT(m_cmd, m_table->resolveBuffer(desc.argsBuffer), desc.offset,
+			vkCmdDrawMeshTasksIndirectEXT(m_cmd, argsBuffer, desc.offset,
 			                              desc.drawCount,
 			                              stride);
 		}
@@ -291,13 +408,13 @@ namespace demo::rhi::vulkan
 	{
 		requireActive();
   requireCompute("VulkanComputeEncoder::setPipeline");
-		m_layout = m_table->resolvePipelineLayout(pipeline);
-		const VkPipeline native = m_table->resolvePipeline(pipeline, VK_PIPELINE_BIND_POINT_COMPUTE);
-		if (m_layout == VK_NULL_HANDLE || native == VK_NULL_HANDLE)
-			throw std::runtime_error("VulkanComputeEncoder::setPipeline received a stale pipeline");
-		m_pipeline = pipeline;
+		const PipelineForRecording resolved = requirePipelineForRecording(
+			m_table, pipeline, VK_PIPELINE_BIND_POINT_COMPUTE,
+			"VulkanComputeEncoder::setPipeline");
 		if (m_owner != nullptr) m_owner->trackPipeline(pipeline);
-		vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native);
+		m_layout = resolved.layout;
+		m_pipeline = pipeline;
+		vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolved.native);
 	}
 	void VulkanComputeEncoder::setArgumentTable(uint32_t slot, ArgumentTableHandle table)
 	{
@@ -305,9 +422,8 @@ namespace demo::rhi::vulkan
   requireCompute("VulkanComputeEncoder::setArgumentTable");
 		if (m_layout == VK_NULL_HANDLE)
 			throw std::runtime_error("Vulkan argument-table binding requires a pipeline");
-		const VkDescriptorSet set = m_table->resolveArgumentTable(table);
-		if (set == VK_NULL_HANDLE)
-			throw std::runtime_error("Vulkan argument-table binding received a stale table");
+		const VkDescriptorSet set = requireArgumentTableForRecording(
+			m_table, table, "Vulkan compute argument-table binding");
 		if (m_owner != nullptr) m_owner->trackArgumentTable(table);
 		vkCmdBindDescriptorSets(m_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, slot, 1, &set, 0, nullptr);
 	}
@@ -340,8 +456,10 @@ namespace demo::rhi::vulkan
 	{
 		requireActive();
   requireCompute("VulkanComputeEncoder::dispatchIndirect");
+		const VkBuffer argsBuffer = requireBufferForRecording(
+			m_table, desc.argsBuffer, "Vulkan indirect dispatch");
 		if (m_owner != nullptr) m_owner->trackBuffer(desc.argsBuffer);
-		vkCmdDispatchIndirect(m_cmd, m_table->resolveBuffer(desc.argsBuffer), desc.offset);
+		vkCmdDispatchIndirect(m_cmd, argsBuffer, desc.offset);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -352,20 +470,28 @@ namespace demo::rhi::vulkan
 	{
 		requireActive();
   requireTransfer("VulkanComputeEncoder::copyBuffer");
+		const VkBuffer sourceBuffer = requireBufferForRecording(
+			m_table, src, "Vulkan buffer copy source");
+		const VkBuffer destinationBuffer = requireBufferForRecording(
+			m_table, dst, "Vulkan buffer copy destination");
 		const VkBufferCopy region{srcOffset, dstOffset, size};
 		if (m_owner != nullptr)
 		{
 			m_owner->trackBuffer(src);
 			m_owner->trackBuffer(dst);
 		}
-		vkCmdCopyBuffer(m_cmd, m_table->resolveBuffer(src), m_table->resolveBuffer(dst), 1,
+		vkCmdCopyBuffer(m_cmd, sourceBuffer, destinationBuffer, 1,
 		                &region);
 	}
 
 	void VulkanComputeEncoder::copyBufferToTexture(const BufferTextureCopyDesc& desc)
 	{
 		requireActive();
-  requireTransfer("VulkanComputeEncoder::copyBufferToTexture");
+		requireTransfer("VulkanComputeEncoder::copyBufferToTexture");
+		const VkBuffer sourceBuffer = requireBufferForRecording(
+			m_table, desc.buffer, "Vulkan buffer-to-image copy source");
+		const VkImage destinationImage = requireTextureForRecording(
+			m_table, desc.texture, "Vulkan buffer-to-image copy destination");
 		const VkBufferImageCopy region{
 			.bufferOffset = desc.bufferOffset,
 			.imageSubresource = {
@@ -386,15 +512,18 @@ namespace demo::rhi::vulkan
 			m_owner->trackBuffer(desc.buffer);
 			m_owner->trackTexture(desc.texture);
 		}
-		vkCmdCopyBufferToImage(m_cmd, m_table->resolveBuffer(desc.buffer),
-		                       m_table->resolveTexture(desc.texture),
+		vkCmdCopyBufferToImage(m_cmd, sourceBuffer, destinationImage,
 		                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 	}
 
 	void VulkanComputeEncoder::copyTextureToBuffer(const BufferTextureCopyDesc& desc)
 	{
 		requireActive();
-  requireTransfer("VulkanComputeEncoder::copyTextureToBuffer");
+		requireTransfer("VulkanComputeEncoder::copyTextureToBuffer");
+		const VkBuffer destinationBuffer = requireBufferForRecording(
+			m_table, desc.buffer, "Vulkan image-to-buffer copy destination");
+		const VkImage sourceImage = requireTextureForRecording(
+			m_table, desc.texture, "Vulkan image-to-buffer copy source");
 		const VkBufferImageCopy region{
 			.bufferOffset = desc.bufferOffset,
 			.imageSubresource = {
@@ -415,15 +544,18 @@ namespace demo::rhi::vulkan
 			m_owner->trackTexture(desc.texture);
 			m_owner->trackBuffer(desc.buffer);
 		}
-		vkCmdCopyImageToBuffer(m_cmd, m_table->resolveTexture(desc.texture),
-		                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		                       m_table->resolveBuffer(desc.buffer), 1, &region);
+		vkCmdCopyImageToBuffer(m_cmd, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                       destinationBuffer, 1, &region);
 	}
 
 	void VulkanComputeEncoder::blitTexture(const TextureBlitDesc& desc)
 	{
 		requireActive();
   requireTransfer("VulkanComputeEncoder::blitTexture");
+		const VkImage sourceImage = requireTextureForRecording(
+			m_table, desc.srcTexture, "Vulkan texture blit source");
+		const VkImage destinationImage = requireTextureForRecording(
+			m_table, desc.dstTexture, "Vulkan texture blit destination");
 		VkImageBlit region{
 			.srcSubresource = {
 				.aspectMask = toVkImageAspect(desc.aspect),
@@ -447,8 +579,8 @@ namespace demo::rhi::vulkan
 			m_owner->trackTexture(desc.srcTexture);
 			m_owner->trackTexture(desc.dstTexture);
 		}
-		vkCmdBlitImage(m_cmd, m_table->resolveTexture(desc.srcTexture), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		               m_table->resolveTexture(desc.dstTexture), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+		vkCmdBlitImage(m_cmd, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		               destinationImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
 		               &region,
 		               VK_FILTER_LINEAR);
 	}
@@ -457,20 +589,32 @@ namespace demo::rhi::vulkan
 	{
 		requireActive();
   requireTransfer("VulkanComputeEncoder::fillBuffer");
+		const VkBuffer nativeBuffer = requireBufferForRecording(
+			m_table, buffer, "Vulkan buffer fill");
 		if (m_owner != nullptr) m_owner->trackBuffer(buffer);
-		vkCmdFillBuffer(m_cmd, m_table->resolveBuffer(buffer), offset, size == 0 ? VK_WHOLE_SIZE : size,
+		vkCmdFillBuffer(m_cmd, nativeBuffer, offset, size == 0 ? VK_WHOLE_SIZE : size,
 		                data);
 	}
 
 	// ---------------------------------------------------------------------------
 	// VulkanCommandBuffer
 	// ---------------------------------------------------------------------------
+	VulkanCommandBuffer::VulkanCommandBuffer()
+	{
+		m_buffers.reserve(kInitialTrackedBufferCapacity);
+		m_textures.reserve(256);
+		m_textureViews.reserve(128);
+	}
+
 	VulkanCommandBuffer::VulkanCommandBuffer(
 		VulkanCommandAllocator& allocator, VkCommandBuffer cmd, VulkanResourceTable* table)
 		: m_cmd(cmd), m_table(table), m_allocator(&allocator)
 	{
 		if (m_cmd == VK_NULL_HANDLE || m_table == nullptr)
 			throw std::runtime_error("VulkanCommandBuffer requires native storage and a resource table");
+		m_buffers.reserve(kInitialTrackedBufferCapacity);
+		m_textures.reserve(256);
+		m_textureViews.reserve(128);
 	}
 
 	VulkanCommandBuffer::~VulkanCommandBuffer()
@@ -497,11 +641,12 @@ namespace demo::rhi::vulkan
 		m_submission = {};
 		m_argumentTableCount = 0;
 		m_pipelineCount = 0;
-		m_bufferCount = 0;
-		m_textureCount = 0;
-		m_textureViewCount = 0;
+		clearTrackedBuffers();
+		m_textures.clear();
+		m_textureViews.clear();
 		m_queryPoolCount = 0;
 		m_residencySetCount = 0;
+		m_submissionPlan = {};
 		m_resourceStates.reset();
 		m_state = CommandBufferState::recording;
 		incrementHotPathCounter(BackendType::vulkan, HotPathCounter::commandBufferBegins);
@@ -532,63 +677,43 @@ namespace demo::rhi::vulkan
 		if (!supportsQueueOperation(queueClass(), operation))
 			throw std::runtime_error(std::string(command) + " is unsupported by this queue class");
 	}
-	void VulkanCommandBuffer::validateForSubmit() const
+	void VulkanCommandBuffer::prepareForSubmit(SubmissionToken token)
 	{
-		if (m_state != CommandBufferState::executable || m_allocator == nullptr)
+		if (m_state != CommandBufferState::executable || m_allocator == nullptr ||
+		    m_table == nullptr || !token.isValid())
 			throw std::runtime_error("VulkanCommandBuffer submission state is invalid");
-		for (uint32_t index = 0; index < m_argumentTableCount; ++index)
-		{
-			if (!m_table->validateArgumentTableForSubmit(m_argumentTables[index]))
-				throw std::runtime_error(
-					"VulkanCommandBuffer submission references a stale argument table or resource");
-		}
-		for (uint32_t index = 0; index < m_pipelineCount; ++index)
-			if (m_table->tryGetPipeline(m_pipelines[index]) == nullptr)
-				throw std::runtime_error("VulkanCommandBuffer submission references a stale pipeline");
-		for (uint32_t index = 0; index < m_bufferCount; ++index)
-		{
-			const BufferHandle buffer = m_buffers[index];
-			if (m_table->tryGetBufferHot(buffer) == nullptr)
-				throw std::runtime_error(
-					"VulkanCommandBuffer submission references stale buffer " +
-					std::to_string(buffer.index) + ":" + std::to_string(buffer.generation));
-		}
-		for (uint32_t index = 0; index < m_textureCount; ++index)
-			if (m_table->tryGetTextureHot(m_textures[index]) == nullptr)
-				throw std::runtime_error("VulkanCommandBuffer submission references a stale texture");
-		for (uint32_t index = 0; index < m_textureViewCount; ++index)
-			if (m_table->tryGetTextureViewHot(m_textureViews[index]) == nullptr)
-				throw std::runtime_error("VulkanCommandBuffer submission references a stale texture view");
-		for (uint32_t index = 0; index < m_queryPoolCount; ++index)
-			if (m_table->resolveQueryPool(m_queryPools[index]) == VK_NULL_HANDLE)
-				throw std::runtime_error("VulkanCommandBuffer submission references a stale query pool");
-		for (uint32_t index = 0; index < m_residencySetCount; ++index)
-			if (!m_table->validateResidencySetForSubmit(m_residencySets[index]))
-				throw std::runtime_error(
-					"VulkanCommandBuffer submission references a stale residency set or resource");
+		if(m_allocator->queue().identity() != token.queue)
+			throw std::runtime_error(
+				"VulkanCommandBuffer submission queue does not own its allocator");
+		if(!m_allocator->owns(*this))
+			throw std::runtime_error(
+				"VulkanCommandBuffer submission allocator does not own the command buffer");
+
+		m_table->prepareSubmission(
+			VulkanSubmissionRoots{
+				.argumentTables = std::span<const ArgumentTableHandle>(
+					m_argumentTables, m_argumentTableCount),
+				.pipelines = std::span<const PipelineHandle>(m_pipelines, m_pipelineCount),
+				.buffers = std::span<const BufferHandle>(m_buffers),
+				.textures = std::span<const TextureHandle>(m_textures),
+				.textureViews = std::span<const TextureViewHandle>(m_textureViews),
+				.queryPools = std::span<const QueryPoolHandle>(
+					m_queryPools, m_queryPoolCount),
+				.residencySets = std::span<const ResidencySetHandle>(
+					m_residencySets, m_residencySetCount),
+			},
+			token, m_submissionPlan);
 	}
 
-	void VulkanCommandBuffer::markSubmitted(SubmissionToken token)
+	void VulkanCommandBuffer::markSubmitted(SubmissionToken token) noexcept
 	{
-		if (m_state != CommandBufferState::executable || m_allocator == nullptr || !token.isValid())
-			throw std::runtime_error("VulkanCommandBuffer submission state is invalid");
-		for (uint32_t index = 0; index < m_argumentTableCount; ++index)
-			m_table->markArgumentTableSubmitted(m_argumentTables[index], token);
-		for (uint32_t index = 0; index < m_pipelineCount; ++index)
-			m_table->markPipelineSubmitted(m_pipelines[index], token);
-		for (uint32_t index = 0; index < m_bufferCount; ++index)
-			m_table->markBufferSubmitted(m_buffers[index], token);
-		for (uint32_t index = 0; index < m_textureCount; ++index)
-			m_table->markTextureSubmitted(m_textures[index], token);
-		for (uint32_t index = 0; index < m_textureViewCount; ++index)
-			m_table->markTextureViewSubmitted(m_textureViews[index], token);
-		for (uint32_t index = 0; index < m_queryPoolCount; ++index)
-			m_table->markQueryPoolSubmitted(m_queryPools[index], token);
-		for (uint32_t index = 0; index < m_residencySetCount; ++index)
-			m_table->markResidencySetSubmitted(m_residencySets[index], token);
+		if (m_state != CommandBufferState::executable || m_allocator == nullptr ||
+		    m_table == nullptr || !m_submissionPlan.preparedFor(token))
+			std::terminate();
+		m_table->commitSubmission(m_submissionPlan);
 		m_submission = token;
 		m_state = CommandBufferState::submitted;
-		m_allocator->noteSubmitted(*this, token);
+		m_allocator->noteSubmitted(token);
 	}
 
 	void VulkanCommandBuffer::markReusable()
@@ -599,11 +724,12 @@ namespace demo::rhi::vulkan
 		m_submission = {};
 		m_argumentTableCount = 0;
 		m_pipelineCount = 0;
-		m_bufferCount = 0;
-		m_textureCount = 0;
-		m_textureViewCount = 0;
+		clearTrackedBuffers();
+		m_textures.clear();
+		m_textureViews.clear();
 		m_queryPoolCount = 0;
 		m_residencySetCount = 0;
+		m_submissionPlan = {};
 		m_state = CommandBufferState::reusable;
 	}
 
@@ -623,23 +749,36 @@ namespace demo::rhi::vulkan
 
 	void VulkanCommandBuffer::trackBuffer(BufferHandle buffer)
 	{
-		trackHandle(
-			m_buffers, m_bufferCount, buffer,
-			"Vulkan command-buffer buffer capacity exceeded");
+		if(m_trackedBufferGenerations.size() <= buffer.index)
+			m_trackedBufferGenerations.resize(
+				static_cast<size_t>(buffer.index) + 1u, 0u);
+		if(m_trackedBufferGenerations[buffer.index] == buffer.generation)
+			return;
+		m_buffers.push_back(buffer);
+		m_trackedBufferGenerations[buffer.index] = buffer.generation;
+	}
+
+	void VulkanCommandBuffer::clearTrackedBuffers() noexcept
+	{
+		for(const BufferHandle buffer : m_buffers)
+		{
+			if(buffer.index < m_trackedBufferGenerations.size() &&
+			   m_trackedBufferGenerations[buffer.index] == buffer.generation)
+				m_trackedBufferGenerations[buffer.index] = 0u;
+		}
+		m_buffers.clear();
 	}
 
 	void VulkanCommandBuffer::trackTexture(TextureHandle texture)
 	{
-		trackHandle(
-			m_textures, m_textureCount, texture,
-			"Vulkan command-buffer texture capacity exceeded");
+		if (std::find(m_textures.begin(), m_textures.end(), texture) == m_textures.end())
+			m_textures.push_back(texture);
 	}
 
 	void VulkanCommandBuffer::trackTextureView(TextureViewHandle view)
 	{
-		trackHandle(
-			m_textureViews, m_textureViewCount, view,
-			"Vulkan command-buffer texture-view capacity exceeded");
+		if (std::find(m_textureViews.begin(), m_textureViews.end(), view) == m_textureViews.end())
+			m_textureViews.push_back(view);
 	}
 
 	void VulkanCommandBuffer::trackQueryPool(QueryPoolHandle pool)
@@ -671,11 +810,12 @@ namespace demo::rhi::vulkan
 		m_active = EncoderKind::none;
 		m_argumentTableCount = 0;
 		m_pipelineCount = 0;
-		m_bufferCount = 0;
-		m_textureCount = 0;
-		m_textureViewCount = 0;
+		clearTrackedBuffers();
+		m_textures.clear();
+		m_textureViews.clear();
 		m_queryPoolCount = 0;
 		m_residencySetCount = 0;
+		m_submissionPlan = {};
 		m_resourceStates.reset();
 		m_state = CommandBufferState::recording;
 	}
@@ -692,13 +832,19 @@ namespace demo::rhi::vulkan
 		for (uint32_t i = 0; i < colorTargetCount; ++i)
 		{
 			const RenderTargetDesc& target = desc.colorTargets[i];
-			const VkImageView view = m_table->resolveTextureView(target.view);
-			if (view == VK_NULL_HANDLE)
-				throw std::runtime_error("Vulkan render pass received a stale color target view");
-			trackTextureView(target.view);
+			const TextureViewForRecording view = requireTextureViewForRecording(
+				m_table, target.view, "Vulkan render-pass color target");
+			if(!target.texture.isNull())
+			{
+				(void)requireTextureForRecording(
+					m_table, target.texture, "Vulkan render-pass color target");
+				if(target.texture != view.parent)
+					throw std::runtime_error(
+						"Vulkan render-pass color target texture/view parent mismatch");
+			}
 			colorAttachments[i] = VkRenderingAttachmentInfo{
 				.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-				.imageView = view,
+				.imageView = view.native,
 				.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 				.loadOp = static_cast<VkAttachmentLoadOp>(target.loadOp),
 				.storeOp = static_cast<VkAttachmentStoreOp>(target.storeOp),
@@ -711,13 +857,19 @@ namespace demo::rhi::vulkan
 		VkRenderingAttachmentInfo depthAttachment{};
 		if (desc.depthTarget != nullptr)
 		{
-			const VkImageView view = m_table->resolveTextureView(desc.depthTarget->view);
-			if (view == VK_NULL_HANDLE)
-				throw std::runtime_error("Vulkan render pass received a stale depth target view");
-			trackTextureView(desc.depthTarget->view);
+			const TextureViewForRecording view = requireTextureViewForRecording(
+				m_table, desc.depthTarget->view, "Vulkan render-pass depth target");
+			if(!desc.depthTarget->texture.isNull())
+			{
+				(void)requireTextureForRecording(
+					m_table, desc.depthTarget->texture, "Vulkan render-pass depth target");
+				if(desc.depthTarget->texture != view.parent)
+					throw std::runtime_error(
+						"Vulkan render-pass depth target texture/view parent mismatch");
+			}
 			depthAttachment = VkRenderingAttachmentInfo{
 				.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-				.imageView = view,
+				.imageView = view.native,
 				.imageLayout = toVkImageLayout(desc.depthTarget->state),
 				.loadOp = static_cast<VkAttachmentLoadOp>(desc.depthTarget->loadOp),
 				.storeOp = static_cast<VkAttachmentStoreOp>(desc.depthTarget->storeOp),
@@ -728,11 +880,29 @@ namespace demo::rhi::vulkan
 		}
 
 		for (const InputAttachmentDesc& input : desc.inputAttachments)
+			(void)requireTextureViewForRecording(
+				m_table, input.view, "Vulkan render-pass input attachment");
+
+		const size_t depthCount = desc.depthTarget != nullptr ? 1u : 0u;
+		m_textureViews.reserve(
+			m_textureViews.size() + colorTargetCount + depthCount +
+			desc.inputAttachments.size());
+		m_textures.reserve(m_textures.size() + colorTargetCount + depthCount);
+
+		for(uint32_t i = 0; i < colorTargetCount; ++i)
 		{
-			if (m_table->resolveTextureView(input.view) == VK_NULL_HANDLE)
-				throw std::runtime_error("Vulkan render pass received a stale input attachment view");
-			trackTextureView(input.view);
+			trackTextureView(desc.colorTargets[i].view);
+			if(!desc.colorTargets[i].texture.isNull())
+				trackTexture(desc.colorTargets[i].texture);
 		}
+		if(desc.depthTarget != nullptr)
+		{
+			trackTextureView(desc.depthTarget->view);
+			if(!desc.depthTarget->texture.isNull())
+				trackTexture(desc.depthTarget->texture);
+		}
+		for(const InputAttachmentDesc& input : desc.inputAttachments)
+			trackTextureView(input.view);
 
 		const VkRenderingInfo renderingInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -807,25 +977,129 @@ namespace demo::rhi::vulkan
 		requireRecording("VulkanCommandBuffer::resourceBarrier");
     const uint32_t textureCount = static_cast<uint32_t>(textures.size());
     const uint32_t bufferCount = static_cast<uint32_t>(buffers.size());
+		for(const TextureBarrier& barrier : textures)
+			(void)requireTextureForRecording(
+				m_table, barrier.texture, "Vulkan resource barrier");
+		for(const BufferBarrier& barrier : buffers)
+			(void)requireBufferForRecording(
+				m_table, barrier.buffer, "Vulkan resource barrier");
+		const auto requireAliasingResource = [this](const AliasingResource& resource) {
+			switch(resource.kind)
+			{
+			case AliasingResourceKind::none:
+				return;
+			case AliasingResourceKind::buffer:
+				(void)requireBufferForRecording(
+					m_table, resource.buffer, "Vulkan aliasing barrier");
+				return;
+			case AliasingResourceKind::texture:
+				(void)requireTextureForRecording(
+					m_table, resource.texture, "Vulkan aliasing barrier");
+				return;
+			}
+			throw std::runtime_error("Vulkan aliasing barrier received an invalid resource kind");
+		};
+		for(const AliasingBarrier& source : aliasing)
+		{
+			if(!source.before.isValid() || !source.after.isValid() ||
+			   source.after.kind == AliasingResourceKind::none)
+				throw std::runtime_error("Vulkan aliasing barrier received an invalid resource");
+			requireAliasingResource(source.before);
+			requireAliasingResource(source.after);
+		}
+
+		std::vector<TextureHandle> texturesToTrack;
+		std::vector<BufferHandle> buffersToTrack;
+		const auto appendUnique = [](auto& handles, auto handle) {
+			if(std::find(handles.begin(), handles.end(), handle) == handles.end())
+				handles.push_back(handle);
+		};
+		for(const TextureBarrier& source : textures)
+			appendUnique(texturesToTrack, source.texture);
+		for(const BufferBarrier& source : buffers)
+			appendUnique(buffersToTrack, source.buffer);
+		for(const AliasingBarrier& source : aliasing)
+		{
+			const auto appendAliasing = [&](const AliasingResource& resource) {
+				if(resource.kind == AliasingResourceKind::buffer)
+					appendUnique(buffersToTrack, resource.buffer);
+				else if(resource.kind == AliasingResourceKind::texture)
+					appendUnique(texturesToTrack, resource.texture);
+			};
+			appendAliasing(source.before);
+			appendAliasing(source.after);
+		}
+
+		std::vector<VkImageMemoryBarrier2> imageBarriers(textureCount);
+		for(uint32_t index = 0; index < textureCount; ++index)
+		{
+			const TextureBarrier& barrier = textures[index];
+			imageBarriers[index] = VkImageMemoryBarrier2{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+				.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+				.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+				.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+				.oldLayout = toVkImageLayout(barrier.before),
+				.newLayout = toVkImageLayout(barrier.after),
+				.image = requireTextureForRecording(
+					m_table, barrier.texture, "Vulkan resource barrier"),
+				.subresourceRange = {
+					.aspectMask = toVkImageAspect(barrier.range.aspect),
+					.baseMipLevel = barrier.range.baseMipLevel,
+					.levelCount = barrier.range.levelCount,
+					.baseArrayLayer = barrier.range.baseArrayLayer,
+					.layerCount = barrier.range.layerCount,
+				},
+			};
+		}
+		std::vector<VkBufferMemoryBarrier2> bufferBarriers(bufferCount);
+		for(uint32_t index = 0; index < bufferCount; ++index)
+		{
+			const BufferBarrier& barrier = buffers[index];
+			bufferBarriers[index] = VkBufferMemoryBarrier2{
+				.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+				.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+				.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+				.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+				.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+				.buffer = requireBufferForRecording(
+					m_table, barrier.buffer, "Vulkan resource barrier"),
+				.offset = barrier.offset,
+				.size = barrier.size == 0 ? VK_WHOLE_SIZE : barrier.size,
+			};
+		}
+
+		const auto countNew = [](const auto& tracked, const auto& requested) {
+			return static_cast<size_t>(std::count_if(
+				requested.begin(), requested.end(), [&](auto handle) {
+					return std::find(tracked.begin(), tracked.end(), handle) == tracked.end();
+				}));
+		};
+		m_textures.reserve(m_textures.size() + countNew(m_textures, texturesToTrack));
+		m_buffers.reserve(m_buffers.size() + countNew(m_buffers, buffersToTrack));
 #ifndef NDEBUG
+		DebugResourceStateTracker pendingStates = m_resourceStates;
 		for (uint32_t index = 0; index < textureCount; ++index)
 		{
-			if (!m_resourceStates.transition(textures[index]).valid())
+			if (!pendingStates.transition(textures[index]).valid())
 				throw std::runtime_error("VulkanCommandBuffer rejected an invalid texture transition");
 		}
 		for (uint32_t index = 0; index < bufferCount; ++index)
 		{
-			if (!m_resourceStates.transition(buffers[index]).valid())
+			if (!pendingStates.transition(buffers[index]).valid())
 				throw std::runtime_error("VulkanCommandBuffer rejected an invalid buffer transition");
 		}
+		m_resourceStates = pendingStates;
 #endif
+		for(TextureHandle texture : texturesToTrack)
+			trackTexture(texture);
+		for(BufferHandle buffer : buffersToTrack)
+			trackBuffer(buffer);
 		uint32_t textureOffset = 0;
 		uint32_t bufferOffset = 0;
 		while (textureOffset < textureCount || bufferOffset < bufferCount)
 		{
-			std::array<VkImageMemoryBarrier2, kMaxBarrierBatchSize> imageBarriers{};
-			std::array<VkBufferMemoryBarrier2, kMaxBarrierBatchSize> bufferBarriers{};
-
 			const uint32_t textureRemaining = textureCount - textureOffset;
 			const uint32_t bufferRemaining = bufferCount - bufferOffset;
 			const uint32_t imageBatch = textureRemaining < kMaxBarrierBatchSize
@@ -834,62 +1108,14 @@ namespace demo::rhi::vulkan
 			const uint32_t bufferBatch = bufferRemaining < kMaxBarrierBatchSize
 				                             ? bufferRemaining
 				                             : kMaxBarrierBatchSize;
-
-			for (uint32_t i = 0; i < imageBatch; ++i)
-			{
-				const TextureBarrier& b = textures[textureOffset + i];
-				const VkImage nativeImage = m_table->resolveTexture(b.texture);
-				trackTexture(b.texture);
-				if (nativeImage == VK_NULL_HANDLE)
-					throw std::runtime_error("Vulkan resource barrier received a stale texture");
-				// Queue ownership is mappable in the RHI barrier shape, but v1 records the
-				// renderer on a same-queue path. Keep ownership fields ignored until the
-				// backend enables real multi-queue scheduling.
-				imageBarriers[i] = VkImageMemoryBarrier2{
-					.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-					.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-					.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-					.oldLayout = toVkImageLayout(b.before),
-					.newLayout = toVkImageLayout(b.after),
-					.image = nativeImage,
-					.subresourceRange = {
-						.aspectMask = toVkImageAspect(b.range.aspect),
-						.baseMipLevel = b.range.baseMipLevel,
-						.levelCount = b.range.levelCount,
-						.baseArrayLayer = b.range.baseArrayLayer,
-						.layerCount = b.range.layerCount
-					},
-				};
-			}
-			for (uint32_t i = 0; i < bufferBatch; ++i)
-			{
-				const BufferBarrier& b = buffers[bufferOffset + i];
-				const VkBuffer nativeBuffer = m_table->resolveBuffer(b.buffer);
-				trackBuffer(b.buffer);
-				if (nativeBuffer == VK_NULL_HANDLE)
-					throw std::runtime_error("Vulkan resource barrier received a stale buffer");
-				// Same-queue v1 behavior: srcQueue/dstQueue are retained in the public RHI
-				// barrier but do not lower to queue-family ownership transfers yet.
-				bufferBarriers[i] = VkBufferMemoryBarrier2{
-					.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-					.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-					.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-					.buffer = nativeBuffer,
-					.offset = b.offset,
-					.size = b.size == 0 ? VK_WHOLE_SIZE : b.size,
-				};
-			}
-
 			const VkDependencyInfo dependencyInfo{
 				.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
 				.bufferMemoryBarrierCount = bufferBatch,
-				.pBufferMemoryBarriers = bufferBatch > 0 ? bufferBarriers.data() : nullptr,
+				.pBufferMemoryBarriers = bufferBatch > 0
+					? bufferBarriers.data() + bufferOffset : nullptr,
 				.imageMemoryBarrierCount = imageBatch,
-				.pImageMemoryBarriers = imageBatch > 0 ? imageBarriers.data() : nullptr,
+				.pImageMemoryBarriers = imageBatch > 0
+					? imageBarriers.data() + textureOffset : nullptr,
 			};
 			vkCmdPipelineBarrier2(m_cmd, &dependencyInfo);
 
@@ -899,42 +1125,6 @@ namespace demo::rhi::vulkan
 
 		if (!aliasing.empty())
 		{
-			for (const AliasingBarrier& source : aliasing)
-			{
-				if (!source.before.isValid() || !source.after.isValid() ||
-				    source.after.kind == AliasingResourceKind::none)
-					throw std::runtime_error("Vulkan aliasing barrier received an invalid resource");
-				const auto resolve = [this](const AliasingResource& resource) {
-					switch (resource.kind)
-					{
-					case AliasingResourceKind::none:
-						return true;
-					case AliasingResourceKind::buffer:
-						return m_table->resolveBuffer(resource.buffer) != VK_NULL_HANDLE;
-					case AliasingResourceKind::texture:
-						return m_table->resolveTexture(resource.texture) != VK_NULL_HANDLE;
-					}
-					return false;
-				};
-				if (!resolve(source.before) || !resolve(source.after))
-					throw std::runtime_error("Vulkan aliasing barrier received a stale resource");
-				const auto track = [this](const AliasingResource& resource) {
-					switch (resource.kind)
-					{
-					case AliasingResourceKind::none:
-						break;
-					case AliasingResourceKind::buffer:
-						trackBuffer(resource.buffer);
-						break;
-					case AliasingResourceKind::texture:
-						trackTexture(resource.texture);
-						break;
-					}
-				};
-				track(source.before);
-				track(source.after);
-			}
-
 			const VkMemoryBarrier2 memoryBarrier{
 				.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
 				.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -956,9 +1146,8 @@ namespace demo::rhi::vulkan
 	                                            const ClearColorValue& clearColor)
 	{
 		requireRecording("VulkanCommandBuffer::clearColorTexture");
-		const VkImage nativeImage = m_table->resolveTexture(texture);
-		if (nativeImage == VK_NULL_HANDLE)
-			throw std::runtime_error("Vulkan clear received a stale texture");
+		const VkImage nativeImage = requireTextureForRecording(
+			m_table, texture, "Vulkan color clear");
 		trackTexture(texture);
 		const VkClearColorValue value{{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
 		const VkImageSubresourceRange vkRange{
@@ -998,13 +1187,20 @@ namespace demo::rhi::vulkan
 		requireRecording("VulkanCommandBuffer::resetQueryPool");
 		if (m_active != EncoderKind::none)
 			throw std::runtime_error("VulkanCommandBuffer::resetQueryPool requires no active encoder");
-		const VkQueryPool nativePool = m_table != nullptr ? m_table->resolveQueryPool(pool) : VK_NULL_HANDLE;
-		if (nativePool == VK_NULL_HANDLE || queryCount == 0)
+		const QueryPoolRecord& record = requireQueryPoolForRecording(
+			m_table, pool, "VulkanCommandBuffer::resetQueryPool");
+		if (queryCount == 0)
 		{
+			if(firstQuery > record.count)
+				throw std::runtime_error(
+					"VulkanCommandBuffer::resetQueryPool range exceeds the pool");
 			return;
 		}
+		if(firstQuery >= record.count || queryCount > record.count - firstQuery)
+			throw std::runtime_error(
+				"VulkanCommandBuffer::resetQueryPool range exceeds the pool");
 		trackQueryPool(pool);
-		vkCmdResetQueryPool(m_cmd, nativePool, firstQuery,
+		vkCmdResetQueryPool(m_cmd, record.nativePool, firstQuery,
 		                    queryCount);
 	}
 
@@ -1013,16 +1209,16 @@ namespace demo::rhi::vulkan
 		requireRecording("VulkanCommandBuffer::writeTimestamp");
 		if (m_active != EncoderKind::none)
 			throw std::runtime_error("VulkanCommandBuffer::writeTimestamp requires no active encoder");
-		const VkQueryPool nativePool = m_table != nullptr ? m_table->resolveQueryPool(pool) : VK_NULL_HANDLE;
-		if (nativePool == VK_NULL_HANDLE)
-		{
-			return;
-		}
+		const QueryPoolRecord& record = requireQueryPoolForRecording(
+			m_table, pool, "VulkanCommandBuffer::writeTimestamp");
+		if(queryIndex >= record.count)
+			throw std::runtime_error(
+				"VulkanCommandBuffer::writeTimestamp index exceeds the pool");
 		trackQueryPool(pool);
 		vkCmdWriteTimestamp2(m_cmd,
 		                     afterAllCommands
 			                     ? VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT
 			                     : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-		                     nativePool, queryIndex);
+		                     record.nativePool, queryIndex);
 	}
 } // namespace demo::rhi::vulkan

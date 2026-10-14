@@ -1,0 +1,56 @@
+{
+  "configurations": [
+    {
+      "name": "x64-debug",
+      "generator": "Ninja",
+      "architecture": "x64",
+      "configurationType": "Debug",
+      "buildRoot": "G:\\Temp\\mgif-vs\\${name}",
+      "installRoot": "G:\\Temp\\mgif-vs-install\\${name}",
+      "inheritEnvironments": [
+        "msvc_x64_x64"
+      ],
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "BUILD_TESTING",
+          "value": "OFF",
+          "type": "BOOL"
+        },
+        {
+          "name": "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT",
+          "value": "ON",
+          "type": "BOOL"
+        }
+      ]
+    },
+    {
+      "name": "x64-release",
+      "generator": "Ninja",
+      "architecture": "x64",
+      "configurationType": "Release",
+      "buildRoot": "G:\\Temp\\mgif-vs\\${name}",
+      "installRoot": "G:\\Temp\\mgif-vs-install\\${name}",
+      "inheritEnvironments": [
+        "msvc_x64_x64"
+      ],
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "BUILD_TESTING",
+          "value": "OFF",
+          "type": "BOOL"
+        },
+        {
+          "name": "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT",
+          "value": "ON",
+          "type": "BOOL"
+        }
+      ]
+    }
+  ]
+}

@@ -28,6 +28,10 @@ public:
     rhi::CommandBuffer& commandBuffer,
     rhi::SubmitWaitPoint waitPoint = {},
     rhi::SubmitSignalPoint signalPoint = {});
+  // Abandons only the current unsubmitted recording. The graphics queue head
+  // must still match the value observed by beginFrame(); this never waits and
+  // never treats an unknown submit outcome as an abandoned frame.
+  [[nodiscard]] bool abandonFrame(rhi::CommandBuffer& commandBuffer) noexcept;
 
   void waitForFrame(uint32_t frameIndex);
   void waitForAllFrames();
@@ -35,6 +39,7 @@ public:
   [[nodiscard]] uint32_t frameCount() const noexcept;
   [[nodiscard]] uint32_t currentFrameIndex() const noexcept;
   [[nodiscard]] rhi::SubmissionToken currentFrameToken() const noexcept;
+  [[nodiscard]] bool isRecording() const noexcept;
   [[nodiscard]] rhi::Queue& queue() const;
 
 private:
@@ -50,6 +55,7 @@ private:
   std::vector<FrameSlot> m_frames;
   uint32_t m_currentFrameIndex{0};
   bool m_recording{false};
+  rhi::SubmissionToken m_recordingBaseline{};
 };
 
 }  // namespace demo

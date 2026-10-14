@@ -66,6 +66,18 @@ struct SubmissionTokenSet
   std::array<SubmissionToken, capacity> tokens{};
   uint32_t count{0};
 
+  [[nodiscard]] constexpr bool canRecord(SubmissionToken token) const noexcept
+  {
+    if(!token.isValid())
+      return true;
+    for(uint32_t index = 0; index < count; ++index)
+    {
+      if(tokens[index].queue == token.queue)
+        return true;
+    }
+    return count < capacity;
+  }
+
   [[nodiscard]] constexpr bool record(SubmissionToken token) noexcept
   {
     if(!token.isValid())

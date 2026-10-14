@@ -65,6 +65,7 @@ void FrameScheduler::shutdown()
   m_queue = nullptr;
   m_device = nullptr;
   m_currentFrameIndex = 0;
+  m_recordingBaseline = {};
 }
 
 rhi::CommandBuffer& FrameScheduler::beginFrame()
@@ -80,7 +81,9 @@ rhi::CommandBuffer& FrameScheduler::beginFrame()
     m_queue->wait(frame.submission);
   frame.allocator->reset(frame.submission);
   m_device->collectGarbage();
+  const rhi::SubmissionToken baseline = m_queue->lastSubmittedToken();
   frame.commandBuffer->begin(*frame.allocator);
+  m_recordingBaseline = baseline;
   m_recording = true;
   return *frame.commandBuffer;
 }
@@ -99,6 +102,11 @@ rhi::SubmissionToken FrameScheduler::submitFrame(
 
   commandBuffer.end();
 
+  // Upload work may have advanced the graphics queue after beginFrame(). Once
+  // this command buffer is executable, bind abandonment to the exact queue head
+  // immediately before its submit attempt.
+  m_recordingBaseline = m_queue->lastSubmittedToken();
+
   std::array<rhi::CommandBuffer*, 1> commandBuffers{&commandBuffer};
   std::array<rhi::SubmitWaitPoint, 1> waitPoints{waitPoint};
   std::array<rhi::SubmitSignalPoint, 1> signalPoints{signalPoint};
@@ -114,9 +122,77 @@ rhi::SubmissionToken FrameScheduler::submitFrame(
   };
   frame.submission = m_queue->submit(batch);
   m_recording = false;
+  m_recordingBaseline = {};
   m_currentFrameIndex =
     (m_currentFrameIndex + 1u) % static_cast<uint32_t>(m_frames.size());
   return frame.submission;
+}
+
+bool FrameScheduler::abandonFrame(rhi::CommandBuffer& commandBuffer) noexcept
+{
+  if(m_device == nullptr || m_queue == nullptr || m_frames.empty() || !m_recording)
+  {
+    return false;
+  }
+
+  FrameSlot& frame = m_frames[m_currentFrameIndex];
+  if(frame.commandBuffer == nullptr || frame.commandBuffer.get() != &commandBuffer)
+  {
+    return false;
+  }
+
+  try
+  {
+    rhi::CommandBufferState state = commandBuffer.state();
+    const rhi::SubmissionToken currentHead = m_queue->lastSubmittedToken();
+    if(state == rhi::CommandBufferState::recording)
+    {
+      // A recording command buffer cannot have been submitted. Queue progress
+      // since beginFrame therefore belongs to independent upload work completed
+      // before this frame's submit boundary.
+      m_recordingBaseline = currentHead;
+    }
+    else if(currentHead != m_recordingBaseline)
+    {
+      return false;
+    }
+
+    if(state == rhi::CommandBufferState::recording)
+    {
+      try
+      {
+        commandBuffer.end();
+      }
+      catch(...)
+      {
+        // A pass may have failed while an encoder was active. Close that
+        // encoder once, then retry ending the command buffer.
+        commandBuffer.endEncoding();
+        commandBuffer.end();
+      }
+      state = commandBuffer.state();
+    }
+
+    if(state != rhi::CommandBufferState::executable)
+    {
+      return false;
+    }
+
+    if(m_queue->lastSubmittedToken() != m_recordingBaseline)
+    {
+      return false;
+    }
+
+    // Leave the command buffer executable. beginFrame() will reset its
+    // allocator and mark it reusable before the next recording on this slot.
+    m_recording = false;
+    m_recordingBaseline = {};
+    return true;
+  }
+  catch(...)
+  {
+    return false;
+  }
 }
 
 void FrameScheduler::waitForFrame(uint32_t frameIndex)
@@ -153,6 +229,11 @@ rhi::SubmissionToken FrameScheduler::currentFrameToken() const noexcept
   if(m_currentFrameIndex >= m_frames.size())
     return {};
   return m_frames[m_currentFrameIndex].submission;
+}
+
+bool FrameScheduler::isRecording() const noexcept
+{
+  return m_recording;
 }
 
 rhi::Queue& FrameScheduler::queue() const

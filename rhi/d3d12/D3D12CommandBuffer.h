@@ -85,7 +85,7 @@ private:
 class D3D12CommandBuffer final : public CommandBuffer
 {
 public:
-  D3D12CommandBuffer() = default;
+  D3D12CommandBuffer();
   D3D12CommandBuffer(D3D12CommandAllocator& allocator,
                      void* nativeCommandList, D3D12Device* device);
   ~D3D12CommandBuffer() override;
@@ -146,8 +146,7 @@ private:
   uint32_t m_argumentTableCount{0};
   std::array<PipelineHandle, 64> m_pipelines{};
   uint32_t m_pipelineCount{0};
-  std::array<BufferHandle, 512> m_buffers{};
-  uint32_t m_bufferCount{0};
+  std::vector<BufferHandle> m_buffers;
   std::array<TextureHandle, 256> m_textures{};
   uint32_t m_textureCount{0};
   std::array<TextureViewHandle, 128> m_textureViews{};

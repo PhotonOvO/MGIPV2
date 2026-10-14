@@ -537,7 +537,7 @@ namespace demo
 			for (size_t d = 0; d < m_resources.uiImageViews.size(); ++d)
 			{
 				m_imguiTextureIds[d] = m_imguiRenderer->registerTexture(
-					m_resources.uiImageViews[d], rhi::ArgumentAccessIntent::readWrite);
+					m_resources.uiImageViews[d], rhi::ArgumentAccessIntent::sampledRead);
 			}
 		}
 
@@ -545,7 +545,7 @@ namespace demo
 		if (m_imguiRenderer != nullptr && m_imguiRenderer->isInitialized())
 		{
 			m_resources.outputTextureImID = m_imguiRenderer->registerTexture(
-				m_resources.outputTextureView, rhi::ArgumentAccessIntent::readWrite);
+				m_resources.outputTextureView, rhi::ArgumentAccessIntent::sampledRead);
 		}
 	}
 

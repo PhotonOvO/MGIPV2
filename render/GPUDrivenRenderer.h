@@ -38,17 +38,37 @@
 #include "passes/GPUDrivenTAAResolvePass.h"
 #include "passes/GPUDrivenPresentPass.h"
 #include "passes/GPUDrivenVisibilitySortPass.h"
+#if !defined(__ANDROID__)
+#include "passes/EditorPickingPass.h"
+#include "passes/EditorOverlayPass.h"
+#endif
 #include "RenderDevice.h"
 
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace demo
 {
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	class GPUDrivenSceneTransactionBridge;
+#endif
+#if !defined(__ANDROID__)
+	struct EditorGpuInteractionDiagnostics final
+	{
+		uint64_t occurrencePassExecutions{0u};
+		uint64_t highlightPassExecutions{0u};
+		editor::SelectionRevision lastHighlightSelectionRevision{0u};
+		uint32_t lastHighlightOccurrenceCount{0u};
+	};
+#endif
 	enum class GPUDrivenVisibilityOwnership : uint32_t
 	{
 		cpuBootstrap = 0,
@@ -282,13 +302,67 @@ namespace demo
 		std::vector<GPUDrivenPassDiagnostic> passDiagnostics;
 	};
 
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	enum class SceneTransactionFailurePoint : uint8_t
+	{
+		none = 0,
+		cpuStaging,
+		resourceAllocation,
+		descriptorStaging,
+		commandRecording,
+		queueSubmission,
+		prePublication,
+		retirementReservation,
+		retirementEnqueue,
+	};
+
+	struct SceneTransactionConcreteStateSnapshot
+	{
+		bool initialized{false};
+		bool resourceBearing{false};
+		uint64_t generation{0};
+		uint64_t descriptorGeneration{0};
+		uint64_t resourceCount{0};
+		uint64_t pendingRetiredGenerationCount{0};
+		uint64_t immediatelyDestroyedResourceCount{0};
+		uint64_t eventuallyDestroyedResourceCount{0};
+		uint64_t queueSubmissionCount{0};
+		rhi::SubmissionToken lastSubmissionToken{};
+		std::optional<editor::RendererTargetFence> fence;
+		editor::RendererSceneMappingSnapshot mapping;
+		std::vector<editor::RendererObjectHandle> meshHandles;
+		std::vector<editor::RendererObjectHandle> textureHandles;
+		std::vector<editor::RendererObjectHandle> materialHandles;
+		std::vector<editor::RendererObjectHandle> sceneObjectHandles;
+		std::vector<editor::RendererObjectHandle> cameraHandles;
+		std::vector<editor::RendererObjectHandle> lightHandles;
+		std::optional<glm::mat4> firstNodeWorldTransform;
+		std::optional<bool> firstNodeVisibility;
+		std::optional<SceneMaterial> firstMaterial;
+		std::optional<int32_t> firstPrimitiveMaterialIndex;
+		std::optional<SceneCamera> firstCamera;
+		std::optional<SceneLight> firstLight;
+		uint32_t rendererObjectCount{0};
+		uint32_t rendererDrawCount{0};
+		uint32_t deferredRegistryUpdateCount{0};
+		std::optional<glm::mat4> firstRendererWorldTransform;
+		std::optional<bool> firstRendererVisibility;
+		std::optional<uint32_t> firstRendererMaterialIndex;
+		std::optional<uint32_t> firstPlanInstanceMaterialIndex;
+		std::optional<uint32_t> firstPlanDrawMaterialIndex;
+		bool rendererStateMatchesGeneration{false};
+	};
+#endif
+
 	class GPUDrivenRenderer
+#if !defined(__ANDROID__)
+		: public editor::IEditorPickingPassBackend
+#endif
 	{
 	public:
-		explicit GPUDrivenRenderer(rhi::BackendType backend = rhi::defaultBackend())
-			: m_renderer(backend)
-		{
-		}
+		explicit GPUDrivenRenderer(rhi::BackendType backend = rhi::defaultBackend());
+		explicit GPUDrivenRenderer(std::unique_ptr<rhi::Device> sceneTransactionDevice);
+		~GPUDrivenRenderer();
 
 		[[nodiscard]] std::unique_ptr<rhi::Surface> createSurface() const { return m_renderer.createSurface(); }
 		void init(void* window, rhi::Surface& surface, bool vSync);
@@ -345,6 +419,75 @@ namespace demo
 		void updateSceneInstanceTransform(uint32_t instanceIndex, const glm::mat4& transform);
 		[[nodiscard]] bool removeSceneInstance(uint32_t instanceIndex);
 		void syncActiveSceneRuntimeState(SceneUploadResult& ioResult) const;
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		[[nodiscard]] RendererSceneTransactionInitializationResult
+		initializeSceneTransactions(RendererSceneTransactionInitialState initialState) noexcept;
+		// Scene replacement is the only production boundary allowed to tear down
+		// the transaction publisher. The implementation drains in-flight readers
+		// before releasing a published private generation.
+		void resetSceneTransactions() noexcept;
+		[[nodiscard]] editor::SceneApplyResult
+		applySceneChanges(const editor::ApplySceneChangeRequest& request) noexcept;
+		[[nodiscard]] editor::SceneApplyResult
+		applyFullSceneSnapshot(const ApplyFullSceneSnapshotRequest& request) noexcept;
+		[[nodiscard]] RendererSceneStateSnapshot activeSceneState() const noexcept;
+		[[nodiscard]] editor::SceneDeltaCounterSnapshot sceneDeltaCounters() const noexcept;
+		[[nodiscard]] SceneTransactionConcreteStateSnapshot
+		sceneTransactionConcreteState() const;
+		void setSceneTransactionFailurePoint(
+			SceneTransactionFailurePoint point,
+			uint32_t submissionIndex = 0u) noexcept;
+		[[nodiscard]] uint64_t collectSceneTransactionGarbage() noexcept;
+		[[nodiscard]] uint64_t sceneTransactionVisibleGeneration() const noexcept;
+		[[nodiscard]] editor::RendererInstanceId editorRendererIdentity() const noexcept
+		{
+			return m_editorRendererIdentity;
+		}
+		[[nodiscard]] editor::RendererDeviceId editorDeviceIdentity() const noexcept
+		{
+			return m_editorDeviceIdentity;
+		}
+#endif
+
+#if !defined(__ANDROID__)
+		[[nodiscard]] editor::EditorPickingBackendSubmission
+		enqueue(const editor::EditorPickRequest& request) noexcept override;
+		[[nodiscard]] std::optional<editor::EditorPickingBackendReadback>
+		pollOne() noexcept override;
+		void cancel(editor::EditorPickingPassTicket ticket) noexcept override;
+		void retireReadback(editor::EditorPickingPassTicket ticket,
+		                    rhi::SubmissionToken submission) noexcept override;
+		[[nodiscard]] std::optional<std::pair<editor::EditorPickFence, uint64_t>>
+		editorPickPublication() const noexcept;
+		[[nodiscard]] editor::SceneRenderOccurrenceSnapshot
+		editorOccurrenceSnapshot(
+			const editor::EditorPickRequest& request) const noexcept;
+		[[nodiscard]] std::optional<editor::RenderOccurrenceRecord>
+		editorResolveOccurrence(const editor::EditorPickFence& fence,
+		                        uint64_t occurrenceGeneration,
+		                        editor::RenderOccurrenceId occurrence) const noexcept;
+		[[nodiscard]] std::optional<editor::RenderOccurrenceRecord>
+		editorResolveOccurrence(const editor::EditorPickFence& fence,
+		                        uint64_t occurrenceGeneration,
+		                        editor::PrimitiveOccurrenceKey occurrence) const noexcept;
+		[[nodiscard]] bool editorNodeHighlightEligible(
+			const editor::EditorPickFence& fence,
+			uint64_t occurrenceGeneration, editor::NodeId node) const noexcept;
+		[[nodiscard]] bool editorPickingBusy() const noexcept;
+		[[nodiscard]] EditorGpuInteractionDiagnostics
+		editorInteractionDiagnostics() const noexcept;
+		[[nodiscard]] bool editorOverlayAvailable() const noexcept;
+		[[nodiscard]] EditorOverlayPassDiagnostics
+		editorOverlayDiagnostics() const noexcept;
+		[[nodiscard]] bool setEditorHighlight(
+			const editor::SceneSelectionValue& selection,
+			editor::SelectionRevision revision) noexcept;
+		void clearEditorHighlight() noexcept;
+		void invalidateEditorPickingPublication() noexcept;
+		void executeEditorOccurrencePass(const PassContext& context);
+		void executeEditorHighlightPass(const PassContext& context);
+#endif
 
 		void executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 		{
@@ -486,9 +629,19 @@ namespace demo
 
 		[[nodiscard]] bool tryGetMeshDrawIndex(MeshHandle handle, uint32_t& outDrawIndex) const;
 		[[nodiscard]] bool tryGetMeshHandleForDrawIndex(uint32_t drawIndex, MeshHandle& outHandle) const;
-		[[nodiscard]] std::span<const uint32_t> getOpaqueDrawIndices() const { return m_opaqueDrawIndices; }
-		[[nodiscard]] std::span<const uint32_t> getAlphaTestDrawIndices() const { return m_alphaTestDrawIndices; }
-		[[nodiscard]] std::span<const uint32_t> getTransparentDrawIndices() const { return m_transparentDrawIndices; }
+		[[nodiscard]] std::span<const uint32_t> getOpaqueDrawIndices() const;
+		[[nodiscard]] std::span<const uint32_t> getAlphaTestDrawIndices() const;
+		[[nodiscard]] std::span<const uint32_t> getTransparentDrawIndices() const;
+		// Transaction generations own private geometry buffers and cannot use the
+		// legacy shared-arena MDI stream. Raster passes use these immutable views to
+		// submit one direct draw per active transaction occurrence.
+		[[nodiscard]] bool hasActiveSceneTransactionState() const noexcept;
+		[[nodiscard]] std::span<const SceneUploadResult::SceneDrawRecord>
+		getActiveSceneTransactionDrawRecords() const noexcept;
+		[[nodiscard]] const MeshRecord*
+		tryGetActiveSceneTransactionMesh(MeshHandle handle) const noexcept;
+		[[nodiscard]] std::span<const shaderio::DrawUniforms>
+		getActivePersistentDrawUniforms() const noexcept;
 		[[nodiscard]] MeshPool& getMeshPool() { return m_renderer.getMeshPool(); }
 		[[nodiscard]] const MeshPool& getMeshPool() const { return m_renderer.getMeshPool(); }
 
@@ -1182,11 +1335,88 @@ namespace demo
 
 		void bindStaticPassResources();
 
+#if !defined(__ANDROID__)
+		struct EditorOverlayPreparedFrame final
+		{
+			EditorOverlayFrameTicket ticket{};
+			rhi::SubmissionToken queueBaseline{};
+			uint32_t frameIndex{0u};
+		};
+
+		void initEditorOverlayResources(uint32_t frameSlotCount);
+		void shutdownEditorOverlayResources() noexcept;
+		void prepareEditorOverlayFrame(uint32_t frameIndex,
+		                               const RenderParams& params) noexcept;
+		// Resolve a prepared overlay ticket without losing ownership when an
+		// independent queue submission raced the prepare call. The fallback to a
+		// published token is conservative: the pass remains fenced until that
+		// token completes and reports a recording failure if no overlay commands
+		// were actually recorded.
+		[[nodiscard]] bool tryResolveEditorOverlayPreparedFrame(
+			bool allowConservativeSubmittedRetire) noexcept;
+		void reconcileEditorOverlayFrameAfterRenderAttempt() noexcept;
+#endif
+
 		[[nodiscard]] bool submitPassGraph(
 			const RenderParams& params,
 			const RenderDevice::FrameSlotReadyCallback& onFrameSlotReady)
 		{
-			return m_renderer.renderWithPassExecutor(params, m_passExecutor, onFrameSlotReady);
+#if !defined(__ANDROID__)
+			const rhi::SubmissionToken editorSubmissionBefore =
+				m_renderer.getRHIDevice().getQueue(rhi::QueueClass::graphics)
+					!= nullptr
+					? m_renderer.getRHIDevice()
+						  .getQueue(rhi::QueueClass::graphics)
+						  ->lastSubmittedToken()
+					: rhi::SubmissionToken{};
+#endif
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			m_renderer.acquireSceneTransactionFrameResources(
+				m_sceneTransactionRendererStateLease != nullptr
+					? m_sceneTransactionRendererStateLease->deviceResources
+					: nullptr);
+#endif
+			bool submitted = false;
+			try
+			{
+				submitted = m_renderer.renderWithPassExecutor(
+					params, m_passExecutor, onFrameSlotReady);
+			}
+				catch (...)
+				{
+	#if !defined(__ANDROID__)
+					reconcileEditorOverlayFrameAfterRenderAttempt();
+					const rhi::SubmissionToken editorSubmissionAfter =
+					m_renderer.getRHIDevice().getQueue(rhi::QueueClass::graphics)
+						!= nullptr
+						? m_renderer.getRHIDevice()
+							  .getQueue(rhi::QueueClass::graphics)
+							  ->lastSubmittedToken()
+						: rhi::SubmissionToken{};
+				abandonEditorPickingRecordedFrame(
+					editorSubmissionAfter.isValid() &&
+					!(editorSubmissionAfter == editorSubmissionBefore)
+						? editorSubmissionAfter : rhi::SubmissionToken{});
+#endif
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+					m_renderer.releaseSceneTransactionFrameResources(
+						m_renderer.getRHIDevice()
+							.getQueue(rhi::QueueClass::graphics)
+							!= nullptr
+							? m_renderer.getRHIDevice()
+								  .getQueue(rhi::QueueClass::graphics)
+								  ->lastSubmittedToken()
+							: rhi::SubmissionToken{});
+#endif
+				throw;
+			}
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			if (!submitted)
+			{
+				m_renderer.releaseSceneTransactionFrameResources({});
+			}
+#endif
+			return submitted;
 		}
 
 		bool prepareAndDispatchVisibilityPatch(rhi::CommandBuffer& cmdBuffer,
@@ -1196,6 +1426,86 @@ namespace demo
 		                                       uint32_t outputOffset);
 
 	private:
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		friend class GPUDrivenSceneTransactionBridge;
+#endif
+		struct SceneTransactionRendererState
+		{
+			struct RegistryUpdate
+			{
+				GPUSceneObjectHandle handle{};
+				GPUSceneRegistrationDesc registration{};
+			};
+
+			uint64_t generation{0};
+			uint64_t descriptorGeneration{0};
+			rhi::GpuPtr objectBufferAddress{};
+			rhi::GpuPtr cullBufferAddress{};
+			rhi::BufferHandle objectBuffer{};
+			rhi::BufferHandle cullBuffer{};
+			GPUSceneRegistry* registry{nullptr};
+			std::vector<shaderio::GPUCullObject> overlayObjects;
+			std::vector<RegistryUpdate> registryUpdates;
+			SceneUploadResult upload;
+			std::vector<uint32_t> opaqueDrawIndices;
+			std::vector<uint32_t> alphaTestDrawIndices;
+			std::vector<uint32_t> transparentDrawIndices;
+			editor::SceneRenderOccurrenceSnapshot occurrenceSnapshot;
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			std::shared_ptr<RenderDevice::SceneTransactionResources> deviceResources;
+#endif
+		};
+#if !defined(__ANDROID__)
+		struct EditorPickingGpuTarget final
+		{
+			rhi::TextureHandle tokenTexture{};
+			rhi::TextureViewHandle tokenView{};
+			rhi::TextureHandle depthTexture{};
+			rhi::TextureViewHandle depthView{};
+			rhi::Extent2D extent{};
+			rhi::ResourceState tokenState{rhi::ResourceState::Undefined};
+			rhi::ResourceState depthState{rhi::ResourceState::Undefined};
+			rhi::SubmissionToken lastRasterSubmission{};
+		};
+
+		struct EditorPickingPublishedFrame final
+		{
+			std::shared_ptr<EditorPickingGpuTarget> target;
+			editor::EditorPickFence fence;
+			editor::SceneRenderOccurrenceSnapshot snapshot;
+			glm::mat4 viewProjection{1.0f};
+			editor::EditorProjectionConvention convention;
+			rhi::SubmissionToken rasterSubmission{};
+			rhi::ResourceState tokenStateBefore{rhi::ResourceState::Undefined};
+			rhi::ResourceState depthStateBefore{rhi::ResourceState::Undefined};
+		};
+
+		struct EditorPickingTicketResources final
+		{
+			editor::EditorPickingPassTicket ticket;
+			rhi::SubmissionToken submission;
+			editor::EditorPickRequest request;
+			EditorPickingPublishedFrame frame;
+			rhi::Queue* queue{nullptr};
+			std::unique_ptr<rhi::CommandAllocator> commandAllocator;
+			std::unique_ptr<rhi::CommandBuffer> commandBuffer;
+			rhi::ArgumentTableHandle argumentTable{};
+			rhi::BufferHandle sampleBuffer{};
+			rhi::BufferHandle readbackBuffer{};
+			bool cancelled{false};
+			bool completionOffered{false};
+		};
+
+		struct EditorHighlightFrameResources final
+		{
+			rhi::BufferHandle tokenMask{};
+			rhi::ArgumentTableHandle argumentTable{};
+			uint32_t maskCapacity{0u};
+			rhi::BufferHandle pickingDrawBuffer{};
+			rhi::ArgumentTableHandle pickingDrawTable{};
+			uint32_t pickingDrawCapacity{0u};
+		};
+#endif
 		struct DirtyRange
 		{
 			uint32_t first{0};
@@ -1345,8 +1655,42 @@ namespace demo
 		void shutdownPhase7Pipelines();
 		void updatePhase7Descriptors(uint32_t frameIndex);
 		void clearShadowPackedBufferMirrors();
+#if !defined(__ANDROID__)
+		void initEditorPickingResources();
+		void shutdownEditorPickingResources() noexcept;
+		void collectEditorPickingResources() noexcept;
+		void destroyEditorPickingTicketResources(
+			EditorPickingTicketResources& resources) noexcept;
+		void destroyEditorPickingTarget(
+			EditorPickingGpuTarget& target) noexcept;
+		[[nodiscard]] std::shared_ptr<EditorPickingGpuTarget>
+		ensureEditorPickingTarget(rhi::Extent2D extent);
+		void publishEditorPickingFrameSubmission(
+			rhi::SubmissionToken submission) noexcept;
+		void abandonEditorPickingRecordedFrame(
+			rhi::SubmissionToken submitted = {}) noexcept;
+		[[nodiscard]] std::optional<double> editorPickDistance(
+			const EditorPickingTicketResources& ticket, float depth) const noexcept;
+		void ensureEditorHighlightMaskCapacity(uint32_t frameIndex,
+		                                     uint32_t requiredCount);
+		void ensureEditorPickingDrawCapacity(uint32_t frameIndex,
+		                                    uint32_t requiredCount);
+#endif
 
 		RenderDevice m_renderer;
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		std::unique_ptr<GPUDrivenSceneTransactionBridge> m_sceneTransactionBridge;
+		std::atomic<std::shared_ptr<const SceneTransactionRendererState>>
+			m_sceneTransactionRendererState;
+		std::shared_ptr<const SceneTransactionRendererState>
+			m_sceneTransactionRendererStateLease;
+		uint32_t m_sceneTransactionConcreteObjectGeneration{1u};
+		uint64_t m_sceneTransactionRendererStateGeneration{0u};
+		uint64_t m_sceneTransactionAppliedRegistryGeneration{0u};
+		editor::RendererInstanceId m_editorRendererIdentity{};
+		editor::RendererDeviceId m_editorDeviceIdentity{};
+		bool m_editorDeviceIdentityInitialized{false};
+#endif
 		PassExecutor m_passExecutor;
 		GPUSceneRegistry m_sceneRegistry;
 		HiZDepthPyramid m_hiZDepthPyramid;
@@ -1369,6 +1713,8 @@ namespace demo
 		std::vector<std::vector<uint32_t>> m_drawIndicesByDrawRecord;
 		std::vector<uint32_t> m_dirtyPersistentDrawIndices;
 		std::vector<PersistentDrawFrameUploadState> m_persistentDrawFrameUploads;
+		std::optional<editor::SceneMaterialColorPreview>
+			m_editorMaterialColorPreview;
 		std::unique_ptr<GPUDrivenDepthPrepass> m_depthPrepass;
 		std::unique_ptr<GPUDrivenDepthPyramidPass> m_depthPyramidPass;
 		std::unique_ptr<GPUDrivenCullingPass> m_gpuCullingPass;
@@ -1442,6 +1788,11 @@ namespace demo
 		std::unique_ptr<GPUDrivenBloomDownsamplePass> m_bloomDownsamplePass;
 		std::unique_ptr<GPUDrivenFinalColorPass> m_finalColorPass;
 		std::unique_ptr<GPUDrivenForwardPass> m_forwardPass;
+#if !defined(__ANDROID__)
+		std::unique_ptr<RenderPassNode> m_editorOccurrencePass;
+		std::unique_ptr<RenderPassNode> m_editorHighlightPass;
+		std::unique_ptr<EditorOverlayPass> m_editorOverlayPass;
+#endif
 		std::unique_ptr<GPUDrivenPresentPass> m_presentPass;
 		std::unique_ptr<GPUDrivenImguiPass> m_imguiPass;
 		GPUDrivenSceneView m_sceneView{};
@@ -1510,6 +1861,35 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_aoDenoiseArgumentTables;
 		// SSR denoise reuses m_aoArgumentLayout (2 sampled + 1 storage, compute).
 		std::vector<rhi::ArgumentTableHandle> m_ssrDenoiseArgumentTables;
+#if !defined(__ANDROID__)
+		mutable std::mutex m_editorPickingMutex;
+		std::shared_ptr<EditorPickingGpuTarget> m_editorPickingTarget;
+		std::vector<std::shared_ptr<EditorPickingGpuTarget>>
+			m_retiredEditorPickingTargets;
+		std::optional<EditorPickingPublishedFrame> m_editorPickingPublishedFrame;
+		std::optional<EditorPickingPublishedFrame> m_editorPickingRecordedFrame;
+		std::vector<EditorPickingTicketResources> m_editorPickingTickets;
+		std::vector<EditorPickingTicketResources> m_retiredEditorPickingTickets;
+		std::vector<EditorPickingTicketResources> m_unfencedEditorPickingTickets;
+		std::vector<rhi::ArgumentTableHandle> m_editorPickTablePool;
+		std::vector<rhi::ArgumentTableHandle> m_editorPickAvailableTables;
+		std::optional<editor::EditorHighlightState> m_editorHighlightState;
+		EditorGpuInteractionDiagnostics m_editorInteractionDiagnostics{};
+		std::vector<EditorHighlightFrameResources> m_editorHighlightFrames;
+		std::optional<EditorOverlayPreparedFrame> m_editorOverlayPreparedFrame;
+		uint64_t m_nextEditorPickingTicket{0u};
+		bool m_editorPickingFormatsSupported{false};
+		rhi::ArgumentLayoutHandle m_editorPickSampleLayout{};
+		rhi::ArgumentLayoutHandle m_editorHighlightLayout{};
+		rhi::ShaderLibraryHandle m_editorPickingShaderLibrary{};
+		rhi::ShaderLibraryHandle m_editorHighlightShaderLibrary{};
+		PipelineHandle m_editorPickingOpaquePipeline{};
+		PipelineHandle m_editorPickingAlphaPipeline{};
+		PipelineHandle m_editorPickingOpaqueDoubleSidedPipeline{};
+		PipelineHandle m_editorPickingAlphaDoubleSidedPipeline{};
+		PipelineHandle m_editorPickSamplePipeline{};
+		PipelineHandle m_editorHighlightPipeline{};
+#endif
 		// Phase-7 compute targets: RHI-owned textures + their sampled/storage views.
 		rhi::TextureHandle m_aoRawImage{};
 		rhi::TextureViewHandle m_aoRawView{};

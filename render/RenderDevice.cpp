@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <type_traits>
@@ -201,6 +202,119 @@ namespace demo
 			return (value + mask) & ~mask;
 		}
 
+		[[nodiscard]] bool tryAddU64(uint64_t left, uint64_t right, uint64_t& out) noexcept
+		{
+			if (right > std::numeric_limits<uint64_t>::max() - left)
+			{
+				return false;
+			}
+			out = left + right;
+			return true;
+		}
+
+		[[nodiscard]] bool tryAlignUpU64(uint64_t value, uint64_t alignment, uint64_t& out) noexcept
+		{
+			const uint64_t safeAlignment = alignment == 0u ? 1u : alignment;
+			if ((safeAlignment & (safeAlignment - 1u)) != 0u)
+			{
+				return false;
+			}
+			uint64_t rounded = 0;
+			if (!tryAddU64(value, safeAlignment - 1u, rounded))
+			{
+				return false;
+			}
+			out = rounded & ~(safeAlignment - 1u);
+			return true;
+		}
+
+		[[nodiscard]] uint32_t textureMipExtent(uint32_t extent, uint32_t mip) noexcept
+		{
+			return mip >= 32u ? 1u : std::max(extent >> mip, 1u);
+		}
+
+		[[nodiscard]] bool validateKtxTextureUpload(
+			const Ktx2Loader::Ktx2Texture& texture,
+			const rhi::TextureDesc& textureDesc,
+			uint64_t sliceOffset,
+			uint64_t stagingCapacity,
+			std::string& outError)
+		{
+			const uint32_t mipLevels = textureDesc.mipLevels;
+			const uint64_t sliceSize = static_cast<uint64_t>(texture.data.size());
+			if (texture.mipOffsets.size() < mipLevels || texture.mipSizes.size() < mipLevels)
+			{
+				outError = "KTX mip tables do not cover every declared mip";
+				return false;
+			}
+			for (uint32_t mip = 0u; mip < mipLevels; ++mip)
+			{
+				const uint64_t offset = texture.mipOffsets[mip];
+				const uint64_t declaredBytes = texture.mipSizes[mip];
+				if (declaredBytes == 0u || offset > sliceSize || declaredBytes > sliceSize - offset)
+				{
+					outError = "KTX mip range exceeds the decoded payload";
+					return false;
+				}
+				const rhi::BufferTextureCopyDesc region{
+					.bufferOffset = offset,
+					.aspect = rhi::TextureAspect::color,
+					.mipLevel = mip,
+					.baseArrayLayer = 0u,
+					.layerCount = 1u,
+					.width = textureMipExtent(textureDesc.extent.width, mip),
+					.height = textureMipExtent(textureDesc.extent.height, mip),
+					.depth = 1u,
+				};
+				const TextureUploadValidationResult validation = validateTextureUploadRegion(
+					textureDesc, region, sliceOffset, sliceSize, stagingCapacity);
+				if (!validation.valid())
+				{
+					outError = std::string("KTX mip footprint validation failed: ") +
+						textureUploadValidationErrorName(validation.error);
+					return false;
+				}
+				if (validation.requiredBytes > declaredBytes)
+				{
+					outError = "KTX mip byte range is smaller than its exact format footprint";
+					return false;
+				}
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool validateRawRgba8TextureUpload(
+			const rhi::TextureDesc& textureDesc,
+			uint64_t sourceBytes,
+			uint64_t sliceOffset,
+			uint64_t stagingCapacity,
+			std::string& outError)
+		{
+			const rhi::BufferTextureCopyDesc region{
+				.aspect = rhi::TextureAspect::color,
+				.mipLevel = 0u,
+				.baseArrayLayer = 0u,
+				.layerCount = 1u,
+				.width = textureDesc.extent.width,
+				.height = textureDesc.extent.height,
+				.depth = 1u,
+			};
+			const TextureUploadValidationResult validation = validateTextureUploadRegion(
+				textureDesc, region, sliceOffset, sourceBytes, stagingCapacity);
+			if (!validation.valid())
+			{
+				outError = std::string("raw RGBA8 footprint validation failed: ") +
+					textureUploadValidationErrorName(validation.error);
+				return false;
+			}
+			if (validation.requiredBytes != sourceBytes)
+			{
+				outError = "raw RGBA8 payload is not the exact decoded format footprint";
+				return false;
+			}
+			return true;
+		}
+
 		[[nodiscard]] bool isUploadableGltfImage(const GltfImageData& imageData)
 		{
 			return (!imageData.pixels.empty() && imageData.width > 0 && imageData.height > 0)
@@ -310,39 +424,6 @@ namespace demo
 				totalSize += vertexCount * 48ull;
 				totalSize += static_cast<uint64_t>(meshData.indices.size()) * sizeof(uint32_t);
 				totalSize += 8; // alignment padding for vertex (alignof(float)) + index (alignof(uint32_t)) allocations
-			}
-
-			return totalSize;
-		}
-
-		[[nodiscard]] uint64_t computeSelectedTextureUploadSize(const GltfModel& model,
-		                                                        std::span<const uint32_t> textureIndices)
-		{
-			uint64_t totalSize = 0;
-			Ktx2Loader ktx2Loader;
-
-			for (const uint32_t textureIndex : textureIndices)
-			{
-				if (textureIndex >= model.images.size() || !isUploadableGltfImage(model.images[textureIndex]))
-				{
-					continue;
-				}
-
-				const GltfImageData& imageData = model.images[textureIndex];
-				Ktx2Loader::Ktx2Texture ktxTexture;
-				const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture);
-
-				if (hasKtx2Sidecar)
-				{
-					totalSize += std::max(static_cast<uint64_t>(ktxTexture.data.size()),
-					                      rawImageUploadBytes(model, imageData));
-					totalSize += 16;
-				}
-				else
-				{
-					totalSize += rawImageUploadBytes(model, imageData);
-					totalSize += 4;
-				}
 			}
 
 			return totalSize;
@@ -722,8 +803,9 @@ namespace demo
 		m_materials = MaterialResources{};
 		if (m_backend == rhi::BackendType::d3d12)
 		{
-			// Three frame-local tables must fit D3D12's 2048-entry shader-visible sampler heap.
-			m_materials.maxTextures = 512;
+			// Frame-local tables and overlapping scene-transaction generations share
+			// D3D12's 2048-entry shader-visible sampler heap.
+			m_materials.maxTextures = 256;
 		}
 
 		// Backend-neutral device creation (RDEV-06): the Vulkan loader bootstrap, WSI /
@@ -2313,7 +2395,12 @@ namespace demo
 				continue;
 			}
 
-			const MeshRecord* meshRecord = m_meshPool.tryGet(source.meshHandles[packedMesh.meshIndex]);
+			const MeshHandle meshHandle = source.meshHandles[packedMesh.meshIndex];
+			const MeshRecord* meshRecord = nullptr;
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			meshRecord = tryGetSceneTransactionMesh(meshHandle);
+#endif
+			if (meshRecord == nullptr) meshRecord = m_meshPool.tryGet(meshHandle);
 			if (meshRecord == nullptr)
 			{
 				continue;
@@ -2802,9 +2889,9 @@ namespace demo
 		ImGui::End();
 	}
 
-	void RenderDevice::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass,
-	                                                  uint32_t passIndex) const
-	{
+		void RenderDevice::PassProfilingHooks::beforePass(const PassContext& context, const PassNode& pass,
+		                                                  uint32_t passIndex) const
+		{
 		if (renderer != nullptr)
 		{
 			const char* passName = pass.getName();
@@ -3408,10 +3495,15 @@ namespace demo
 
 		{
 			demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
-			(void)m_perFrame.frameScheduler.submitFrame(
+			const rhi::SubmissionToken submitted =
+				m_perFrame.frameScheduler.submitFrame(
 				cmdBuffer,
 				m_swapchainDependent.acquireWaitPoint,
 				m_swapchainDependent.renderCompleteSignal);
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			m_lastSubmittedFrameToken = submitted;
+			releaseSceneTransactionFrameResources(submitted);
+#endif
 			m_perFrame.activeCommandBuffer = nullptr;
 		}
 
@@ -3548,7 +3640,11 @@ namespace demo
 		for (uint32_t meshIndex = 0; meshIndex < meshCount; ++meshIndex)
 		{
 			const MeshHandle meshHandle = meshHandles[meshIndex];
-			const MeshRecord* mesh = m_meshPool.tryGet(meshHandle);
+			const MeshRecord* mesh = nullptr;
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+			mesh = tryGetSceneTransactionMesh(meshHandle);
+#endif
+			if (mesh == nullptr) mesh = m_meshPool.tryGet(meshHandle);
 			if (mesh == nullptr)
 			{
 				continue;
@@ -5275,8 +5371,86 @@ namespace demo
 		}
 	}
 
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	std::shared_ptr<RenderDevice::SceneTransactionResources>
+	RenderDevice::loadPublishedSceneTransactionResources() const noexcept
+	{
+		if (std::shared_ptr<SceneTransactionResources> frameResources =
+				m_sceneTransactionFrameResources.load(std::memory_order_acquire))
+		{
+			return frameResources;
+		}
+		for (;;)
+		{
+			const uint64_t generationBefore =
+				m_sceneTransactionPublishedGeneration.load(std::memory_order_acquire);
+			std::shared_ptr<SceneTransactionResources> resources =
+				m_sceneTransactionResources.load(std::memory_order_acquire);
+			const uint64_t generationAfter =
+				m_sceneTransactionPublishedGeneration.load(std::memory_order_acquire);
+			if (generationBefore != generationAfter)
+			{
+				continue;
+			}
+			if (resources == nullptr)
+			{
+				if (generationAfter == 0u) return nullptr;
+				continue;
+			}
+			if (resources->publicationGeneration == generationAfter)
+			{
+				return resources;
+			}
+		}
+	}
+
+	void RenderDevice::acquireSceneTransactionFrameResources(
+		std::shared_ptr<SceneTransactionResources> resources) noexcept
+	{
+		m_lastSubmittedFrameToken = {};
+		if (resources == nullptr || resources->frameUse == nullptr)
+		{
+			m_sceneTransactionFrameResources.store(nullptr, std::memory_order_release);
+			return;
+		}
+		resources->frameUse->recordingCount.fetch_add(1u, std::memory_order_acq_rel);
+		m_sceneTransactionFrameResources.store(std::move(resources),
+		                                      std::memory_order_release);
+	}
+
+	void RenderDevice::releaseSceneTransactionFrameResources(
+		rhi::SubmissionToken token) noexcept
+	{
+		std::shared_ptr<SceneTransactionResources> resources =
+			m_sceneTransactionFrameResources.exchange(nullptr,
+			                                          std::memory_order_acq_rel);
+		if (resources == nullptr || resources->frameUse == nullptr) return;
+		auto& frameUse = *resources->frameUse;
+		if (token.isValid() && token.queue == frameUse.queue)
+		{
+			uint64_t observed = frameUse.latestSubmissionValue.load(
+				std::memory_order_relaxed);
+			while (observed < token.value &&
+			       !frameUse.latestSubmissionValue.compare_exchange_weak(
+				       observed, token.value,
+				       std::memory_order_release, std::memory_order_relaxed))
+			{
+			}
+		}
+		frameUse.recordingCount.fetch_sub(1u, std::memory_order_release);
+	}
+#endif
+
 	void RenderDevice::syncMaterialArgumentTable(uint32_t frameIndex)
 	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		if (loadPublishedSceneTransactionResources() != nullptr)
+		{
+			// The complete persistent table was written while the generation was
+			// private. Per-frame legacy table rewrites must not overwrite it.
+			return;
+		}
+#endif
 		if (frameIndex >= m_materials.materialArgumentTables.size() || frameIndex >= m_materials.
 			materialArgumentTableGenerations.size())
 		{
@@ -5342,6 +5516,14 @@ namespace demo
 
 	rhi::ArgumentTableHandle RenderDevice::getCurrentMaterialArgumentTable() const
 	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr && !transaction->descriptorTable.isNull())
+		{
+			return transaction->descriptorTable;
+		}
+#endif
 		if (m_materials.materialArgumentTables.empty())
 		{
 			return m_materials.materialArgumentTable;
@@ -5529,15 +5711,10 @@ namespace demo
 	                                                                    uint32_t height,
 	                                                                    const char* debugName)
 	{
-		ASSERT(width > 0 && height > 0, "Raw RGBA8 image dimensions must be non-zero");
-		const uint64_t expectedByteSize = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4u;
-		ASSERT(static_cast<uint64_t>(rgba8Pixels.size_bytes()) == expectedByteSize,
-		       "Raw RGBA8 image byte size does not match its dimensions");
 		ASSERT(debugName != nullptr, "Raw RGBA8 image must have a debug name");
 
 		const uint32_t mipLevels = 1;
-
-		const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
+		const rhi::TextureDesc imageDesc{
 			.dimension = rhi::TextureDimension::e2D,
 			.format = rhi::TextureFormat::rgba8Unorm,
 			.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst |
@@ -5546,7 +5723,29 @@ namespace demo
 			.mipLevels = mipLevels,
 			.arrayLayers = 1,
 			.debugName = debugName,
-		});
+		};
+		const rhi::BufferTextureCopyDesc uploadRegion{
+			.aspect = rhi::TextureAspect::color,
+			.mipLevel = 0,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+			.width = width,
+			.height = height,
+			.depth = 1,
+		};
+		const uint64_t sourceBytes = static_cast<uint64_t>(rgba8Pixels.size_bytes());
+		const TextureUploadValidationResult preflight = validateTextureUploadRegion(
+			imageDesc, uploadRegion, 0u, sourceBytes, sourceBytes);
+		if (!preflight.valid() || preflight.requiredBytes != sourceBytes)
+		{
+			LOGE("Rejecting raw RGBA8 image upload before RHI effects: reason=%s required=%llu source=%llu",
+			     textureUploadValidationErrorName(preflight.error),
+			     static_cast<unsigned long long>(preflight.requiredBytes),
+			     static_cast<unsigned long long>(sourceBytes));
+			return {};
+		}
+
+		const rhi::TextureHandle imageHandle = m_device.device->createTexture(imageDesc);
 		const rhi::TextureSubresourceRange imageRange{
 			.aspect = rhi::TextureAspect::color,
 			.baseMipLevel = 0,
@@ -5567,19 +5766,9 @@ namespace demo
 		upload.init(*m_device.device, static_cast<uint64_t>(dataSpan.size_bytes()));
 		const BatchUploadContext::Slice slice = upload.allocate(static_cast<uint64_t>(dataSpan.size_bytes()), 4);
 		std::memcpy(slice.cpuPtr, dataSpan.data(), dataSpan.size_bytes());
-		upload.recordTextureUpload(
-			slice,
-			imageHandle,
-			rhi::BufferTextureCopyDesc{
-				.texture = imageHandle,
-				.aspect = rhi::TextureAspect::color,
-				.mipLevel = 0,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-				.width = width,
-				.height = height,
-				.depth = 1,
-			});
+		const TextureUploadValidationResult recorded = upload.recordTextureUpload(
+			slice, imageHandle, imageDesc, uploadRegion);
+		ASSERT(recorded.valid(), "Preflighted raw RGBA8 upload changed before command recording");
 		upload.executeUploads(cmd);
 
 		const rhi::TextureBarrier uploadEndBarrier{
@@ -5797,17 +5986,183 @@ namespace demo
 
 	const RenderDevice::MaterialResources::TextureHotData* RenderDevice::tryGetTextureHot(TextureHandle handle) const
 	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr)
+		{
+			for (const auto& entry : transaction->textures)
+			{
+				if (entry.handle == handle)
+				{
+					return &entry.record.hot;
+				}
+			}
+		}
+#endif
 		const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
 		return textureRecord != nullptr ? &textureRecord->hot : nullptr;
 	}
 
 	const RenderDevice::MaterialResources::MaterialRecord* RenderDevice::tryGetMaterial(MaterialHandle handle) const
 	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr)
+		{
+			for (const auto& entry : transaction->materials)
+			{
+				if (entry.handle == handle)
+				{
+					return &entry.record;
+				}
+			}
+		}
+#endif
 		return m_materials.materialPool.tryGet(handle);
 	}
 
+	RenderDevice::MaterialResources::MaterialRecord* RenderDevice::tryGetMaterial(MaterialHandle handle)
+	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr)
+		{
+			for (auto& entry : transaction->materials)
+			{
+				if (entry.handle == handle)
+				{
+					return &entry.record;
+				}
+			}
+		}
+#endif
+		return m_materials.materialPool.tryGet(handle);
+	}
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	bool RenderDevice::isMaterialHandleLive(MaterialHandle handle) const noexcept
+	{
+		return tryGetMaterial(handle) != nullptr;
+	}
+
+	const MeshRecord* RenderDevice::tryGetSceneTransactionMesh(MeshHandle handle) const noexcept
+	{
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction == nullptr)
+		{
+			return nullptr;
+		}
+		for (const auto& entry : transaction->meshes)
+		{
+			if (entry.handle == handle)
+			{
+				return &entry.record;
+			}
+		}
+		return nullptr;
+	}
+
+	bool RenderDevice::updateMaterialParameters(
+		MaterialHandle handle,
+		const editor::SceneMaterialParametersValue& parameters) noexcept
+	{
+		MaterialResources::MaterialRecord* material = tryGetMaterial(handle);
+		if (material == nullptr)
+		{
+			return false;
+		}
+		material->baseColorFactor = glm::vec4(
+			static_cast<float>(parameters.baseColorFactor[0]),
+			static_cast<float>(parameters.baseColorFactor[1]),
+			static_cast<float>(parameters.baseColorFactor[2]),
+			static_cast<float>(parameters.baseColorFactor[3]));
+		material->metallicFactor = static_cast<float>(parameters.metallicFactor);
+		material->roughnessFactor = static_cast<float>(parameters.roughnessFactor);
+		material->emissiveFactor = glm::vec3(
+			static_cast<float>(parameters.emissiveFactor[0]),
+			static_cast<float>(parameters.emissiveFactor[1]),
+			static_cast<float>(parameters.emissiveFactor[2]));
+		material->alphaCutoff = static_cast<float>(parameters.alphaCutoff);
+		material->alphaMode = static_cast<int32_t>(parameters.alphaMode);
+		material->doubleSided = parameters.doubleSided;
+		return true;
+	}
+
+	bool RenderDevice::updateMaterialTextureBinding(
+		MaterialHandle handle,
+		editor::SceneTextureSemantic semantic,
+		TextureHandle texture) noexcept
+	{
+		MaterialResources::MaterialRecord* material = tryGetMaterial(handle);
+		if (material == nullptr ||
+			(!texture.isNull() && tryGetTextureHot(texture) == nullptr))
+		{
+			return false;
+		}
+
+		switch (semantic)
+		{
+		case editor::SceneTextureSemantic::BaseColor:
+			material->baseColorTexture = texture;
+			material->sampledTexture = texture;
+			break;
+		case editor::SceneTextureSemantic::MetallicRoughness:
+			material->metallicRoughnessTexture = texture;
+			break;
+		case editor::SceneTextureSemantic::Normal:
+			material->normalTexture = texture;
+			break;
+		case editor::SceneTextureSemantic::Occlusion:
+			material->occlusionTexture = texture;
+			break;
+		case editor::SceneTextureSemantic::Emissive:
+			material->emissiveTexture = texture;
+			break;
+		}
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr)
+		{
+			++transaction->descriptorGeneration;
+		}
+		else
+		{
+			++m_materials.materialDescriptorGeneration;
+		}
+		return true;
+	}
+
+	void RenderDevice::waitForIdle(editor::SceneDeviceIdleReason reason)
+	{
+		const size_t index = editor::sceneDeviceIdleReasonIndex(reason);
+		if (index < m_sceneDeviceIdleCounts.size())
+		{
+			++m_sceneDeviceIdleCounts[index];
+		}
+		waitForIdle();
+	}
+#endif
+
 	const RenderDevice::MaterialResources::TextureColdData* RenderDevice::tryGetTextureCold(TextureHandle handle) const
 	{
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		const std::shared_ptr<SceneTransactionResources> transaction =
+			loadPublishedSceneTransactionResources();
+		if (transaction != nullptr)
+		{
+			for (const auto& entry : transaction->textures)
+			{
+				if (entry.handle == handle)
+				{
+					return &entry.record.cold;
+				}
+			}
+		}
+#endif
 		const MaterialResources::TextureRecord* textureRecord = m_materials.texturePool.tryGet(handle);
 		return textureRecord != nullptr ? &textureRecord->cold : nullptr;
 	}
@@ -5873,12 +6228,136 @@ namespace demo
 		result.materials.resize(asset.materials.size(), kNullMaterialHandle);
 		result.textures.resize(asset.textures.size(), kNullTextureHandle);
 
+		struct PreparedSceneTextureUpload
+		{
+			const TextureUploadPlan* plan{nullptr};
+			rhi::TextureDesc textureDesc{};
+			Ktx2Loader::Ktx2Texture ktx{};
+			const uint8_t* source{nullptr};
+			size_t sourceSize{0u};
+			uint64_t alignment{1u};
+			uint64_t sliceOffset{0u};
+			bool isKtx{false};
+		};
+		std::vector<PreparedSceneTextureUpload> preparedTextureUploads;
+		preparedTextureUploads.reserve(plan.textures.size());
 		uint64_t estimatedTextureUploadBytes = 0;
 		uint64_t estimatedVertexUploadBytes = 0;
 		uint64_t estimatedIndexUploadBytes = 0;
 		for (const TextureUploadPlan& texturePlan : plan.textures)
 		{
-			estimatedTextureUploadBytes += texturePlan.payloadByteSize;
+			if (texturePlan.textureIndex >= asset.textures.size())
+			{
+				LOGE("Rejecting SceneAsset texture upload before RHI effects: texture index is out of range");
+				return result;
+			}
+			const SceneTexture& texture = asset.textures[texturePlan.textureIndex];
+			if (texturePlan.payloadByteSize == 0u ||
+				texturePlan.payloadSrcOffset > asset.texturePayload.size() ||
+				texturePlan.payloadByteSize > asset.texturePayload.size() - texturePlan.payloadSrcOffset ||
+				texturePlan.payloadSrcOffset != texture.payloadOffset ||
+				texturePlan.payloadByteSize != texture.payloadSize)
+			{
+				LOGE("Rejecting SceneAsset texture upload before RHI effects: texture %u payload range is invalid",
+				     texturePlan.textureIndex);
+				return result;
+			}
+
+			PreparedSceneTextureUpload prepared{};
+			prepared.plan = &texturePlan;
+			prepared.source = asset.texturePayload.data() + texturePlan.payloadSrcOffset;
+			prepared.sourceSize = static_cast<size_t>(texturePlan.payloadByteSize);
+			prepared.isKtx = texturePlan.payloadKind == TexturePayloadKind::Ktx2Container;
+			prepared.alignment = prepared.isKtx ? 16u : 4u;
+			if (prepared.isKtx != texture.isKtx2)
+			{
+				LOGE("Rejecting SceneAsset texture upload before RHI effects: texture %u payload kind is inconsistent",
+				     texturePlan.textureIndex);
+				return result;
+			}
+
+			if (prepared.isKtx)
+			{
+				const Ktx2ContainerValidationResult containerValidation =
+					validateKtx2ContainerRanges(std::span<const uint8_t>{
+						prepared.source, prepared.sourceSize});
+				if (!containerValidation.valid())
+				{
+					LOGE("Rejecting SceneAsset KTX texture %u before RHI effects: container-%s",
+					     texturePlan.textureIndex,
+					     ktx2ContainerValidationErrorName(containerValidation.error));
+					return result;
+				}
+				Ktx2Loader loader;
+				if (!loader.loadFromMemory(prepared.source, prepared.sourceSize, prepared.ktx))
+				{
+					LOGE("Rejecting SceneAsset KTX texture %u before RHI effects: %s",
+					     texturePlan.textureIndex, loader.getLastError().c_str());
+					return result;
+				}
+				prepared.source = prepared.ktx.data.data();
+				prepared.sourceSize = prepared.ktx.data.size();
+				prepared.textureDesc = {
+					.dimension = rhi::TextureDimension::e2D,
+					.format = prepared.ktx.format,
+					.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
+					.extent = {prepared.ktx.width, prepared.ktx.height, 1u},
+					.mipLevels = std::max(prepared.ktx.mipLevels, 1u),
+					.arrayLayers = 1u,
+					.debugName = "SceneAssetTexture",
+				};
+				if (!m_device.device->isFormatSupported(
+						prepared.ktx.format, rhi::FormatFeatureFlag::sampledImage))
+				{
+					LOGE("Rejecting SceneAsset KTX texture %u before RHI effects: unsupported format %s",
+					     texturePlan.textureIndex, formatDisplayName(prepared.ktx.format));
+					return result;
+				}
+			}
+			else
+			{
+				if ((texturePlan.format != rhi::TextureFormat::rgba8Unorm &&
+					 texturePlan.format != rhi::TextureFormat::rgba8Srgb) ||
+					texturePlan.format != texture.format ||
+					texturePlan.width != texture.width || texturePlan.height != texture.height ||
+					texturePlan.mipLevels != 1u || texture.mipLevels != 1u)
+				{
+					LOGE("Rejecting SceneAsset raw texture %u before RHI effects: raw payload is not one RGBA8 mip",
+					     texturePlan.textureIndex);
+					return result;
+				}
+				prepared.textureDesc = {
+					.dimension = rhi::TextureDimension::e2D,
+					.format = texturePlan.format,
+					.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
+					.extent = {texturePlan.width, texturePlan.height, 1u},
+					.mipLevels = 1u,
+					.arrayLayers = 1u,
+					.debugName = "SceneAssetTexture",
+				};
+			}
+
+			uint64_t sliceEnd = 0;
+			if (!tryAlignUpU64(estimatedTextureUploadBytes, prepared.alignment, prepared.sliceOffset) ||
+				!tryAddU64(prepared.sliceOffset, prepared.sourceSize, sliceEnd))
+			{
+				LOGE("Rejecting SceneAsset texture upload before RHI effects: aggregate staging layout overflow");
+				return result;
+			}
+			std::string footprintError;
+			const bool footprintValid = prepared.isKtx
+				? validateKtxTextureUpload(
+					prepared.ktx, prepared.textureDesc, prepared.sliceOffset, sliceEnd, footprintError)
+				: validateRawRgba8TextureUpload(
+					prepared.textureDesc, prepared.sourceSize, prepared.sliceOffset, sliceEnd, footprintError);
+			if (!footprintValid)
+			{
+				LOGE("Rejecting SceneAsset texture %u before RHI effects: %s",
+				     texturePlan.textureIndex, footprintError.c_str());
+				return result;
+			}
+			estimatedTextureUploadBytes = sliceEnd;
+			preparedTextureUploads.push_back(std::move(prepared));
 		}
 		for (const MeshUploadPlan& meshPlan : plan.meshes)
 		{
@@ -5900,59 +6379,18 @@ namespace demo
 		                     static_cast<uint64_t>(estimatedVertexUploadBytes + estimatedIndexUploadBytes));
 		m_meshPool.reserve(estimatedVertexUploadBytes, estimatedIndexUploadBytes, cmd);
 
-		for (const TextureUploadPlan& texturePlan : plan.textures)
+		for (PreparedSceneTextureUpload& prepared : preparedTextureUploads)
 		{
-			if (texturePlan.textureIndex >= asset.textures.size() || !result.textures[texturePlan.textureIndex].
-				isNull())
+			const TextureUploadPlan& texturePlan = *prepared.plan;
+			if (!result.textures[texturePlan.textureIndex].isNull())
 			{
 				continue;
 			}
-
-			const SceneTexture& texture = asset.textures[texturePlan.textureIndex];
-			if (texture.payloadSize == 0 || texture.payloadOffset + texture.payloadSize > asset.texturePayload.size())
-			{
-				continue;
-			}
-
-			const uint8_t* payloadData = asset.texturePayload.data() + texture.payloadOffset;
-			const size_t payloadSize = static_cast<size_t>(texture.payloadSize);
-			rhi::TextureFormat rhiFormat = texturePlan.format;
-			uint32_t width = texturePlan.width;
-			uint32_t height = texturePlan.height;
-			uint32_t mipLevels = std::max(texturePlan.mipLevels, 1u);
-			Ktx2Loader::Ktx2Texture ktxTexture;
-			const bool isKtxPayload = texturePlan.payloadKind == TexturePayloadKind::Ktx2Container;
-			if (isKtxPayload)
-			{
-				Ktx2Loader loader;
-				if (!loader.loadFromMemory(payloadData, payloadSize, ktxTexture))
-				{
-					LOGW("Skipping SceneAsset KTX2 texture %u: %s", texturePlan.textureIndex,
-					     loader.getLastError().c_str());
-					continue;
-				}
-				if (!m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage))
-				{
-					LOGW("Skipping unsupported SceneAsset KTX2 texture format %s for texture %u",
-					     formatDisplayName(ktxTexture.format),
-					     texturePlan.textureIndex);
-					continue;
-				}
-				rhiFormat = ktxTexture.format;
-				width = ktxTexture.width;
-				height = ktxTexture.height;
-				mipLevels = std::max(ktxTexture.mipLevels, 1u);
-			}
-
-			const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
-				.dimension = rhi::TextureDimension::e2D,
-				.format = rhiFormat,
-				.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
-				.extent = {width, height, 1},
-				.mipLevels = mipLevels,
-				.arrayLayers = 1,
-				.debugName = "SceneAssetTexture",
-			});
+			const rhi::TextureFormat rhiFormat = prepared.textureDesc.format;
+			const uint32_t width = prepared.textureDesc.extent.width;
+			const uint32_t height = prepared.textureDesc.extent.height;
+			const uint32_t mipLevels = prepared.textureDesc.mipLevels;
+			const rhi::TextureHandle imageHandle = m_device.device->createTexture(prepared.textureDesc);
 			const rhi::TextureSubresourceRange imageRange{
 				.aspect = rhi::TextureAspect::color,
 				.baseMipLevel = 0,
@@ -5969,34 +6407,37 @@ namespace demo
 			cmd.resourceBarrier(std::span{&uploadBeginBarrier, 1}, {});
 			textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
-			if (isKtxPayload)
+			const BatchUploadContext::Slice slice = textureBatchUpload.allocate(
+				prepared.sourceSize, prepared.alignment);
+			ASSERT(slice.offset == prepared.sliceOffset,
+			       "SceneAsset texture staging layout changed after preflight");
+			std::memcpy(slice.cpuPtr, prepared.source, prepared.sourceSize);
+			if (prepared.isKtx)
 			{
-				const BatchUploadContext::Slice slice = textureBatchUpload.allocate(ktxTexture.data.size(), 16);
-				std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
-
 				for (uint32_t mip = 0; mip < mipLevels; ++mip)
 				{
 					const rhi::BufferTextureCopyDesc region{
-						.bufferOffset = ktxTexture.mipOffsets[mip],
+						.bufferOffset = prepared.ktx.mipOffsets[mip],
 						.texture = imageHandle,
 						.aspect = rhi::TextureAspect::color,
 						.mipLevel = mip,
 						.baseArrayLayer = 0,
 						.layerCount = 1,
-						.width = std::max(width >> mip, 1u),
-						.height = std::max(height >> mip, 1u),
+						.width = textureMipExtent(width, mip),
+						.height = textureMipExtent(height, mip),
 						.depth = 1,
 					};
-					textureBatchUpload.recordTextureUpload(slice, imageHandle, region);
+					const TextureUploadValidationResult recorded = textureBatchUpload.recordTextureUpload(
+						slice, imageHandle, prepared.textureDesc, region);
+					ASSERT(recorded.valid(), "Preflighted SceneAsset KTX mip changed before command recording");
 				}
 			}
 			else
 			{
-				const BatchUploadContext::Slice slice = textureBatchUpload.allocate(payloadSize, 4);
-				std::memcpy(slice.cpuPtr, payloadData, payloadSize);
-				textureBatchUpload.recordTextureUpload(
+				const TextureUploadValidationResult recorded = textureBatchUpload.recordTextureUpload(
 					slice,
 					imageHandle,
+					prepared.textureDesc,
 					rhi::BufferTextureCopyDesc{
 						.texture = imageHandle,
 						.aspect = rhi::TextureAspect::color,
@@ -6007,6 +6448,7 @@ namespace demo
 						.height = height,
 						.depth = 1,
 					});
+				ASSERT(recorded.valid(), "Preflighted SceneAsset RGBA8 upload changed before command recording");
 			}
 
 			const rhi::TextureViewHandle imageViewHandle = m_device.device->createTextureView(rhi::TextureViewCreateDesc{
@@ -6077,6 +6519,7 @@ namespace demo
 			record.emissiveFactor = materialPlan.emissiveFactor;
 			record.alphaMode = materialPlan.alphaMode;
 			record.alphaCutoff = materialPlan.alphaCutoff;
+			record.doubleSided = materialPlan.doubleSided;
 			record.descriptorIndex = static_cast<rhi::ResourceIndex>(materialPlan.materialIndex);
 			record.debugName = asset.materials[materialPlan.materialIndex].name.empty()
 				                   ? "scene-material"
@@ -6398,10 +6841,127 @@ namespace demo
 			initializeGltfUploadResult(model, ioResult);
 		}
 
+		struct PreparedGltfTextureUpload
+		{
+			uint32_t textureIndex{0u};
+			const GltfImageData* rawImage{nullptr};
+			Ktx2Loader::Ktx2Texture ktx{};
+			std::filesystem::path ktxPath;
+			rhi::TextureDesc textureDesc{};
+			const uint8_t* source{nullptr};
+			size_t sourceSize{0u};
+			uint64_t alignment{1u};
+			uint64_t sliceOffset{0u};
+			uint32_t requestedMipLevels{1u};
+			bool isKtx{false};
+		};
+		std::vector<PreparedGltfTextureUpload> preparedTextureUploads;
+		preparedTextureUploads.reserve(textureIndices.size());
+		uint64_t estimatedTextureUploadBytes = 0u;
+		for (const uint32_t textureIndex : textureIndices)
+		{
+			if (textureIndex >= model.images.size() || !ioResult.textures[textureIndex].isNull())
+			{
+				continue;
+			}
+			const GltfImageData& imageData = model.images[textureIndex];
+			if (!isUploadableGltfImage(imageData))
+			{
+				continue;
+			}
+
+			PreparedGltfTextureUpload prepared{};
+			prepared.textureIndex = textureIndex;
+			Ktx2Loader loader;
+			const bool loadedKtx = tryLoadKtx2Texture(
+				model, imageData, loader, prepared.ktx, &prepared.ktxPath);
+			prepared.isKtx = loadedKtx && m_device.device->isFormatSupported(
+				prepared.ktx.format, rhi::FormatFeatureFlag::sampledImage);
+			if (loadedKtx && !prepared.isKtx)
+			{
+				LOGW("Unsupported KTX2 format %s for %s; validating the raw fallback before upload",
+				     formatDisplayName(prepared.ktx.format), prepared.ktxPath.string().c_str());
+			}
+			prepared.rawImage = prepared.isKtx ? nullptr : findRawImageFallback(model, imageData);
+			if (!prepared.isKtx && prepared.rawImage == nullptr)
+			{
+				LOGW("Skipping glTF KTX2 texture without a raw image fallback: uri=%s path=%s reason=%s",
+				     imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+				     prepared.ktxPath.empty() ? "<none>" : prepared.ktxPath.string().c_str(),
+				     loader.getLastError().empty() ? "unsupported or missing KTX2" : loader.getLastError().c_str());
+				continue;
+			}
+
+			prepared.alignment = prepared.isKtx ? 16u : 4u;
+			if (prepared.isKtx)
+			{
+				prepared.source = prepared.ktx.data.data();
+				prepared.sourceSize = prepared.ktx.data.size();
+				prepared.requestedMipLevels = std::max(prepared.ktx.mipLevels, 1u);
+				prepared.textureDesc = {
+					.dimension = rhi::TextureDimension::e2D,
+					.format = prepared.ktx.format,
+					.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
+					.extent = {prepared.ktx.width, prepared.ktx.height, 1u},
+					.mipLevels = prepared.requestedMipLevels,
+					.arrayLayers = 1u,
+					.debugName = "GltfTexture",
+				};
+			}
+			else
+			{
+				prepared.source = prepared.rawImage->pixels.data();
+				prepared.sourceSize = prepared.rawImage->pixels.size();
+				const uint32_t width = static_cast<uint32_t>(prepared.rawImage->width);
+				const uint32_t height = static_cast<uint32_t>(prepared.rawImage->height);
+				prepared.requestedMipLevels = MipmapGenerator::calculateMipLevelCount(width, height);
+				prepared.textureDesc = {
+					.dimension = rhi::TextureDimension::e2D,
+					.format = imageData.isSrgb
+						? rhi::TextureFormat::rgba8Srgb
+						: rhi::TextureFormat::rgba8Unorm,
+					.usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst,
+					.extent = {width, height, 1u},
+					.mipLevels = 1u,
+					.arrayLayers = 1u,
+					.debugName = "GltfTexture",
+				};
+			}
+
+			uint64_t sliceEnd = 0u;
+			if (!tryAlignUpU64(estimatedTextureUploadBytes, prepared.alignment, prepared.sliceOffset) ||
+				!tryAddU64(prepared.sliceOffset, prepared.sourceSize, sliceEnd))
+			{
+				LOGE("Rejecting glTF texture %u before RHI effects: aggregate texture staging layout overflow",
+				     textureIndex);
+				continue;
+			}
+			std::string footprintError;
+			const bool footprintValid = prepared.isKtx
+				? validateKtxTextureUpload(
+					prepared.ktx, prepared.textureDesc, prepared.sliceOffset, sliceEnd, footprintError)
+				: validateRawRgba8TextureUpload(
+					prepared.textureDesc, prepared.sourceSize, prepared.sliceOffset, sliceEnd, footprintError);
+			if (!footprintValid)
+			{
+				LOGE("Rejecting glTF texture before RHI effects: texture=%u uri=%s reason=%s",
+				     textureIndex,
+				     imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
+				     footprintError.c_str());
+				continue;
+			}
+			estimatedTextureUploadBytes = sliceEnd;
+			preparedTextureUploads.push_back(std::move(prepared));
+		}
+
 		BatchUploadContext textureBatchUpload;
-		const uint64_t estimatedTextureUploadBytes = computeSelectedTextureUploadSize(model, textureIndices);
 		const uint64_t estimatedMeshUploadBytes = computeSelectedMeshUploadSize(model, meshIndices);
-		const uint64_t estimatedBatchUploadBytes = estimatedTextureUploadBytes + estimatedMeshUploadBytes;
+		uint64_t estimatedBatchUploadBytes = 0u;
+		if (!tryAddU64(estimatedTextureUploadBytes, estimatedMeshUploadBytes, estimatedBatchUploadBytes))
+		{
+			LOGE("Rejecting glTF upload batch before RHI effects: combined staging size overflow");
+			return;
+		}
 		const TextureUploadDiagnostics textureDiagnostics = gatherTextureUploadDiagnostics(model, textureIndices);
 		LOGI(
 			"glTF upload batch: textures=%zu materials=%zu meshes=%zu textureBytes=%llu meshBytes=%llu totalBytes=%llu mipGenTextures=%u maxTexture=%ux%u",
@@ -6414,30 +6974,17 @@ namespace demo
 			textureDiagnostics.mipGenerationCount,
 			textureDiagnostics.maxWidth,
 			textureDiagnostics.maxHeight);
-		Ktx2Loader batchKtx2Loader;
-		for (const uint32_t textureIndex : textureIndices)
+		for (const PreparedGltfTextureUpload& prepared : preparedTextureUploads)
 		{
-			if (textureIndex >= model.images.size())
-			{
-				continue;
-			}
-
-			const GltfImageData& imageData = model.images[textureIndex];
-			Ktx2Loader::Ktx2Texture ktxTexture;
-			const bool hasKtx2Sidecar = tryLoadKtx2Texture(model, imageData, batchKtx2Loader, ktxTexture);
-			const uint32_t width = hasKtx2Sidecar ? ktxTexture.width : static_cast<uint32_t>(imageData.width);
-			const uint32_t height = hasKtx2Sidecar ? ktxTexture.height : static_cast<uint32_t>(imageData.height);
-			const uint32_t mipLevels = hasKtx2Sidecar
-				                           ? std::max(ktxTexture.mipLevels, 1u)
-				                           : MipmapGenerator::calculateMipLevelCount(width, height);
+			const GltfImageData& imageData = model.images[prepared.textureIndex];
 			LOGI("  glTF texture[%u]: uri=%s size=%ux%u pixels=%zu ktx2=%d mipLevels=%u",
-			     textureIndex,
+			     prepared.textureIndex,
 			     imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
-			     width,
-			     height,
+			     prepared.textureDesc.extent.width,
+			     prepared.textureDesc.extent.height,
 			     imageData.pixels.size(),
-			     hasKtx2Sidecar ? 1 : 0,
-			     mipLevels);
+			     prepared.isKtx ? 1 : 0,
+			     prepared.requestedMipLevels);
 		}
 		struct PendingTextureUploadState
 		{
@@ -6465,76 +7012,18 @@ namespace demo
 		}
 		m_meshPool.reserve(selectedVertexBytes, selectedIndexBytes, cmd);
 
-		for (const uint32_t textureIndex : textureIndices)
+		for (PreparedGltfTextureUpload& prepared : preparedTextureUploads)
 		{
-			if (textureIndex >= model.images.size() || !ioResult.textures[textureIndex].isNull())
+			const uint32_t textureIndex = prepared.textureIndex;
+			if (!ioResult.textures[textureIndex].isNull())
 			{
 				continue;
 			}
-
-			const GltfImageData& imageData = model.images[textureIndex];
-			if (!isUploadableGltfImage(imageData))
-			{
-				continue;
-			}
-
-			Ktx2Loader ktx2Loader;
-			Ktx2Loader::Ktx2Texture ktxTexture;
-			std::filesystem::path ktx2Path;
-			const bool loadedKtx2Sidecar = tryLoadKtx2Texture(model, imageData, ktx2Loader, ktxTexture, &ktx2Path);
-			const bool hasSupportedKtx2Sidecar =
-				loadedKtx2Sidecar && m_device.device->isFormatSupported(ktxTexture.format, rhi::FormatFeatureFlag::sampledImage);
-			if (loadedKtx2Sidecar && !hasSupportedKtx2Sidecar)
-			{
-				LOGW("Skipping unsupported KTX2 format %s for %s, falling back to source image upload",
-				     formatDisplayName(ktxTexture.format),
-				     ktx2Path.string().c_str());
-			}
-			const GltfImageData* rawImageData = hasSupportedKtx2Sidecar
-				                                    ? nullptr
-				                                    : findRawImageFallback(model, imageData);
-			if (!hasSupportedKtx2Sidecar && rawImageData == nullptr)
-			{
-				LOGW("Skipping glTF KTX2 texture without a raw image fallback: uri=%s path=%s reason=%s",
-				     imageData.uri.empty() ? "<embedded>" : imageData.uri.c_str(),
-				     ktx2Path.empty() ? "<none>" : ktx2Path.string().c_str(),
-				     ktx2Loader.getLastError().empty() ? "unsupported or missing KTX2" : ktx2Loader.getLastError().c_str
-				     ());
-				continue;
-			}
-
-			const rhi::TextureFormat rhiFormat = hasSupportedKtx2Sidecar
-				                                     ? ktxTexture.format
-                                                     : (imageData.isSrgb
-					                                     ? rhi::TextureFormat::rgba8Srgb
-					                                     : rhi::TextureFormat::rgba8Unorm);
-			const uint32_t width = hasSupportedKtx2Sidecar
-				                       ? ktxTexture.width
-				                       : static_cast<uint32_t>(rawImageData->width);
-			const uint32_t height = hasSupportedKtx2Sidecar
-				                        ? ktxTexture.height
-				                        : static_cast<uint32_t>(rawImageData->height);
-			const uint32_t requestedMipLevels =
-				hasSupportedKtx2Sidecar
-					? std::max(ktxTexture.mipLevels, 1u)
-					: MipmapGenerator::calculateMipLevelCount(width, height);
-			const uint32_t mipLevels = hasSupportedKtx2Sidecar ? requestedMipLevels : 1u;
-
-			rhi::TextureUsageFlags usage = rhi::TextureUsageFlags::sampled | rhi::TextureUsageFlags::transferDst;
-			if (!hasSupportedKtx2Sidecar && mipLevels > 1)
-			{
-				usage = usage | rhi::TextureUsageFlags::transferSrc;
-			}
-
-			const rhi::TextureHandle imageHandle = m_device.device->createTexture(rhi::TextureDesc{
-				.dimension = rhi::TextureDimension::e2D,
-				.format = rhiFormat,
-				.usage = usage,
-				.extent = {width, height, 1},
-				.mipLevels = mipLevels,
-				.arrayLayers = 1,
-				.debugName = "GltfTexture",
-			});
+			const rhi::TextureFormat rhiFormat = prepared.textureDesc.format;
+			const uint32_t width = prepared.textureDesc.extent.width;
+			const uint32_t height = prepared.textureDesc.extent.height;
+			const uint32_t mipLevels = prepared.textureDesc.mipLevels;
+			const rhi::TextureHandle imageHandle = m_device.device->createTexture(prepared.textureDesc);
 			const rhi::TextureSubresourceRange imageRange{
 				.aspect = rhi::TextureAspect::color,
 				.baseMipLevel = 0,
@@ -6551,34 +7040,37 @@ namespace demo
 			cmd.resourceBarrier(std::span{&uploadBeginBarrier, 1}, {});
 			textureUploadStates.push_back(PendingTextureUploadState{.texture = imageHandle, .mipLevels = mipLevels});
 
-			if (hasSupportedKtx2Sidecar)
+			const BatchUploadContext::Slice slice = textureBatchUpload.allocate(
+				prepared.sourceSize, prepared.alignment);
+			ASSERT(slice.offset == prepared.sliceOffset,
+			       "glTF texture staging layout changed after preflight");
+			std::memcpy(slice.cpuPtr, prepared.source, prepared.sourceSize);
+			if (prepared.isKtx)
 			{
-				const BatchUploadContext::Slice slice = textureBatchUpload.allocate(ktxTexture.data.size(), 16);
-				std::memcpy(slice.cpuPtr, ktxTexture.data.data(), ktxTexture.data.size());
-
 				for (uint32_t mip = 0; mip < mipLevels; ++mip)
 				{
 					const rhi::BufferTextureCopyDesc region{
-						.bufferOffset = ktxTexture.mipOffsets[mip],
+						.bufferOffset = prepared.ktx.mipOffsets[mip],
 						.texture = imageHandle,
 						.aspect = rhi::TextureAspect::color,
 						.mipLevel = mip,
 						.baseArrayLayer = 0,
 						.layerCount = 1,
-						.width = std::max(width >> mip, 1u),
-						.height = std::max(height >> mip, 1u),
+						.width = textureMipExtent(width, mip),
+						.height = textureMipExtent(height, mip),
 						.depth = 1,
 					};
-					textureBatchUpload.recordTextureUpload(slice, imageHandle, region);
+					const TextureUploadValidationResult recorded = textureBatchUpload.recordTextureUpload(
+						slice, imageHandle, prepared.textureDesc, region);
+					ASSERT(recorded.valid(), "Preflighted glTF KTX mip changed before command recording");
 				}
 			}
 			else
 			{
-				const BatchUploadContext::Slice slice = textureBatchUpload.allocate(rawImageData->pixels.size(), 4);
-				std::memcpy(slice.cpuPtr, rawImageData->pixels.data(), rawImageData->pixels.size());
-				textureBatchUpload.recordTextureUpload(
+				const TextureUploadValidationResult recorded = textureBatchUpload.recordTextureUpload(
 					slice,
 					imageHandle,
+					prepared.textureDesc,
 					rhi::BufferTextureCopyDesc{
 						.texture = imageHandle,
 						.aspect = rhi::TextureAspect::color,
@@ -6589,17 +7081,18 @@ namespace demo
 						.height = height,
 						.depth = 1,
 					});
+				ASSERT(recorded.valid(), "Preflighted glTF RGBA8 upload changed before command recording");
 
 				// Temporary validation path: keep raw glTF texture uploads at base mip only
 				// so we can isolate device-loss issues from the runtime mip-generation chain.
-				if (requestedMipLevels > 1)
+				if (prepared.requestedMipLevels > 1)
 				{
 					LOGI(
 						"Skipping runtime mip generation for raw glTF texture: uri=%s size=%ux%u requestedMipLevels=%u",
-						rawImageData->uri.empty() ? "<embedded>" : rawImageData->uri.c_str(),
+						prepared.rawImage->uri.empty() ? "<embedded>" : prepared.rawImage->uri.c_str(),
 						width,
 						height,
-						requestedMipLevels);
+						prepared.requestedMipLevels);
 				}
 			}
 
@@ -7553,7 +8046,13 @@ namespace demo
 		}
 
 		// Find texture index in gltfModel->textures
-		const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+		uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		if (loadPublishedSceneTransactionResources() != nullptr)
+		{
+			gltfTextureBaseIndex = 0u;
+		}
+#endif
 		for (size_t i = 0; i < gltfModel->textures.size(); ++i)
 		{
 			if (gltfModel->textures[i] == material->baseColorTexture)
@@ -7585,8 +8084,16 @@ namespace demo
 		result.metallicFactor = material->metallicFactor;
 		result.roughnessFactor = material->roughnessFactor;
 		result.normalScale = material->normalScale;
+		result.occlusionStrength = material->occlusionStrength;
+		result.emissiveFactor = material->emissiveFactor;
 
-		const uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+		uint32_t gltfTextureBaseIndex = getGltfTextureBaseIndex();
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		if (loadPublishedSceneTransactionResources() != nullptr)
+		{
+			gltfTextureBaseIndex = 0u;
+		}
+#endif
 
 		// Helper to find texture index
 		auto findTextureIndex = [&](TextureHandle handle) -> int32_t
@@ -7609,6 +8116,7 @@ namespace demo
 		result.normal = findTextureIndex(material->normalTexture);
 		result.metallicRoughness = findTextureIndex(material->metallicRoughnessTexture);
 		result.occlusion = findTextureIndex(material->occlusionTexture);
+		result.emissive = findTextureIndex(material->emissiveTexture);
 
 		// Fill alpha properties
 		result.alphaMode = material->alphaMode;

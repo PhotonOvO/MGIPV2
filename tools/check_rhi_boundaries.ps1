@@ -49,7 +49,7 @@ function Get-ScanFiles {
   param([Parameter(Mandatory = $true)]$Root)
 
   $Root = [string]$Root
-  $roots = @("app", "render", "common")
+  $roots = @("app", "render", "common", "scene")
   $files = New-Object System.Collections.Generic.List[string]
   foreach ($scanRoot in $roots) {
     $path = Join-Path $Root $scanRoot
@@ -86,6 +86,10 @@ function Test-Phase2PublicSurface {
   }
 
   if ($RepoPath -like "rhi/*.h") {
+    return $true
+  }
+
+  if ($RepoPath -like "scene/editor/include/*.h") {
     return $true
   }
 
@@ -336,7 +340,7 @@ $metadata = [pscustomobject]@{
   generated_at = $now
   mode = if ($Enforce) { "enforce" } else { "report" }
   exit_policy = if ($Enforce) { "fail-on-public-native-or-terminology" } else { "always-zero" }
-  scan_roots = @("app/", "render/", "common/", "rhi/*.h")
+  scan_roots = @("app/", "render/", "common/", "scene/", "rhi/*.h")
   include_backend_dirs = [bool]$IncludeBackendDirs
   baseline_path = $baselineReportPath
   report_paths = @($markdownReportPath, $jsonReportPath)
@@ -358,7 +362,7 @@ $markdown.Add("")
 $markdown.Add("- Generated: $now")
 $markdown.Add("- Mode: $(if ($Enforce) { "enforce" } else { "report" })")
 $markdown.Add("- Exit policy: $(if ($Enforce) { "fail on public native leaks or terminology" } else { "always zero" })")
-$markdown.Add("- Scan roots: app/, render/, common/, rhi/*.h")
+$markdown.Add("- Scan roots: app/, render/, common/, scene/, rhi/*.h")
 $markdown.Add("- Baseline: $baselineReportPath")
 $markdown.Add("- Blocking findings: $($blockingFindings.Count)")
 $markdown.Add("")

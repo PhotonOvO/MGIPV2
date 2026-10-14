@@ -1,0 +1,87 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "x64-debug",
+      "displayName": "MGIF x64 Debug (external build)",
+      "generator": "Ninja",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "toolset": {
+        "value": "host=x64",
+        "strategy": "external"
+      },
+      "binaryDir": "G:/Temp/mgif-vs/x64-debug",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "OFF",
+        "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT": "ON",
+        "USE_SLANG": "ON"
+      }
+    },
+    {
+      "name": "x64-release",
+      "displayName": "MGIF x64 Release (external build)",
+      "generator": "Ninja",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "toolset": {
+        "value": "host=x64",
+        "strategy": "external"
+      },
+      "binaryDir": "G:/Temp/mgif-vs/x64-release",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT": "ON",
+        "USE_SLANG": "ON"
+      }
+    },
+    {
+      "name": "x64-debug-tests",
+      "displayName": "MGIF x64 Debug (tests)",
+      "inherits": "x64-debug",
+      "binaryDir": "G:/Temp/mgif-vs/x64-debug-tests",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT": "OFF"
+      }
+    },
+    {
+      "name": "x64-release-tests",
+      "displayName": "MGIF x64 Release (tests)",
+      "inherits": "x64-release",
+      "binaryDir": "G:/Temp/mgif-vs/x64-release-tests",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x64-debug",
+      "configurePreset": "x64-debug"
+    },
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release"
+    },
+    {
+      "name": "x64-debug-tests",
+      "configurePreset": "x64-debug-tests"
+    },
+    {
+      "name": "x64-release-tests",
+      "configurePreset": "x64-release-tests"
+    }
+  ]
+}

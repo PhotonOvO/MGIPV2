@@ -84,6 +84,7 @@ namespace demo
 		[[nodiscard]] uint32_t getFrameCount() const { return static_cast<uint32_t>(m_frames.size()); }
 		[[nodiscard]] Diagnostics getDiagnostics() const;
 		void cacheClusterStats(uint32_t frameIndex);
+		void markClusterStatsProducerSubmitted(uint32_t frameIndex, bool producerSubmitted);
 
 	private:
 		struct FrameResources
@@ -99,6 +100,7 @@ namespace demo
 			rhi::BufferHandle clusterIndicesBuffer{};
 			rhi::BufferHandle clusterStatsBuffer{};
 			rhi::BufferHandle clusterStatsReadbackBuffer{};
+			bool clusterStatsProducerSubmitted{false};
 		};
 
 		[[nodiscard]] rhi::BufferHandle createStorageBuffer(uint64_t size, rhi::MemoryUsage usage) const;

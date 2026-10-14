@@ -67,8 +67,12 @@ std::vector<glm::mat4> TransformSystem::buildWorldTransforms(const SceneAssetVie
 {
   std::vector<glm::mat4> worldTransforms(asset.nodes.size(), glm::mat4(1.0f));
 
-  for(const uint32_t rootNodeIndex : asset.rootNodes) {
-    buildWorldTransformsRecursive(asset, rootNodeIndex, glm::mat4(1.0f), worldTransforms);
+  for(size_t rootIndex = 0; rootIndex < asset.rootNodes.size(); ++rootIndex) {
+    const uint32_t rootNodeIndex = asset.rootNodes[rootIndex];
+    const bool applySceneTransform = rootIndex >= asset.sceneRootTransformApplyToRoot.size()
+        || asset.sceneRootTransformApplyToRoot[rootIndex] != 0u;
+    buildWorldTransformsRecursive(asset, rootNodeIndex,
+        applySceneTransform ? asset.sceneRootTransform.matrix : glm::mat4(1.0f), worldTransforms);
   }
 
   for(uint32_t nodeIndex = 0; nodeIndex < asset.nodes.size(); ++nodeIndex) {

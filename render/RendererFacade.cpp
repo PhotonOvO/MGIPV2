@@ -1,5 +1,7 @@
 #include "RendererFacade.h"
 
+#include <limits>
+
 namespace demo
 {
 	std::unique_ptr<rhi::Surface> RendererFacade::createSurface() const
@@ -14,6 +16,25 @@ namespace demo
 
 	void RendererFacade::shutdown(rhi::Surface& surface)
 	{
+#if !defined(__ANDROID__)
+		m_scenePicking.cancelAll();
+		try
+		{
+			std::vector<editor::EditorPickResult> terminals;
+			terminals.reserve(m_scenePicking.pendingCount());
+			m_scenePicking.poll(terminals);
+			for (const editor::EditorPickResult& terminal : terminals)
+			{
+				onTerminal(terminal);
+			}
+		}
+		catch (...)
+		{
+			// ScenePicking's noexcept destructor accounts for any still-buffered
+			// terminals through the allocation-free shutdown sink.
+		}
+		gpuDriven().clearEditorHighlight();
+#endif
 		gpuDriven().shutdown(surface);
 	}
 
@@ -44,6 +65,10 @@ namespace demo
 
 	void RendererFacade::resize(rhi::Extent2D size)
 	{
+#if !defined(__ANDROID__)
+		m_scenePicking.cancelAll();
+		gpuDriven().invalidateEditorPickingPublication();
+#endif
 		gpuDriven().resize(size);
 	}
 
@@ -59,6 +84,13 @@ namespace demo
 
 	void RendererFacade::setSceneRenderingSuspended(bool suspended)
 	{
+#if !defined(__ANDROID__)
+		if (suspended)
+		{
+			m_scenePicking.cancelAll();
+			gpuDriven().invalidateEditorPickingPublication();
+		}
+#endif
 		gpuDriven().setSceneRenderingSuspended(suspended);
 	}
 
@@ -66,6 +98,146 @@ namespace demo
 	{
 		return gpuDriven().isSceneRenderingSuspended();
 	}
+
+#if !defined(__ANDROID__)
+	std::optional<editor::EditorPickFence>
+	RendererFacade::editorPickFence() const noexcept
+	{
+		const auto publication = gpuDriven().editorPickPublication();
+		return publication ? std::optional<editor::EditorPickFence>{publication->first}
+		                  : std::nullopt;
+	}
+
+	std::optional<std::pair<editor::EditorPickFence, uint64_t>>
+	RendererFacade::editorPickPublication() const noexcept
+	{
+		return gpuDriven().editorPickPublication();
+	}
+
+	std::optional<editor::RenderOccurrenceRecord>
+	RendererFacade::editorResolveOccurrence(
+		const editor::EditorPickFence& fence, uint64_t occurrenceGeneration,
+		editor::RenderOccurrenceId occurrence) const noexcept
+	{
+		return gpuDriven().editorResolveOccurrence(
+			fence, occurrenceGeneration, occurrence);
+	}
+
+	std::optional<editor::RenderOccurrenceRecord>
+	RendererFacade::editorResolveOccurrence(
+		const editor::EditorPickFence& fence, uint64_t occurrenceGeneration,
+		editor::PrimitiveOccurrenceKey occurrence) const noexcept
+	{
+		return gpuDriven().editorResolveOccurrence(
+			fence, occurrenceGeneration, occurrence);
+	}
+
+	bool RendererFacade::editorNodeHighlightEligible(
+		const editor::EditorPickFence& fence, uint64_t occurrenceGeneration,
+		editor::NodeId node) const noexcept
+	{
+		return gpuDriven().editorNodeHighlightEligible(
+			fence, occurrenceGeneration, node);
+	}
+
+	editor::PickSubmitResult RendererFacade::enqueueEditorPick(
+		const editor::EditorPickRequest& request)
+	{
+		editor::SceneRenderOccurrenceSnapshot snapshot =
+			gpuDriven().editorOccurrenceSnapshot(request);
+		return snapshot
+			? m_scenePicking.submit(request, std::move(snapshot))
+			: editor::PickSubmitResult{
+				editor::PickSubmitStatus::rejectedSnapshot, request.serial};
+	}
+
+	void RendererFacade::pollEditorPickResults(
+		std::vector<editor::EditorPickResult>& out)
+	{
+		out.reserve(out.size() + m_scenePicking.pendingCount());
+		m_scenePicking.poll(out);
+	}
+
+	void RendererFacade::cancelEditorPicks() noexcept
+	{
+		try
+		{
+			m_scenePicking.cancelAll();
+		}
+		catch (...)
+		{
+			std::terminate();
+		}
+	}
+
+	void RendererFacade::cancelEditorPicks(
+		editor::EditorDocumentAuthority authority) noexcept
+	{
+		try
+		{
+			m_scenePicking.cancelAuthority(authority);
+		}
+		catch (...)
+		{
+			std::terminate();
+		}
+	}
+
+	bool RendererFacade::editorPickingBusy() const noexcept
+	{
+		return gpuDriven().editorPickingBusy();
+	}
+
+	EditorGpuInteractionDiagnostics
+	RendererFacade::editorInteractionDiagnostics() const noexcept
+	{
+		return gpuDriven().editorInteractionDiagnostics();
+	}
+
+	bool RendererFacade::editorOverlayAvailable() const noexcept
+	{
+		return gpuDriven().editorOverlayAvailable();
+	}
+
+	EditorOverlayPassDiagnostics
+	RendererFacade::editorOverlayDiagnostics() const noexcept
+	{
+		return gpuDriven().editorOverlayDiagnostics();
+	}
+
+	bool RendererFacade::setEditorHighlight(
+		const editor::SceneSelectionValue& selection,
+		editor::SelectionRevision revision) noexcept
+	{
+		return gpuDriven().setEditorHighlight(selection, revision);
+	}
+
+	void RendererFacade::clearEditorHighlight() noexcept
+	{
+		gpuDriven().clearEditorHighlight();
+	}
+
+	void RendererFacade::invalidateEditorPickingPublication() noexcept
+	{
+		gpuDriven().invalidateEditorPickingPublication();
+	}
+
+	size_t RendererFacade::pendingEditorPickCount() const noexcept
+	{
+		return m_scenePicking.pendingCount();
+	}
+
+	void RendererFacade::onTerminal(
+		const editor::EditorPickResult& result) noexcept
+	{
+		(void)result;
+		if (m_shutdownPickTerminalCount !=
+			std::numeric_limits<uint64_t>::max())
+		{
+			++m_shutdownPickTerminalCount;
+		}
+	}
+#endif
 
 	TextureHandle RendererFacade::getViewportTextureHandle() const
 	{
@@ -128,6 +300,88 @@ namespace demo
 	{
 		gpuDriven().syncActiveSceneRuntimeState(ioResult);
 	}
+
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+	RendererSceneTransactionInitializationResult
+	RendererFacade::initializeSceneTransactions(
+		RendererSceneTransactionInitialState initialState) noexcept
+	{
+		return gpuDriven().initializeSceneTransactions(std::move(initialState));
+	}
+
+	void RendererFacade::resetSceneTransactions() noexcept
+	{
+#if !defined(__ANDROID__)
+		cancelEditorPicks();
+		clearEditorHighlight();
+		invalidateEditorPickingPublication();
+#endif
+		gpuDriven().resetSceneTransactions();
+	}
+
+	editor::SceneApplyResult RendererFacade::applySceneChanges(
+		const editor::ApplySceneChangeRequest& request) noexcept
+	{
+#if !defined(__ANDROID__)
+		cancelEditorPicks(request.expectedTarget.authority);
+		invalidateEditorPickingPublication();
+#endif
+		return gpuDriven().applySceneChanges(request);
+	}
+
+	editor::SceneApplyResult RendererFacade::applyFullSceneSnapshot(
+		const ApplyFullSceneSnapshotRequest& request) noexcept
+	{
+#if !defined(__ANDROID__)
+		cancelEditorPicks(request.transaction.expectedTarget.authority);
+		invalidateEditorPickingPublication();
+#endif
+		return gpuDriven().applyFullSceneSnapshot(request);
+	}
+
+	RendererSceneStateSnapshot RendererFacade::activeSceneState() const noexcept
+	{
+		return gpuDriven().activeSceneState();
+	}
+
+	editor::SceneDeltaCounterSnapshot RendererFacade::sceneDeltaCounters() const noexcept
+	{
+		return gpuDriven().sceneDeltaCounters();
+	}
+
+	SceneTransactionConcreteStateSnapshot
+	RendererFacade::sceneTransactionConcreteState() const
+	{
+		return gpuDriven().sceneTransactionConcreteState();
+	}
+
+	void RendererFacade::setSceneTransactionFailurePoint(
+		SceneTransactionFailurePoint point,
+		uint32_t submissionIndex) noexcept
+	{
+		gpuDriven().setSceneTransactionFailurePoint(point, submissionIndex);
+	}
+
+	uint64_t RendererFacade::collectSceneTransactionGarbage() noexcept
+	{
+		return gpuDriven().collectSceneTransactionGarbage();
+	}
+
+	uint64_t RendererFacade::sceneTransactionVisibleGeneration() const noexcept
+	{
+		return gpuDriven().sceneTransactionVisibleGeneration();
+	}
+
+	editor::RendererInstanceId RendererFacade::editorRendererIdentity() const noexcept
+	{
+		return gpuDriven().editorRendererIdentity();
+	}
+
+	editor::RendererDeviceId RendererFacade::editorDeviceIdentity() const noexcept
+	{
+		return gpuDriven().editorDeviceIdentity();
+	}
+#endif
 
 	void RendererFacade::executeUploadCommand(std::function<void(rhi::CommandBuffer&)> uploadFn)
 	{

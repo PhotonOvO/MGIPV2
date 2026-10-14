@@ -64,9 +64,10 @@ namespace demo
 			enc->dispatch(rhi::DispatchDesc{(shaderio::LClusterCount + 63u) / 64u, 1u, 1u});
 			context.commandBuffer->endEncoding();
 
-			// Local output barrier: clustered culling writes light-list buffers consumed
-			// through lighting tables that are not fully represented in pass dependencies.
-			context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::fragmentShader,
+			// Local output barrier: transfer-cleared stats and compute-written light-list/stats
+			// buffers feed fragment lighting, while stats also feed the transfer readback below.
+			context.commandBuffer->barrier(rhi::StageFlags::transfer | rhi::StageFlags::compute,
+			                               rhi::StageFlags::fragmentShader | rhi::StageFlags::transfer,
 			                               rhi::HazardFlags::bufferWrites);
 
 			const rhi::BufferHandle statsReadback =

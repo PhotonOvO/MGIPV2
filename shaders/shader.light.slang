@@ -1160,9 +1160,19 @@ float4 fragmentHdrMain(VSOutput input) : SV_Target
     const vec3 hdrColor =
         max(ambient + directional.color + pointLights + emissiveAreaLights + emissiveSample.rgb, 0.0);
 
+    // Quantize in log2 space so each step is *relative* (2^(1/32) ~ 2.2%).
+    // A linear floor() snapped every channel independently, which turned a dim
+    // GI contribution such as (0.04, 0.02, 0.018) into the saturated
+    // single-channel value (1/32, 0, 0) -- the red/green/olive speckles -- and
+    // zeroed any pixel whose luminance sat below one linear 1/32 step (0.0156),
+    // which reads as hard-edged black blotches in the vaulted interior.
+    // Relative steps keep the hue, keep the energy of dim GI, and still
+    // quantize the signal for temporal stability.
     const float hdrStabilityLevels = 32.0;
-    const vec3 stableHdrColor =
-        floor(hdrColor * hdrStabilityLevels + 0.375) / hdrStabilityLevels;
+    const vec3 quantizableHdrColor = max(hdrColor, vec3(5.9604645e-8)); // 2^-24
+    const vec3 stableHdrColor = exp2(
+        floor(log2(quantizableHdrColor) * hdrStabilityLevels + 0.375) /
+        hdrStabilityLevels);
 
     return float4(stableHdrColor, directional.shadowSignal);
 }

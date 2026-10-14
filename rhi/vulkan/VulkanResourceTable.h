@@ -8,6 +8,7 @@
 #include "../RHIResidency.h"
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -151,9 +152,36 @@ struct ArgumentTableRecord
   ArgumentTableLifetime lifetime{ArgumentTableLifetime::persistent};
   SubmissionTokenSet pendingUses{};
   std::vector<ArgumentResourceReference> referencedResources;
+  // Resource liveness is stable until VulkanResourceTable advances its
+  // mutation epoch. This avoids re-walking every descriptor dependency on
+  // every setArgumentTable call while preserving stale-handle rejection.
+  mutable std::uint64_t validatedResourceEpoch{0};
   // When false the descriptor set is owned by another subsystem (adopted external set);
   // the registry resolves it but must not free it back to the device argument pool.
   bool                 owned{true};
+};
+
+struct VulkanSubmissionPlan
+{
+  SubmissionToken token{};
+  std::vector<SubmissionTokenSet*> pendingUses;
+
+  [[nodiscard]] bool preparedFor(SubmissionToken expected) const noexcept
+  {
+    return token == expected && token.isValid();
+  }
+};
+
+struct VulkanSubmissionRoots
+{
+  std::span<const ArgumentTableHandle> argumentTables{};
+  std::span<const PipelineHandle> pipelines{};
+  std::span<const BufferHandle> buffers{};
+  std::span<const TextureHandle> textures{};
+  std::span<const TextureViewHandle> textureViews{};
+  std::span<const SamplerHandle> samplers{};
+  std::span<const QueryPoolHandle> queryPools{};
+  std::span<const ResidencySetHandle> residencySets{};
 };
 
 // Backend-owned table mapping opaque RHI handles to native Vulkan objects.
@@ -165,6 +193,12 @@ struct ArgumentTableRecord
 class VulkanResourceTable
 {
 public:
+  VulkanResourceTable() = default;
+  VulkanResourceTable(const VulkanResourceTable&) = delete;
+  VulkanResourceTable& operator=(const VulkanResourceTable&) = delete;
+  VulkanResourceTable(VulkanResourceTable&&) = delete;
+  VulkanResourceTable& operator=(VulkanResourceTable&&) = delete;
+
   // --- Pipelines (this table owns the handle allocation) ---
   PipelineHandle registerPipeline(VkPipelineBindPoint bindPoint, VkPipeline nativePipeline, uint32_t specializationVariant,
                                   VkPipelineLayout nativeLayout, std::vector<PipelineRecord::RootBindingLowering> rootBindings = {},
@@ -245,6 +279,7 @@ public:
   // --- Query pools ---
   QueryPoolHandle                  registerQueryPool(VkQueryPool nativePool, uint32_t count);
   [[nodiscard]] VkQueryPool        resolveQueryPool(QueryPoolHandle handle) const;
+  [[nodiscard]] const QueryPoolRecord* tryGetQueryPool(QueryPoolHandle handle) const;
   QueryPoolRecord                  removeQueryPool(QueryPoolHandle handle);
   template <typename Fn>
   void forEachQueryPool(Fn&& fn)
@@ -291,6 +326,9 @@ public:
   void markSamplerSubmitted(SamplerHandle handle, SubmissionToken token);
   void markQueryPoolSubmitted(QueryPoolHandle handle, SubmissionToken token);
   void markResidencySetSubmitted(ResidencySetHandle handle, SubmissionToken token);
+  void prepareSubmission(const VulkanSubmissionRoots& roots, SubmissionToken token,
+                         VulkanSubmissionPlan& plan);
+  void commitSubmission(const VulkanSubmissionPlan& plan) noexcept;
   [[nodiscard]] bool isAlive(ResidencyResource resource) const;
 
   Result<ResidencySetHandle> registerResidencySet(const ResidencySetDesc& desc);
@@ -305,6 +343,10 @@ public:
   }
 
 private:
+  [[nodiscard]] bool validateResourceGraph(
+    ResidencyResource resource, std::vector<ResidencyResource>& visited) const;
+  void advanceResourceValidationEpoch() noexcept;
+
   HandlePool<PipelineHandle, PipelineRecord>          m_pipelines;
   HandlePool<TextureViewHandle, TextureViewHotRecord> m_textureViews;
   std::vector<TextureViewColdRecord>                   m_textureViewCold;
@@ -318,6 +360,7 @@ private:
   HandlePool<ArgumentLayoutHandle, ArgumentLayoutRecord> m_argumentLayouts;
   HandlePool<ArgumentTableHandle, ArgumentTableRecord>   m_argumentTables;
   HandlePool<ResidencySetHandle, ResidencySetRecord>       m_residencySets;
+  std::uint64_t m_resourceValidationEpoch{1u};
 };
 
 }  // namespace demo::rhi::vulkan

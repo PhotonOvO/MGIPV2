@@ -21,6 +21,10 @@
 namespace demo::rhi::d3d12 {
 namespace {
 
+const GUID kMgIfStructuredBufferStrideGuid = {
+  0x7eac3991u, 0x683du, 0x4be4u,
+  {0x9bu, 0x91u, 0x72u, 0x31u, 0x31u, 0x7fu, 0x41u, 0x2du}};
+
 template<typename T>
 void releaseNative(void*& object) noexcept
 {
@@ -84,6 +88,7 @@ DXGI_FORMAT toDxgiFormat(TextureFormat format)
   case TextureFormat::rgba16Sfloat:     return DXGI_FORMAT_R16G16B16A16_FLOAT;
   case TextureFormat::rg16Sfloat:       return DXGI_FORMAT_R16G16_FLOAT;
   case TextureFormat::r32Sfloat:        return DXGI_FORMAT_R32_FLOAT;
+  case TextureFormat::r32Uint:          return DXGI_FORMAT_R32_UINT;
   case TextureFormat::r16Sfloat:        return DXGI_FORMAT_R16_FLOAT;
   case TextureFormat::rgba8Snorm:       return DXGI_FORMAT_R8G8B8A8_SNORM;
   case TextureFormat::r11g11b10Ufloat:  return DXGI_FORMAT_R11G11B10_FLOAT;
@@ -152,6 +157,7 @@ TextureFormat fromDxgiFormat(DXGI_FORMAT format)
   case DXGI_FORMAT_D16_UNORM: return TextureFormat::d16Unorm;
   case DXGI_FORMAT_D32_FLOAT: return TextureFormat::d32Sfloat;
   case DXGI_FORMAT_D24_UNORM_S8_UINT: return TextureFormat::d24UnormS8;
+  case DXGI_FORMAT_R32_UINT: return TextureFormat::r32Uint;
   default: return TextureFormat::undefined;
   }
 }
@@ -1200,6 +1206,12 @@ BufferHandle D3D12Device::createBuffer(const BufferDesc& desc)
     throw std::runtime_error("D3D12Device::createBuffer called before device initialization");
   if(desc.size == 0)
     throw std::runtime_error("D3D12Device::createBuffer requires a nonzero size");
+  if(desc.structuredElementStride != 0u &&
+     (desc.structuredElementStride < 4u ||
+      (desc.structuredElementStride & 3u) != 0u ||
+      desc.size % desc.structuredElementStride != 0u))
+    throw std::runtime_error(
+      "D3D12 structured buffer size/stride contract is invalid");
   if(m_nextBufferIndex == 0)
     throw std::runtime_error("D3D12 buffer handle space exhausted");
 
@@ -1255,6 +1267,18 @@ BufferHandle D3D12Device::createBuffer(const BufferDesc& desc)
                "ID3D12Device::CreateCommittedResource(buffer)");
 
   setDebugName(resource, desc.debugName);
+  if(desc.structuredElementStride != 0u)
+  {
+    const uint32_t stride = desc.structuredElementStride;
+    const HRESULT strideResult = resource->SetPrivateData(
+      kMgIfStructuredBufferStrideGuid, sizeof(stride), &stride);
+    if(FAILED(strideResult))
+    {
+      resource->Release();
+      checkHresult(strideResult,
+                   "ID3D12Resource::SetPrivateData(structured stride)");
+    }
+  }
 
   const bool addressable =
     desc.allowGpuAddress ||
@@ -1959,17 +1983,35 @@ void D3D12Device::updateArgumentTable(ArgumentTableHandle table, ArgumentWriteBa
       if(requested < 4 || (write.offset & 3u) != 0)
         throw std::runtime_error("D3D12 storage-buffer write requires a 4-byte-aligned range");
       auto* resource = static_cast<ID3D12Resource*>(buffer.resource);
+      uint32_t structuredStride = 0u;
+      UINT structuredStrideBytes = sizeof(structuredStride);
+      if(FAILED(resource->GetPrivateData(
+           kMgIfStructuredBufferStrideGuid, &structuredStrideBytes,
+           &structuredStride)))
+      {
+        structuredStride = 0u;
+      }
+      if(structuredStride != 0u &&
+         ((write.offset % structuredStride) != 0u ||
+          (requested % structuredStride) != 0u))
+        throw std::runtime_error(
+          "D3D12 structured-buffer write range is not element aligned");
+      const uint32_t elementStride =
+        structuredStride == 0u ? 4u : structuredStride;
       if(write.accessIntent == ArgumentAccessIntent::readWrite)
       {
         D3D12_UNORDERED_ACCESS_VIEW_DESC view{
-          .Format = DXGI_FORMAT_R32_TYPELESS,
+          .Format = structuredStride == 0u
+                      ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_UNKNOWN,
           .ViewDimension = D3D12_UAV_DIMENSION_BUFFER,
           .Buffer = {
-            .FirstElement = write.offset / 4u,
-            .NumElements = static_cast<UINT>(requested / 4u),
-            .StructureByteStride = 0,
+            .FirstElement = write.offset / elementStride,
+            .NumElements = static_cast<UINT>(requested / elementStride),
+            .StructureByteStride = structuredStride,
             .CounterOffsetInBytes = 0,
-            .Flags = D3D12_BUFFER_UAV_FLAG_RAW,
+            .Flags = structuredStride == 0u
+                       ? D3D12_BUFFER_UAV_FLAG_RAW
+                       : D3D12_BUFFER_UAV_FLAG_NONE,
           },
         };
         device->CreateUnorderedAccessView(resource, nullptr, &view, resourceDestination);
@@ -1977,14 +2019,17 @@ void D3D12Device::updateArgumentTable(ArgumentTableHandle table, ArgumentWriteBa
       else
       {
         D3D12_SHADER_RESOURCE_VIEW_DESC view{
-          .Format = DXGI_FORMAT_R32_TYPELESS,
+          .Format = structuredStride == 0u
+                      ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_UNKNOWN,
           .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
           .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
           .Buffer = {
-            .FirstElement = write.offset / 4u,
-            .NumElements = static_cast<UINT>(requested / 4u),
-            .StructureByteStride = 0,
-            .Flags = D3D12_BUFFER_SRV_FLAG_RAW,
+            .FirstElement = write.offset / elementStride,
+            .NumElements = static_cast<UINT>(requested / elementStride),
+            .StructureByteStride = structuredStride,
+            .Flags = structuredStride == 0u
+                       ? D3D12_BUFFER_SRV_FLAG_RAW
+                       : D3D12_BUFFER_SRV_FLAG_NONE,
           },
         };
         device->CreateShaderResourceView(resource, &view, resourceDestination);

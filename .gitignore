@@ -1,4 +1,5 @@
 out/
+node_modules/
 .vs/
 .idea/
 resources/
@@ -20,3 +21,20 @@ android/local.properties
 .claude/
 imgui.ini
 .planning/
+
+# Stray build and investigation artifacts (2026-09-08 hygiene pass)
+*.obj
+*.pdb
+_tmp_frame_compare*/
+/mgif build entrypoints kftx8g0b/
+
+# Large profiling/render captures (never commit; hundreds of MB each)
+*.rdc
+*.slp
+*.slt
+
+# Regenerable investigation artifacts (screenshots, logs, compiled shaders)
+investigations/**/*.png
+investigations/**/*.log
+investigations/**/*.spv
+*.spv

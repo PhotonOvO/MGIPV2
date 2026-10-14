@@ -7,6 +7,7 @@
 
 #include <android/asset_manager.h>
 #include <android_native_app_glue.h>
+#include <backends/imgui_impl_android.h>
 
 #include <algorithm>
 #include <filesystem>

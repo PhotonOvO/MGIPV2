@@ -13,6 +13,72 @@
 
 namespace demo
 {
+	enum class TextureUploadValidationError : uint8_t
+	{
+		none = 0,
+		unsupportedFormat,
+		aspectMismatch,
+		invalidTextureDescriptor,
+		invalidCopyExtent,
+		mipOutOfRange,
+		subresourceOutOfRange,
+		compressedRegionMisaligned,
+		arithmeticOverflow,
+		sliceRangeExceeded,
+		aggregateRangeExceeded,
+	};
+
+	struct TextureUploadValidationResult
+	{
+		TextureUploadValidationError error{TextureUploadValidationError::none};
+		uint64_t requiredBytes{0};
+		uint64_t relativeEnd{0};
+		uint64_t aggregateEnd{0};
+
+		[[nodiscard]] constexpr bool valid() const noexcept
+		{
+			return error == TextureUploadValidationError::none;
+		}
+	};
+
+	enum class Ktx2ContainerValidationError : uint8_t
+	{
+		none = 0,
+		truncatedHeader,
+		invalidIdentifier,
+		levelTableOverflow,
+		levelTableOutOfRange,
+		levelRangeOutOfRange,
+		emptyLevel,
+		overlappingLevels,
+		aggregatePayloadOverflow,
+	};
+
+	struct Ktx2ContainerValidationResult
+	{
+		Ktx2ContainerValidationError error{Ktx2ContainerValidationError::none};
+		uint32_t levelCount{0u};
+		uint64_t totalPayloadBytes{0u};
+
+		[[nodiscard]] constexpr bool valid() const noexcept
+		{
+			return error == Ktx2ContainerValidationError::none;
+		}
+	};
+
+	[[nodiscard]] const char* textureUploadValidationErrorName(TextureUploadValidationError error) noexcept;
+	[[nodiscard]] const char* ktx2ContainerValidationErrorName(Ktx2ContainerValidationError error) noexcept;
+
+	[[nodiscard]] Ktx2ContainerValidationResult validateKtx2ContainerRanges(
+		std::span<const uint8_t> container);
+
+	[[nodiscard]] TextureUploadValidationResult validateTextureUploadRegion(
+		const rhi::TextureDesc& texture,
+		const rhi::BufferTextureCopyDesc& region,
+		uint64_t sliceOffset,
+		uint64_t sliceSize,
+		uint64_t stagingCapacity) noexcept;
+
 	class BatchUploadContext
 	{
 	public:
@@ -33,8 +99,15 @@ namespace demo
 		[[nodiscard]] std::vector<Slice> reserveSlices(const std::vector<uint64_t>& sizes, uint64_t alignment);
 		void copyToSlices(std::span<const Slice> slices, std::span<const std::span<const std::byte>> sources);
 
-		void recordTextureUpload(const Slice& slice, rhi::TextureHandle dstImage,
-		                         const rhi::BufferTextureCopyDesc& region);
+		[[nodiscard]] TextureUploadValidationResult recordTextureUpload(
+			const Slice& slice,
+			rhi::TextureHandle dstImage,
+			const rhi::TextureDesc& texture,
+			const rhi::BufferTextureCopyDesc& region);
+		void recordTextureUpload(
+			const Slice& slice,
+			rhi::TextureHandle dstImage,
+			const rhi::BufferTextureCopyDesc& tightlyPackedRgba8Region);
 		void recordBufferUpload(const Slice& slice, rhi::BufferHandle dstBuffer, uint64_t dstOffset, uint64_t size);
 		void executeUploads(rhi::CommandBuffer& cmd) const;
 

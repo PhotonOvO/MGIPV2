@@ -6,9 +6,19 @@
 #include <cassert>
 #include <new>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace demo::rhi::vulkan {
+
+void VulkanResourceTable::advanceResourceValidationEpoch() noexcept
+{
+  ++m_resourceValidationEpoch;
+  // Zero is reserved for "never validated". A wrap would require roughly
+  // 2^64 resource mutations, but keep the sentinel invariant explicit.
+  if(m_resourceValidationEpoch == 0u)
+    m_resourceValidationEpoch = 1u;
+}
 
 PipelineHandle VulkanResourceTable::registerPipeline(VkPipelineBindPoint bindPoint, VkPipeline nativePipeline,
                                                      uint32_t specializationVariant, VkPipelineLayout nativeLayout,
@@ -35,7 +45,8 @@ const PipelineRecord* VulkanResourceTable::tryGetPipeline(PipelineHandle handle)
 
 void VulkanResourceTable::destroyPipeline(PipelineHandle handle)
 {
-  m_pipelines.destroy(handle);
+  if(m_pipelines.destroy(handle))
+    advanceResourceValidationEpoch();
 }
 
 TextureViewHandle VulkanResourceTable::registerTextureView(
@@ -44,9 +55,17 @@ TextureViewHandle VulkanResourceTable::registerTextureView(
   ASSERT(nativeView != 0, "Texture view registry entries require a valid native image view");
   const TextureViewHandle handle =
     m_textureViews.emplace(TextureViewHotRecord{.nativeView = nativeView});
-  if(m_textureViewCold.size() <= handle.index)
-    m_textureViewCold.resize(static_cast<size_t>(handle.index) + 1u);
-  m_textureViewCold[handle.index] = std::move(cold);
+  try
+  {
+    if(m_textureViewCold.size() <= handle.index)
+      m_textureViewCold.resize(static_cast<size_t>(handle.index) + 1u);
+    m_textureViewCold[handle.index] = std::move(cold);
+  }
+  catch(...)
+  {
+    (void)m_textureViews.destroy(handle);
+    throw;
+  }
   return handle;
 }
 
@@ -78,6 +97,7 @@ TextureViewRecord VulkanResourceTable::removeTextureView(TextureViewHandle handl
   TextureViewRecord record{.hot = *hot, .cold = std::move(m_textureViewCold[handle.index])};
   m_textureViewCold[handle.index] = {};
   m_textureViews.destroy(handle);
+  advanceResourceValidationEpoch();
   return record;
 }
 
@@ -87,9 +107,17 @@ TextureHandle VulkanResourceTable::registerTexture(
   ASSERT(nativeImage != 0, "Texture registry entries require a valid native image");
   const TextureHandle handle =
     m_textures.emplace(TextureHotRecord{.nativeImage = nativeImage});
-  if(m_textureCold.size() <= handle.index)
-    m_textureCold.resize(static_cast<size_t>(handle.index) + 1u);
-  m_textureCold[handle.index] = std::move(cold);
+  try
+  {
+    if(m_textureCold.size() <= handle.index)
+      m_textureCold.resize(static_cast<size_t>(handle.index) + 1u);
+    m_textureCold[handle.index] = std::move(cold);
+  }
+  catch(...)
+  {
+    (void)m_textures.destroy(handle);
+    throw;
+  }
   return handle;
 }
 
@@ -120,6 +148,7 @@ TextureRecord VulkanResourceTable::removeTexture(TextureHandle handle)
   TextureRecord record{.hot = *hot, .cold = std::move(m_textureCold[handle.index])};
   m_textureCold[handle.index] = {};
   m_textures.destroy(handle);
+  advanceResourceValidationEpoch();
   return record;
 }
 
@@ -143,9 +172,17 @@ BufferHandle VulkanResourceTable::registerBuffer(
 {
   ASSERT(hot.nativeBuffer != 0, "Buffer registry entries require a valid native buffer");
   const BufferHandle handle = m_buffers.emplace(std::move(hot));
-  if(m_bufferCold.size() <= handle.index)
-    m_bufferCold.resize(static_cast<size_t>(handle.index) + 1u);
-  m_bufferCold[handle.index] = std::move(cold);
+  try
+  {
+    if(m_bufferCold.size() <= handle.index)
+      m_bufferCold.resize(static_cast<size_t>(handle.index) + 1u);
+    m_bufferCold[handle.index] = std::move(cold);
+  }
+  catch(...)
+  {
+    (void)m_buffers.destroy(handle);
+    throw;
+  }
   return handle;
 }
 
@@ -159,10 +196,12 @@ void VulkanResourceTable::updateBuffer(
   BufferHandle handle, VkBuffer nativeBuffer, VkDeviceAddress gpuAddress)
 {
   BufferHotRecord* record = m_buffers.tryGet(handle);
-  if(record != nullptr)
+  if(record != nullptr &&
+     (record->nativeBuffer != nativeBuffer || record->gpuAddress != gpuAddress))
   {
     record->nativeBuffer = nativeBuffer;
     record->gpuAddress = gpuAddress;
+    advanceResourceValidationEpoch();
   }
 }
 
@@ -188,6 +227,7 @@ BufferRecord VulkanResourceTable::removeBuffer(BufferHandle handle)
   BufferRecord record{.hot = *hot, .cold = std::move(m_bufferCold[handle.index])};
   m_bufferCold[handle.index] = {};
   m_buffers.destroy(handle);
+  advanceResourceValidationEpoch();
   return record;
 }
 
@@ -207,7 +247,8 @@ SamplerRecord VulkanResourceTable::removeSampler(SamplerHandle handle)
 {
   const SamplerRecord* record = m_samplers.tryGet(handle);
   const SamplerRecord  copy   = record != nullptr ? *record : SamplerRecord{};
-  m_samplers.destroy(handle);
+  if(m_samplers.destroy(handle))
+    advanceResourceValidationEpoch();
   return copy;
 }
 
@@ -221,6 +262,12 @@ VkQueryPool VulkanResourceTable::resolveQueryPool(QueryPoolHandle handle) const
 {
   const QueryPoolRecord* record = m_queryPools.tryGet(handle);
   return record != nullptr ? record->nativePool : VK_NULL_HANDLE;
+}
+
+const QueryPoolRecord* VulkanResourceTable::tryGetQueryPool(
+  QueryPoolHandle handle) const
+{
+  return m_queryPools.tryGet(handle);
 }
 
 QueryPoolRecord VulkanResourceTable::removeQueryPool(QueryPoolHandle handle)
@@ -252,7 +299,8 @@ ShaderLibraryRecord VulkanResourceTable::removeShaderLibrary(
 {
   const ShaderLibraryRecord* record = m_shaderLibraries.tryGet(handle);
   const ShaderLibraryRecord copy = record != nullptr ? *record : ShaderLibraryRecord{};
-  m_shaderLibraries.destroy(handle);
+  if(m_shaderLibraries.destroy(handle))
+    advanceResourceValidationEpoch();
   return copy;
 }
 
@@ -302,49 +350,30 @@ bool VulkanResourceTable::validateArgumentTableForSubmit(
   ArgumentTableHandle handle) const
 {
   const ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
-  if(record == nullptr)
+  if(record == nullptr || record->nativeSet == VK_NULL_HANDLE)
     return false;
-  return std::all_of(
-    record->referencedResources.begin(), record->referencedResources.end(),
-    [this](const ArgumentResourceReference& reference) {
-      return isAlive(reference.resource);
-    });
+  if(record->validatedResourceEpoch == m_resourceValidationEpoch)
+    return true;
+
+  std::vector<ResidencyResource> visited;
+  const bool valid = validateResourceGraph(
+    ResidencyResource{
+      ResidencyResourceKind::argumentTable, handle.index, handle.generation},
+    visited);
+  if(valid)
+    record->validatedResourceEpoch = m_resourceValidationEpoch;
+  return valid;
 }
 
 void VulkanResourceTable::markArgumentTableSubmitted(
   ArgumentTableHandle handle, SubmissionToken token)
 {
-  ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
-  if(record == nullptr)
-    throw std::runtime_error("Vulkan command buffer references a stale argument table");
-  if(!record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan argument-table queue dependency capacity exceeded");
-  for(const ArgumentResourceReference& reference : record->referencedResources)
-  {
-    const ResidencyResource resource = reference.resource;
-    switch(resource.kind)
-    {
-    case ResidencyResourceKind::buffer:
-      markBufferSubmitted(BufferHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::texture:
-      markTextureSubmitted(TextureHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::textureView:
-      markTextureViewSubmitted(
-        TextureViewHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::sampler:
-      markSamplerSubmitted(SamplerHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::pipeline:
-      markPipelineSubmitted(PipelineHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::argumentTable:
-    case ResidencyResourceKind::shaderLibrary:
-      break;
-    }
-  }
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .argumentTables = std::span<const ArgumentTableHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::recordArgumentTableResource(
@@ -364,97 +393,294 @@ void VulkanResourceTable::recordArgumentTableResource(
              reference.resource.kind == resource.kind;
     });
   if(existing != record->referencedResources.end())
-    existing->resource = resource;
+  {
+    if(existing->resource != resource)
+    {
+      existing->resource = resource;
+      advanceResourceValidationEpoch();
+    }
+  }
   else
+  {
     record->referencedResources.push_back(
       ArgumentResourceReference{binding, arrayElement, resource});
+    advanceResourceValidationEpoch();
+  }
 }
 
 void VulkanResourceTable::markPipelineSubmitted(
   PipelineHandle handle, SubmissionToken token)
 {
-  PipelineRecord* record = m_pipelines.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan pipeline submission tracking failed");
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .pipelines = std::span<const PipelineHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markTextureViewSubmitted(
   TextureViewHandle handle, SubmissionToken token)
 {
-  TextureViewHotRecord* hot = m_textureViews.tryGet(handle);
-  const TextureViewColdRecord* cold = tryGetTextureViewCold(handle);
-  if(hot == nullptr || cold == nullptr || !hot->pendingUses.record(token))
-    throw std::runtime_error("Vulkan texture-view submission tracking failed");
-  if(cold->parentTexture.isValid())
-    markTextureSubmitted(cold->parentTexture, token);
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .textureViews = std::span<const TextureViewHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markTextureSubmitted(
   TextureHandle handle, SubmissionToken token)
 {
-  TextureHotRecord* record = m_textures.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan texture submission tracking failed");
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .textures = std::span<const TextureHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markBufferSubmitted(
   BufferHandle handle, SubmissionToken token)
 {
-  BufferHotRecord* record = m_buffers.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan buffer submission tracking failed");
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .buffers = std::span<const BufferHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markSamplerSubmitted(
   SamplerHandle handle, SubmissionToken token)
 {
-  SamplerRecord* record = m_samplers.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan sampler submission tracking failed");
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .samplers = std::span<const SamplerHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markQueryPoolSubmitted(
   QueryPoolHandle handle, SubmissionToken token)
 {
-  QueryPoolRecord* record = m_queryPools.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan query-pool submission tracking failed");
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .queryPools = std::span<const QueryPoolHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
 }
 
 void VulkanResourceTable::markResidencySetSubmitted(
   ResidencySetHandle handle, SubmissionToken token)
 {
-  ResidencySetRecord* record = m_residencySets.tryGet(handle);
-  if(record == nullptr || !record->pendingUses.record(token))
-    throw std::runtime_error("Vulkan residency-set submission tracking failed");
-  for(const ResidencyResource resource : record->resources)
-  {
+  VulkanSubmissionPlan plan;
+  prepareSubmission(
+    VulkanSubmissionRoots{
+      .residencySets = std::span<const ResidencySetHandle>(&handle, 1)},
+    token, plan);
+  commitSubmission(plan);
+}
+
+void VulkanResourceTable::prepareSubmission(
+  const VulkanSubmissionRoots& roots, SubmissionToken token,
+  VulkanSubmissionPlan& plan)
+{
+  if(!token.isValid())
+    throw std::runtime_error("Vulkan submission preparation requires a valid token");
+
+  VulkanSubmissionPlan candidate;
+  candidate.token = token;
+  std::unordered_set<SubmissionTokenSet*> uniquePendingUses;
+  const std::size_t rootCount = roots.argumentTables.size() +
+    roots.pipelines.size() + roots.buffers.size() + roots.textures.size() +
+    roots.textureViews.size() + roots.samplers.size() +
+    roots.queryPools.size() + roots.residencySets.size();
+  candidate.pendingUses.reserve(rootCount);
+  uniquePendingUses.reserve(rootCount);
+
+  const auto addPendingUse = [&candidate, &uniquePendingUses, token](
+    SubmissionTokenSet& pendingUses) -> bool {
+    if(!uniquePendingUses.insert(&pendingUses).second)
+      return false;
+    if(!pendingUses.canRecord(token))
+      throw std::runtime_error(
+        "Vulkan submission queue dependency capacity exceeded");
+    candidate.pendingUses.push_back(&pendingUses);
+    return true;
+  };
+
+  const auto prepareResource = [this, &addPendingUse](
+    auto&& self, ResidencyResource resource) -> void {
+    if(!resource.isValid())
+      throw std::runtime_error(
+        "Vulkan submission references a null or malformed resource handle");
+
     switch(resource.kind)
     {
     case ResidencyResourceKind::buffer:
-      markBufferSubmitted(BufferHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::texture:
-      markTextureSubmitted(TextureHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::textureView:
-      markTextureViewSubmitted(
-        TextureViewHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::sampler:
-      markSamplerSubmitted(SamplerHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::pipeline:
-      markPipelineSubmitted(PipelineHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::argumentTable:
-      markArgumentTableSubmitted(
-        ArgumentTableHandle{resource.index, resource.generation}, token);
-      break;
-    case ResidencyResourceKind::shaderLibrary:
-      break;
+    {
+      BufferHotRecord* record = m_buffers.tryGet(
+        BufferHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativeBuffer == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native buffer");
+      (void)addPendingUse(record->pendingUses);
+      return;
     }
+    case ResidencyResourceKind::texture:
+    {
+      TextureHotRecord* record = m_textures.tryGet(
+        TextureHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativeImage == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native texture");
+      (void)addPendingUse(record->pendingUses);
+      return;
+    }
+    case ResidencyResourceKind::textureView:
+    {
+      const TextureViewHandle handle{resource.index, resource.generation};
+      TextureViewHotRecord* hot = m_textureViews.tryGet(handle);
+      const TextureViewColdRecord* cold = tryGetTextureViewCold(handle);
+      if(hot == nullptr || cold == nullptr || hot->nativeView == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native texture view");
+      if(!addPendingUse(hot->pendingUses))
+        return;
+      if(!cold->parentTexture.isNull())
+      {
+        self(self, ResidencyResource{
+          ResidencyResourceKind::texture, cold->parentTexture.index,
+          cold->parentTexture.generation});
+      }
+      return;
+    }
+    case ResidencyResourceKind::sampler:
+    {
+      SamplerRecord* record = m_samplers.tryGet(
+        SamplerHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativeSampler == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native sampler");
+      (void)addPendingUse(record->pendingUses);
+      return;
+    }
+    case ResidencyResourceKind::shaderLibrary:
+    {
+      const ShaderLibraryRecord* record = m_shaderLibraries.tryGet(
+        ShaderLibraryHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativeModule == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native shader library");
+      return;
+    }
+    case ResidencyResourceKind::pipeline:
+    {
+      PipelineRecord* record = m_pipelines.tryGet(
+        PipelineHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativePipeline == VK_NULL_HANDLE ||
+         record->nativeLayout == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native pipeline");
+      (void)addPendingUse(record->pendingUses);
+      return;
+    }
+    case ResidencyResourceKind::argumentTable:
+    {
+      ArgumentTableRecord* record = m_argumentTables.tryGet(
+        ArgumentTableHandle{resource.index, resource.generation});
+      if(record == nullptr || record->nativeSet == VK_NULL_HANDLE)
+        throw std::runtime_error(
+          "Vulkan submission references a stale or null-native argument table");
+      if(!addPendingUse(record->pendingUses))
+        return;
+      for(const ArgumentResourceReference& reference : record->referencedResources)
+        self(self, reference.resource);
+      return;
+    }
+    }
+    throw std::runtime_error("Vulkan submission references an unknown resource kind");
+  };
+
+  for(ArgumentTableHandle handle : roots.argumentTables)
+  {
+    prepareResource(prepareResource, ResidencyResource{
+      ResidencyResourceKind::argumentTable, handle.index, handle.generation});
   }
+  for(PipelineHandle handle : roots.pipelines)
+  {
+    prepareResource(prepareResource, ResidencyResource{
+      ResidencyResourceKind::pipeline, handle.index, handle.generation});
+  }
+  for(BufferHandle handle : roots.buffers)
+    prepareResource(prepareResource, residencyResource(handle));
+  for(TextureHandle handle : roots.textures)
+    prepareResource(prepareResource, residencyResource(handle));
+  for(TextureViewHandle handle : roots.textureViews)
+    prepareResource(prepareResource, residencyResource(handle));
+  for(SamplerHandle handle : roots.samplers)
+  {
+    prepareResource(prepareResource, ResidencyResource{
+      ResidencyResourceKind::sampler, handle.index, handle.generation});
+  }
+  for(QueryPoolHandle handle : roots.queryPools)
+  {
+    QueryPoolRecord* record = m_queryPools.tryGet(handle);
+    if(record == nullptr || record->nativePool == VK_NULL_HANDLE)
+      throw std::runtime_error(
+        "Vulkan submission references a stale or null-native query pool");
+    (void)addPendingUse(record->pendingUses);
+  }
+  for(ResidencySetHandle handle : roots.residencySets)
+  {
+    ResidencySetRecord* record = m_residencySets.tryGet(handle);
+    if(record == nullptr)
+      throw std::runtime_error("Vulkan submission references a stale residency set");
+    if(!addPendingUse(record->pendingUses))
+      continue;
+    for(ResidencyResource resource : record->resources)
+      prepareResource(prepareResource, resource);
+  }
+
+  plan = std::move(candidate);
+}
+
+void VulkanResourceTable::commitSubmission(
+  const VulkanSubmissionPlan& plan) noexcept
+{
+  for(SubmissionTokenSet* pendingUses : plan.pendingUses)
+  {
+    const bool recorded =
+      pendingUses != nullptr && pendingUses->record(plan.token);
+    assert(recorded);
+    (void)recorded;
+  }
+}
+
+bool VulkanResourceTable::validateResourceGraph(
+  ResidencyResource resource, std::vector<ResidencyResource>& visited) const
+{
+  if(!resource.isValid())
+    return false;
+  if(std::find(visited.begin(), visited.end(), resource) != visited.end())
+    return true;
+  visited.push_back(resource);
+  if(!isAlive(resource))
+    return false;
+  if(resource.kind != ResidencyResourceKind::argumentTable)
+    return true;
+
+  const ArgumentTableRecord* record = m_argumentTables.tryGet(
+    ArgumentTableHandle{resource.index, resource.generation});
+  return record != nullptr && std::all_of(
+    record->referencedResources.begin(), record->referencedResources.end(),
+    [this, &visited](const ArgumentResourceReference& reference) {
+      return validateResourceGraph(reference.resource, visited);
+    });
 }
 
 bool VulkanResourceTable::isAlive(ResidencyResource resource) const
@@ -464,22 +690,54 @@ bool VulkanResourceTable::isAlive(ResidencyResource resource) const
   switch(resource.kind)
   {
   case ResidencyResourceKind::buffer:
-    return m_buffers.isAlive(BufferHandle{resource.index, resource.generation});
+  {
+    const BufferHotRecord* record = m_buffers.tryGet(
+      BufferHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativeBuffer != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::texture:
-    return m_textures.isAlive(TextureHandle{resource.index, resource.generation});
+  {
+    const TextureHotRecord* record = m_textures.tryGet(
+      TextureHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativeImage != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::textureView:
-    return m_textureViews.isAlive(
-      TextureViewHandle{resource.index, resource.generation});
+  {
+    const TextureViewHandle handle{resource.index, resource.generation};
+    const TextureViewHotRecord* hot = m_textureViews.tryGet(handle);
+    const TextureViewColdRecord* cold = tryGetTextureViewCold(handle);
+    if(hot == nullptr || cold == nullptr || hot->nativeView == VK_NULL_HANDLE)
+      return false;
+    if(cold->parentTexture.isNull())
+      return true;
+    const TextureHotRecord* parent = m_textures.tryGet(cold->parentTexture);
+    return parent != nullptr && parent->nativeImage != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::sampler:
-    return m_samplers.isAlive(SamplerHandle{resource.index, resource.generation});
+  {
+    const SamplerRecord* record = m_samplers.tryGet(
+      SamplerHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativeSampler != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::shaderLibrary:
-    return m_shaderLibraries.isAlive(
+  {
+    const ShaderLibraryRecord* record = m_shaderLibraries.tryGet(
       ShaderLibraryHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativeModule != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::pipeline:
-    return m_pipelines.isAlive(PipelineHandle{resource.index, resource.generation});
+  {
+    const PipelineRecord* record = m_pipelines.tryGet(
+      PipelineHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativePipeline != VK_NULL_HANDLE &&
+           record->nativeLayout != VK_NULL_HANDLE;
+  }
   case ResidencyResourceKind::argumentTable:
-    return m_argumentTables.isAlive(
+  {
+    const ArgumentTableRecord* record = m_argumentTables.tryGet(
       ArgumentTableHandle{resource.index, resource.generation});
+    return record != nullptr && record->nativeSet != VK_NULL_HANDLE;
+  }
   }
   return false;
 }
@@ -494,7 +752,8 @@ ArgumentTableRecord VulkanResourceTable::removeArgumentTable(ArgumentTableHandle
 {
   const ArgumentTableRecord* record = m_argumentTables.tryGet(handle);
   const ArgumentTableRecord  copy   = record != nullptr ? *record : ArgumentTableRecord{};
-  m_argumentTables.destroy(handle);
+  if(m_argumentTables.destroy(handle))
+    advanceResourceValidationEpoch();
   return copy;
 }
 
@@ -569,8 +828,11 @@ bool VulkanResourceTable::validateResidencySetForSubmit(
   const ResidencySetRecord* record = m_residencySets.tryGet(handle);
   if(record == nullptr)
     return false;
+  std::vector<ResidencyResource> visited;
   return std::all_of(
     record->resources.begin(), record->resources.end(),
-    [this](ResidencyResource resource) { return isAlive(resource); });
+    [this, &visited](ResidencyResource resource) {
+      return validateResourceGraph(resource, visited);
+    });
 }
 }  // namespace demo::rhi::vulkan

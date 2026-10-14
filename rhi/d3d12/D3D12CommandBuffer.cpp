@@ -21,6 +21,7 @@ namespace demo::rhi::d3d12 {
 namespace {
 
 constexpr uint64_t kInitialFillUploadCapacity = 64u * 1024u;
+constexpr uint32_t kInitialTrackedBufferCapacity = 512;
 
 template <typename Handle, size_t Capacity>
 void trackHandle(
@@ -769,12 +770,18 @@ void D3D12ComputeEncoder::fillBuffer(
     destination, offset, upload, sourceOffset, fillSize);
   m_device->transitionBuffer(m_commandList, buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
+D3D12CommandBuffer::D3D12CommandBuffer()
+{
+  m_buffers.reserve(kInitialTrackedBufferCapacity);
+}
+
 D3D12CommandBuffer::D3D12CommandBuffer(
   D3D12CommandAllocator& allocator, void* nativeCommandList, D3D12Device* device)
   : m_commandList(nativeCommandList), m_device(device), m_allocator(&allocator)
 {
   if(m_commandList == nullptr || m_device == nullptr)
     throw std::runtime_error("D3D12CommandBuffer requires native storage and a device");
+  m_buffers.reserve(kInitialTrackedBufferCapacity);
   m_transientResources.reserve(16);
   ensureFillUploadCapacity(kInitialFillUploadCapacity);
 }
@@ -924,7 +931,7 @@ void D3D12CommandBuffer::begin(CommandAllocator& allocator)
   m_fillUploadHead = 0;
   m_argumentTableCount = 0;
   m_pipelineCount = 0;
-  m_bufferCount = 0;
+  m_buffers.clear();
   m_textureCount = 0;
   m_textureViewCount = 0;
   m_queryPoolCount = 0;
@@ -978,8 +985,8 @@ void D3D12CommandBuffer::validateForSubmit() const
   for(uint32_t index = 0; index < m_pipelineCount; ++index)
     if(!m_device->isPipelineValid(m_pipelines[index]))
       throw std::runtime_error("D3D12CommandBuffer submission references a stale pipeline");
-  for(uint32_t index = 0; index < m_bufferCount; ++index)
-    if(!m_device->isBufferValid(m_buffers[index]))
+  for(BufferHandle buffer : m_buffers)
+    if(!m_device->isBufferValid(buffer))
       throw std::runtime_error("D3D12CommandBuffer submission references a stale buffer");
   for(uint32_t index = 0; index < m_textureCount; ++index)
     if(!m_device->isTextureValid(m_textures[index]))
@@ -1003,8 +1010,8 @@ void D3D12CommandBuffer::markSubmitted(SubmissionToken token)
     m_device->markArgumentTableSubmitted(m_argumentTables[index], token);
   for(uint32_t index = 0; index < m_pipelineCount; ++index)
     m_device->markPipelineSubmitted(m_pipelines[index], token);
-  for(uint32_t index = 0; index < m_bufferCount; ++index)
-    m_device->markBufferSubmitted(m_buffers[index], token);
+  for(BufferHandle buffer : m_buffers)
+    m_device->markBufferSubmitted(buffer, token);
   for(uint32_t index = 0; index < m_textureCount; ++index)
     m_device->markTextureSubmitted(m_textures[index], token);
   for(uint32_t index = 0; index < m_textureViewCount; ++index)
@@ -1025,7 +1032,7 @@ void D3D12CommandBuffer::markReusable()
   m_submission = {};
   m_argumentTableCount = 0;
   m_pipelineCount = 0;
-  m_bufferCount = 0;
+  m_buffers.clear();
   m_textureCount = 0;
   m_textureViewCount = 0;
   m_queryPoolCount = 0;
@@ -1048,9 +1055,8 @@ void D3D12CommandBuffer::trackPipeline(PipelineHandle pipeline)
 
 void D3D12CommandBuffer::trackBuffer(BufferHandle buffer)
 {
-  trackHandle(
-    m_buffers, m_bufferCount, buffer,
-    "D3D12 command-buffer buffer capacity exceeded");
+  if(std::find(m_buffers.begin(), m_buffers.end(), buffer) == m_buffers.end())
+    m_buffers.push_back(buffer);
 }
 
 void D3D12CommandBuffer::trackTexture(TextureHandle texture)
@@ -1090,7 +1096,7 @@ void D3D12CommandBuffer::setTarget(void* nativeCommandList, D3D12Device* device)
   m_active = EncoderKind::none;
   m_argumentTableCount = 0;
   m_pipelineCount = 0;
-  m_bufferCount = 0;
+  m_buffers.clear();
   m_textureCount = 0;
   m_textureViewCount = 0;
   m_queryPoolCount = 0;

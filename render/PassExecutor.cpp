@@ -118,9 +118,74 @@ namespace demo
 		m_passes.clear();
 	}
 
-	void PassExecutor::addPass(const PassNode& pass)
+	void PassExecutor::addPass(
+		const PassNode& pass, MissingBindingPolicy missingBindingPolicy)
 	{
-		m_passes.push_back(&pass);
+		m_passes.push_back(PassEntry{
+			.pass = &pass,
+			.enabled = true,
+			.missingBindingPolicy = missingBindingPolicy,
+		});
+	}
+
+	PassExecutor::PassEntry* PassExecutor::findPassEntry(const PassNode& pass)
+	{
+		for (PassEntry& entry : m_passes)
+		{
+			if (entry.pass == &pass)
+			{
+				return &entry;
+			}
+		}
+		return nullptr;
+	}
+
+	const PassExecutor::PassEntry* PassExecutor::findPassEntry(const PassNode& pass) const
+	{
+		for (const PassEntry& entry : m_passes)
+		{
+			if (entry.pass == &pass)
+			{
+				return &entry;
+			}
+		}
+		return nullptr;
+	}
+
+	bool PassExecutor::setPassEnabled(const PassNode& pass, bool enabled)
+	{
+		PassEntry* entry = findPassEntry(pass);
+		if (entry == nullptr)
+		{
+			return false;
+		}
+		entry->enabled = enabled;
+		return true;
+	}
+
+	bool PassExecutor::isPassEnabled(const PassNode& pass) const
+	{
+		const PassEntry* entry = findPassEntry(pass);
+		return entry != nullptr && entry->enabled;
+	}
+
+	bool PassExecutor::setMissingBindingPolicy(
+		const PassNode& pass, MissingBindingPolicy policy)
+	{
+		PassEntry* entry = findPassEntry(pass);
+		if (entry == nullptr)
+		{
+			return false;
+		}
+		entry->missingBindingPolicy = policy;
+		return true;
+	}
+
+	PassExecutor::MissingBindingPolicy PassExecutor::getMissingBindingPolicy(
+		const PassNode& pass) const
+	{
+		const PassEntry* entry = findPassEntry(pass);
+		return entry != nullptr ? entry->missingBindingPolicy : MissingBindingPolicy::ignore;
 	}
 
 	void PassExecutor::setResourceTable(rhi::Device* device)
@@ -169,6 +234,44 @@ namespace demo
 		}
 		m_bufferBindings.push_back(binding);
 		m_executionBufferStates.reserve(m_bufferBindings.size());
+	}
+
+	std::optional<PassExecutor::TextureBinding> PassExecutor::getTextureBinding(TextureHandle handle) const
+	{
+		const TextureBinding* binding = findTextureBinding(handle);
+		return binding != nullptr ? std::optional<TextureBinding>{*binding} : std::nullopt;
+	}
+
+	std::optional<PassExecutor::BufferBinding> PassExecutor::getBufferBinding(BufferHandle handle) const
+	{
+		const BufferBinding* binding = findBufferBinding(handle);
+		return binding != nullptr ? std::optional<BufferBinding>{*binding} : std::nullopt;
+	}
+
+	bool PassExecutor::hasBoundDependencies(const PassNode& pass) const
+	{
+		const PassNode::HandleSlice<PassResourceDependency> dependencies = pass.getDependencies();
+		for (uint32_t index = 0; index < dependencies.count; ++index)
+		{
+			const PassResourceDependency& dependency = dependencies.data[index];
+			if (dependency.type == PassResourceType::texture)
+			{
+				const TextureBinding* binding = findTextureBinding(dependency.textureHandle);
+				if (binding == nullptr || binding->rhiTexture.isNull())
+				{
+					return false;
+				}
+			}
+			else
+			{
+				const BufferBinding* binding = findBufferBinding(dependency.bufferHandle);
+				if (binding == nullptr || binding->rhiBuffer.isNull())
+				{
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	const PassExecutor::TextureBinding* PassExecutor::findTextureBinding(TextureHandle handle) const
@@ -226,7 +329,7 @@ namespace demo
 
 	const PassNode* PassExecutor::getPass(size_t index) const
 	{
-		return index < m_passes.size() ? m_passes[index] : nullptr;
+		return index < m_passes.size() ? m_passes[index].pass : nullptr;
 	}
 
 	void PassExecutor::execute(const PassContext& context, const ExecutionHooks* hooks) const
@@ -250,8 +353,15 @@ namespace demo
 
 		for (uint32_t passIndex = 0; passIndex < m_passes.size(); ++passIndex)
 		{
-			const PassNode* pass = m_passes[passIndex];
+			const PassEntry& passEntry = m_passes[passIndex];
+			const PassNode* pass = passEntry.pass;
 			assert(pass != nullptr);
+			if (!passEntry.enabled ||
+				(passEntry.missingBindingPolicy == MissingBindingPolicy::skipPass &&
+				 !hasBoundDependencies(*pass)))
+			{
+				continue;
+			}
 
 			if (hooks != nullptr)
 			{

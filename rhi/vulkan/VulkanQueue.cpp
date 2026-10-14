@@ -5,6 +5,7 @@
 #include "internal/VulkanCommon.h"
 #include "../RHIDebugCounters.h"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -122,6 +123,9 @@ SubmissionToken VulkanQueue::submit(const SubmitBatch& batch)
   require(batch.signalPoints.size() <= kMaxSignalPoints,
           "VulkanQueue::submit signal-point capacity exceeded");
 
+  const uint64_t signalValue = m_lastSubmittedValue + 1u;
+  const SubmissionToken token{m_identity, signalValue};
+
   std::array<VkCommandBufferSubmitInfo, kMaxCommandBuffers> commandInfos{};
   std::array<VulkanCommandBuffer*, kMaxCommandBuffers> commandBuffers{};
   uint32_t commandCount = 0;
@@ -134,7 +138,10 @@ SubmissionToken VulkanQueue::submit(const SubmitBatch& batch)
             "VulkanQueue::submit requires executable command buffers");
     require(vkCommandBuffer->queueClass() == m_info.queueClass,
             "VulkanQueue::submit command buffer queue class mismatch");
-    vkCommandBuffer->validateForSubmit();
+    require(std::find(commandBuffers.begin(), commandBuffers.begin() + commandCount,
+                      vkCommandBuffer) == commandBuffers.begin() + commandCount,
+            "VulkanQueue::submit received a duplicate command buffer");
+    vkCommandBuffer->prepareForSubmit(token);
     commandInfos[commandCount] = VkCommandBufferSubmitInfo{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
       .commandBuffer = vkCommandBuffer->nativeHandle(),
@@ -189,7 +196,6 @@ SubmissionToken VulkanQueue::submit(const SubmitBatch& batch)
     };
   }
 
-  const uint64_t signalValue = m_lastSubmittedValue + 1u;
   signalInfos[signalCount++] = VkSemaphoreSubmitInfo{
     .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
     .semaphore = m_timeline,
@@ -212,7 +218,6 @@ SubmissionToken VulkanQueue::submit(const SubmitBatch& batch)
   incrementHotPathCounter(BackendType::vulkan, HotPathCounter::queueSubmits);
   incrementHotPathCounter(
     BackendType::vulkan, HotPathCounter::submittedCommandBuffers, commandCount);
-  const SubmissionToken token{m_identity, signalValue};
   for(uint32_t index = 0; index < commandCount; ++index)
     commandBuffers[index]->markSubmitted(token);
   return token;

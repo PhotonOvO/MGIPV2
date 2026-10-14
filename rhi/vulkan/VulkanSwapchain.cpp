@@ -255,7 +255,7 @@ AcquireResult VulkanSwapchain::acquireNextImage()
       : AcquireResult::Status::success,
     .waitPoint = SubmitWaitPoint{
       .external = QueueSyncPoint{frame.imageAvailableSync, 0},
-      .stage = SubmitStage::colorOutput,
+      .stage = SubmitStage::transfer,
     },
     .signalPoint = SubmitSignalPoint{
       .external = QueueSyncPoint{

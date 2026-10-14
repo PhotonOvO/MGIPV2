@@ -10,8 +10,9 @@ namespace demo {
 class SceneCacheSerializer
 {
 public:
-  // Bumped 11->12: material image color-space semantics are serialized.
-  static constexpr uint32_t kCurrentVersion = 12;
+  // Bumped for source identity, visibility, variants, animation metadata,
+  // and typed texture/sampler/image identity records.
+  static constexpr uint32_t kCurrentVersion = 14;
 
   [[nodiscard]] static std::filesystem::path buildCachePath(const std::filesystem::path& sourcePath);
 

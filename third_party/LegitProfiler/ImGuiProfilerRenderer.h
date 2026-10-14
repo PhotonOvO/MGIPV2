@@ -42,6 +42,7 @@ public:
   void LoadFrameData(const legit::ProfilerTask* tasks, size_t count)
   {
     auto& currFrame = frames[currFrameIndex];
+    bool taskStatsChanged = false;
     currFrame.tasks.resize(0);
     currFrame.totalTime = 0.0f;
     for(size_t taskIndex = 0; taskIndex < count; taskIndex++)
@@ -75,12 +76,19 @@ public:
         TaskStats taskStat;
         taskStat.maxTime = -1.0;
         taskStats.push_back(taskStat);
+        taskStatsChanged = true;
       }
       currFrame.taskStatsIndex[taskIndex] = taskNameToStatsIndex[task.name];
     }
     currFrameIndex = (currFrameIndex + 1) % frames.size();
 
-    RebuildTaskStats(currFrameIndex, 300);
+    ++framesSinceStatsRebuild;
+    constexpr size_t kStatsRebuildInterval = 4u;
+    if(taskStatsChanged || framesSinceStatsRebuild >= kStatsRebuildInterval)
+    {
+      RebuildTaskStats(currFrameIndex, frames.size());
+      framesSinceStatsRebuild = 0u;
+    }
   }
 
   float GetTotalTaskTime(int frameIndexOffset)
@@ -105,6 +113,7 @@ private:
 
   void RebuildTaskStats(size_t endFrame, size_t framesCount)
   {
+    framesCount = std::min(framesCount, frames.size());
     for(auto& taskStat : taskStats)
     {
       taskStat.maxTime = -1.0f;
@@ -284,5 +293,6 @@ private:
   std::map<std::string, size_t>  taskNameToStatsIndex;
   std::vector<FrameData>         frames;
   size_t                         currFrameIndex = 0;
+  size_t                         framesSinceStatsRebuild = 0;
 };
 }  // namespace ImGuiUtils

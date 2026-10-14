@@ -66,6 +66,7 @@ DXGI_FORMAT toDxgiFormat(TextureFormat format)
   case TextureFormat::rgba16Sfloat: return DXGI_FORMAT_R16G16B16A16_FLOAT;
   case TextureFormat::rg16Sfloat: return DXGI_FORMAT_R16G16_FLOAT;
   case TextureFormat::r32Sfloat: return DXGI_FORMAT_R32_FLOAT;
+  case TextureFormat::r32Uint: return DXGI_FORMAT_R32_UINT;
   case TextureFormat::r16Sfloat: return DXGI_FORMAT_R16_FLOAT;
   case TextureFormat::rgba8Snorm: return DXGI_FORMAT_R8G8B8A8_SNORM;
   case TextureFormat::r11g11b10Ufloat: return DXGI_FORMAT_R11G11B10_FLOAT;
@@ -544,16 +545,27 @@ PipelineHandle D3D12Device::createGraphicsPipeline(const GraphicsPipelineDesc& d
   for(uint32_t index = 0; index < static_cast<uint32_t>(desc.vertexInput.attributes.size()); ++index)
   {
     const VertexAttributeDesc& attribute = desc.vertexInput.attributes[index];
-    const auto reflected = std::find_if(
+    auto reflected = std::find_if(
       vertexShader->vertexInputs.begin(), vertexShader->vertexInputs.end(),
       [&attribute](const D3D12VertexInput& input)
       {
         return input.location == attribute.location;
       });
+    // DXIL input signatures compact holes in Vulkan location numbering. The
+    // declaration order remains stable, so use it only when both sides expose
+    // the same complete input cardinality and exact location matching failed.
+    if(reflected == vertexShader->vertexInputs.end() &&
+       vertexShader->vertexInputs.size() == desc.vertexInput.attributes.size())
+      reflected = vertexShader->vertexInputs.begin() + index;
     if(reflected == vertexShader->vertexInputs.end())
     {
       root.signature->Release();
-      throw std::runtime_error("DX12 vertex reflection is missing an RHI location");
+      std::string message = "DX12 vertex reflection for " +
+        vertexShader->sourcePath.string() + " is missing RHI location " +
+        std::to_string(attribute.location) + "; reflected locations:";
+      for(const D3D12VertexInput& input : vertexShader->vertexInputs)
+        message += " " + std::to_string(input.location);
+      throw std::runtime_error(std::move(message));
     }
     const auto binding = std::find_if(
       desc.vertexInput.bindings.begin(),

@@ -26,6 +26,7 @@ namespace demo::rhi::vulkan
     case VK_FORMAT_R16G16B16A16_SFLOAT:      return rhi::TextureFormat::rgba16Sfloat;
     case VK_FORMAT_R16G16_SFLOAT:            return rhi::TextureFormat::rg16Sfloat;
     case VK_FORMAT_R32_SFLOAT:               return rhi::TextureFormat::r32Sfloat;
+    case VK_FORMAT_R32_UINT:                 return rhi::TextureFormat::r32Uint;
     case VK_FORMAT_R16_SFLOAT:               return rhi::TextureFormat::r16Sfloat;
     case VK_FORMAT_R8G8B8A8_SNORM:          return rhi::TextureFormat::rgba8Snorm;
     case VK_FORMAT_B10G11R11_UFLOAT_PACK32:  return rhi::TextureFormat::r11g11b10Ufloat;
@@ -56,6 +57,7 @@ namespace demo::rhi::vulkan
     case rhi::TextureFormat::rgba16Sfloat:    return VK_FORMAT_R16G16B16A16_SFLOAT;
     case rhi::TextureFormat::rg16Sfloat:      return VK_FORMAT_R16G16_SFLOAT;
     case rhi::TextureFormat::r32Sfloat:       return VK_FORMAT_R32_SFLOAT;
+    case rhi::TextureFormat::r32Uint:         return VK_FORMAT_R32_UINT;
     case rhi::TextureFormat::r16Sfloat:       return VK_FORMAT_R16_SFLOAT;
     case rhi::TextureFormat::rgba8Snorm:      return VK_FORMAT_R8G8B8A8_SNORM;
     case rhi::TextureFormat::r11g11b10Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;

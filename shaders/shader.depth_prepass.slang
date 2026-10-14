@@ -26,7 +26,7 @@ ConstantBuffer<CameraUniforms> camera;
 ConstantBuffer<DrawUniforms> draw;
 
 [[vk::binding(LBindDrawModelMdi, LSetDraw)]]
-StructuredBuffer<DrawUniforms> drawData;
+StructuredBuffer<DrawUniformsStorage> drawData;
 
 #ifdef DEMO_D3D12
 [[vk::push_constant]]
@@ -69,7 +69,7 @@ VertexOutputMdi vertexMdiMain(VertexInput input)
 VertexOutputMdi vertexMdiMain(VertexInput input, uint drawIndex : DEMO_DRAW_INSTANCE_SEMANTIC)
 {
 #endif
-    const DrawUniforms mdiDraw = drawData[drawIndex];
+    const DrawUniformsStorage mdiDraw = drawData[drawIndex];
     VertexOutputMdi output;
     float4 worldPos = mul(mdiDraw.modelMatrix, float4(input.position, 1.0));
     output.position = mul(camera.viewProjection, worldPos);
@@ -101,7 +101,7 @@ void fragmentMain(VertexOutput input)
 [shader("fragment")]
 void fragmentMdiMain(VertexOutputMdi input)
 {
-    const DrawUniforms mdiDraw = drawData[input.drawIndex];
+    const DrawUniformsStorage mdiDraw = drawData[input.drawIndex];
     if(!alphaTestEnabled)
     {
         return;

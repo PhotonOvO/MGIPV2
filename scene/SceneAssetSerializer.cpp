@@ -25,6 +25,9 @@ constexpr uint32_t kMaxReasonableNodeCount = 1u << 16;
 constexpr uint32_t kMaxReasonableCameraCount = 1u << 14;
 constexpr uint32_t kMaxReasonableLightCount = 1u << 14;
 constexpr uint32_t kMaxReasonableDependencyCount = 1u << 14;
+constexpr uint32_t kMaxReasonablePrimitiveCount = 1u << 18;
+constexpr uint32_t kMaxReasonableAnimationCount = 1u << 14;
+constexpr uint32_t kMaxReasonableVariantCount = 1u << 14;
 constexpr uint64_t kMaxReasonablePayloadBytes = 8ull << 30;
 
 struct AssetHeader {
@@ -42,6 +45,11 @@ struct AssetHeader {
   uint32_t lightCount{0};
   uint32_t rootNodeCount{0};
   uint32_t dependencyCount{0};
+  uint32_t primitiveCount{0};
+  uint32_t animationCount{0};
+  uint32_t variantCount{0};
+  uint64_t documentRevision{0};
+  uint64_t documentSemanticHashSize{0};
   uint64_t vertexPayloadBytes{0};
   uint64_t indexPayloadBytes{0};
   uint64_t texturePayloadBytes{0};
@@ -70,6 +78,14 @@ struct SectionTable {
   uint64_t indexPayloadSize{0};
   uint64_t texturePayloadOffset{0};
   uint64_t texturePayloadSize{0};
+  uint64_t primitivesOffset{0};
+  uint64_t primitivesSize{0};
+  uint64_t variantsOffset{0};
+  uint64_t variantsSize{0};
+  uint64_t animationsOffset{0};
+  uint64_t animationsSize{0};
+  uint64_t semanticHashOffset{0};
+  uint64_t semanticHashSize{0};
 };
 
 [[nodiscard]] bool hasReasonableCounts(const AssetHeader& h) {
@@ -80,6 +96,10 @@ struct SectionTable {
       && h.cameraCount <= kMaxReasonableCameraCount
       && h.lightCount <= kMaxReasonableLightCount
       && h.dependencyCount <= kMaxReasonableDependencyCount
+      && h.primitiveCount <= kMaxReasonablePrimitiveCount
+      && h.animationCount <= kMaxReasonableAnimationCount
+      && h.variantCount <= kMaxReasonableVariantCount
+      && h.documentSemanticHashSize <= kMaxReasonableStringBytes
       && h.vertexPayloadBytes <= kMaxReasonablePayloadBytes
       && h.indexPayloadBytes <= kMaxReasonablePayloadBytes
       && h.texturePayloadBytes <= kMaxReasonablePayloadBytes;
@@ -105,7 +125,14 @@ struct SectionTable {
     return false;
   }
 
-  const std::array<std::pair<uint64_t, uint64_t>, 11> sections{{
+  if(table.primitivesSize == 0 && h.primitiveCount != 0
+     || table.variantsSize == 0 && h.variantCount != 0
+     || table.animationsSize == 0 && h.animationCount != 0
+     || table.semanticHashSize != h.documentSemanticHashSize) {
+    return false;
+  }
+
+  const std::array<std::pair<uint64_t, uint64_t>, 15> sections{{
       {table.meshesOffset, table.meshesSize},
       {table.materialsOffset, table.materialsSize},
       {table.texturesOffset, table.texturesSize},
@@ -117,6 +144,10 @@ struct SectionTable {
       {table.vertexPayloadOffset, table.vertexPayloadSize},
       {table.indexPayloadOffset, table.indexPayloadSize},
       {table.texturePayloadOffset, table.texturePayloadSize},
+      {table.primitivesOffset, table.primitivesSize},
+      {table.variantsOffset, table.variantsSize},
+      {table.animationsOffset, table.animationsSize},
+      {table.semanticHashOffset, table.semanticHashSize},
   }};
 
   uint64_t expectedOffset = minimumSize;
@@ -230,6 +261,8 @@ void writeMaterial(std::ostream& stream, const SceneMaterial& mat) {
   writePod(stream, mat.materialWorkflow);
   writePod(stream, mat.doubleSided);
   writeString(stream, mat.name);
+  writeString(stream, mat.extensionsJson);
+  writeString(stream, mat.extrasJson);
 }
 
 bool readMaterial(std::istream& stream, SceneMaterial& mat) {
@@ -249,7 +282,9 @@ bool readMaterial(std::istream& stream, SceneMaterial& mat) {
       && readPod(stream, mat.alphaCutoff)
       && readPod(stream, mat.materialWorkflow)
       && readPod(stream, mat.doubleSided)
-      && readString(stream, mat.name);
+      && readString(stream, mat.name)
+      && readString(stream, mat.extensionsJson)
+      && readString(stream, mat.extrasJson);
 }
 
 // SceneTexture is mostly POD except uri
@@ -262,6 +297,7 @@ void writeTexture(std::ostream& stream, const SceneTexture& tex) {
   writePod(stream, tex.payloadSize);
   writePod(stream, tex.isKtx2);
   writeString(stream, tex.uri);
+  writePod(stream, tex.sourceImageIndex);
 }
 
 bool readTexture(std::istream& stream, SceneTexture& tex) {
@@ -272,7 +308,8 @@ bool readTexture(std::istream& stream, SceneTexture& tex) {
       && readPod(stream, tex.payloadOffset)
       && readPod(stream, tex.payloadSize)
       && readPod(stream, tex.isKtx2)
-      && readString(stream, tex.uri);
+      && readString(stream, tex.uri)
+      && readPod(stream, tex.sourceImageIndex);
 }
 
 void writeDependency(std::ostream& stream, const SceneDependency& dependency) {
@@ -299,6 +336,12 @@ void writeNode(std::ostream& stream, const SceneNode& node) {
   writePod(stream, node.scale);
   writePod(stream, node.localTransform);
   writePod(stream, node.worldTransform);
+  writePod(stream, node.sourceNodeIndex);
+  writePod(stream, node.runtimeIdentity);
+  writePod(stream, node.localVisible);
+  writePod(stream, node.effectiveVisible);
+  writeString(stream, node.extensionsJson);
+  writeString(stream, node.extrasJson);
 }
 
 bool readNode(std::istream& stream, SceneNode& node) {
@@ -310,7 +353,110 @@ bool readNode(std::istream& stream, SceneNode& node) {
       && readPod(stream, node.rotation)
       && readPod(stream, node.scale)
       && readPod(stream, node.localTransform)
-      && readPod(stream, node.worldTransform);
+      && readPod(stream, node.worldTransform)
+      && readPod(stream, node.sourceNodeIndex)
+      && readPod(stream, node.runtimeIdentity)
+      && readPod(stream, node.localVisible)
+      && readPod(stream, node.effectiveVisible)
+      && readString(stream, node.extensionsJson)
+      && readString(stream, node.extrasJson);
+}
+
+void writePrimitive(std::ostream& stream, const ScenePrimitive& primitive)
+{
+  writePod(stream, primitive.meshIndex);
+  writePod(stream, primitive.nodeIndex);
+  writePod(stream, primitive.documentMeshIndex);
+  writePod(stream, primitive.documentPrimitiveIndex);
+  writePod(stream, primitive.materialIndex);
+  writePod(stream, primitive.localVisible);
+  writePod(stream, primitive.effectiveVisible);
+  writePod(stream, primitive.runtimeIdentity);
+  const uint64_t variantCount = static_cast<uint64_t>(primitive.variants.size());
+  writePod(stream, variantCount);
+  for(const ScenePrimitiveVariant& variant : primitive.variants) {
+    writePod(stream, variant.materialIndex);
+    writeVector(stream, variant.variantIndices);
+  }
+  writeString(stream, primitive.extensionsJson);
+  writeString(stream, primitive.extrasJson);
+}
+
+bool readPrimitive(std::istream& stream, ScenePrimitive& primitive)
+{
+  uint64_t variantCount = 0;
+  if(!readPod(stream, primitive.meshIndex)
+     || !readPod(stream, primitive.nodeIndex)
+     || !readPod(stream, primitive.documentMeshIndex)
+     || !readPod(stream, primitive.documentPrimitiveIndex)
+     || !readPod(stream, primitive.materialIndex)
+     || !readPod(stream, primitive.localVisible)
+     || !readPod(stream, primitive.effectiveVisible)
+     || !readPod(stream, primitive.runtimeIdentity)
+     || !readPod(stream, variantCount)
+     || variantCount > kMaxReasonableVariantCount) {
+    return false;
+  }
+  primitive.variants.resize(static_cast<size_t>(variantCount));
+  for(ScenePrimitiveVariant& variant : primitive.variants) {
+    if(!readPod(stream, variant.materialIndex) || !readVector(stream, variant.variantIndices)) {
+      return false;
+    }
+  }
+  return readString(stream, primitive.extensionsJson)
+      && readString(stream, primitive.extrasJson);
+}
+
+void writeAnimation(std::ostream& stream, const SceneAnimation& animation)
+{
+  writeString(stream, animation.name);
+  const uint64_t samplerCount = static_cast<uint64_t>(animation.samplers.size());
+  writePod(stream, samplerCount);
+  for(const SceneAnimationSampler& sampler : animation.samplers) {
+    writePod(stream, sampler.inputAccessor);
+    writePod(stream, sampler.outputAccessor);
+    writeString(stream, sampler.interpolation);
+  }
+  const uint64_t channelCount = static_cast<uint64_t>(animation.channels.size());
+  writePod(stream, channelCount);
+  for(const SceneAnimationChannel& channel : animation.channels) {
+    writePod(stream, channel.documentNodeIndex);
+    writePod(stream, channel.projectedNodeIndex);
+    writePod(stream, channel.samplerIndex);
+    writeString(stream, channel.path);
+  }
+}
+
+bool readAnimation(std::istream& stream, SceneAnimation& animation)
+{
+  uint64_t samplerCount = 0;
+  uint64_t channelCount = 0;
+  if(!readString(stream, animation.name)
+     || !readPod(stream, samplerCount)
+     || samplerCount > kMaxReasonableVectorElements) {
+    return false;
+  }
+  animation.samplers.resize(static_cast<size_t>(samplerCount));
+  for(SceneAnimationSampler& sampler : animation.samplers) {
+    if(!readPod(stream, sampler.inputAccessor)
+       || !readPod(stream, sampler.outputAccessor)
+       || !readString(stream, sampler.interpolation)) {
+      return false;
+    }
+  }
+  if(!readPod(stream, channelCount) || channelCount > kMaxReasonableVectorElements) {
+    return false;
+  }
+  animation.channels.resize(static_cast<size_t>(channelCount));
+  for(SceneAnimationChannel& channel : animation.channels) {
+    if(!readPod(stream, channel.documentNodeIndex)
+       || !readPod(stream, channel.projectedNodeIndex)
+       || !readPod(stream, channel.samplerIndex)
+       || !readString(stream, channel.path)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void writeCamera(std::ostream& stream, const SceneCamera& camera) {
@@ -323,6 +469,8 @@ void writeCamera(std::ostream& stream, const SceneCamera& camera) {
   writePod(stream, camera.farPlane);
   writePod(stream, camera.horizontalMagnification);
   writePod(stream, camera.verticalMagnification);
+  writePod(stream, camera.sourceCameraIndex);
+  writePod(stream, camera.runtimeIdentity);
 }
 
 bool readCamera(std::istream& stream, SceneCamera& camera) {
@@ -334,7 +482,9 @@ bool readCamera(std::istream& stream, SceneCamera& camera) {
       && readPod(stream, camera.nearPlane)
       && readPod(stream, camera.farPlane)
       && readPod(stream, camera.horizontalMagnification)
-      && readPod(stream, camera.verticalMagnification);
+      && readPod(stream, camera.verticalMagnification)
+      && readPod(stream, camera.sourceCameraIndex)
+      && readPod(stream, camera.runtimeIdentity);
 }
 
 void writeLight(std::ostream& stream, const SceneLight& light) {
@@ -347,6 +497,8 @@ void writeLight(std::ostream& stream, const SceneLight& light) {
   writePod(stream, light.range);
   writePod(stream, light.innerConeAngle);
   writePod(stream, light.outerConeAngle);
+  writePod(stream, light.sourceLightIndex);
+  writePod(stream, light.runtimeIdentity);
 }
 
 bool readLight(std::istream& stream, SceneLight& light) {
@@ -358,7 +510,9 @@ bool readLight(std::istream& stream, SceneLight& light) {
       && readPod(stream, light.intensity)
       && readPod(stream, light.range)
       && readPod(stream, light.innerConeAngle)
-      && readPod(stream, light.outerConeAngle);
+      && readPod(stream, light.outerConeAngle)
+      && readPod(stream, light.sourceLightIndex)
+      && readPod(stream, light.runtimeIdentity);
 }
 
 } // namespace
@@ -387,6 +541,9 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   std::string camerasData;
   std::string lightsData;
   std::string dependenciesData;
+  std::string primitivesData;
+  std::string variantsData;
+  std::string animationsData;
   {
     std::ostringstream matStream(std::ios::binary);
     for (const auto& mat : asset.materials) {
@@ -429,6 +586,27 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
     }
     dependenciesData = dependencyStream.str();
   }
+  {
+    std::ostringstream primitiveStream(std::ios::binary);
+    for(const ScenePrimitive& primitive : asset.primitives) {
+      writePrimitive(primitiveStream, primitive);
+    }
+    primitivesData = primitiveStream.str();
+  }
+  {
+    std::ostringstream variantStream(std::ios::binary);
+    for(const std::string& variant : asset.materialVariantNames) {
+      writeString(variantStream, variant);
+    }
+    variantsData = variantStream.str();
+  }
+  {
+    std::ostringstream animationStream(std::ios::binary);
+    for(const SceneAnimation& animation : asset.animations) {
+      writeAnimation(animationStream, animation);
+    }
+    animationsData = animationStream.str();
+  }
 
   AssetHeader header{};
   std::memcpy(header.magic, kAssetMagic, sizeof(kAssetMagic));
@@ -444,6 +622,11 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   header.lightCount           = static_cast<uint32_t>(asset.lights.size());
   header.rootNodeCount        = static_cast<uint32_t>(asset.rootNodes.size());
   header.dependencyCount      = static_cast<uint32_t>(asset.dependencies.size());
+  header.primitiveCount       = static_cast<uint32_t>(asset.primitives.size());
+  header.animationCount       = static_cast<uint32_t>(asset.animations.size());
+  header.variantCount         = static_cast<uint32_t>(asset.materialVariantNames.size());
+  header.documentRevision     = asset.documentRevision;
+  header.documentSemanticHashSize = static_cast<uint64_t>(asset.documentSemanticHash.size());
   header.vertexPayloadBytes   = static_cast<uint64_t>(asset.vertexPayload.size());
   header.indexPayloadBytes    = static_cast<uint64_t>(asset.indexPayload.size());
   header.texturePayloadBytes  = static_cast<uint64_t>(asset.texturePayload.size());
@@ -497,6 +680,22 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   table.texturePayloadOffset = currentOffset;
   table.texturePayloadSize   = header.texturePayloadBytes;
   currentOffset += table.texturePayloadSize;
+
+  table.primitivesOffset = currentOffset;
+  table.primitivesSize = static_cast<uint64_t>(primitivesData.size());
+  currentOffset += table.primitivesSize;
+
+  table.variantsOffset = currentOffset;
+  table.variantsSize = static_cast<uint64_t>(variantsData.size());
+  currentOffset += table.variantsSize;
+
+  table.animationsOffset = currentOffset;
+  table.animationsSize = static_cast<uint64_t>(animationsData.size());
+  currentOffset += table.animationsSize;
+
+  table.semanticHashOffset = currentOffset;
+  table.semanticHashSize = static_cast<uint64_t>(asset.documentSemanticHash.size());
+  currentOffset += table.semanticHashSize;
 
   std::ofstream stream(assetPath, std::ios::binary | std::ios::trunc);
   if (!stream) {
@@ -557,6 +756,12 @@ bool SceneAssetSerializer::save(const std::filesystem::path& assetPath,
   if (!asset.texturePayload.empty()) {
     stream.write(reinterpret_cast<const char*>(asset.texturePayload.data()), static_cast<std::streamsize>(asset.texturePayload.size()));
   }
+  if(!primitivesData.empty()) stream.write(primitivesData.data(), static_cast<std::streamsize>(primitivesData.size()));
+  if(!variantsData.empty()) stream.write(variantsData.data(), static_cast<std::streamsize>(variantsData.size()));
+  if(!animationsData.empty()) stream.write(animationsData.data(), static_cast<std::streamsize>(animationsData.size()));
+  if(!asset.documentSemanticHash.empty()) {
+    stream.write(asset.documentSemanticHash.data(), static_cast<std::streamsize>(asset.documentSemanticHash.size()));
+  }
 
   if(!stream) {
     m_lastError = "Failed while writing asset file";
@@ -614,9 +819,13 @@ bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAss
     loaded.lights.resize(header.lightCount);
     loaded.rootNodes.resize(header.rootNodeCount);
     loaded.dependencies.resize(header.dependencyCount);
-    loaded.vertexPayload.resize(static_cast<size_t>(header.vertexPayloadBytes));
-    loaded.indexPayload.resize(static_cast<size_t>(header.indexPayloadBytes));
-    loaded.texturePayload.resize(static_cast<size_t>(header.texturePayloadBytes));
+    loaded.primitives.resize(header.primitiveCount);
+    loaded.materialVariantNames.resize(header.variantCount);
+    loaded.animations.resize(header.animationCount);
+    loaded.documentRevision = header.documentRevision;
+    std::vector<uint8_t> vertexPayload(static_cast<size_t>(header.vertexPayloadBytes));
+    std::vector<uint8_t> indexPayload(static_cast<size_t>(header.indexPayloadBytes));
+    std::vector<uint8_t> texturePayload(static_cast<size_t>(header.texturePayloadBytes));
 
     // Read meshes
     stream.seekg(static_cast<std::streamoff>(table.meshesOffset), std::ios::beg);
@@ -687,17 +896,47 @@ bool SceneAssetSerializer::load(const std::filesystem::path& assetPath, SceneAss
     // Read payloads
     stream.seekg(static_cast<std::streamoff>(table.vertexPayloadOffset), std::ios::beg);
     if (header.vertexPayloadBytes > 0) {
-      stream.read(reinterpret_cast<char*>(loaded.vertexPayload.data()), static_cast<std::streamsize>(loaded.vertexPayload.size()));
+      stream.read(reinterpret_cast<char*>(vertexPayload.data()), static_cast<std::streamsize>(vertexPayload.size()));
     }
 
     stream.seekg(static_cast<std::streamoff>(table.indexPayloadOffset), std::ios::beg);
     if (header.indexPayloadBytes > 0) {
-      stream.read(reinterpret_cast<char*>(loaded.indexPayload.data()), static_cast<std::streamsize>(loaded.indexPayload.size()));
+      stream.read(reinterpret_cast<char*>(indexPayload.data()), static_cast<std::streamsize>(indexPayload.size()));
     }
 
     stream.seekg(static_cast<std::streamoff>(table.texturePayloadOffset), std::ios::beg);
     if (header.texturePayloadBytes > 0) {
-      stream.read(reinterpret_cast<char*>(loaded.texturePayload.data()), static_cast<std::streamsize>(loaded.texturePayload.size()));
+      stream.read(reinterpret_cast<char*>(texturePayload.data()), static_cast<std::streamsize>(texturePayload.size()));
+    }
+    loaded.vertexPayload = std::move(vertexPayload);
+    loaded.indexPayload = std::move(indexPayload);
+    loaded.texturePayload = std::move(texturePayload);
+
+    stream.seekg(static_cast<std::streamoff>(table.primitivesOffset), std::ios::beg);
+    for(ScenePrimitive& primitive : loaded.primitives) {
+      if(!readPrimitive(stream, primitive)) {
+        m_lastError = "Failed to read primitive projection";
+        return false;
+      }
+    }
+    stream.seekg(static_cast<std::streamoff>(table.variantsOffset), std::ios::beg);
+    for(std::string& variant : loaded.materialVariantNames) {
+      if(!readString(stream, variant)) {
+        m_lastError = "Failed to read material variant projection";
+        return false;
+      }
+    }
+    stream.seekg(static_cast<std::streamoff>(table.animationsOffset), std::ios::beg);
+    for(SceneAnimation& animation : loaded.animations) {
+      if(!readAnimation(stream, animation)) {
+        m_lastError = "Failed to read animation projection";
+        return false;
+      }
+    }
+    stream.seekg(static_cast<std::streamoff>(table.semanticHashOffset), std::ios::beg);
+    loaded.documentSemanticHash.resize(static_cast<size_t>(table.semanticHashSize));
+    if(table.semanticHashSize > 0) {
+      stream.read(loaded.documentSemanticHash.data(), static_cast<std::streamsize>(table.semanticHashSize));
     }
 
     if (!stream) {

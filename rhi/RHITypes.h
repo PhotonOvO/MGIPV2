@@ -111,6 +111,9 @@ enum class TextureFormat : uint8_t
   bc6hSfloatBlock,
   bc7UnormBlock,
   bc7SrgbBlock,
+  // Snapshot-local editor occurrence tokens. Appended to preserve every
+  // existing public enum value.
+  r32Uint,
 };
 // Feature flags for format capability queries (IFACE-01).
 // Values are backend-neutral semantic capability bits.
@@ -507,6 +510,9 @@ struct BufferDesc
   bool             allowIndirectArgument{false};
   bool             allowArgumentTableBinding{false};
   const char*      debugName{nullptr};
+  // Zero selects a raw/byte-address view. A nonzero value declares the exact
+  // StructuredBuffer element stride used by argument-table SRV/UAV creation.
+  uint32_t         structuredElementStride{0};
 };
 
 struct TextureDesc

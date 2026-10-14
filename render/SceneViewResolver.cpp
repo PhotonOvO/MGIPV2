@@ -133,8 +133,14 @@ bool populatePrimarySceneCameraUniforms(
         -halfWidth, halfWidth, -halfHeight, halfHeight,
         nearPlane, farPlane, projectionConvention);
   } else {
-    const float aspect =
-        camera.aspectRatio > 1.0e-3f ? camera.aspectRatio : std::max(fallbackAspect, 1.0e-3f);
+    // The projection aspect must match the render target that consumes it.
+    // NDC [-1,1]^2 always fills the whole target, so an authored glTF
+    // aspectRatio (Sponza ships 16:9) rendered into a differently shaped
+    // central viewport non-uniformly scales the image: 1.7778 into 1103x1062
+    // squashed it horizontally by 0.58x. aspectRatio stays authoritative
+    // document data for the Inspector and Apply/Set round-trips; only the
+    // render projection follows the viewport.
+    const float aspect = std::max(fallbackAspect, 1.0e-3f);
     const float verticalFov =
         std::clamp(camera.verticalFieldOfViewRadians, glm::radians(1.0f), glm::radians(179.0f));
     projection = clipspace::makePerspectiveProjection(

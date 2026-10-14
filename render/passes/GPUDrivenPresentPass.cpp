@@ -63,17 +63,32 @@ namespace demo
 			dstY1 = barHeight + scaledHeight;
 		}
 
-		// Special resource boundary: present blit needs explicit source/destination
-		// transfer layouts; this is an explicit layout boundary.
+		// Discard the acquired swapchain image, clear the complete target, then
+		// aspect-fit the scene into it. The blit may not cover letterbox bars, so a
+		// clear is required before transparent ImGui windows are composited.
 		const rhi::TextureSubresourceRange colorRange{rhi::TextureAspect::color, 0, 1, 0, 1};
-		const rhi::TextureBarrier toBlit[] = {
+		const rhi::TextureBarrier toClear[] = {
 			{
 				.texture = srcTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferSrc,
 				.range = colorRange
 			},
 			{
-				.texture = dstTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferDst,
+				// Swapchain images are undefined on first acquire and remain in PRESENT
+				// between frames; Undefined is the intentional discard boundary for the
+				// clear-and-blit destination.
+				.texture = dstTex, .before = rhi::ResourceState::Undefined, .after = rhi::ResourceState::General,
 				.range = colorRange
+			},
+		};
+		context.commandBuffer->resourceBarrier(toClear, {});
+		context.commandBuffer->clearColorTexture(
+			dstTex, colorRange, rhi::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
+		const std::array toBlit{
+			rhi::TextureBarrier{
+				.texture = dstTex,
+				.before = rhi::ResourceState::General,
+				.after = rhi::ResourceState::TransferDst,
+				.range = colorRange,
 			},
 		};
 		context.commandBuffer->resourceBarrier(toBlit, {});
@@ -90,8 +105,9 @@ namespace demo
 		});
 		context.commandBuffer->endEncoding();
 
-		// Special resource boundary: restore blit source/destination to General before
-		// the subsequent ImGui/present path uses the swapchain.
+		// Return the offscreen output to the graph's persistent General boundary.
+		// GPUDrivenImgui declares the following sampled-read transition and restores
+		// General after its draw, keeping the physical and graph states closed.
 		const rhi::TextureBarrier fromBlit[] = {
 			{
 				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = rhi::ResourceState::General,

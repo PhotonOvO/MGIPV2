@@ -1,17 +1,17 @@
 #include "MinimalLatestApp.h"
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "editor/EditorTransactionPath.h"
 
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace
 {
@@ -60,6 +60,40 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 		throw std::invalid_argument("--fixed-dt must be a positive finite number");
 	}
 	return parsed;
+}
+
+void validateVisualSha256(std::string_view value, const char* optionName)
+{
+	if(value.size() != 64u || !std::all_of(value.begin(), value.end(), [](char character) {
+		return std::isxdigit(static_cast<unsigned char>(character)) != 0;
+	}))
+	{
+		throw std::invalid_argument(std::string(optionName) + " must be a 64-character hexadecimal SHA-256");
+	}
+}
+
+void validateEditorTransactionOptions(AutomationOptions& options)
+{
+	if(options.editorTransactionDirectory.empty())
+	{
+		return;
+	}
+	if(options.mode == AutomationMode::none || !options.noUi || !options.autoExit)
+	{
+		throw std::invalid_argument(
+			"--editor-transaction-dir requires --automation, --no-ui, and --auto-exit");
+	}
+	if(options.warmupFrames != 8u || options.motionFrames != 24u
+	   || options.holdFrames != 8u || options.captureControlFrame)
+	{
+		throw std::invalid_argument(
+			"--editor-transaction-dir requires exactly 8/24/8 frames and no control frame");
+	}
+	const demo::editor::automation::EditorTransactionDirectoryValidation validated =
+		demo::editor::automation::validateEditorTransactionDirectory(
+			options.editorTransactionDirectory,
+			std::filesystem::path{"resources/GLTF_Sponza/sponza.gltf"});
+	options.editorTransactionDirectory = validated.directory;
 }
 
 [[nodiscard]] AutomationOptions parseAutomationOptions(int argc, char** argv, bool& showHelp)
@@ -124,6 +158,21 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 		{
 			options.captureControlFrame = true;
 		}
+		else if(argument == "--editor-empty")
+		{
+			options.editorEmptyStart = true;
+		}
+		else if(const std::string_view value = optionValue(argument, "--editor-scene"); !value.empty())
+		{
+			options.editorStartupScene = std::filesystem::path(std::string(value));
+		}
+		else if(argument == "--editor-window-undecorated")
+		{
+			// Test-only: drop the non-client frame so a client extent equal to
+			// the host virtual screen (2560x1440) stays reachable.  A decorated
+			// window clamps to 2560x1421 on this host.
+			options.windowUndecorated = true;
+		}
 		else if(const std::string_view value = optionValue(argument, "--capture-sync-dir"); !value.empty())
 		{
 			options.captureSyncDirectory = std::filesystem::path(std::string(value));
@@ -135,6 +184,62 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 		else if(const std::string_view value = optionValue(argument, "--metrics-output"); !value.empty())
 		{
 			options.metricsOutputPath = std::filesystem::path(std::string(value));
+		}
+		else if(const std::string_view value = optionValue(argument, "--editor-visual-case"); !value.empty())
+		{
+			options.editorVisualCase = std::string(value);
+		}
+		else if(const std::string_view value = optionValue(argument, "--editor-visual-state"); !value.empty())
+		{
+			options.editorVisualStatePath = std::filesystem::path(std::string(value));
+		}
+			else if(const std::string_view value = optionValue(argument, "--editor-visual-sync-dir"); !value.empty())
+			{
+				options.editorVisualSyncDirectory = std::filesystem::path(std::string(value));
+			}
+			else if(const std::string_view value = optionValue(argument, "--editor-visual-variant"); !value.empty())
+			{
+				options.editorVisualVariant = std::string(value);
+			}
+			else if(const std::string_view value = optionValue(argument, "--editor-visual-component"); !value.empty())
+			{
+				const std::uint32_t component = parseFrameCount(value, "--editor-visual-component");
+				if(component >= demo::editor::kGizmoComponentCount)
+				{
+					throw std::invalid_argument("--editor-visual-component must be in [0, 12]");
+				}
+				options.editorVisualComponent = component;
+			}
+		else if(const std::string_view value = optionValue(argument, "--editor-visual-dpi"); !value.empty())
+		{
+			const float dpi = parseFixedDelta(value);
+			if(!(dpi >= 1.0f && dpi <= 4.0f))
+			{
+				throw std::invalid_argument("--editor-visual-dpi must be in [1, 4]");
+			}
+			options.editorVisualDpi = dpi;
+		}
+		else if(const std::string_view value = optionValue(argument, "--editor-visual-executable-sha256"); !value.empty())
+		{
+			validateVisualSha256(value, "--editor-visual-executable-sha256");
+			options.editorVisualExecutableSha256 = std::string(value);
+		}
+		else if(const std::string_view value = optionValue(argument, "--editor-visual-source-sha256"); !value.empty())
+		{
+			validateVisualSha256(value, "--editor-visual-source-sha256");
+			options.editorVisualSourceSha256 = std::string(value);
+		}
+		else if(argument.starts_with("--editor-transaction-dir="))
+		{
+			const std::string_view value =
+				argument.substr(std::string_view{"--editor-transaction-dir="}.size());
+			if(value.empty())
+			{
+				throw std::invalid_argument(
+					"--editor-transaction-dir requires a value");
+			}
+			options.editorTransactionDirectory =
+				std::filesystem::path(std::string(value));
 		}
 		else
 		{
@@ -150,6 +255,10 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 	if(options.noPost && options.taa)
 	{
 		throw std::invalid_argument("--no-post and --taa cannot be used together");
+	}
+	if(options.editorEmptyStart && !options.editorStartupScene.empty())
+	{
+		throw std::invalid_argument("--editor-empty and --editor-scene cannot be used together");
 	}
 	if(!options.captureSyncDirectory.empty() && options.mode == AutomationMode::none)
 	{
@@ -175,6 +284,76 @@ using AutomationOptions = MinimalLatestApp::AutomationOptions;
 	{
 		throw std::invalid_argument("--capture-sync-timeout-ms must be greater than zero");
 	}
+	validateEditorTransactionOptions(options);
+	const bool visualPathRequested = !options.editorVisualCase.empty() ||
+	                                 !options.editorVisualStatePath.empty() ||
+	                                 !options.editorVisualSyncDirectory.empty() ||
+	                                 !options.editorVisualVariant.empty() ||
+	                                 options.editorVisualComponent.has_value();
+	if(visualPathRequested)
+	{
+		if(options.mode == AutomationMode::none || options.noUi || !options.autoExit)
+		{
+			throw std::invalid_argument(
+				"editor visual capture requires automation, UI, and auto-exit");
+		}
+		if(options.editorVisualCase != "V01-grid" &&
+		   options.editorVisualCase != "V02-gizmo-components" &&
+		   options.editorVisualCase != "V03-parent-space" &&
+		   options.editorVisualCase != "V04-depth-xray" &&
+		   options.editorVisualCase != "V07-dpi-resize")
+		{
+			throw std::invalid_argument("unknown --editor-visual-case");
+		}
+		if(options.editorVisualStatePath.empty() ||
+		   options.editorVisualSyncDirectory.empty() ||
+		   !options.editorVisualStatePath.is_absolute() ||
+		   !options.editorVisualSyncDirectory.is_absolute())
+		{
+			throw std::invalid_argument(
+				"editor visual state and sync paths must be absolute and non-empty");
+		}
+			if(options.editorVisualExecutableSha256.empty() || options.editorVisualSourceSha256.empty())
+		{
+			throw std::invalid_argument(
+				"editor visual executable/source SHA-256 values are required");
+			}
+			const auto isVariant = [&](std::initializer_list<std::string_view> allowed) {
+				return std::find(allowed.begin(), allowed.end(), options.editorVisualVariant) != allowed.end();
+			};
+			const bool componentAbsent = !options.editorVisualComponent.has_value();
+			const bool variantValid =
+				(options.editorVisualCase == "V01-grid" &&
+				 componentAbsent &&
+				 isVariant({"perspective-unit-0.001", "perspective-unit-1", "perspective-unit-1000",
+				            "orthographic-unit-0.001", "orthographic-unit-1", "orthographic-unit-1000",
+				            "perspective-horizon"})) ||
+				(options.editorVisualCase == "V02-gizmo-components" &&
+				 options.editorVisualVariant == "component" && options.editorVisualComponent.has_value()) ||
+				(options.editorVisualCase == "V03-parent-space" &&
+				 componentAbsent &&
+				 options.editorVisualVariant == "rotated-negative-nonuniform") ||
+				(options.editorVisualCase == "V04-depth-xray" &&
+				 componentAbsent &&
+				 isVariant({"xray", "occlusion-dither"})) ||
+				(options.editorVisualCase == "V07-dpi-resize" &&
+				 componentAbsent &&
+				 options.editorVisualVariant == "framebuffer-dpi-resize");
+			if(!variantValid)
+			{
+				throw std::invalid_argument("editor visual case/variant/component combination is invalid");
+			}
+		if(!options.captureSyncDirectory.empty() &&
+		   options.captureSyncDirectory != options.editorVisualSyncDirectory)
+		{
+			throw std::invalid_argument(
+				"editor visual sync directory conflicts with capture sync directory");
+		}
+		// Reuse the existing frame handshake so the visual harness observes the
+		// same pre-render boundaries as the renderer smoke protocol.
+		options.captureSyncDirectory = options.editorVisualSyncDirectory;
+		options.captureControlFrame = true;
+	}
 	return options;
 }
 
@@ -187,7 +366,16 @@ void printUsage()
 	    << "            [--motion-frames=N] [--hold-frames=N]\n"
 	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi] [--auto-exit]\n"
 	    << "            [--capture-sync-dir=PATH] [--capture-sync-timeout-ms=N]\n"
-	    << "            [--capture-control-frame] [--metrics-output=PATH]"
+	    << "            [--capture-control-frame] [--metrics-output=PATH]\n"
+	    << "            [--editor-empty|--editor-scene=PATH]\n"
+	    << "            [--editor-window-undecorated]\n"
+		    << "            [--editor-visual-case=V01-grid|V02-gizmo-components|V03-parent-space|V04-depth-xray|V07-dpi-resize]\n"
+		    << "            [--editor-visual-state=ABSOLUTE_JSON] [--editor-visual-sync-dir=ABSOLUTE_DIR]\n"
+		    << "            [--editor-visual-variant=NAME] [--editor-visual-component=0..12]\n"
+	    << "            [--editor-visual-dpi=1..4]\n"
+	    << "            [--editor-visual-executable-sha256=HEX] [--editor-visual-source-sha256=HEX]\n"
+	    << "            [--editor-transaction-dir=ABSOLUTE_EMPTY_TEMP_CHILD]"
+	    << "  (strict child of the process-configured absolute temp root)"
 	    << std::endl;
 }
 }  // namespace
