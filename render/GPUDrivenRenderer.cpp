@@ -11537,10 +11537,14 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		// stable GPUDrivenLightResources buffers; mirror them as owned=false handles. The image
 		// bindings are written per-frame in updateLightingArgumentTable (views change on resize).
 		m_lightingInputArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
+		m_lightOpaqueInputArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		for (uint32_t i = 0; i < frameCount; ++i)
 		{
 			m_lightingInputArgumentTables[i] =
 				m_renderer.createPersistentArgumentTable(m_lightingArgumentLayout, "gpu-driven-lighting-input");
+			m_lightOpaqueInputArgumentTables[i] =
+				m_renderer.createPersistentArgumentTable(m_lightingArgumentLayout,
+				                                        "gpu-driven-lighting-opaque-input");
 
 			// Buffer bindings 2-8 come from stable light-resource buffers; register + write once.
 			const std::array<rhi::BufferHandle, 7> inputBuffers{
@@ -11578,6 +11582,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				};
 			}
 			m_renderer.updateArgumentTable(m_lightingInputArgumentTables[i], inputWrites.data(),
+			                               static_cast<uint32_t>(inputWrites.size()));
+			m_renderer.updateArgumentTable(m_lightOpaqueInputArgumentTables[i], inputWrites.data(),
 			                               static_cast<uint32_t>(inputWrites.size()));
 		}
 
@@ -11685,6 +11691,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_lightingInputBufferHandles.clear();
 		m_lightingSceneArgumentTables.clear();
 		m_lightingInputArgumentTables.clear();
+		m_lightOpaqueInputArgumentTables.clear();
 		m_finalColorInputArgumentTables.clear();
 		m_lightingArgumentLayout = {};
 		m_finalColorInputArgumentLayout = {};
@@ -12891,6 +12898,25 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 
 		m_renderer.updateArgumentTable(m_lightingInputArgumentTables[frameIndex], writes.data(),
 		                               static_cast<uint32_t>(writes.size()));
+
+		// Lighting-pass copy: swap the live colour target view for a read-only one so the
+		// descriptor stays legal while the pass renders into that target. Only this pass
+		// uses the copy, so the shared table keeps the real view for TAA resolve.
+		if (frameIndex < m_lightOpaqueInputArgumentTables.size()
+			&& !m_lightOpaqueInputArgumentTables[frameIndex].isNull())
+		{
+			std::vector<rhi::ArgumentWrite> lightWrites = writes;
+			for (rhi::ArgumentWrite& write : lightWrites)
+			{
+				if (write.binding == static_cast<uint32_t>(shaderio::LBindTextures)
+					&& write.arrayElement == kGPUDrivenLightPassSceneColorHdrIndex)
+				{
+					write.textureView = fallbackColor;
+				}
+			}
+			m_renderer.updateArgumentTable(m_lightOpaqueInputArgumentTables[frameIndex], lightWrites.data(),
+			                               static_cast<uint32_t>(lightWrites.size()));
+		}
 
 		if (frameIndex < m_finalColorInputArgumentTables.size()
 			&& !m_finalColorInputArgumentTables[frameIndex].isNull())

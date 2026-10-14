@@ -95,7 +95,10 @@ namespace demo
 		}
 
 		enc->setPipeline(lightPipeline);
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		// This pass renders into sceneColorHdr, so it uses the lighting-table copy whose
+		// scene-colour slot is a read-only substitute; fragmentHdrMain does not sample it.
+		const rhi::ArgumentTableHandle inputTable =
+			m_renderer->getLightingOpaqueInputArgumentTable(context.frameIndex);
 		enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
 		if (!context.cameraAllocValid)

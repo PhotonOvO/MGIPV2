@@ -1267,6 +1267,18 @@ namespace demo
 				       : rhi::ArgumentTableHandle{};
 		}
 
+		// Same layout as getLightingInputArgumentTable, except that the view at
+		// kGPUDrivenLightPassSceneColorHdrIndex is a read-only substitute. The lighting
+		// pass renders into that target, and its fragment entry point (fragmentHdrMain)
+		// never samples that index, so this keeps the descriptor set legal while the
+		// target is a live colour attachment.
+		[[nodiscard]] rhi::ArgumentTableHandle getLightingOpaqueInputArgumentTable(uint32_t frameIndex) const
+		{
+			return frameIndex < m_lightOpaqueInputArgumentTables.size()
+				       ? m_lightOpaqueInputArgumentTables[frameIndex]
+				       : rhi::ArgumentTableHandle{};
+		}
+
 		[[nodiscard]] rhi::ArgumentTableHandle getFinalColorInputArgumentTable(uint32_t frameIndex) const
 		{
 			return frameIndex < m_finalColorInputArgumentTables.size()
@@ -1841,6 +1853,7 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_lightCoarseCullingArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
+		std::vector<rhi::ArgumentTableHandle> m_lightOpaqueInputArgumentTables;
 		rhi::ArgumentLayoutHandle m_finalColorInputArgumentLayout{};
 		std::vector<rhi::ArgumentTableHandle> m_finalColorInputArgumentTables;
 		rhi::SamplerHandle m_linearClampSamplerHandle{};

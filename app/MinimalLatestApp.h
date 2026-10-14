@@ -44,7 +44,6 @@
 #include "../third_party/LegitProfiler/ImGuiProfilerRenderer.h"
 #include <mgif/scene_editor/GltfSemanticCompare.h>
 #include <imgui_internal.h>
-#include <backends/imgui_impl_glfw.h>
 
 #include <memory>
 #include <optional>

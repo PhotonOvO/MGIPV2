@@ -14,7 +14,9 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenPresentPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 2> dependencies = {
-			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment),
+			// The pass blits out of this target, so the read side is a transfer source.
+			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::TransferSrc),
 			PassResourceDependency::texture(kPassSwapchainHandle, ResourceAccess::write, rhi::ShaderStage::fragment),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
