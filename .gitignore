@@ -64,3 +64,8 @@ tsconfig.json
 
 # GitHub Actions workflows and local planning artifacts
 .github/
+
+# Local documentation and example scaffolding
+/doc/
+/docs/
+/examples/
