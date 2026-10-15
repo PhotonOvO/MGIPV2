@@ -831,8 +831,11 @@ namespace demo
 		if (m_backend == rhi::BackendType::d3d12)
 		{
 			// Frame-local tables and overlapping scene-transaction generations share
-			// D3D12's 2048-entry shader-visible sampler heap.
-			m_materials.maxTextures = 256;
+			// D3D12's 2048-entry shader-visible sampler heap. The table must still cover the
+			// range the shader declares, because CreateGraphicsPipelineState rejects a root
+			// signature whose descriptor range is shorter than the shader's array
+			// (id 690 / E_INVALIDARG). Use the same capacity the shaders compile against.
+			m_materials.maxTextures = shaderio::LMaterialTextureCapacity;
 		}
 		else if (m_backend == rhi::BackendType::metal)
 		{

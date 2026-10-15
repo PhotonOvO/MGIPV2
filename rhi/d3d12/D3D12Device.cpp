@@ -13,7 +13,6 @@
 #include <dxgi1_6.h>
 
 #include <array>
-#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -465,6 +464,14 @@ bool D3D12Device::isFormatSupported(
   if(nativeFormat == DXGI_FORMAT_UNKNOWN)
     return false;
 
+  // D3D12 splits a depth format's capabilities across several DXGI formats, and the one that
+  // carries the resource (TYPELESS) reports neither. Ask about the formats the backend will
+  // actually create views with: toSrvFormat for the sample side and toDsvFormat for the
+  // depth-stencil side, then union them. That keeps a portable probe such as
+  // "depth attachment + sampled" honest without leaking DXGI format families upward.
+  const DXGI_FORMAT sampleFormat =
+    isDepthFormat(format) ? toSrvFormat(format) : nativeFormat;
+
   D3D12_FEATURE_DATA_FORMAT_SUPPORT support{
     .Format = nativeFormat,
   };
@@ -472,19 +479,34 @@ bool D3D12Device::isFormatSupported(
               D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))))
     return false;
 
+  D3D12_FORMAT_SUPPORT1 support1 = support.Support1;
+  D3D12_FORMAT_SUPPORT1 sampleSupport1 = static_cast<D3D12_FORMAT_SUPPORT1>(0);
+  if(sampleFormat != nativeFormat)
+  {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT sampleSupport{
+      .Format = sampleFormat,
+    };
+    if(SUCCEEDED(static_cast<ID3D12Device*>(m_d3d12Device)->CheckFeatureSupport(
+                   D3D12_FEATURE_FORMAT_SUPPORT, &sampleSupport, sizeof(sampleSupport))))
+    {
+      sampleSupport1 = sampleSupport.Support1;
+      support1 = static_cast<D3D12_FORMAT_SUPPORT1>(support1 | sampleSupport1);
+    }
+  }
+
   const uint32_t requested = static_cast<uint32_t>(feature);
   if((requested & static_cast<uint32_t>(FormatFeatureFlag::sampledImage)) != 0 &&
-     (support.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
+     (support1 & (D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE |
                           D3D12_FORMAT_SUPPORT1_SHADER_LOAD)) == 0)
     return false;
   if((requested & static_cast<uint32_t>(FormatFeatureFlag::storageImage)) != 0 &&
-     (support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) == 0)
+     (support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) == 0)
     return false;
   if((requested & static_cast<uint32_t>(FormatFeatureFlag::colorAttachment)) != 0 &&
-     (support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0)
+     (support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0)
     return false;
   if((requested & static_cast<uint32_t>(FormatFeatureFlag::depthStencilAttachment)) != 0 &&
-     (support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL) == 0)
+     (support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL) == 0)
     return false;
   return true;
 }
