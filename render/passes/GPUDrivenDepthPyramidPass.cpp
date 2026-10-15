@@ -16,8 +16,14 @@ namespace demo
 		static const std::array<PassResourceDependency, 2> dependencies = {
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::ShaderRead),
+			// The pyramid is consumed as a sampled image by GPU-driven culling, and the
+			// descriptor is written with VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+			// (VulkanDevice's default for a sampled binding that is not readWrite).
+			// Declaring General here left the image in a layout the descriptor was not
+			// written for, which validation reports as both an imageLayout mismatch on
+			// the descriptor and an oldLayout mismatch on the later barrier.
 			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::write, rhi::ShaderStage::compute,
-			                                rhi::ResourceState::General),
+			                                rhi::ResourceState::ShaderRead),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

@@ -21,7 +21,8 @@ namespace demo
 		static const std::array<PassResourceDependency, 7> dependencies = {
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::ShaderRead),
-			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::buffer(kPassPointLightBufferHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassSpotLightBufferHandle, ResourceAccess::read, rhi::ShaderStage::compute),

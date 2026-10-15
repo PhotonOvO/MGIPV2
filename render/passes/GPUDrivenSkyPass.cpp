@@ -17,10 +17,14 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 3> dependencies = {
-			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment),
+			// readWrite: VulkanDevice writes this slot with VK_IMAGE_LAYOUT_GENERAL for a
+			// readWrite binding, so the pass has to leave the target in General as well.
+			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::General),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ShaderRead),
-			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment),
+			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ShaderRead),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

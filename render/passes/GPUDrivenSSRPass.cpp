@@ -31,7 +31,8 @@ namespace demo
 			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::ShaderRead),
-			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::ShaderRead),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

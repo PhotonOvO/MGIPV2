@@ -17,7 +17,10 @@ namespace demo
 			// The pass blits out of this target, so the read side is a transfer source.
 			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::TransferSrc),
-			PassResourceDependency::texture(kPassSwapchainHandle, ResourceAccess::write, rhi::ShaderStage::fragment),
+			// The blit writes here, so the write side lands in TransferDst; the pass then
+			// transitions the swapchain to its presentation layout explicitly.
+			PassResourceDependency::texture(kPassSwapchainHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::TransferDst),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
@@ -70,10 +73,10 @@ namespace demo
 		// clear is required before transparent ImGui windows are composited.
 		const rhi::TextureSubresourceRange colorRange{rhi::TextureAspect::color, 0, 1, 0, 1};
 		const rhi::TextureBarrier toClear[] = {
-			{
-				.texture = srcTex, .before = rhi::ResourceState::General, .after = rhi::ResourceState::TransferSrc,
-				.range = colorRange
-			},
+			// srcTex reaches TransferSrc through this pass dependency declaration
+			// (read + TransferSrc); the graph knows what the previous pass left behind.
+			// Repeating the transition here with a hard-coded source state contradicted
+			// the tracked layout. Only the swapchain destination is handled explicitly.
 			{
 				// Swapchain images are undefined on first acquire and remain in PRESENT
 				// between frames; Undefined is the intentional discard boundary for the

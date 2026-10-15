@@ -15,7 +15,8 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenCullingPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 6> dependencies = {
-			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute),
+			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::buffer(kPassGPUCullObjectBufferHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassGPUCullIndirectBufferHandle, ResourceAccess::write,
