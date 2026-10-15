@@ -1769,23 +1769,23 @@ endif()
 option(DEMO_USE_DXC_FINAL_COLOR
   "Compile the final-color pass through DXC for D3D12-identical float codegen" OFF)
 
-if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12 AND DEMO_USE_DXC_FINAL_COLOR)
-  get_filename_component(_VULKAN_TOOL_DIR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}" DIRECTORY)
-  find_program(DEMO_DXC_SPIRV_EXECUTABLE
-    NAMES dxc
-    HINTS "${_VULKAN_TOOL_DIR}"
-    REQUIRED
-  )
+# Two consumers, two requirements, so the work is split in two:
+#
+#   1. The HLSL for the final-color entry point. The D3D12 backend compiles it at
+#      runtime (D3D12Pipelines.cpp keys off the source name and entry point alone), so
+#      the file has to exist whenever D3D12 is enabled, whether or not DXC is used.
+#   2. The DXC-built SPIR-V module and its embedded header, which route the Vulkan
+#      final-color pass through DXC so its float codegen matches D3D12. That is the
+#      optional part, and it is what carries the hand-maintained bind list below.
+set(DEMO_DXC_FINAL_HLSL "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.hlsl")
+set(DEMO_DXC_FINAL_SPV "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv")
+set(DEMO_DXC_FINAL_HEADER "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv.h")
+set(DEMO_DXC_FINAL_DEPFILE "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.dep")
 
-  set(DEMO_DXC_FINAL_HLSL "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.hlsl")
-  set(DEMO_DXC_FINAL_SPV "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv")
-  set(DEMO_DXC_FINAL_HEADER "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.spv.h")
-  set(DEMO_DXC_FINAL_DEPFILE "${SHADER_OUTPUT_DIR}/shader.light.final.dxc.dep")
+if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12)
   add_custom_command(
     OUTPUT
       "${DEMO_DXC_FINAL_HLSL}"
-      "${DEMO_DXC_FINAL_SPV}"
-      "${DEMO_DXC_FINAL_HEADER}"
     COMMAND "${Slang_SLANGC_EXECUTABLE}"
       "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang"
       -depfile "${DEMO_DXC_FINAL_DEPFILE}"
@@ -1800,6 +1800,35 @@ if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12 AND DEMO_USE_DXC_FINAL_COLOR)
       -target hlsl
       -profile sm_6_6
       -o "${DEMO_DXC_FINAL_HLSL}"
+    DEPENDS
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang"
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light.slang"
+      "${CMAKE_CURRENT_LIST_DIR}/shaders/shader_io.h"
+    DEPFILE "${DEMO_DXC_FINAL_DEPFILE}"
+    COMMENT "Emitting final-color HLSL for the D3D12 backend"
+    VERBATIM
+  )
+  # Attached to the generated-source list so the file exists in the autogen directory
+  # that the D3D12 backend reads from at runtime. Marked header-only because the list is
+  # passed to target_sources, and MSBuild would otherwise hand the .hlsl to FXC, which
+  # cannot find a 'main' entry point in it (the entry point is fragmentFinalColorMain and
+  # the D3D12 backend compiles it itself).
+  set_source_files_properties("${DEMO_DXC_FINAL_HLSL}" PROPERTIES HEADER_FILE_ONLY TRUE)
+  list(APPEND GENERATED_SHADER_SPV_BINARIES "${DEMO_DXC_FINAL_HLSL}")
+endif()
+
+if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12 AND DEMO_USE_DXC_FINAL_COLOR)
+  get_filename_component(_VULKAN_TOOL_DIR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}" DIRECTORY)
+  find_program(DEMO_DXC_SPIRV_EXECUTABLE
+    NAMES dxc
+    HINTS "${_VULKAN_TOOL_DIR}"
+    REQUIRED
+  )
+
+  add_custom_command(
+    OUTPUT
+      "${DEMO_DXC_FINAL_SPV}"
+      "${DEMO_DXC_FINAL_HEADER}"
     COMMAND "${DEMO_DXC_SPIRV_EXECUTABLE}"
       -spirv
       -T ps_6_6
@@ -1821,11 +1850,11 @@ if(WIN32 AND USE_SLANG AND DEMO_ENABLE_D3D12 AND DEMO_USE_DXC_FINAL_COLOR)
       "-DVARIABLE_NAME=shader_light_final_dxc_spv"
       -P "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedSpirv.cmake"
     DEPENDS
+      "${DEMO_DXC_FINAL_HLSL}"
       "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang"
       "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light.slang"
       "${CMAKE_CURRENT_LIST_DIR}/shaders/shader_io.h"
       "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedSpirv.cmake"
-    DEPFILE "${DEMO_DXC_FINAL_DEPFILE}"
     COMMENT "Compiling DXC SPIR-V final-color shader"
     VERBATIM
   )
