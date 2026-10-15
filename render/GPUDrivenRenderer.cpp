@@ -11538,6 +11538,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		// bindings are written per-frame in updateLightingArgumentTable (views change on resize).
 		m_lightingInputArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		m_lightOpaqueInputArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
+		m_bloomPrefilterArgumentTables.assign(frameCount, rhi::ArgumentTableHandle{});
 		for (uint32_t i = 0; i < frameCount; ++i)
 		{
 			m_lightingInputArgumentTables[i] =
@@ -11545,6 +11546,9 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			m_lightOpaqueInputArgumentTables[i] =
 				m_renderer.createPersistentArgumentTable(m_lightingArgumentLayout,
 				                                        "gpu-driven-lighting-opaque-input");
+			m_bloomPrefilterArgumentTables[i] =
+				m_renderer.createPersistentArgumentTable(m_lightingArgumentLayout,
+                                        "gpu-driven-lighting-bloom-prefilter-input");
 
 			// Buffer bindings 2-8 come from stable light-resource buffers; register + write once.
 			const std::array<rhi::BufferHandle, 7> inputBuffers{
@@ -11584,6 +11588,8 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			m_renderer.updateArgumentTable(m_lightingInputArgumentTables[i], inputWrites.data(),
 			                               static_cast<uint32_t>(inputWrites.size()));
 			m_renderer.updateArgumentTable(m_lightOpaqueInputArgumentTables[i], inputWrites.data(),
+			                               static_cast<uint32_t>(inputWrites.size()));
+			m_renderer.updateArgumentTable(m_bloomPrefilterArgumentTables[i], inputWrites.data(),
 			                               static_cast<uint32_t>(inputWrites.size()));
 		}
 
@@ -11692,6 +11698,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_lightingSceneArgumentTables.clear();
 		m_lightingInputArgumentTables.clear();
 		m_lightOpaqueInputArgumentTables.clear();
+		m_bloomPrefilterArgumentTables.clear();
 		m_finalColorInputArgumentTables.clear();
 		m_lightingArgumentLayout = {};
 		m_finalColorInputArgumentLayout = {};
@@ -12905,17 +12912,81 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		if (frameIndex < m_lightOpaqueInputArgumentTables.size()
 			&& !m_lightOpaqueInputArgumentTables[frameIndex].isNull())
 		{
+			// Slots that are render targets (or storage images) in some other pass of this
+			// frame. A descriptor's imageLayout is fixed when the table is written, and must
+			// agree with the layout the image actually has. So a pass that renders into such
+			// a target must not bind it as a sample source -- even when its shader never reads
+			// it, because Vulkan validation records the descriptor's layout as the image's
+			// known layout and then reports the owning pass's barrier as a mismatch
+			// (VUID-VkImageMemoryBarrier2-oldLayout-01197 / ...-imageLayout-00344).
+			const auto isBloomSlot = [](uint32_t slot)
+			{
+				return slot >= kGPUDrivenLightPassBloomHalfIndex
+					&& slot <= kGPUDrivenLightPassBloomOutputIndex
+					&& slot != kGPUDrivenLightPassVelocityIndex
+					&& slot != kGPUDrivenLightPassHistoryReadIndex
+					&& slot != kGPUDrivenLightPassHistoryWriteIndex
+					&& slot != kGPUDrivenLightPassIBLEnvironmentIndex
+					&& slot != kGPUDrivenLightPassAOIndex
+					&& slot != kGPUDrivenLightPassSSRIndex;
+			};
+			const auto isRenderTargetSlot = [](uint32_t slot)
+			{
+				if (slot == kGPUDrivenLightPassSceneColorHdrIndex
+					|| slot == kGPUDrivenLightPassVelocityIndex
+					|| slot == kGPUDrivenLightPassHistoryReadIndex
+					|| slot == kGPUDrivenLightPassHistoryWriteIndex)
+				{
+					return true;
+				}
+				if (slot < kGPUDrivenLightPassBloomHalfIndex
+					|| slot > kGPUDrivenLightPassBloomOutputIndex)
+				{
+					return false;
+				}
+				// The bloom range also contains velocity/history/IBL/AO/SSR slots.
+				return slot == kGPUDrivenLightPassBloomHalfIndex
+					|| slot == kGPUDrivenLightPassBloomQuarterIndex
+					|| slot == kGPUDrivenLightPassBloomEighthIndex
+					|| slot == kGPUDrivenLightPassBloomSixteenthIndex
+					|| slot == kGPUDrivenLightPassBloomThirtySecondIndex
+					|| slot == kGPUDrivenLightPassBloomUpsampleSixteenthIndex
+					|| slot == kGPUDrivenLightPassBloomUpsampleEighthIndex
+					|| slot == kGPUDrivenLightPassBloomUpsampleQuarterIndex
+					|| slot == kGPUDrivenLightPassBloomOutputIndex;
+			};
+
+			// Variant A: passes that sample none of those slots (light, sky, skybox, forward,
+			// velocity, culling, AO, SSR, bloom downsample).
 			std::vector<rhi::ArgumentWrite> lightWrites = writes;
 			for (rhi::ArgumentWrite& write : lightWrites)
 			{
 				if (write.binding == static_cast<uint32_t>(shaderio::LBindTextures)
-					&& write.arrayElement == kGPUDrivenLightPassSceneColorHdrIndex)
+					&& isRenderTargetSlot(write.arrayElement))
 				{
 					write.textureView = fallbackColor;
 				}
 			}
 			m_renderer.updateArgumentTable(m_lightOpaqueInputArgumentTables[frameIndex], lightWrites.data(),
 			                               static_cast<uint32_t>(lightWrites.size()));
+
+			// Variant B: the bloom prefilter samples scene colour and the history write image
+			// but renders into the bloom mip chain, so only the bloom slots substitute.
+			if (frameIndex < m_bloomPrefilterArgumentTables.size()
+				&& !m_bloomPrefilterArgumentTables[frameIndex].isNull())
+			{
+				std::vector<rhi::ArgumentWrite> bloomWrites = writes;
+				for (rhi::ArgumentWrite& write : bloomWrites)
+				{
+					if (write.binding == static_cast<uint32_t>(shaderio::LBindTextures)
+						&& isBloomSlot(write.arrayElement))
+					{
+						write.textureView = fallbackColor;
+					}
+				}
+				m_renderer.updateArgumentTable(m_bloomPrefilterArgumentTables[frameIndex], bloomWrites.data(),
+				                               static_cast<uint32_t>(bloomWrites.size()));
+			}
 		}
 
 		if (frameIndex < m_finalColorInputArgumentTables.size()

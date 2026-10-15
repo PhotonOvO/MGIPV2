@@ -120,10 +120,12 @@ namespace demo
 				.texture = dstTex, .before = rhi::ResourceState::TransferDst, .after = swapchainAfterBlit,
 				.range = colorRange
 			},
-			{
-				.texture = srcTex, .before = rhi::ResourceState::TransferSrc, .after = rhi::ResourceState::General,
-				.range = colorRange
-			},
+			// No entry for srcTex. Its transfer-source layout comes from this pass's
+			// dependency declaration, and the graph is what tracks layouts between passes:
+			// an explicit transfer back to General here was invisible to that tracking, so
+			// the next consumer's barrier still used TransferSrc as the current layout
+			// (VUID-VkImageMemoryBarrier2-oldLayout-01197). Downstream passes declare the
+			// layout they need and the graph performs the transition.
 		};
 		context.commandBuffer->resourceBarrier(fromBlit, {});
 

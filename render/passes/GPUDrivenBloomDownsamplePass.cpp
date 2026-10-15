@@ -113,7 +113,9 @@ namespace demo
 			},
 		};
 
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		// This pass does not sample the scene-colour / velocity / history slots, so it uses
+		// the table whose attachment-era slots are read-only substitutes.
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingOpaqueInputArgumentTable(context.frameIndex);
 		const rhi::ArgumentTableHandle sceneTable = m_renderer->getLightingSceneArgumentTable(context.frameIndex);
 		const rhi::Extent2D bloomHalfExtent = m_renderer->getBloomHalfExtent();
 		bool bloomWritesAllLevelsThisFrame = !downsamplePipeline.isNull() && !upsamplePipeline.isNull()

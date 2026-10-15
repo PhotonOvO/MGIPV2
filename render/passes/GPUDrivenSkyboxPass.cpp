@@ -20,7 +20,7 @@ namespace demo
 		static const std::array<PassResourceDependency, 2> dependencies = {
 			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::readWrite,
 			                                rhi::StageFlags::rasterColorOut, rhi::HazardFlags::textureWrites,
-			                                rhi::ResourceState::ColorAttachment),
+			                                rhi::ResourceState::General),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::DepthStencilReadOnly),
 		};
@@ -75,7 +75,9 @@ namespace demo
 
 		// Pipeline + both descriptor sets bind through RHI handles.
 		enc->setPipeline(skyboxPipeline);
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		// The scene-colour target is written here and never sampled, so it comes from the
+		// table whose attachment-era slots are read-only substitutes.
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingOpaqueInputArgumentTable(context.frameIndex);
 		enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
 		// Point the lighting-scene set at this frame's transient camera allocation, then

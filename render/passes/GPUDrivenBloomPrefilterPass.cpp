@@ -76,7 +76,7 @@ namespace demo
 			context.commandBuffer->endEvent();
 			return;
 		}
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getBloomPrefilterInputArgumentTable(context.frameIndex);
 		if (!pipelineHandle.isNull() && !inputTable.isNull())
 		{
 			enc->setPipeline(pipelineHandle);

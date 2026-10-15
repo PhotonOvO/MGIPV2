@@ -67,7 +67,9 @@ namespace demo
 		enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
 		const PipelineHandle pipelineHandle = m_renderer->getVelocityPipelineHandle();
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		// The velocity target is written here and never sampled, so it comes from the table
+		// whose attachment-era slots are read-only substitutes.
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingOpaqueInputArgumentTable(context.frameIndex);
 		const rhi::ArgumentTableHandle sceneTable = m_renderer->getLightingSceneArgumentTable(context.frameIndex);
 		if (!pipelineHandle.isNull() && !inputTable.isNull() && !sceneTable.isNull())
 		{

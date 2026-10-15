@@ -17,10 +17,12 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenSkyPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 3> dependencies = {
-			// readWrite: VulkanDevice writes this slot with VK_IMAGE_LAYOUT_GENERAL for a
-			// readWrite binding, so the pass has to leave the target in General as well.
-			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::readWrite, rhi::ShaderStage::fragment,
-			                                rhi::ResourceState::General),
+			// The sky pass only renders into this target (it samples the depth and GBuffer0), so
+			// the write side is a plain colour attachment. Declaring readWrite/General here made
+			// the graph emit its own TransferSrc -> General transition for a target that
+			// PresentPass had already left in General (VUID-VkImageMemoryBarrier2-oldLayout-01197).
+			PassResourceDependency::texture(kPassOutputHandle, ResourceAccess::write, rhi::ShaderStage::fragment,
+			                                rhi::ResourceState::ColorAttachment),
 			PassResourceDependency::texture(kPassSceneDepthHandle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
@@ -71,7 +73,9 @@ namespace demo
 		enc->setScissor(rhi::Rect2D{{0, 0}, extent});
 
 		enc->setPipeline(skyPipeline);
-		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingInputArgumentTable(context.frameIndex);
+		// This pass does not sample the scene-colour / velocity / history slots, so it uses
+		// the table whose attachment-era slots are read-only substitutes.
+		const rhi::ArgumentTableHandle inputTable = m_renderer->getLightingOpaqueInputArgumentTable(context.frameIndex);
 		enc->setArgumentTable(rhi::ShaderStage::fragment, shaderio::LSetTextures, inputTable);
 
 		if (context.cameraAllocValid)

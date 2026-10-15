@@ -23,7 +23,7 @@ namespace demo
 			// written for, which validation reports as both an imageLayout mismatch on
 			// the descriptor and an oldLayout mismatch on the later barrier.
 			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::write, rhi::ShaderStage::compute,
-			                                rhi::ResourceState::ShaderRead),
+			                                rhi::ResourceState::General),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

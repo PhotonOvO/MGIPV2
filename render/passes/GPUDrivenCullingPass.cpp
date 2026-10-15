@@ -15,8 +15,10 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenCullingPass::getDependencies() const
 	{
 		static const std::array<PassResourceDependency, 6> dependencies = {
+			// hiz-depth-pyramid is a storage image written by compute, so Vulkan requires it to
+			// stay in GENERAL for both the write and the sampled read.
 			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
-			                                rhi::ResourceState::ShaderRead),
+			                                rhi::ResourceState::General),
 			PassResourceDependency::buffer(kPassGPUCullObjectBufferHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::compute),
 			PassResourceDependency::buffer(kPassGPUCullIndirectBufferHandle, ResourceAccess::write,

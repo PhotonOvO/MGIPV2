@@ -31,8 +31,10 @@ namespace demo
 			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::ShaderRead),
+			// hiz-depth-pyramid is a storage image written by compute, so Vulkan requires it to
+			// stay in GENERAL for both the write and the sampled read.
 			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
-			                                rhi::ResourceState::ShaderRead),
+			                                rhi::ResourceState::General),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}

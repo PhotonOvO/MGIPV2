@@ -1279,6 +1279,18 @@ namespace demo
 				       : rhi::ArgumentTableHandle{};
 		}
 
+		// Same layout again, but only the slots the bloom prefilter actually samples keep
+		// their real view (scene colour and the history write image). Everything else that
+		// is a render target elsewhere in the frame is a read-only substitute, because that
+		// pass renders into the bloom mip this table would otherwise bind as a sample
+		// source: a single descriptor imageLayout cannot be both.
+		[[nodiscard]] rhi::ArgumentTableHandle getBloomPrefilterInputArgumentTable(uint32_t frameIndex) const
+		{
+			return frameIndex < m_bloomPrefilterArgumentTables.size()
+				       ? m_bloomPrefilterArgumentTables[frameIndex]
+				       : getLightingOpaqueInputArgumentTable(frameIndex);
+		}
+
 		[[nodiscard]] rhi::ArgumentTableHandle getFinalColorInputArgumentTable(uint32_t frameIndex) const
 		{
 			return frameIndex < m_finalColorInputArgumentTables.size()
@@ -1854,6 +1866,7 @@ namespace demo
 		std::vector<rhi::ArgumentTableHandle> m_lightingSceneArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightingInputArgumentTables;
 		std::vector<rhi::ArgumentTableHandle> m_lightOpaqueInputArgumentTables;
+		std::vector<rhi::ArgumentTableHandle> m_bloomPrefilterArgumentTables;
 		rhi::ArgumentLayoutHandle m_finalColorInputArgumentLayout{};
 		std::vector<rhi::ArgumentTableHandle> m_finalColorInputArgumentTables;
 		rhi::SamplerHandle m_linearClampSamplerHandle{};
