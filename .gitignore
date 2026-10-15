@@ -48,3 +48,16 @@ investigations/**/*.spv
 *.progress-ledger-local.guard
 Demo.txt
 editor_ui_os_replay.txt
+
+# Internal process/evidence, tooling config, and local-only project plans
+.pi/
+.codex/
+.agents/
+investigations/
+docs/editor-parity/
+tools/beeai_dx12/
+TASK_PLAN_PI_RENDERDOC_V0_1.md
+rhi-public-contract-refactor-plan.md
+package.json
+package-lock.json
+tsconfig.json
