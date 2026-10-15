@@ -42,3 +42,9 @@ investigations/**/*.png
 investigations/**/*.log
 investigations/**/*.spv
 *.spv
+
+# Build products / local run logs (not source)
+*.plist
+*.progress-ledger-local.guard
+Demo.txt
+editor_ui_os_replay.txt
