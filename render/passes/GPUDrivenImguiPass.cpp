@@ -14,9 +14,14 @@ namespace demo
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenImguiPass::getDependencies() const
 	{
 		static const std::array dependencies{
+			// ImGui samples the offscreen viewport image and draws into the same target, so
+			// this is readWrite and the target has to be in General: VulkanDevice writes the
+			// descriptor with VK_IMAGE_LAYOUT_GENERAL for a readWrite binding, and
+			// ImGuiRhiRenderer then transitions it to ColorAttachment from there. Declaring
+			// ShaderRead instead left the graph expecting a layout the target was not in.
 			PassResourceDependency::texture(
-				kPassOutputHandle, ResourceAccess::read,
-				rhi::ShaderStage::fragment, rhi::ResourceState::ShaderRead),
+				kPassOutputHandle, ResourceAccess::readWrite,
+				rhi::ShaderStage::fragment, rhi::ResourceState::General),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
