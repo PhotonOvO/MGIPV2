@@ -61,3 +61,6 @@ rhi-public-contract-refactor-plan.md
 package.json
 package-lock.json
 tsconfig.json
+
+# GitHub Actions workflows and local planning artifacts
+.github/
