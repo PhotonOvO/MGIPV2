@@ -45,6 +45,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Required by the editor production dependency gate" FORCE)
 set(DEMO_EDITOR_DEPENDENCY_IDENTITY "${CMAKE_BINARY_DIR}/editor-dependency-build-identity.json")
 
+include(FetchContent)
+
 if(APPLE)
   option(DEMO_ENABLE_METAL4 "Build the Metal 4 RHI backend" ON)
 else()
@@ -232,8 +234,6 @@ if(DEMO_RHI_CONTRACT_ONLY)
   endif()
   return()
 endif()
-
-include(FetchContent)
 
 FetchContent_Declare(
   tinygltf
@@ -2840,7 +2840,7 @@ if(BUILD_TESTING AND NOT ANDROID)
   endif()
 endif()
 
-if(NOT ANDROID)
+if(WIN32 AND NOT ANDROID)
 add_executable(texture_converter  
   tools/texture_converter.cpp
 )
