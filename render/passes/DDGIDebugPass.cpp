@@ -109,7 +109,7 @@ namespace demo
 			.debugName = "ddgi-debug-sampler",
 		});
 
-		const std::array<rhi::ArgumentBinding, 3> bindings{
+		const std::array<rhi::ArgumentBinding, 4> bindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -123,6 +123,10 @@ namespace demo
 					.binding = 2, .type = rhi::ArgumentType::sampledTexture,
 					.visibility = rhi::ShaderStage::vertex, .arrayCount = 1
 				},
+			rhi::ArgumentBinding{
+				.binding = 3, .type = rhi::ArgumentType::storageBuffer,
+				.visibility = rhi::ShaderStage::vertex, .arrayCount = 1
+			},
 			}
 		};
 		m_layout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
@@ -151,7 +155,7 @@ namespace demo
 					rhi::ArgumentTableHandle& table =
 						m_tables[uniformIndex * 2u + parity];
 					table = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_layout, .lifetime = rhi::ArgumentTableLifetime::persistent});
-					const std::array<rhi::ArgumentWrite, 3> writes{
+					const std::array<rhi::ArgumentWrite, 4> writes{
 						{
 							rhi::ArgumentWrite{
 								.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -170,6 +174,12 @@ namespace demo
 									? m_probeDataView : m_irradianceViews[parity],
 								.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 							},
+						rhi::ArgumentWrite{
+							.binding = 3, .type = rhi::ArgumentType::storageBuffer,
+							.buffer = probeVolume.getProbePositionBuffer(),
+							.size = static_cast<uint64_t>(sizeof(glm::vec4)) *
+							        static_cast<uint64_t>(probeVolume.getTotalProbes()),
+						},
 						}
 					};
 					device.updateArgumentTable(table, writes);

@@ -35,6 +35,11 @@ ConstantBuffer<DDGIProbeVisualizationUniforms> probeVisUniforms;
 [[vk::binding(2, 0)]]
 Texture2D<float4> flaxProbeData;
 
+// Probe world positions. Read through a descriptor-table binding instead of a raw
+// buffer-device-address pointer, which the DXIL backend cannot lower.
+[[vk::binding(3, 0)]]
+StructuredBuffer<float4> ddgiProbePositions;
+
 struct ProbeVisVertexOutput
 {
     float4 position : SV_Position;
@@ -227,8 +232,7 @@ ProbeVisVertexOutput vertexProbeVisMain(uint vertexId : SV_VertexID,
     }
     else
     {
-        float4* probePositions = (float4*)probeVisUniforms.probePositionAddress;
-        const float4 probeData = probePositions[instanceId];
+        const float4 probeData = ddgiProbePositions[instanceId];
         if (probeData.w < 0.5)
         {
             return output;

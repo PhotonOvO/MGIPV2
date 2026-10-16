@@ -176,7 +176,7 @@ namespace demo
 			.debugName = "ddgi-raytrace-atlas-sampler",
 		});
 
-		const std::array<rhi::ArgumentBinding, 6> bindings{
+		const std::array<rhi::ArgumentBinding, 7> bindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -202,13 +202,17 @@ namespace demo
 					.binding = 5, .type = rhi::ArgumentType::combinedImageSampler,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
+			rhi::ArgumentBinding{
+				.binding = 6, .type = rhi::ArgumentType::storageBuffer,
+				.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+			},
 			}
 		};
 		m_layout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
 			.bindings = bindings,
 			.debugName = "ddgi-raytrace",
 		});
-		const std::array<rhi::ArgumentBinding, 2> relocationBindings{
+		const std::array<rhi::ArgumentBinding, 3> relocationBindings{
 			{
 				rhi::ArgumentBinding{
 					.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -218,6 +222,10 @@ namespace demo
 					.binding = 1, .type = rhi::ArgumentType::uniformBuffer,
 					.visibility = rhi::ShaderStage::compute, .arrayCount = 1
 				},
+			rhi::ArgumentBinding{
+				.binding = 2, .type = rhi::ArgumentType::storageBuffer,
+				.visibility = rhi::ShaderStage::compute, .arrayCount = 1
+			},
 			}
 		};
 		m_relocationLayout = device.createArgumentLayout(rhi::ArgumentLayoutDesc{
@@ -241,7 +249,7 @@ namespace demo
 				.debugName = "ddgi-raytrace-uniforms",
 			});
 			m_relocationTables[i] = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_relocationLayout, .lifetime = rhi::ArgumentTableLifetime::persistent});
-			const std::array<rhi::ArgumentWrite, 2> relocationWrites{
+			const std::array<rhi::ArgumentWrite, 3> relocationWrites{
 				{
 					rhi::ArgumentWrite{
 						.binding = 0, .type = rhi::ArgumentType::combinedImageSampler,
@@ -254,6 +262,12 @@ namespace demo
 						.buffer = m_uniformBuffers[i],
 						.size = sizeof(shaderio::DDGIRayTraceUniforms),
 					},
+				rhi::ArgumentWrite{
+					.binding = 2, .type = rhi::ArgumentType::storageBuffer,
+					.buffer = probeVolume.getProbePositionBuffer(),
+					.size = static_cast<uint64_t>(sizeof(glm::vec4)) *
+					        static_cast<uint64_t>(probeVolume.getTotalProbes()),
+				},
 				}
 			};
 			device.updateArgumentTable(m_relocationTables[i], relocationWrites);
@@ -262,7 +276,7 @@ namespace demo
 			{
 				rhi::ArgumentTableHandle& table = m_tables[i * 2u + parity];
 				table = device.createArgumentTable(rhi::ArgumentTableCreateDesc{.layout = m_layout, .lifetime = rhi::ArgumentTableLifetime::persistent});
-				const std::array<rhi::ArgumentWrite, 6> writes{
+				const std::array<rhi::ArgumentWrite, 7> writes{
 					{
 						rhi::ArgumentWrite{
 							.binding = 0, .type = rhi::ArgumentType::storageTexture,
@@ -306,6 +320,12 @@ namespace demo
 							.sampler = m_globalSDFSampler,
 							.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 						},
+					rhi::ArgumentWrite{
+						.binding = 6, .type = rhi::ArgumentType::storageBuffer,
+						.buffer = probeVolume.getProbePositionBuffer(),
+						.size = static_cast<uint64_t>(sizeof(glm::vec4)) *
+						        static_cast<uint64_t>(probeVolume.getTotalProbes()),
+					},
 					}
 				};
 				device.updateArgumentTable(table, writes);

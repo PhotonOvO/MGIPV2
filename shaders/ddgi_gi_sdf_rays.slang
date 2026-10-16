@@ -55,6 +55,12 @@ DemoMetalSampler2D getHistoryDepthAtlas()
 [[vk::binding(5, 0)]]
 Sampler3D<float4> globalAlbedoTexture;
 
+// Probe world positions. Reached through a descriptor-table binding instead of a raw
+// buffer-device-address pointer: the DXIL backend cannot lower pointer types, and this form
+// works on Vulkan, D3D12 and Metal alike.
+[[vk::binding(6, 0)]]
+StructuredBuffer<float4> ddgiProbePositions;
+
 // sphericalFibonacci moved to ddgi_common.slang (Wave D2-3): the probe update
 // kernels reconstruct the exact same per-ray directions from the shared
 // implementation + the same per-frame rotation columns.
@@ -97,10 +103,8 @@ void kernelDDGIRayTrace(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // Probe origin through the buffer device address of the position buffer
-    // (same BDA pattern as shader.rast.slang sceneInfo.dataBufferAddress).
-    float4* probePositions = (float4*)rayTraceUniforms.probePositionAddress;
-    const float4 probeData = probePositions[probeId];
+    // Probe origin through the bound position buffer (see ddgiProbePositions above).
+    const float4 probeData = ddgiProbePositions[probeId];
     const float3 rayOrigin = probeData.xyz;
 
     if (probeData.w < 0.5)

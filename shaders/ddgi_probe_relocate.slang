@@ -15,6 +15,11 @@ Sampler3D<float> globalSDFTexture;
 [[vk::binding(1, 0)]]
 ConstantBuffer<DDGIRayTraceUniforms> relocateUniforms;
 
+// Probe world positions. Written through a descriptor-table binding instead of a raw
+// buffer-device-address pointer, which the DXIL backend cannot lower.
+[[vk::binding(2, 0)]]
+RWStructuredBuffer<float4> ddgiProbePositions;
+
 GlobalSDFTraceConfig makeRelocateTraceConfig()
 {
     GlobalSDFTraceConfig config;
@@ -102,7 +107,6 @@ void kernelDDGIProbeRelocate(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
-    float4* probePositions = (float4*)relocateUniforms.probePositionAddress;
     const float active = bestDistance > clearance ? 1.0 : 0.0;
-    probePositions[probeIndex] = float4(active > 0.5 ? bestPosition : basePosition, active);
+    ddgiProbePositions[probeIndex] = float4(active > 0.5 ? bestPosition : basePosition, active);
 }
