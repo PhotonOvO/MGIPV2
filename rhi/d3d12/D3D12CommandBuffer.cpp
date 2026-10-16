@@ -708,11 +708,57 @@ void D3D12ComputeEncoder::blitTexture(const TextureBlitDesc& desc)
   const uint32_t sourceWidth = static_cast<uint32_t>(sourceEnd.x - sourceBegin.x);
   const uint32_t sourceHeight = static_cast<uint32_t>(sourceEnd.y - sourceBegin.y);
   const uint32_t sourceDepth = static_cast<uint32_t>(sourceEnd.z - sourceBegin.z);
-  if(sourceWidth != static_cast<uint32_t>(destinationEnd.x - destinationBegin.x) ||
-     sourceHeight != static_cast<uint32_t>(destinationEnd.y - destinationBegin.y) ||
-     sourceDepth != static_cast<uint32_t>(destinationEnd.z - destinationBegin.z))
-    throw std::runtime_error(
-      "D3D12ComputeEncoder::blitTexture requires equal source and destination extents");
+  const uint32_t destinationWidth =
+    static_cast<uint32_t>(destinationEnd.x - destinationBegin.x);
+  const uint32_t destinationHeight =
+    static_cast<uint32_t>(destinationEnd.y - destinationBegin.y);
+  const uint32_t destinationDepth =
+    static_cast<uint32_t>(destinationEnd.z - destinationBegin.z);
+  if(sourceWidth != destinationWidth || sourceHeight != destinationHeight ||
+     sourceDepth != destinationDepth)
+  {
+    // D3D12 has no scaled texel copy, so a mismatched blit (the present path aspect-fits the
+    // scene into the swapchain) is drawn instead. Vulkan and Metal scale natively and never
+    // reach this path. The state round-trip keeps the pass graph's model intact: it declared
+    // this as a transfer, so the destination ends in TransferDst and the source back in
+    // TransferSrc.
+    if(sourceDepth != 1u || destinationDepth != 1u)
+      throw std::runtime_error(
+        "D3D12ComputeEncoder::blitTexture supports scaled copies of single-slice 2D regions only");
+
+    const TextureSubresourceRange sourceRange{
+      .aspect = desc.aspect,
+      .baseMipLevel = desc.srcMipLevel,
+      .levelCount = 1,
+      .baseArrayLayer = desc.srcBaseArrayLayer,
+      .layerCount = 1,
+    };
+    const TextureSubresourceRange destinationRange{
+      .aspect = desc.aspect,
+      .baseMipLevel = desc.dstMipLevel,
+      .levelCount = 1,
+      .baseArrayLayer = desc.dstBaseArrayLayer,
+      .layerCount = 1,
+    };
+    const uint64_t destinationRtv =
+      m_device->resolveTextureAttachmentDescriptor(desc.dstTexture, destinationRange);
+    if(destinationRtv == 0)
+      throw std::runtime_error(
+        "D3D12ComputeEncoder::blitTexture requires a render-target view for a scaled copy");
+
+    m_device->transitionTexture(m_commandList, desc.srcTexture, sourceRange,
+                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_device->transitionTexture(m_commandList, desc.dstTexture, destinationRange,
+                                D3D12_RESOURCE_STATE_RENDER_TARGET);
+    m_device->recordScaledBlit(
+      m_commandList, desc.srcTexture, desc.dstTexture, destinationRtv,
+      sourceBegin, sourceEnd, destinationBegin, destinationEnd);
+    m_device->transitionTexture(m_commandList, desc.dstTexture, destinationRange,
+                                D3D12_RESOURCE_STATE_COPY_DEST);
+    m_device->transitionTexture(m_commandList, desc.srcTexture, sourceRange,
+                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+    return;
+  }
 
   const D3D12_TEXTURE_COPY_LOCATION sourceLocation{
     .pResource = source,

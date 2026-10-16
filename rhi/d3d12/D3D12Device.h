@@ -88,6 +88,19 @@ public:
   void markTextureViewSubmitted(TextureViewHandle view, SubmissionToken token);
   void markQueryPoolSubmitted(QueryPoolHandle pool, SubmissionToken token);
   void bindPipeline(void* commandList, PipelineHandle pipeline, bool compute) const;
+  // Draws a scaled blit: binds the cached pipeline and argument table, points the render
+  // target at destinationRtv, restricts the viewport to the destination region and issues
+  // one full-screen triangle. D3D12 state handling stays in the device.
+  void recordScaledBlit(
+    void* commandList,
+    TextureHandle source,
+    TextureHandle destination,
+    uint64_t destinationRtv,
+    const Offset3D& sourceBegin,
+    const Offset3D& sourceEnd,
+    const Offset3D& destinationBegin,
+    const Offset3D& destinationEnd);
+
   void bindArgumentTable(void* commandList, PipelineHandle pipeline, bool compute,
                          uint32_t slot, ArgumentTableHandle table,
                          const uint64_t* dynamicOffsets, uint32_t dynamicOffsetCount) const;
@@ -126,7 +139,6 @@ private:
 
   TextureHandle adoptSwapchainTexture(void* resource);
   TextureViewHandle adoptSwapchainTextureView(uint64_t descriptor, TextureHandle image);
-
   struct ShaderLibraryRecord
   {
     ShaderIRFormat format{ShaderIRFormat::unknown};
@@ -331,6 +343,14 @@ private:
   void releaseRetiredQueryPool(QueryPoolRecord& record) noexcept;
   void releaseRetiredPipeline(PipelineRecord& record) noexcept;
   [[nodiscard]] bool isResidencyResourceAlive(ResidencyResource resource) const noexcept;
+  // Scaled-blit support. D3D12 has no scaled texel copy (CopyTextureRegion needs equal
+  // extents), while Vulkan and Metal blit natively, so a mismatched blit has to be drawn.
+  // The pipeline is cached per destination format because the target is usually the
+  // swapchain, whose format is fixed per swapchain rather than per frame.
+  [[nodiscard]] PipelineHandle ensureBlitPipeline(TextureFormat colorFormat);
+  [[nodiscard]] ArgumentLayoutHandle ensureBlitArgumentLayout();
+  [[nodiscard]] SamplerHandle ensureBlitSampler();
+  [[nodiscard]] TextureViewHandle ensureBlitSourceView(TextureHandle texture);
   [[nodiscard]] uint32_t allocateSamplerSpan(uint32_t count);
   [[nodiscard]] bool layoutSharesSamplerRange(const ArgumentLayoutRecord& layout) const noexcept;
   void retireSamplerSpan(uint32_t base, uint32_t count) noexcept;
@@ -399,6 +419,22 @@ private:
   // built from that layout. The descriptors in it are identical, so sharing costs nothing and
   // keeps several live tables from each consuming a whole array out of the 2048-entry heap.
   std::unordered_map<uint32_t, uint32_t>          m_sharedSamplerBases;
+  // One blit pipeline per destination format, plus the layout and sampler every blit shares.
+  struct BlitPipelineRecord
+  {
+    TextureFormat colorFormat{TextureFormat::undefined};
+    PipelineHandle pipeline{};
+  };
+  std::vector<BlitPipelineRecord>                 m_blitPipelines;
+  ArgumentLayoutHandle                            m_blitArgumentLayout{};
+  SamplerHandle                                   m_blitSampler{};
+  // Sources are sampled through a view that usually already exists (the scene target is read
+  // by later passes). Cached per texture; the entry is validated against m_textureViews before
+  // reuse, and the table is rewritten only when the bound source changes.
+  std::unordered_map<uint32_t, TextureViewHandle> m_blitSourceViews;
+  std::unordered_map<uint32_t, TextureViewHandle> m_blitOwnedViews;
+  ArgumentTableHandle                             m_blitTable{};
+  TextureHandle                                   m_blitTableSource{};
   std::unordered_map<uint32_t, SamplerRecord>        m_samplers;
   std::unordered_map<uint32_t, ArgumentLayoutRecord> m_argumentLayouts;
   std::unordered_map<uint32_t, ArgumentTableRecord>  m_argumentTables;

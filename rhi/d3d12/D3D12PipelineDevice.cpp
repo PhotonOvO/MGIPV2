@@ -3,6 +3,8 @@
 #include "D3D12CommandBuffer.h"
 #include "D3D12Pipelines.h"
 
+#include "_autogen/shader.blit.slang.h"
+
 #define NOMINMAX
 #include <Windows.h>
 #include <d3d12.h>
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -929,6 +932,241 @@ void* D3D12Device::drawIndirectSignature(
 void* D3D12Device::dispatchIndirectSignature() const
 {
   return m_dispatchSignature;
+}
+
+
+ArgumentLayoutHandle D3D12Device::ensureBlitArgumentLayout()
+{
+  if(!m_blitArgumentLayout.isNull() &&
+     m_blitArgumentLayout.generation == m_handleGeneration)
+    return m_blitArgumentLayout;
+  const std::array<ArgumentBinding, 1> bindings{
+    ArgumentBinding{
+      .binding = 0, .type = ArgumentType::combinedImageSampler,
+      .visibility = ShaderStage::fragment, .arrayCount = 1
+    },
+  };
+  m_blitArgumentLayout = createArgumentLayout(ArgumentLayoutDesc{
+    .bindings = bindings,
+    .debugName = "d3d12-blit-source",
+  });
+  return m_blitArgumentLayout;
+}
+
+SamplerHandle D3D12Device::ensureBlitSampler()
+{
+  if(!m_blitSampler.isNull() && m_blitSampler.generation == m_handleGeneration)
+    return m_blitSampler;
+  m_blitSampler = createSampler(SamplerDesc{
+    .magFilter = Filter::linear,
+    .minFilter = Filter::linear,
+    .mipmapMode = MipmapMode::nearest,
+    .addressModeU = AddressMode::clampToEdge,
+    .addressModeV = AddressMode::clampToEdge,
+    .addressModeW = AddressMode::clampToEdge,
+    .debugName = "d3d12-blit-sampler",
+  });
+  return m_blitSampler;
+}
+
+PipelineHandle D3D12Device::ensureBlitPipeline(TextureFormat colorFormat)
+{
+  for(const BlitPipelineRecord& record : m_blitPipelines)
+  {
+    if(record.colorFormat == colorFormat)
+      return record.pipeline;
+  }
+
+  const ShaderLibraryHandle library = createShaderLibrary(ShaderLibraryDesc{
+    .format = ShaderIRFormat::spirv,
+    .data = std::as_bytes(std::span{shader_blit_slang}),
+    .debugName = "d3d12-blit",
+  });
+  const std::array<ShaderEntry, 2> stages{
+    ShaderEntry{
+      .stage = ShaderStage::vertex,
+      .library = library,
+      .entryPoint = "blitVertexMain",
+    },
+    ShaderEntry{
+      .stage = ShaderStage::fragment,
+      .library = library,
+      .entryPoint = "blitFragmentMain",
+    },
+  };
+  const std::array<PipelineArgumentSlotDesc, 1> argumentSlots{
+    PipelineArgumentSlotDesc{
+      .slot = 0, .layout = ensureBlitArgumentLayout(),
+      .visibility = ShaderStage::fragment, .debugName = "d3d12-blit-source",
+    },
+  };
+  // The source UV rectangle travels as root constants: four floats, no buffer to manage.
+  const RootBindingDesc rootBinding{
+    .slot = 0, .kind = RootBindingKind::constants,
+    .visibility = ShaderStage::fragment,
+    .size = sizeof(float) * 4u, .alignment = alignof(float),
+    .debugName = "d3d12-blit-params",
+  };
+  const BlendAttachmentState blend{
+    .blendEnable = false,
+  };
+  const std::array<DynamicState, 2> dynamicStates{
+    DynamicState::viewport,
+    DynamicState::scissor,
+  };
+  const PipelineHandle pipeline = createGraphicsPipeline(GraphicsPipelineDesc{
+    .shaderStages = stages,
+    .vertexInput = {},
+    .rasterState = {
+      .topology = PrimitiveTopology::triangleList,
+      .polygonMode = PolygonMode::fill,
+      .cullMode = CullMode::none,
+      .frontFace = FrontFace::counterClockwise,
+      .sampleCount = SampleCount::count1,
+    },
+    .depthState = {
+      .depthTestEnable = false,
+      .depthWriteEnable = false,
+    },
+    .blendStates = std::span{&blend, 1},
+    .dynamicStates = dynamicStates,
+    .renderingInfo = {
+      .colorFormats = std::span{&colorFormat, 1},
+    },
+    .bindingSchema = {
+      .argumentSlots = argumentSlots,
+      .rootBindings = std::span{&rootBinding, 1},
+    },
+  });
+  m_blitPipelines.push_back(BlitPipelineRecord{colorFormat, pipeline});
+  return pipeline;
+}
+
+
+TextureViewHandle D3D12Device::ensureBlitSourceView(TextureHandle texture)
+{
+  const auto cached = m_blitSourceViews.find(texture.index);
+  if(cached != m_blitSourceViews.end() && cached->second.generation == m_handleGeneration &&
+     m_textureViews.find(cached->second.index) != m_textureViews.end())
+    return cached->second;
+
+  // Prefer a view that already exists for this texture. The scaled-blit source is a render
+  // target that later passes sample, so in the normal path one is already registered.
+  for(const auto& [index, view] : m_textureViews)
+  {
+    if(view.desc.image.index != texture.index ||
+       view.desc.image.generation != texture.generation ||
+       view.desc.aspect != TextureAspect::color ||
+       !view.ownsDescriptor)
+      continue;
+    const TextureViewHandle handle{{index, m_handleGeneration}};
+    m_blitSourceViews[texture.index] = handle;
+    return handle;
+  }
+
+  const auto found = m_textures.find(texture.index);
+  if(found == m_textures.end() || found->second.desc.format == TextureFormat::undefined)
+    throw std::runtime_error("D3D12 scaled blit received a stale source texture");
+  const TextureDesc& desc = found->second.desc;
+  const TextureViewHandle created = createTextureView(TextureViewCreateDesc{
+    .image = texture,
+    .format = desc.format,
+    .viewType = ImageViewType::e2D,
+    .aspect = TextureAspect::color,
+    .levelCount = 1,
+    .layerCount = 1,
+    .debugName = "d3d12-blit-source-view",
+  });
+  m_blitSourceViews[texture.index] = created;
+  m_blitOwnedViews[texture.index] = created;
+  return created;
+}
+
+void D3D12Device::recordScaledBlit(
+  void* commandList,
+  TextureHandle source,
+  TextureHandle destination,
+  uint64_t destinationRtv,
+  const Offset3D& sourceBegin,
+  const Offset3D& sourceEnd,
+  const Offset3D& destinationBegin,
+  const Offset3D& destinationEnd)
+{
+  if(commandList == nullptr || destinationRtv == 0)
+    throw std::runtime_error("D3D12 scaled blit requires a command list and a render target");
+
+  const auto destinationTexture = m_textures.find(destination.index);
+  if(destinationTexture == m_textures.end())
+    throw std::runtime_error("D3D12 scaled blit received a stale destination texture");
+  const TextureFormat destinationFormat = destinationTexture->second.desc.format;
+  const TextureViewHandle sourceView = ensureBlitSourceView(source);
+  const SamplerHandle sampler = ensureBlitSampler();
+  const PipelineHandle pipeline = ensureBlitPipeline(destinationFormat);
+  const ArgumentLayoutHandle layout = ensureBlitArgumentLayout();
+
+  if(m_blitTable.isNull() || m_blitTable.generation != m_handleGeneration)
+  {
+    m_blitTable = createArgumentTable(ArgumentTableCreateDesc{
+      .layout = layout,
+      .lifetime = ArgumentTableLifetime::persistent,
+      .debugName = "d3d12-blit-source-table",
+    });
+    m_blitTableSource = TextureHandle{};
+  }
+  // The table is persistent, so it is rewritten only when the bound source changes. Sources
+  // are per-swapchain-image here, and the table is reused across frames otherwise.
+  if(m_blitTableSource.index != source.index ||
+     m_blitTableSource.generation != source.generation)
+  {
+    const std::array<ArgumentWrite, 1> writes{
+      ArgumentWrite{
+        .binding = 0, .type = ArgumentType::combinedImageSampler,
+        .textureView = sourceView, .sampler = sampler,
+        .accessIntent = ArgumentAccessIntent::sampledRead,
+      },
+    };
+    updateArgumentTable(m_blitTable, writes);
+    m_blitTableSource = source;
+  }
+
+  const auto sourceTexture = m_textures.find(source.index);
+  if(sourceTexture == m_textures.end() ||
+     sourceTexture->second.desc.extent.width == 0 ||
+     sourceTexture->second.desc.extent.height == 0)
+    throw std::runtime_error("D3D12 scaled blit received a stale source texture");
+  // The shader samples the source range, so the UV rectangle is normalized against the
+  // source texture, not the destination.
+  const float sourceExtentW = static_cast<float>(sourceTexture->second.desc.extent.width);
+  const float sourceExtentH = static_cast<float>(sourceTexture->second.desc.extent.height);
+  const float params[4]{
+    static_cast<float>(sourceBegin.x) / sourceExtentW,
+    static_cast<float>(sourceBegin.y) / sourceExtentH,
+    static_cast<float>(sourceEnd.x - sourceBegin.x) / sourceExtentW,
+    static_cast<float>(sourceEnd.y - sourceBegin.y) / sourceExtentH,
+  };
+
+  auto* list = static_cast<ID3D12GraphicsCommandList*>(commandList);
+  bindPipeline(commandList, pipeline, false);
+  bindArgumentTable(commandList, pipeline, false, 0, m_blitTable, nullptr, 0);
+  bindRootConstants(commandList, pipeline, false, 0, params, sizeof(params));
+
+  const D3D12_CPU_DESCRIPTOR_HANDLE rtv{static_cast<SIZE_T>(destinationRtv)};
+  list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+  const D3D12_VIEWPORT viewport{
+    static_cast<FLOAT>(destinationBegin.x),
+    static_cast<FLOAT>(destinationBegin.y),
+    static_cast<FLOAT>(destinationEnd.x - destinationBegin.x),
+    static_cast<FLOAT>(destinationEnd.y - destinationBegin.y),
+    0.0f, 1.0f,
+  };
+  list->RSSetViewports(1, &viewport);
+  const D3D12_RECT scissor{
+    static_cast<LONG>(destinationBegin.x), static_cast<LONG>(destinationBegin.y),
+    static_cast<LONG>(destinationEnd.x), static_cast<LONG>(destinationEnd.y),
+  };
+  list->RSSetScissorRects(1, &scissor);
+  list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  list->DrawInstanced(3, 1, 0, 0);
 }
 
 }  // namespace demo::rhi::d3d12
