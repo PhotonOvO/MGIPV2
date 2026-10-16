@@ -68,12 +68,12 @@ uint editorPickingFragmentMain(EditorPickingVertexOutput input) : SV_Target0
         if (draw.baseColorTextureIndex >= 0)
         {
             const uint textureIndex =
-                NonUniformResourceIndex(uint(draw.baseColorTextureIndex));
+                DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
             alpha *= inTexture[textureIndex].Sample(input.uv).a;
         }
         if (alpha < draw.alphaCutoff)
         {
-            discard;
+            DEMO_DISCARD_FRAGMENT();
         }
     }
     return input.framebufferToken;

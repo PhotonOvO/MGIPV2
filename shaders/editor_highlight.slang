@@ -34,10 +34,10 @@ ConstantBuffer<EditorHighlightPushConstants> editorHighlight;
 [numthreads(1, 1, 1)]
 void editorPickSampleMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint outputBytes = 0;
-    editorPickingSampleOutput.GetDimensions(outputBytes);
+    // Metal has no buffer-length query. The host allocates the sample slot at
+    // its full 8-byte size, so only the dispatch guard remains.
     if (dispatchThreadId.x != 0u || dispatchThreadId.y != 0u ||
-        dispatchThreadId.z != 0u || outputBytes < 8u)
+        dispatchThreadId.z != 0u)
     {
         return;
     }
@@ -79,9 +79,11 @@ bool editorTokenSelected(uint token)
     {
         return false;
     }
-    uint availableBytes = 0;
-    highlightedTokenMask.GetDimensions(availableBytes);
-    const uint count = min(editorHighlight.counts.x, availableBytes / 4u);
+    // Metal has no buffer-length query. The host sizes the mask through
+    // ensureEditorHighlightMaskCapacity() to at least counts.x entries and
+    // pushes that same count, so the clamp against the buffer length is
+    // already implied by counts.x.
+    const uint count = editorHighlight.counts.x;
     return token < count && highlightedTokenMask.Load(token * 4u) != 0u;
 }
 
