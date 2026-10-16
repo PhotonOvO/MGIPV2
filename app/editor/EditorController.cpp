@@ -1004,6 +1004,8 @@ private:
   SelectionCause m_transitionCause{SelectionCause::programmatic};
 };
 
+EditorController::EditorController() : EditorController(Callbacks{}) {}
+
 EditorController::EditorController(Callbacks callbacks)
     : m_callbacks(std::move(callbacks)) {}
 

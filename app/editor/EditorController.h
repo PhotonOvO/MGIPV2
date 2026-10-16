@@ -68,7 +68,12 @@ public:
     std::function<bool()> rendererPublicationFailed;
   };
 
-  explicit EditorController(Callbacks callbacks = {});
+  // A default argument such as `Callbacks callbacks = {}` cannot be used here:
+  // it would require Callbacks' default member initializers while the
+  // enclosing class is still incomplete, which clang rejects. Delegate from an
+  // explicit default constructor instead.
+  EditorController();
+  explicit EditorController(Callbacks callbacks);
   ~EditorController() override;
 
   EditorController(const EditorController &) = delete;

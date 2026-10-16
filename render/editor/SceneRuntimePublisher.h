@@ -3,6 +3,7 @@
 #include "../../rhi/RHIBackend.h"
 #include "../../rhi/RHIQueue.h"
 #include "../../rhi/RHIResult.h"
+#include "../../common/AtomicSharedPtr.h"
 #include "SceneDeltaCounters.h"
 #include "SceneDeltaResourceJournal.h"
 
@@ -451,7 +452,7 @@ private:
 
   SceneTransactionBackend &m_backend;
   SceneDeltaCounters &m_counters;
-  std::atomic<std::shared_ptr<const RendererSceneGeneration>> m_active;
+  AtomicSharedPtr<const RendererSceneGeneration> m_active;
   mutable std::mutex m_applyMutex;
   std::unique_ptr<SceneDeltaResourceJournal> m_pendingOrphan;
 };

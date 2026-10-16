@@ -3,6 +3,7 @@
 #include "ImGuiRhiRenderer.h"
 #include "../common/Handles.h"
 #include "../common/HandlePool.h"
+#include "../common/AtomicSharedPtr.h"
 #include "ArgumentTables.h"
 #include "DrawStream.h"
 #include "DrawStreamDecoder.h"
@@ -965,11 +966,9 @@ namespace demo
 			std::shared_ptr<FrameUseState> frameUse;
 		};
 
-		std::atomic<std::shared_ptr<SceneTransactionResources>>
-			m_sceneTransactionResources;
+		AtomicSharedPtr<SceneTransactionResources> m_sceneTransactionResources;
 		std::atomic<uint64_t> m_sceneTransactionPublishedGeneration{0u};
-		std::atomic<std::shared_ptr<SceneTransactionResources>>
-			m_sceneTransactionFrameResources;
+		AtomicSharedPtr<SceneTransactionResources> m_sceneTransactionFrameResources;
 		rhi::SubmissionToken m_lastSubmittedFrameToken{};
 		[[nodiscard]] std::shared_ptr<SceneTransactionResources>
 			loadPublishedSceneTransactionResources() const noexcept;
