@@ -634,7 +634,9 @@ void D3D12Device::releaseRetiredTextureView(TextureViewRecord& record) noexcept
     static_cast<ID3D12Resource*>(record.resource)->Release();
   if(record.ownsDescriptor)
     m_freeTextureViewDescriptors.push_back(record.descriptorIndex);
-  if(record.ownsAttachmentDescriptor)
+  // attachmentDescriptorIndex is ~0u for adopted descriptors that were never carved out of
+  // this device's heaps (swapchain back buffers), so only return ones this device allocated.
+  if(record.ownsAttachmentDescriptor && record.attachmentDescriptorIndex != ~0u)
   {
     const bool depthView = record.desc.aspect != TextureAspect::color;
     (depthView ? m_freeDsvDescriptors : m_freeRtvDescriptors)
@@ -674,6 +676,10 @@ void D3D12Device::drainRetirements() noexcept
     releaseRetiredQueryPool(retired.record);
   for(RetiredPipeline& retired : m_retiredPipelines)
     releaseRetiredPipeline(retired.record);
+  // Sampler spans become reusable only here, at a point the caller has established is safe.
+  for(const RetiredSamplerSpan& retired : m_retiredSamplerSpans)
+    m_freeSamplerSpans.push_back(retired.span);
+  m_retiredSamplerSpans.clear();
   m_retiredBuffers.clear();
   m_retiredTextures.clear();
   m_retiredTextureViews.clear();
@@ -1013,13 +1019,20 @@ TextureViewHandle D3D12Device::createTextureView(const TextureViewCreateDesc& de
   ++m_nextTextureViewIndex;
   return TextureViewHandle{{index, m_handleGeneration}};
 }
-TextureViewHandle D3D12Device::adoptSwapchainTextureView(uint64_t externalView)
+TextureViewHandle D3D12Device::adoptSwapchainTextureView(
+  uint64_t externalView, TextureHandle image)
 {
   if(!m_initialized || externalView == 0)
     throw std::runtime_error("D3D12Device::adoptSwapchainTextureView requires an initialized device and descriptor");
+  if(image.isNull() || image.generation != m_handleGeneration)
+    throw std::runtime_error("D3D12Device::adoptSwapchainTextureView requires a valid texture");
+  const auto texture = m_textures.find(image.index);
+  if(texture == m_textures.end())
+    throw std::runtime_error("D3D12Device::adoptSwapchainTextureView received a stale texture handle");
   if(m_nextTextureViewIndex == 0)
     throw std::runtime_error("D3D12 texture-view handle space exhausted");
 
+  const TextureDesc& textureDesc = texture->second.desc;
   const uint32_t index = m_nextTextureViewIndex++;
   m_textureViews.emplace(index, TextureViewRecord{
     .resource = nullptr,
@@ -1027,8 +1040,21 @@ TextureViewHandle D3D12Device::adoptSwapchainTextureView(uint64_t externalView)
     .nativeDescriptor = externalView,
     .attachmentDescriptorIndex = ~0u,
     .attachmentDescriptor = externalView,
+    // The descriptor belongs to the swapchain, but it must still be recorded as this
+    // texture's attachment view and carry the subresource it covers. Leaving desc.image
+    // empty made resolveTextureAttachmentDescriptor() unable to match it, so a clear on a
+    // swapchain image failed even though a render-target view existed for it.
+    .desc = TextureViewCreateDesc{
+      .image = image,
+      .format = textureDesc.format,
+      .viewType = ImageViewType::e2D,
+      .aspect = TextureAspect::color,
+      .levelCount = textureDesc.mipLevels,
+      .layerCount = textureDesc.arrayLayers,
+    },
     .ownsResourceReference = false,
     .ownsDescriptor = false,
+    .ownsAttachmentDescriptor = true,
   });
   return TextureViewHandle{{index, m_handleGeneration}};
 }
@@ -1608,12 +1634,91 @@ void D3D12Device::writeTimestamp(
                          readback, static_cast<UINT64>(queryIndex) * sizeof(uint64_t));
   record.available[queryIndex] = 1;
 }
+uint32_t D3D12Device::allocateSamplerSpan(uint32_t count)
+{
+  // Spans retired by earlier frames become reusable once the GPU has drained past them.
+  reapSamplerSpans();
+  // Reuse a retired run whenever a freed span still fits, so that repeatedly creating and
+  // destroying argument tables does not walk the 2048-entry heap to exhaustion.
+  for(auto it = m_freeSamplerSpans.begin(); it != m_freeSamplerSpans.end(); ++it)
+  {
+    if(it->count < count)
+      continue;
+    const uint32_t base = it->base;
+    if(it->count == count)
+      m_freeSamplerSpans.erase(it);
+    else
+    {
+      it->base += count;
+      it->count -= count;
+    }
+    return base;
+  }
+  if(count > 2048u - m_nextSamplerDescriptor)
+    throw std::runtime_error("D3D12 sampler descriptor heap exhausted");
+  const uint32_t base = m_nextSamplerDescriptor;
+  m_nextSamplerDescriptor += count;
+  return base;
+}
+
+bool D3D12Device::layoutSharesSamplerRange(const ArgumentLayoutRecord& layout) const noexcept
+{
+  // A layout whose sampler side is a single array is the shape the shared pool is for: every
+  // table built from it pairs the same sampler with its own textures. Layouts that bind several
+  // independent samplers keep private ranges, since those may legitimately differ per table.
+  if(layout.samplerDescriptorCount <= 1u)
+    return false;
+  uint32_t samplerBindings = 0;
+  for(const ArgumentBindingPlacement& placement : layout.bindings)
+  {
+    if(placement.binding.type == ArgumentType::combinedImageSampler ||
+       placement.binding.type == ArgumentType::sampler)
+      ++samplerBindings;
+  }
+  return samplerBindings == 1u;
+}
+
+void D3D12Device::retireSamplerSpan(uint32_t base, uint32_t count) noexcept
+{
+  if(count == 0)
+    return;
+  // The span stays reserved until the GPU has drained past the submissions that could still read
+  // it. allocateSamplerSpan() reclaims it, and drainRetirements() takes it at an idle point.
+  try
+  {
+    m_retiredSamplerSpans.push_back(
+      RetiredSamplerSpan{SamplerSpan{base, count}, retirementDependencies()});
+  }
+  catch(...)
+  {
+    // Retirement bookkeeping must never break resource destruction; the span is simply not
+    // reused, which is the behaviour this device had before spans were reclaimable.
+  }
+}
+
+void D3D12Device::reapSamplerSpans() noexcept
+{
+  for(size_t index = 0; index < m_retiredSamplerSpans.size();)
+  {
+    if(!isRetirementComplete(m_retiredSamplerSpans[index].dependencies))
+    {
+      ++index;
+      continue;
+    }
+    m_freeSamplerSpans.push_back(m_retiredSamplerSpans[index].span);
+    m_retiredSamplerSpans[index] = m_retiredSamplerSpans.back();
+    m_retiredSamplerSpans.pop_back();
+  }
+}
+
 SamplerHandle D3D12Device::createSampler(const SamplerDesc& desc)
 {
   if(!m_initialized)
     throw std::runtime_error("D3D12Device::createSampler called before device initialization");
-  if(m_nextSamplerDescriptor >= 2048 || m_nextSamplerIndex == 0)
-    throw std::runtime_error("D3D12 sampler descriptor heap exhausted");
+  if(m_nextSamplerIndex == 0)
+    throw std::runtime_error("D3D12 sampler handle space exhausted");
+
+  const uint32_t descriptorIndex = allocateSamplerSpan(1);
 
   D3D12_SAMPLER_DESC native{
     .Filter = toD3D12Filter(desc),
@@ -1631,11 +1736,11 @@ SamplerHandle D3D12Device::createSampler(const SamplerDesc& desc)
 
   auto* heap = static_cast<ID3D12DescriptorHeap*>(m_samplerStagingHeap);
   D3D12_CPU_DESCRIPTOR_HANDLE destination = heap->GetCPUDescriptorHandleForHeapStart();
-  destination.ptr += static_cast<SIZE_T>(m_nextSamplerDescriptor) * m_samplerDescriptorSize;
+  destination.ptr += static_cast<SIZE_T>(descriptorIndex) * m_samplerDescriptorSize;
   static_cast<ID3D12Device*>(m_d3d12Device)->CreateSampler(&native, destination);
 
   const uint32_t index = m_nextSamplerIndex++;
-  m_samplers.emplace(index, SamplerRecord{m_nextSamplerDescriptor++});
+  m_samplers.emplace(index, SamplerRecord{descriptorIndex});
   return {index, m_handleGeneration};
 }
 
@@ -1643,7 +1748,11 @@ void D3D12Device::destroySampler(SamplerHandle handle)
 {
   if(handle.isNull() || handle.generation != m_handleGeneration)
     return;
-  m_samplers.erase(handle.index);
+  const auto found = m_samplers.find(handle.index);
+  if(found == m_samplers.end())
+    return;
+  retireSamplerSpan(found->second.descriptorIndex, 1);
+  m_samplers.erase(found);
 }
 
 ArgumentLayoutHandle D3D12Device::createArgumentLayout(const ArgumentLayoutDesc& desc)
@@ -1704,8 +1813,6 @@ ArgumentTableHandle D3D12Device::createArgumentTable(const ArgumentTableCreateDe
   const ArgumentLayoutRecord& layoutRecord = layoutIt->second;
   if(layoutRecord.resourceDescriptorCount > 65536u - m_nextTextureViewDescriptor)
     throw std::runtime_error("D3D12 resource descriptor heap exhausted");
-  if(layoutRecord.samplerDescriptorCount > 2048u - m_nextSamplerDescriptor)
-    throw std::runtime_error("D3D12 sampler descriptor heap exhausted");
 
   ArgumentTableRecord record{.layout = desc.layout, .lifetime = desc.lifetime};
   if(layoutRecord.resourceDescriptorCount != 0)
@@ -1715,8 +1822,19 @@ ArgumentTableHandle D3D12Device::createArgumentTable(const ArgumentTableCreateDe
   }
   if(layoutRecord.samplerDescriptorCount != 0)
   {
-    record.samplerBase = m_nextSamplerDescriptor;
-    m_nextSamplerDescriptor += layoutRecord.samplerDescriptorCount;
+    if(layoutSharesSamplerRange(layoutRecord))
+    {
+      auto shared = m_sharedSamplerBases.find(desc.layout.index);
+      if(shared == m_sharedSamplerBases.end())
+        shared = m_sharedSamplerBases
+                   .emplace(desc.layout.index,
+                            allocateSamplerSpan(layoutRecord.samplerDescriptorCount))
+                   .first;
+      record.samplerBase = shared->second;
+      record.samplerBaseShared = true;
+    }
+    else
+      record.samplerBase = allocateSamplerSpan(layoutRecord.samplerDescriptorCount);
   }
 
   const uint32_t index = m_nextArgumentTableIndex++;
@@ -1728,10 +1846,19 @@ void D3D12Device::destroyArgumentTable(ArgumentTableHandle handle)
 {
   if(handle.isNull() || handle.generation != m_handleGeneration)
     return;
-  // Descriptor ranges are monotonic for this device generation, so erasing the
-  // logical record invalidates the handle while the native range remains valid
-  // for already-submitted command lists until device teardown.
-  m_argumentTables.erase(handle.index);
+  const auto found = m_argumentTables.find(handle.index);
+  if(found == m_argumentTables.end())
+    return;
+  // The native range is returned to the heap so later tables can reuse it; release waits for
+  // drainRetirements() because already-submitted command lists may still reference it.
+  const ArgumentTableRecord& record = found->second;
+  if(record.samplerBase != ~0u && !record.samplerBaseShared)
+  {
+    const auto layout = m_argumentLayouts.find(record.layout.index);
+    if(layout != m_argumentLayouts.end())
+      retireSamplerSpan(record.samplerBase, layout->second.samplerDescriptorCount);
+  }
+  m_argumentTables.erase(found);
 }
 
 bool D3D12Device::isResidencyResourceAlive(
@@ -2677,6 +2804,9 @@ void D3D12Device::releaseNativeObjects() noexcept
   m_nextArgumentLayoutIndex = 1;
   m_nextSamplerIndex = 1;
   m_nextSamplerDescriptor = 0;
+  m_freeSamplerSpans.clear();
+  m_retiredSamplerSpans.clear();
+  m_sharedSamplerBases.clear();
 
   for(auto& [index, record] : m_textureViews)
   {

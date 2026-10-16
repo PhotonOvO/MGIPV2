@@ -334,7 +334,7 @@ void D3D12Swapchain::createBackBuffers()
 
       device->CreateRenderTargetView(resource, nullptr, descriptor);
       const TextureHandle texture = m_owner->adoptSwapchainTexture(resource);
-      const TextureViewHandle view = m_owner->adoptSwapchainTextureView(static_cast<uint64_t>(descriptor.ptr));
+      const TextureViewHandle view = m_owner->adoptSwapchainTextureView(static_cast<uint64_t>(descriptor.ptr), texture);
       m_images.push_back({resource, static_cast<uint64_t>(descriptor.ptr), texture, view});
 
       descriptor.ptr += m_rtvDescriptorSize;

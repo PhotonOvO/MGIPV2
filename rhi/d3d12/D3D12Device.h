@@ -125,7 +125,7 @@ private:
   friend class D3D12Swapchain;
 
   TextureHandle adoptSwapchainTexture(void* resource);
-  TextureViewHandle adoptSwapchainTextureView(uint64_t descriptor);
+  TextureViewHandle adoptSwapchainTextureView(uint64_t descriptor, TextureHandle image);
 
   struct ShaderLibraryRecord
   {
@@ -205,6 +205,21 @@ private:
     uint32_t descriptorIndex{0};
   };
 
+  // A contiguous run of sampler-heap slots. Argument tables need their sampler descriptors to
+  // be contiguous, so spans are allocated and retired as units rather than one slot at a time.
+  struct SamplerSpan
+  {
+    uint32_t base{0};
+    uint32_t count{0};
+  };
+
+  // A span that has been handed back but may still be read by in-flight command lists.
+  struct RetiredSamplerSpan
+  {
+    SamplerSpan span{};
+    SubmissionTokenSet dependencies{};
+  };
+
   struct ArgumentBindingPlacement
   {
     ArgumentBinding binding{};
@@ -239,6 +254,9 @@ private:
     ArgumentTableLifetime lifetime{ArgumentTableLifetime::persistent};
     uint32_t resourceBase{~0u};
     uint32_t samplerBase{~0u};
+    // True when samplerBase points into the layout's shared pool rather than a span this table
+    // owns, in which case destroying the table must not return the range to the heap.
+    bool samplerBaseShared{false};
     SubmissionTokenSet pendingUses{};
     std::unordered_map<uint32_t, BufferValue> buffers;
     std::vector<ArgumentResourceReference> referencedResources;
@@ -313,6 +331,10 @@ private:
   void releaseRetiredQueryPool(QueryPoolRecord& record) noexcept;
   void releaseRetiredPipeline(PipelineRecord& record) noexcept;
   [[nodiscard]] bool isResidencyResourceAlive(ResidencyResource resource) const noexcept;
+  [[nodiscard]] uint32_t allocateSamplerSpan(uint32_t count);
+  [[nodiscard]] bool layoutSharesSamplerRange(const ArgumentLayoutRecord& layout) const noexcept;
+  void retireSamplerSpan(uint32_t base, uint32_t count) noexcept;
+  void reapSamplerSpans() noexcept;
   void drainRetirements() noexcept;
 
   DeviceCreateInfo m_createInfo{};
@@ -369,6 +391,14 @@ private:
   std::vector<uint32_t>                           m_freeTextureViewDescriptors;
   std::vector<uint32_t>                           m_freeRtvDescriptors;
   std::vector<uint32_t>                           m_freeDsvDescriptors;
+  // Sampler-heap slots finish being read when the GPU drains past the point they were handed
+  // back, so retirement is deferred to drainRetirements() instead of freeing immediately.
+  std::vector<SamplerSpan>                        m_freeSamplerSpans;
+  std::vector<RetiredSamplerSpan>                 m_retiredSamplerSpans;
+  // Layouts that bind a single sampler array keep one heap run per layout, shared by every table
+  // built from that layout. The descriptors in it are identical, so sharing costs nothing and
+  // keeps several live tables from each consuming a whole array out of the 2048-entry heap.
+  std::unordered_map<uint32_t, uint32_t>          m_sharedSamplerBases;
   std::unordered_map<uint32_t, SamplerRecord>        m_samplers;
   std::unordered_map<uint32_t, ArgumentLayoutRecord> m_argumentLayouts;
   std::unordered_map<uint32_t, ArgumentTableRecord>  m_argumentTables;
