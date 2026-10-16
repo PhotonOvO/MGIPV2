@@ -44,6 +44,7 @@
 #endif
 #include "RenderDevice.h"
 
+#include "../common/AtomicSharedPtr.h"
 #include <array>
 #include <atomic>
 #include <filesystem>
@@ -1713,7 +1714,7 @@ namespace demo
 		RenderDevice m_renderer;
 #if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
 		std::unique_ptr<GPUDrivenSceneTransactionBridge> m_sceneTransactionBridge;
-		std::atomic<std::shared_ptr<const SceneTransactionRendererState>>
+		AtomicSharedPtr<const SceneTransactionRendererState>
 			m_sceneTransactionRendererState;
 		std::shared_ptr<const SceneTransactionRendererState>
 			m_sceneTransactionRendererStateLease;
