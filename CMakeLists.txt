@@ -2492,6 +2492,10 @@ if(WIN32 AND DEMO_ENABLE_D3D12)
     DEMO_SHADER_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/shaders"
     DEMO_SHADER_AUTOGEN_DIR="${SHADER_OUTPUT_DIR}"
   )
+  # D3D12 Agility SDK: vendored runtime plus its headers. See cmake/D3D12Agility.cmake.
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/D3D12Agility.cmake")
+  demo_apply_d3d12_agility(demo_core)
+
   target_compile_definitions(demo_core PUBLIC DEMO_HAS_D3D12=1)
 endif()
 if(ANDROID)
@@ -2661,6 +2665,13 @@ else()
     app/editor/EditorTransactionPath.cpp
   )
   target_link_libraries(Demo PRIVATE demo_core)
+  if(WIN32 AND DEMO_ENABLE_D3D12)
+    # D3D12SDKVersion/D3D12SDKPath must be exported by the executable: the loader reads them
+    # from the entry point module, and nothing references them, so a static library would drop
+    # them. Staging the runtime beside the binary happens here as well.
+    target_sources(Demo PRIVATE rhi/d3d12/D3D12AgilitySDK.cpp)
+    demo_apply_d3d12_agility(Demo)
+  endif()
 endif()
 if(BUILD_TESTING AND NOT ANDROID)
   add_executable(editor_ui_live_replay_acceptance
