@@ -296,10 +296,10 @@ RendererTargetFence EditorRendererAdapter::targetFence(
     std::uint64_t mappingEpoch) const noexcept {
   RendererTargetFence fence;
   fence.backend = m_backend;
-  fence.capability =
-      m_backend == rhi::BackendType::metal
-          ? RendererSceneUpdateCapability::Unsupported
-          : RendererSceneUpdateCapability::IncrementalAndSnapshot;
+  // The Metal backend runs the same scene transaction path as the others. It
+  // was previously reported as Unsupported, which made the adapter refuse to
+  // publish and left the editor viewport with nothing to draw.
+  fence.capability = RendererSceneUpdateCapability::IncrementalAndSnapshot;
   fence.renderer = m_rendererIdentity;
   fence.device = m_deviceIdentity;
   fence.mappingEpoch = mappingEpoch;

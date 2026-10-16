@@ -81,6 +81,7 @@ inline MTL::PixelFormat toMetalPixelFormat(TextureFormat format)
   case TextureFormat::bc6hSfloatBlock:  return MTL::PixelFormatBC6H_RGBFloat;
   case TextureFormat::bc7UnormBlock:    return MTL::PixelFormatBC7_RGBAUnorm;
   case TextureFormat::bc7SrgbBlock:     return MTL::PixelFormatBC7_RGBAUnorm_sRGB;
+  case TextureFormat::r32Uint:          return MTL::PixelFormatR32Uint;
   case TextureFormat::undefined:        return MTL::PixelFormatInvalid;
   }
   return MTL::PixelFormatInvalid;
@@ -107,6 +108,7 @@ inline TextureFormat fromMetalPixelFormat(MTL::PixelFormat format)
   case MTL::PixelFormatBC6H_RGBFloat:          return TextureFormat::bc6hSfloatBlock;
   case MTL::PixelFormatBC7_RGBAUnorm:          return TextureFormat::bc7UnormBlock;
   case MTL::PixelFormatBC7_RGBAUnorm_sRGB:     return TextureFormat::bc7SrgbBlock;
+  case MTL::PixelFormatR32Uint:                return TextureFormat::r32Uint;
   default:                                     return TextureFormat::undefined;
   }
 }

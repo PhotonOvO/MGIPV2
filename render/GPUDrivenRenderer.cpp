@@ -784,13 +784,6 @@ namespace demo
 				result.message = "initial scene fence backend differs from renderer backend";
 				return result;
 			}
-			if (fence.backend == rhi::BackendType::metal &&
-				fence.capability != editor::RendererSceneUpdateCapability::Unsupported)
-			{
-				result.error = editor::SceneApplyError::UnsupportedCapability;
-				result.message = "Metal scene transactions are not verified";
-				return result;
-			}
 			std::string ownerError;
 			if (!validateProjectionOwner(initialState.ownerCapability,
 				initialState.activeAsset, initialState.publication.mapping,
@@ -2505,15 +2498,35 @@ namespace demo
 			{
 				ResourceSet& resources = *m_candidateConcrete->resources;
 				auto& records = *resources.deviceRecords;
+				// Metal binds the texture array and one shared sampler separately; the
+				// material layout this table reuses is declared that way, and Metal
+				// rejects a write whose type does not match its binding. Mirror the
+				// branch above that chose the layout: the split layout is installed
+				// only on Metal and only when the renderer material table exists.
+				const bool useSeparateSamplerBinding =
+					resources.device->getBackendInfo().type == rhi::BackendType::metal &&
+					!m_owner.m_renderer.getGraphicsMaterialArgumentTable().isNull();
 				std::vector<rhi::ArgumentWrite> writes;
-				writes.reserve(records.textures.size());
+				writes.reserve(records.textures.size() + 1u);
 				for (uint32_t index = 0u; index < records.textures.size(); ++index)
 				{
 					writes.push_back(rhi::ArgumentWrite{
 						.binding = 0u,
 						.arrayElement = index,
-						.type = rhi::ArgumentType::combinedImageSampler,
+						.type = useSeparateSamplerBinding
+							? rhi::ArgumentType::sampledTexture
+							: rhi::ArgumentType::combinedImageSampler,
 						.textureView = records.textures[index].record.hot.sampledViewHandle,
+						.sampler = useSeparateSamplerBinding
+							? rhi::SamplerHandle{}
+							: records.sampler,
+					});
+				}
+				if (useSeparateSamplerBinding)
+				{
+					writes.push_back(rhi::ArgumentWrite{
+						.binding = shaderio::LBindSharedTextureSampler,
+						.type = rhi::ArgumentType::sampler,
 						.sampler = records.sampler,
 					});
 				}
