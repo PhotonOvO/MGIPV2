@@ -23,8 +23,22 @@ struct EditorPickingPushConstants
     uint framebufferToken;
 };
 
+#ifdef DEMO_METAL
+// Metal binds a fixed texture array plus one shared sampler. The DX/VK path
+// keeps the combined-image-sampler runtime array it has always used.
+[[vk::binding(LBindTextures, LSetTextures)]]
+Texture2D<float4> inTextureResources[LMaterialTextureCapacity];
+[[vk::binding(LBindSharedTextureSampler, LSetTextures)]]
+SamplerState inTextureSampler;
+DemoMetalSampler2D getBindlessTexture(uint index)
+{
+    return makeDemoMetalSampler2D(inTextureResources[index], inTextureSampler);
+}
+#else
 [[vk::binding(LBindTextures, LSetTextures)]]
 Sampler2D inTexture[];
+#define getBindlessTexture(index) inTexture[index]
+#endif
 
 [[vk::binding(LBindCamera, LSetScene)]]
 ConstantBuffer<CameraUniforms> camera;
@@ -69,7 +83,7 @@ uint editorPickingFragmentMain(EditorPickingVertexOutput input) : SV_Target0
         {
             const uint textureIndex =
                 DEMO_NON_UNIFORM_RESOURCE_INDEX(uint(draw.baseColorTextureIndex));
-            alpha *= inTexture[textureIndex].Sample(input.uv).a;
+            alpha *= getBindlessTexture(textureIndex).Sample(input.uv).a;
         }
         if (alpha < draw.alphaCutoff)
         {

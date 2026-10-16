@@ -51,7 +51,10 @@ float2 demoNdcToFramebufferUv(float2 ndc)
 }
 
 #ifdef DEMO_METAL
-#define DEMO_REGISTER(binding)
+// Variadic so a caller can pass a HLSL register with the space qualifier, e.g.
+// DEMO_REGISTER(b0, space3). Metal drops the annotation and places the resource
+// through the [[vk::binding]] slot of its argument buffer instead.
+#define DEMO_REGISTER(...)
 #define DEMO_NON_UNIFORM_RESOURCE_INDEX(index) (index)
 
 struct DemoMetalSampler2D
@@ -85,7 +88,7 @@ __target_intrinsic(metal, "discard_fragment()")
 void demoDiscardFragment();
 #define DEMO_DISCARD_FRAGMENT() demoDiscardFragment()
 #else
-#define DEMO_REGISTER(binding) : register(binding)
+#define DEMO_REGISTER(...) : register(__VA_ARGS__)
 #define DEMO_NON_UNIFORM_RESOURCE_INDEX(index) NonUniformResourceIndex(index)
 #define DEMO_BINDLESS_SAMPLER2D Sampler2D
 #define DEMO_DISCARD_FRAGMENT() discard

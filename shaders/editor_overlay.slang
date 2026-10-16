@@ -1,4 +1,5 @@
 #include "../render/editor/EditorOverlayShaderInterop.h"
+#include "shader_io.h"
 
 struct EditorOverlayLineVertexInput
 {
@@ -22,10 +23,10 @@ struct EditorOverlayVertexOutput
 
 [[vk::binding(kEditorOverlayFrameBinding, kEditorOverlayArgumentSlot)]]
 ConstantBuffer<EditorOverlayFrameUniforms> editorOverlayFrame
-    : register(b0, space3);
+    DEMO_REGISTER(b0, space3);
 
 [[vk::binding(kEditorOverlaySceneDepthBinding, kEditorOverlayArgumentSlot)]]
-Sampler2D<float> editorOverlaySceneDepth : register(t1, space3);
+Sampler2D<float> editorOverlaySceneDepth DEMO_REGISTER(t1, space3);
 
 [[vk::push_constant]]
 ConstantBuffer<EditorOverlayDrawConstants> editorOverlayDraw;
