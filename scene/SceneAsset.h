@@ -222,6 +222,23 @@ struct SceneAsset {
   };
   std::vector<MeshletPayload> meshletPayloads;  // per mesh, same order as meshes
 
+  // --- Mesh LOD chains (optional, populated by builder when enabled) ------
+  //
+  // One entry per mesh, in the same order as `meshes`. Level 0 is always the source mesh,
+  // described by SceneMesh::indexOffset and SceneMesh::indexCount, so it is not repeated here.
+  // A level that no consumer selects costs nothing beyond its index bytes.
+  struct MeshLodPayload {
+    struct Level {
+      uint32_t indexOffset = 0;        // offset into indexData, in elements
+      uint32_t indexCount = 0;
+      float    geometricError = 0.0f;  // absolute error in mesh units
+    };
+
+    std::vector<uint32_t> indexData;   // derived levels, concatenated
+    std::vector<Level>    levels;      // empty when no chain was built
+  };
+  std::vector<MeshLodPayload> meshLodPayloads;  // per mesh, same order as meshes
+
   // Convenience helpers
   [[nodiscard]] const uint8_t* vertexDataPtr() const { return vertexPayload.data(); }
   [[nodiscard]] const uint8_t* indexDataPtr() const { return indexPayload.data(); }

@@ -12,6 +12,7 @@ class SceneAssetBuilder {
 public:
   struct BuildOptions {
     bool buildMeshlets = false;      // Pre-build meshlet data into SceneAsset
+    bool buildMeshLod = false;       // Pre-build mesh LOD chains into SceneAsset
     bool keepRawVertexData = false;  // Keep raw separated attributes for meshlet conversion fallback
     // Runtime-only variant selection. The source GltfModel remains unchanged;
     // the selected material is applied to derived primitives.
@@ -27,6 +28,7 @@ private:
   static void buildTextures(SceneAsset& asset, const GltfModel& model);
   static void buildNodes(SceneAsset& asset, const GltfModel& model);
   static void buildMeshlets(SceneAsset& asset, const GltfModel& model);
+  static void buildMeshLodChains(SceneAsset& asset, const GltfModel& model);
 };
 
 }  // namespace demo

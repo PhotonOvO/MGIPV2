@@ -33,6 +33,18 @@ namespace demo
 		uint32_t firstIndex{0};
 		int32_t vertexOffset{0};
 		bool visible{true};
+
+		// Derived LOD levels, coarse-last. Level 0 is the source mesh carried by
+		// indexCount/firstIndex above, so it is not repeated. A count of zero keeps the object on
+		// its source range, which is the previous behavior.
+		uint32_t lodLevelCount{0};
+		struct LodRange
+		{
+			uint32_t firstIndex{0};
+			uint32_t indexCount{0};
+			float geometricError{0.0f};
+		};
+		LodRange lodLevels[3]{};
 	};
 
 	struct GPUSceneObjectHandle

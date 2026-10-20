@@ -536,13 +536,32 @@ struct ClusteredLightUniforms
 STATIC_CONST uint32_t LGPUCullingThreadCount       = 64;
 STATIC_CONST uint32_t LGPUCullingFrustumPlaneCount = 6;
 
+// Derived LOD levels of one object, coarse-last like the chain they come from. Level 0 is the
+// source mesh and is carried by GPUCullObject::firstIndex/indexCount, so it is not repeated here.
+STATIC_CONST int LGPUCullDerivedLodCount = 3;
+
+struct GPUCullLodRange
+{
+  uint32_t firstIndex;
+  uint32_t indexCount;
+  float    geometricError;  // absolute error in mesh units
+  uint32_t _padding;
+};
+
 struct GPUCullObject
 {
   vec4 sphereCenterRadius;  // xyz = world-space center, w = world-space radius
-  uint32_t indexCount;
+  uint32_t indexCount;      // source-mesh range, used when lodLevelCount is 0
   uint32_t firstIndex;
   int32_t  vertexOffset;
   uint32_t flags;
+  // Number of valid entries in lodLevels. Zero means the object has no chain and the range
+  // above is authoritative, which keeps the no-LOD path identical to the previous behavior.
+  uint32_t lodLevelCount;
+  uint32_t _lodPadding0;
+  uint32_t _lodPadding1;
+  uint32_t _lodPadding2;
+  GPUCullLodRange lodLevels[LGPUCullDerivedLodCount];
 };
 
 struct GPUSceneObject

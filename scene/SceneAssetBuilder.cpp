@@ -1,6 +1,8 @@
 #include "SceneAssetBuilder.h"
 
 #include "../common/ProfilerMarkers.h"
+#include "../render/MeshLodBuilder.h"
+#include "../common/logger.h"
 
 #include <algorithm>
 #include <cstring>
@@ -142,6 +144,12 @@ SceneAsset SceneAssetBuilder::build(const GltfModel& model, const BuildOptions& 
 
   if(options.buildMeshlets) {
     buildMeshlets(asset, model);
+  }
+
+  // Runs after buildMeshes so the chains are derived from the same interleaved bytes that
+  // will be uploaded, and from the same index payload the source range points into.
+  if(options.buildMeshLod) {
+    buildMeshLodChains(asset, model);
   }
 
   return asset;
@@ -366,6 +374,62 @@ void SceneAssetBuilder::buildMeshlets(SceneAsset& asset, const GltfModel& model)
   // TODO: integrate MeshletConverter when meshlet path is needed
   // For now, leave meshletPayloads empty; the GPUDrivenRenderer can fall back
   // to runtime conversion from GltfModel or from SceneAsset's vertexPayload.
+}
+
+void SceneAssetBuilder::buildMeshLodChains(SceneAsset& asset, const GltfModel& model)
+{
+  VKDEMO_CPU_SCOPE("Scene.Asset.Build.MeshLodChains");
+  asset.meshLodPayloads.clear();
+  asset.meshLodPayloads.reserve(asset.meshes.size());
+
+  const float* vertices = reinterpret_cast<const float*>(asset.vertexPayload.data());
+  const uint32_t* indices = reinterpret_cast<const uint32_t*>(asset.indexPayload.data());
+
+  std::size_t chainedMeshCount = 0;
+  std::size_t sourceIndexCount = 0;
+  std::size_t derivedIndexCount = 0;
+
+  // buildMeshes pushes one SceneMesh per GltfMeshData in order, so one index addresses both.
+  for(std::size_t meshIndex = 0; meshIndex < asset.meshes.size(); ++meshIndex) {
+    const SceneMesh& mesh = asset.meshes[meshIndex];
+    const GltfMeshData& source = meshIndex < model.meshes.size()
+        ? model.meshes[meshIndex] : GltfMeshData{};
+
+    // The interleaved record fills a default normal and texture coordinate when the source had
+    // none. A default carries no information, so it must not enter the metric.
+    const MeshLodAttributes attributes{
+        .normals = !source.normals.empty(),
+        .uv = !source.texCoords.empty(),
+    };
+    const MeshLodChain chain = MeshLodBuilder::build(
+        vertices + mesh.vertexOffset / sizeof(float),
+        mesh.vertexCount,
+        kInterleavedVertexStride,
+        attributes,
+        indices + mesh.indexOffset / sizeof(uint32_t),
+        mesh.indexCount,
+        kMeshLodLevelCapacity - 1u);
+
+    SceneAsset::MeshLodPayload payload{};
+    payload.indexData = chain.indices;
+    payload.levels.reserve(chain.levels.size());
+    for(const MeshLodChain::Level& level : chain.levels) {
+      payload.levels.push_back(SceneAsset::MeshLodPayload::Level{
+          .indexOffset = level.indexOffset,
+          .indexCount = level.indexCount,
+          .geometricError = level.geometricError,
+      });
+    }
+    if(!payload.levels.empty()) {
+      ++chainedMeshCount;
+    }
+    sourceIndexCount += mesh.indexCount;
+    derivedIndexCount += payload.indexData.size();
+    asset.meshLodPayloads.push_back(std::move(payload));
+  }
+
+  LOGI("Scene LOD chains: %zu of %zu meshes, source indices %zu, derived indices %zu",
+       chainedMeshCount, asset.meshes.size(), sourceIndexCount, derivedIndexCount);
 }
 
 }  // namespace demo

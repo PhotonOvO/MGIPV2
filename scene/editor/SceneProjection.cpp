@@ -990,6 +990,9 @@ SceneProjection::project(const GltfDocument &document,
 
     SceneAssetBuilder::BuildOptions buildOptions;
     buildOptions.buildMeshlets = options.buildMeshlets;
+    // Chains are built but nothing selects a level yet, so keep the cost off the default path
+    // until the culling pass reads them. Flip to true in the change that consumes them.
+    buildOptions.buildMeshLod = false;
     buildOptions.keepRawVertexData = options.keepRawVertexData;
     buildOptions.activeVariant = options.activeVariant;
     result.asset = SceneAssetBuilder::build(model, buildOptions);

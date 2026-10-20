@@ -2422,6 +2422,8 @@ add_library(demo_core STATIC
   scene/SceneUploadPlanner.cpp
   scene/TransformSystem.h
   scene/TransformSystem.cpp
+  render/MeshLodBuilder.h
+  render/MeshLodBuilder.cpp
   render/MeshPool.h
   render/MeshPool.cpp
   render/Camera.h

@@ -686,12 +686,27 @@ namespace demo
 
 	shaderio::GPUCullObject GPUSceneRegistry::packCullObject(const GPUSceneRegistrationDesc& desc)
 	{
-		return shaderio::GPUCullObject{
+		shaderio::GPUCullObject object{
 			.sphereCenterRadius = desc.boundsSphere,
 			.indexCount = desc.visible ? desc.indexCount : 0u,
 			.firstIndex = desc.firstIndex,
 			.vertexOffset = desc.vertexOffset,
 			.flags = desc.flags,
 		};
+
+		// A hidden object keeps no level ranges, so it cannot become visible through a stale chain.
+		const uint32_t levelCount = desc.visible
+			? std::min(desc.lodLevelCount, static_cast<uint32_t>(shaderio::LGPUCullDerivedLodCount))
+			: 0u;
+		object.lodLevelCount = levelCount;
+		for(uint32_t level = 0u; level < levelCount; ++level)
+		{
+			object.lodLevels[level] = shaderio::GPUCullLodRange{
+				.firstIndex = desc.lodLevels[level].firstIndex,
+				.indexCount = desc.lodLevels[level].indexCount,
+				.geometricError = desc.lodLevels[level].geometricError,
+			};
+		}
+		return object;
 	}
 } // namespace demo
