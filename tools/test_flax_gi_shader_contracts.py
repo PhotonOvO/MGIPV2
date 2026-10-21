@@ -5,7 +5,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMON_SHADER = (REPO_ROOT / "shaders" / "flax_ddgi_common.slang").read_text(encoding="utf-8")
-INACTIVE_SHADER = (REPO_ROOT / "shaders" / "ddgi_flax_update_inactive.slang").read_text(encoding="utf-8")
 CLASSIFY_SHADER = (REPO_ROOT / "shaders" / "ddgi_flax_classify.slang").read_text(encoding="utf-8")
 INIT_ARGS_SHADER = (REPO_ROOT / "shaders" / "ddgi_flax_init_args.slang").read_text(encoding="utf-8")
 TRACE_SHADER = (REPO_ROOT / "shaders" / "ddgi_flax_trace_rays.slang").read_text(encoding="utf-8")
@@ -278,10 +277,16 @@ class FlaxGIShaderContractTests(unittest.TestCase):
         self.assertIn("Only Active Probes", APP_HEADER)
 
     def test_inactive_probe_sanitation_is_deterministic(self) -> None:
-        self.assertIn("Deterministic inactive-probe sanitation", INACTIVE_SHADER)
-        self.assertIn("probesData[texel] = float4(0.0f, 0.0f, 0.0f, -1.0f)", INACTIVE_SHADER)
-        self.assertNotIn("neighborData", INACTIVE_SHADER)
-        self.assertNotIn("encodeFallbackCoords", INACTIVE_SHADER)
+        # Sanitation moved into the classify kernel (commit 63c7e25 folded the inactive-probe
+        # pass into classify), so the guarantee is asserted where it now lives rather than
+        # against the removed shader.
+        self.assertIn("kDDGIProbeStateInactive", CLASSIFY_SHADER)
+        self.assertIn(
+            "probesData[dataCoord] = encodeProbeData(float3(0,0,0), kDDGIProbeStateInactive",
+            CLASSIFY_SHADER,
+        )
+        self.assertNotIn("neighborData", CLASSIFY_SHADER)
+        self.assertNotIn("encodeFallbackCoords", CLASSIFY_SHADER)
 
     def test_update_budget_compacts_deterministically_and_reuses_slack(self) -> None:
         self.assertIn("curvatureMagnitude", CLASSIFY_SHADER)

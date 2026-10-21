@@ -64,27 +64,41 @@ def scene_color_dependency(owner: str, relative_path: str) -> dict[str, str]:
 
 class ColorAttachmentChainSyncContractTests(unittest.TestCase):
     def test_scene_color_attachment_dependencies_use_raster_output_access(self) -> None:
+        # A pass that only writes the target can keep COLOR_ATTACHMENT_OPTIMAL. A pass that also
+        # samples it cannot, because a combined image sampler may not read that layout, so its
+        # declaration has to be General. The state therefore follows from the access, and pinning
+        # one name for the whole chain would demand a layout Vulkan does not allow.
         for owner, relative_path, expected_access in CHAIN:
             with self.subTest(pass_name=owner):
                 dependency = scene_color_dependency(owner, relative_path)
                 self.assertEqual(dependency["access"], expected_access)
                 self.assertEqual(dependency["stage"], "rasterColorOut")
                 self.assertEqual(dependency["hazard"], "textureWrites")
-                self.assertEqual(dependency["state"], "ColorAttachment")
+                expected_state = "ColorAttachment" if expected_access == "write" else "General"
+                self.assertEqual(dependency["state"], expected_state)
 
-    def test_light_skybox_forward_ddgi_form_the_complete_same_layout_chain(self) -> None:
+    def test_light_skybox_forward_ddgi_share_one_scene_color_layout(self) -> None:
+        # Passes that write without sampling keep COLOR_ATTACHMENT_OPTIMAL; the rest settle in
+        # General. Both groups are legitimate, and what has to hold is that each pass lands in the
+        # state its own access requires, so the chain never flips back and forth.
         attachment_owners: list[str] = []
         for pass_path in sorted((ROOT / "render/passes").glob("*.cpp")):
             source = pass_path.read_text(encoding="utf-8")
             if "kPassSceneColorHdrHandle" not in source:
                 continue
             for match in SCENE_COLOR_DEPENDENCY.finditer(source):
-                if match.group("state") == "ColorAttachment":
-                    attachment_owners.append(pass_path.stem)
+                # Record both groups so the assertion below proves every expected pass declares a
+                # state, rather than only that the write-only passes do.
+                attachment_owners.append(f"{pass_path.stem}:{match.group('state')}")
 
         self.assertCountEqual(
             attachment_owners,
-            ["GPUDrivenLightPass", "GPUDrivenSkyboxPass", "GPUDrivenForwardPass", "DDGIDebugPass"],
+            [
+                "GPUDrivenLightPass:ColorAttachment",
+                "GPUDrivenSkyboxPass:General",
+                "GPUDrivenForwardPass:General",
+                "DDGIDebugPass:General",
+            ],
         )
 
         order_markers = (
@@ -123,9 +137,19 @@ class ColorAttachmentChainSyncContractTests(unittest.TestCase):
             scene_color_dependency(owner, relative_path)
             for owner, relative_path, _ in CHAIN
         ]
+        # The chain may leave COLOR_ATTACHMENT_OPTIMAL once, when the first pass that also samples
+        # the target forces General, and must then stay there: flipping back would add a
+        # transition per pass.
+        left_attachment = False
         for previous, current in zip(dependencies, dependencies[1:]):
             with self.subTest(previous=previous, current=current):
-                self.assertEqual(previous["state"], current["state"])
+                if previous["state"] != current["state"]:
+                    self.assertEqual(
+                        (previous["state"], current["state"]),
+                        ("ColorAttachment", "General"),
+                    )
+                    self.assertFalse(left_attachment)
+                    left_attachment = True
                 self.assertFalse(
                     previous["access"] == "read" and current["access"] == "read"
                 )

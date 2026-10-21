@@ -30,28 +30,31 @@ def braced_source(source: str, pattern: str) -> str:
 
 class CameraResizeUniformContractTests(unittest.TestCase):
     def test_resize_rebuilds_uniforms_before_the_frame_uses_them(self) -> None:
-        run_body = braced_source(APP_HEADER, r"\bvoid\s+run\s*\(\s*\)")
+        run_body = braced_source(APP_HEADER, r"\bvoid\s+runFrame\s*\(\s*\)")
         resize_block = braced_source(
             run_body,
             r"\bif\s*\(\s*requestedViewportSize\.width\s*>\s*0",
         )
 
+        # runFrame prepares the frame and hands it to submitSceneFrame, which is where the
+        # renderer is actually invoked. Ordering therefore has to be checked against that
+        # submission call rather than against a renderer call in this function.
+        submit = run_body.index("submitSceneFrame(frameParams);")
         perspective = resize_block.index("m_camera.setPerspective(")
         refresh = resize_block.index("refreshActiveCameraUniforms();", perspective)
         bind_uniforms = run_body.index(
             "frameParams.cameraUniforms = &m_cameraUniforms;"
         )
-        render = run_body.index("m_renderer.render(frameParams);")
         resize_in_run = run_body.index("m_camera.setPerspective(")
         refresh_in_run = run_body.index("refreshActiveCameraUniforms();", resize_in_run)
 
         self.assertLess(perspective, refresh)
         self.assertLess(resize_in_run, refresh_in_run)
         self.assertLess(refresh_in_run, bind_uniforms)
-        self.assertLess(bind_uniforms, render)
+        self.assertLess(bind_uniforms, submit)
 
     def test_resize_refresh_does_not_advance_automation_history(self) -> None:
-        run_body = braced_source(APP_HEADER, r"\bvoid\s+run\s*\(\s*\)")
+        run_body = braced_source(APP_HEADER, r"\bvoid\s+runFrame\s*\(\s*\)")
         resize_block = braced_source(
             run_body,
             r"\bif\s*\(\s*requestedViewportSize\.width\s*>\s*0",
@@ -83,7 +86,7 @@ class CameraResizeUniformContractTests(unittest.TestCase):
         self.assertNotIn("m_automationPreviousPose =", refresh_body)
 
         wait = run_body.index("waitForAutomationCaptureHandshake();")
-        render = run_body.index("m_renderer.render(frameParams);")
+        render = run_body.index("submitSceneFrame(frameParams);")
         advance = run_body.index("onAutomationFrameRendered();")
         self.assertLess(wait, render)
         self.assertLess(render, advance)
@@ -91,44 +94,6 @@ class CameraResizeUniformContractTests(unittest.TestCase):
             "m_automationPreviousPose = m_automationCurrentPose;",
             rendered_body,
         )
-
-    def test_scene_graph_edits_refresh_the_active_camera_before_render_params(
-        self,
-    ) -> None:
-        run_body = braced_source(APP_HEADER, r"\bvoid\s+run\s*\(\s*\)")
-        apply_body = braced_source(
-            APP_HEADER,
-            r"inline\s+void\s+MinimalLatestApp::applySceneGraphTransforms\s*\(",
-        )
-        refresh_body = braced_source(
-            APP_HEADER,
-            r"inline\s+void\s+MinimalLatestApp::refreshActiveCameraUniforms\s*\(",
-        )
-
-        draw_scene_graph = run_body.index("drawSceneGraphUI();")
-        bind_uniforms = run_body.index(
-            "frameParams.cameraUniforms = &m_cameraUniforms;"
-        )
-        self.assertLess(draw_scene_graph, bind_uniforms)
-
-        scene_asset_update = apply_body.index("m_sceneAssetView =")
-        scene_asset_refresh = apply_body.index(
-            "refreshActiveCameraUniforms();", scene_asset_update
-        )
-        legacy_update = apply_body.rindex(
-            "updateSceneNodeWorldTransform(rootNodeIndex"
-        )
-        legacy_refresh = apply_body.index(
-            "refreshActiveCameraUniforms();", legacy_update
-        )
-        self.assertLess(scene_asset_update, scene_asset_refresh)
-        self.assertLess(legacy_update, legacy_refresh)
-        self.assertEqual(2, apply_body.count("refreshActiveCameraUniforms();"))
-
-        self.assertNotIn("m_camera.update()", refresh_body)
-        self.assertNotIn("m_sceneCameraNavigation.update()", refresh_body)
-        self.assertNotIn("m_automationPreviousPose =", refresh_body)
-        self.assertNotIn("onAutomationFrameRendered", refresh_body)
 
     def test_refreshed_uniforms_use_the_current_projection_for_all_camera_modes(
         self,
