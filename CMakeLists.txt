@@ -1548,6 +1548,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(meshoptimizer)
 
+# Tracy profiler. Off by default: it adds a client library that opens a socket to the Tracy
+# GUI and instruments every zone in the frame. Enable with -DDEMO_ENABLE_TRACY=ON, and also
+# define TRACY_ENABLE for the target so the client headers emit code.
+option(DEMO_ENABLE_TRACY "Build with the Tracy frame profiler client" OFF)
+if(DEMO_ENABLE_TRACY)
+  FetchContent_Declare(
+    tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.13.1
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE
+  )
+  FetchContent_MakeAvailable(tracy)
+endif()
+
 if(DEMO_ENABLE_VULKAN)
   FetchContent_Declare(
     VulkanMemoryAllocator
@@ -1626,6 +1641,9 @@ list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_common\\.slang$")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "ddgi_sample_probe\\.slang$")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "surface_atlas_common\\.slang$")
 list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "flax_ddgi_common\\.slang$")
+# Defensive: meshlet culling lives in shader.gpu_culling.slang; a stub named meshlet_culling was removed.
+list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "meshlet_culling\\.slang$")
+list(FILTER SHADER_GLSL_FILES EXCLUDE REGEX "meshlet_culling\\.glsl$")
 list(FIND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang" DEMO_GPU_LIGHT_SHADER_INDEX)
 if(DEMO_GPU_LIGHT_SHADER_INDEX EQUAL -1)
   list(APPEND SHADER_SLANG_FILES "${CMAKE_CURRENT_LIST_DIR}/shaders/shader.light_gpu_driven.slang")
@@ -2290,8 +2308,6 @@ add_library(demo_core STATIC
   render/DDGIProbeVolume.cpp
   render/HiZDepthPyramid.h
   render/HiZDepthPyramid.cpp
-  render/GPUBatchBuilder.h
-  render/GPUBatchBuilder.cpp
   render/MeshletConverter.h
   render/MeshletConverter.cpp
   render/GPUMeshletBuffer.h
@@ -2471,6 +2487,24 @@ if(APPLE AND DEMO_ENABLE_METAL4)
 endif()
 
 if(WIN32 AND DEMO_ENABLE_D3D12)
+  # The D3D12 backend compiles the final-color pass at runtime with DXC. Resolve it whenever D3D12
+  # is enabled: it used to be found only for DEMO_USE_DXC_FINAL_COLOR, which left DEMO_DXC_PATH
+  # empty and made the backend spawn an empty command, so a fresh build tree could not render.
+  # The Vulkan SDK ships dxc beside glslangValidator, the directory the optional path searched.
+  if(NOT DEMO_DXC_EXECUTABLE)
+    get_filename_component(_DEMO_VULKAN_TOOL_DIR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}" DIRECTORY)
+    find_program(DEMO_DXC_EXECUTABLE
+      NAMES dxc
+      HINTS "${_DEMO_VULKAN_TOOL_DIR}"
+      DOC "DXC the D3D12 backend uses for the runtime final-color pass"
+    )
+    if(NOT DEMO_DXC_EXECUTABLE)
+      message(WARNING
+        "DXC not found. The D3D12 backend needs it to compile the final-color pass at runtime; "
+        "set -DDEMO_DXC_EXECUTABLE=<path>/dxc.exe or install the Vulkan SDK.")
+    endif()
+  endif()
+
   target_sources(demo_core PRIVATE
     rhi/d3d12/D3D12Device.h
     rhi/d3d12/D3D12Device.cpp
@@ -2490,7 +2524,7 @@ if(WIN32 AND DEMO_ENABLE_D3D12)
   )
   target_compile_definitions(demo_core PRIVATE
     DEMO_SLANGC_PATH="${Slang_SLANGC_EXECUTABLE}"
-    DEMO_DXC_PATH="${DEMO_DXC_SPIRV_EXECUTABLE}"
+    DEMO_DXC_PATH="${DEMO_DXC_EXECUTABLE}"
     DEMO_SHADER_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}/shaders"
     DEMO_SHADER_AUTOGEN_DIR="${SHADER_OUTPUT_DIR}"
   )
@@ -2566,6 +2600,15 @@ if(VKDEMO_NVTX_INCLUDE_DIR AND EXISTS "${VKDEMO_NVTX_INCLUDE_DIR}/nvtx3/nvToolsE
   target_compile_definitions(demo_core PUBLIC VKDEMO_HAS_NVTX=1)
 else()
   message(STATUS "NVTX markers: disabled (set VKDEMO_NVTX_INCLUDE_DIR to enable)")
+endif()
+
+if(DEMO_ENABLE_TRACY)
+  message(STATUS "Tracy profiler: enabled (connect with the Tracy GUI on the same host)")
+  # TRACY_ENABLE is what makes the client headers emit instrumentation, and it has to reach
+  # every translation unit that includes ProfilerMarkers.h, hence PUBLIC. The client library
+  # must be linked into the executable, not only the static core.
+  target_compile_definitions(demo_core PUBLIC TRACY_ENABLE=1 VKDEMO_HAS_TRACY=1)
+  target_link_libraries(demo_core PUBLIC TracyClient)
 endif()
 
    
