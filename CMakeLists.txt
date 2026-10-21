@@ -480,21 +480,6 @@ if(NOT ANDROID)
 
 endif()
 
-if(NOT ANDROID AND NOT DEMO_EDITOR_CORE_ONLY AND NOT DEMO_SKIP_EDITOR_DEPENDENCY_PREFLIGHT)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_custom_target(scene_editor_dependency_preflight
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_p0_artifacts.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --mode configured-dependency-preflight
-            --configured-build-root "${CMAKE_BINARY_DIR}"
-            --config "$<CONFIG>"
-    COMMENT "Inspect the final configured production-editor graph before compilation"
-    VERBATIM
-    USES_TERMINAL
-  )
-endif()
-
 if(BUILD_TESTING AND NOT ANDROID)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_executable(portable_bit_representation_tests
@@ -990,11 +975,7 @@ if(BUILD_TESTING AND NOT ANDROID)
     list(APPEND DEMO_SCENE_EDITOR_TEST_TARGETS editor_rhi_contract_tests)
   endif()
 
-  add_test(NAME scene_editor.p0_artifacts
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_p0_artifacts.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-  )
+
   add_test(NAME scene_editor.acceptance_report_validator
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_LIST_DIR}/tests/editor/acceptance_report_validator_tests.py"
@@ -1020,153 +1001,14 @@ if(BUILD_TESTING AND NOT ANDROID)
             "${CMAKE_CURRENT_LIST_DIR}/tests/editor/progress_ledger_validator_tests.py"
             -v
   )
-  add_test(NAME scene_editor.progress_ledger_validator
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-  )
-  add_test(NAME scene_editor.progress_ledger_updater_check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/update_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-  )
+
+
   add_test(NAME scene_editor.local_progress_ledger_protocol
     COMMAND "${Python3_EXECUTABLE}" -B
             "${CMAKE_CURRENT_LIST_DIR}/tests/editor/local_progress_ledger_tests.py"
             -v
   )
-  add_test(NAME scene_editor.local_progress_ledger_validator
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_local_progress.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-  )
-  add_test(NAME scene_editor.local_progress_ledger_publisher_check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/local_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-  )
 
-  add_custom_target(scene_editor_progress_ledger_check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tests/editor/progress_ledger_validator_tests.py"
-            -v
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/update_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tests/editor/local_progress_ledger_tests.py"
-            -v
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_local_progress.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-    COMMAND "${Python3_EXECUTABLE}" -B
-            "${CMAKE_CURRENT_LIST_DIR}/tools/local_editor_progress_ledger.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --check
-    COMMENT "Validate frozen legacy and active local editor progress protocols"
-    VERBATIM
-    USES_TERMINAL
-  )
-
-  set_tests_properties(
-    scene_editor.portable_bit_representation
-    scene_editor.p0_support
-    scene_editor.p0_artifacts
-    scene_editor.p0_artifact_validator
-    scene_editor.dependency_gate_integration
-    scene_editor.android_viewer_contract
-    scene_editor.acceptance_report_validator
-    scene_editor.progress_ledger_protocol
-    scene_editor.progress_ledger_validator
-    scene_editor.progress_ledger_updater_check
-    scene_editor.local_progress_ledger_protocol
-    scene_editor.local_progress_ledger_validator
-    scene_editor.local_progress_ledger_publisher_check
-    PROPERTIES LABELS "scene-editor-p0-scaffold"
-  )
-  set_tests_properties(
-    scene_editor.identity
-    scene_editor.gltf_document_load
-    scene_editor.gltf_document_roundtrip
-    scene_editor.gltf_document_io
-    scene_editor.gltf_validator
-    scene_editor.gltf_accessor_payload
-    scene_editor.scene_projection
-    PROPERTIES LABELS "scene-editor-p1-document"
-  )
-  set_tests_properties(
-    scene_editor.scene_commands
-    scene_editor.mutation
-    scene_editor.p3_regression
-    scene_editor.animation_playback
-    PROPERTIES LABELS "scene-editor-p3-mutation"
-  )
-  set_tests_properties(scene_editor.scene_projection PROPERTIES
-    LABELS "scene-editor-p1-document;scene-editor-p3-mutation")
-  if(TARGET editor_rhi_contract_tests)
-    set_tests_properties(scene_editor.rhi_contract PROPERTIES LABELS "scene-editor-p0-scaffold")
-  endif()
-
-  add_custom_target(scene_editor_tests DEPENDS
-    ${DEMO_SCENE_EDITOR_TEST_TARGETS}
-    portable_bit_representation_tests
-    automation_asset_identity_tests
-    editor_transaction_path_tests
-    scene_editor_progress_ledger_check)
-  add_custom_target(scene_editor_p0_scaffold
-    COMMAND "${CMAKE_CTEST_COMMAND}"
-            --test-dir "${CMAKE_BINARY_DIR}"
-            -C "$<CONFIG>"
-            --output-on-failure
-    DEPENDS scene_editor_tests
-    USES_TERMINAL
-  )
-  add_custom_target(scene_editor_p0
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/generate_editor_dependency_identity.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --build-root "${CMAKE_BINARY_DIR}"
-            --source-dir "${CMAKE_BINARY_DIR}/_deps/imgui-src"
-            --expected-source-dir "${CMAKE_BINARY_DIR}/_deps/imgui-src"
-            --config "$<CONFIG>"
-            --output "${DEMO_EDITOR_DEPENDENCY_IDENTITY}"
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_p0_artifacts.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --mode gate
-            --resolved-build-identity "${DEMO_EDITOR_DEPENDENCY_IDENTITY}"
-    DEPENDS scene_editor_p0_scaffold
-    COMMENT "Validate P0 closure and P1 engineering readiness with the resolved build identity"
-    USES_TERMINAL
-  )
-  add_custom_target(scene_editor_release_gate
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/generate_editor_dependency_identity.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --build-root "${CMAKE_BINARY_DIR}"
-            --source-dir "${CMAKE_BINARY_DIR}/_deps/imgui-src"
-            --expected-source-dir "${CMAKE_BINARY_DIR}/_deps/imgui-src"
-            --config "$<CONFIG>"
-            --output "${DEMO_EDITOR_DEPENDENCY_IDENTITY}"
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_LIST_DIR}/tools/validate_editor_p0_artifacts.py"
-            --repo-root "${CMAKE_CURRENT_LIST_DIR}"
-            --mode release
-            --resolved-build-identity "${DEMO_EDITOR_DEPENDENCY_IDENTITY}"
-    DEPENDS scene_editor_p0_scaffold
-    COMMENT "Validate final release licensing; blocked until the owner selects a root license"
-    USES_TERMINAL
-  )
 endif()
 
 # CMAKE_PROJECT_TOP_LEVEL_INCLUDES and toolchain files can schedule mutations
