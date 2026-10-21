@@ -1707,6 +1707,14 @@ private:
           frameParams.debugOptions.flaxGIDebugViewMask = 0u;
           frameParams.debugOptions.flaxGIDebugMode = 0;
         }
+        if(m_automationOptions.noUi)
+        {
+          // Nothing displays the telemetry in this mode, but collecting it still costs a GPU
+          // readback every frame. The automation flag rejects a run-to-stage request on its own,
+          // so turning telemetry off here cannot starve a debugger that asked for it.
+          frameParams.debugOptions.flaxGIDebugTelemetryEnabled = false;
+          frameParams.debugOptions.flaxGIDebugOverlayEnabled = false;
+        }
         // Copy CSM debug settings to debugOptions
         frameParams.debugOptions.showShadowCascades    = m_showShadowCascades;
         frameParams.debugOptions.cascadeIndex          = m_cascadeIndex;
