@@ -37,6 +37,8 @@ namespace demo
 		// Derived LOD levels, coarse-last. Level 0 is the source mesh carried by
 		// indexCount/firstIndex above, so it is not repeated. A count of zero keeps the object on
 		// its source range, which is the previous behavior.
+		// No shader consumes lodLevels yet and no registration populates them, so this count stays
+		// zero in practice; see README.md "Mesh LOD Capability".
 		uint32_t lodLevelCount{0};
 		struct LodRange
 		{

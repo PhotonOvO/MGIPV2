@@ -530,6 +530,14 @@ The caller or RenderGraph must emit the required barriers.
 
 ---
 
+### Meshlet Capability
+
+Meshlets are currently used only for culling acceleration, not for cluster-level draws. `Meshlet::indexOffset` / `indexCount` are uploaded by `render/MeshletConverter.cpp`, but no shader consumes them; `shader.gpu_culling.slang` builds indirect commands from `GPUCullObject` per object. Culling granularity is meshlet; draw granularity is object.
+
+### Mesh LOD Capability
+
+Mesh LOD chains are built at load time (`render/MeshLodBuilder.cpp`) into `SceneAsset::MeshLodPayload`, but no runtime consumer selects a level. `SceneAssetBuilder::BuildOptions::buildMeshLod` defaults to `false` (`scene/editor/SceneProjection.cpp`), no registration site populates `GPUSceneRegistrationDesc::lodLevels`, so `GPUCullObject::lodLevelCount` is always 0 and `lodLevels[]` stays zeroed. No shader reads `lodLevels`; `gpuCullingMain` builds indirect commands from the source-mesh range (`indexCount`/`firstIndex`), and `SceneAssetSerializer` does not persist the payloads. Screen-space LOD selection is unimplemented.
+
 ## 7. Multi-backend Mapping
 
 The RHI is designed around a common modern GPU model.

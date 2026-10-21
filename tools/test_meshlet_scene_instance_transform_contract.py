@@ -375,5 +375,26 @@ class MeshletSceneInstanceTransformContractTests(unittest.TestCase):
             "m_meshletMetadataFullRewriteDirty = false;", self.clear_scene
         )
 
+class MeshletCapabilityContractTests(unittest.TestCase):
+    def test_stub_meshlet_culling_shader_is_removed(self) -> None:
+        self.assertFalse((ROOT / "shaders" / "shader.meshlet_culling.slang").exists())
+
+    def test_cmake_excludes_meshlet_culling_shader_name(self) -> None:
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn(r'list(FILTER SHADER_SLANG_FILES EXCLUDE REGEX "meshlet_culling\\.slang$")', cmake)
+
+    def test_gpu_culling_command_does_not_consume_meshlet_index_range(self) -> None:
+        source = (ROOT / "shaders" / "shader.gpu_culling.slang").read_text(encoding="utf-8")
+        body = braced_source(source, "void gpuCullingMain(")
+        start = body.index("GPUCullIndirectCommand command;")
+        end = body.index("float3 center;", start)
+        command_block = body[start:end]
+        self.assertIn("command.indexCount = objectData.indexCount;", command_block)
+        self.assertNotIn("meshlets[", command_block)
+        self.assertNotIn(".indexOffset", command_block)
+        self.assertNotIn("meshlet.indexOffset", command_block)
+        self.assertNotIn("meshlet.indexCount", command_block)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

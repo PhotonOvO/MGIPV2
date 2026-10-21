@@ -27,16 +27,34 @@ namespace demo
 			return;
 		}
 
-		const uint64_t copySize = static_cast<uint64_t>(sort.paddedElementCount) * sizeof(uint32_t);
+		// Upload only the CPU-owned inputs: keys = GPUSceneObject index, values = draw index.
+		// The keygen dispatch below writes every padded slot (distance key or 0xffffffff).
+		const uint64_t copySize = static_cast<uint64_t>(sort.keygenPushConstants.activeCount) * sizeof(uint32_t);
 		rhi::ComputeEncoder* copyEnc = context.commandBuffer->beginComputePass();
 		copyEnc->copyBuffer(sort.uploadKeyBufferHandle, 0, sort.keyBufferHandle, 0, copySize);
 		copyEnc->copyBuffer(sort.uploadValueBufferHandle, 0, sort.valueBufferHandle, 0, copySize);
 		context.commandBuffer->endEncoding();
 
-		// Same-pass barrier: copyBuffer uploads sort keys/values. For one element
-		// there is no bitonic dispatch, but the visibility patch still consumes the
-		// copied key/value buffers from compute, so transfer visibility is required.
+		// Same-pass barrier: copyBuffer uploads the keygen inputs, which the keygen compute
+		// dispatch reads and overwrites in place.
 		context.commandBuffer->barrier(rhi::StageFlags::transfer, rhi::StageFlags::compute,
+		                               rhi::HazardFlags::bufferWrites);
+
+		// GPU transparent sort-key generation: key = 0x80000000 | (asuint(d2) >> 2 & 0x3fffffff),
+		// d2 = |GPUSceneObject translation - camera|^2; padding slots get 0xffffffff.
+		{
+			rhi::ComputeEncoder* keygenEnc = context.commandBuffer->beginComputePass();
+			keygenEnc->setPipeline(sort.keygenPipelineHandle);
+			keygenEnc->setArgumentTable(0, sort.keygenArgumentTable);
+			keygenEnc->setRootConstants(kPrimaryRootConstantsSlot,
+			                            std::as_bytes(std::span{&sort.keygenPushConstants, 1}));
+			keygenEnc->dispatch(rhi::DispatchDesc{(sort.paddedElementCount + 63u) / 64u, 1u, 1u});
+			context.commandBuffer->endEncoding();
+		}
+
+		// Same-pass barrier: keygen compute writes keys/values; the bitonic steps (or, for one
+		// element, the visibility patch) read them from compute.
+		context.commandBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::compute,
 		                               rhi::HazardFlags::bufferWrites);
 
 		if (sort.paddedElementCount <= 1u)

@@ -199,6 +199,12 @@ namespace demo
 		// stable handle ring at (frameIndex + frameCount - 1) % frameCount.
 		[[nodiscard]] rhi::BufferHandle getGPUCullingIndirectBufferRHIHandle(uint32_t frameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getGPUCullingStatsBufferRHIHandle(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getGPUCullingResultBufferRHIHandle(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getGPUCullingStatsStagingHandle(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountStagingHandle(uint32_t frameIndex) const;
+		[[nodiscard]] rhi::BufferHandle getGPUCullingResultStagingHandle(uint32_t frameIndex) const;
+		[[nodiscard]] uint32_t getGPUCullingResultCount(uint32_t frameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t currentFrameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getPreviousGPUCullingDrawCountBufferRHIHandle(uint32_t currentFrameIndex) const;
 		[[nodiscard]] rhi::BufferHandle getGPUDrivenPersistentIndirectStreamBufferRHIHandle(uint32_t frameIndex) const;
@@ -224,6 +230,9 @@ namespace demo
 		{
 			return m_lastGPUCullingDrawCounts;
 		}
+
+		[[nodiscard]] bool isGPUCullingStatsValid() const { return m_statsValid; }
+		[[nodiscard]] uint32_t getGPUCullingStatsReadFailureCount() const { return m_statsReadFailures; }
 
 		[[nodiscard]] const std::vector<GPUCullOverlayObject>& getLastGPUCullingOverlayObjects() const
 		{
@@ -688,6 +697,11 @@ namespace demo
 				rhi::BufferHandle gpuCullingStatsBuffer{};
 				rhi::BufferHandle gpuCullingUniformBuffer{};
 				rhi::BufferHandle gpuCullingResultBuffer{};
+				// gpuToCpu staging copies written by GPUDrivenCullingPass after culling. Readback reads these,
+				// never the device-local buffers above, and only once the owning submission is complete.
+				rhi::BufferHandle gpuCullingStatsStaging{};
+				rhi::BufferHandle gpuCullingDrawCountStaging{};
+				rhi::BufferHandle gpuCullingResultStaging{};
 				rhi::GpuPtr externalGPUCullingObjectBufferAddress{};
 				bool useExternalGPUCullingObjectBuffer{false};
 				bool useExternalGPUCullingMeshletData{false};
@@ -1129,6 +1143,12 @@ namespace demo
 		DebugDrawList m_debugDrawList;
 		shaderio::GPUCullStats m_lastGPUCullingStats{};
 		shaderio::GPUCullDrawCounts m_lastGPUCullingDrawCounts{};
+		// m_statsValid: false until the first successful staging readback. While false, UI must show
+		// "No data" rather than zero. Failed reads keep the previous values and bump the failure counter.
+		bool m_statsValid{false};
+		uint32_t m_statsReadFailures{0};
+		// Submit token of each frame slot's most recent submission. Used to gate staging readback.
+		std::vector<rhi::SubmissionToken> m_frameSlotSubmissions;
 		const shaderio::GPUCullObject* m_externalGPUCullingOverlayObjects{nullptr};
 		uint32_t m_externalGPUCullingOverlayObjectCount{0};
 		std::vector<GPUCullOverlayObject> m_lastGPUCullingOverlayObjects;

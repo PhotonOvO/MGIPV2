@@ -874,18 +874,33 @@ namespace demo
 				       ? m_ssrDenoiseArgumentTables[frameIndex]
 				       : rhi::ArgumentTableHandle{};
 		}
-		// Builds the SSR compute set as a per-frame temporary argument table (gbuffer/depth/history
-		// sampled images + ssrRaw storage image + the caller's camera UBO slice). Returns a
-		// frame-lifetime handle; do not cache it across frames.
+		// Builds the SSR compute set (gbuffer/depth/history sampled images + ssrRaw storage image
+		// + the caller's camera UBO slice). The returned handle is a persistent per-frame-slot
+		// ArgumentTable that is only rewritten when a binding source changes, so repeated steady
+		// frames allocate nothing. Safe to hold for the slot's lifetime; the device owns the table.
 		[[nodiscard]] rhi::ArgumentTableHandle
 		acquireSSRTempArgumentTable(rhi::BufferHandle cameraBuffer, uint32_t cameraOffset);
 
 		// Opaque snapshot of the per-frame bitonic visibility-sort resources, so the
 		// visibility-sort pass can record without reaching into renderer internals.
+		// CPU mirror of VisibilitySortKeygenPushConstants in shaders/shader.visibility_sort_keygen.slang.
+		struct VisibilitySortKeygenPushConstants
+		{
+			glm::vec4 cameraPosition{0.0f}; // xyz = camera world position
+			uint32_t activeCount{0};
+			uint32_t paddedCount{0};
+			uint32_t sceneObjectCount{0};
+			uint32_t _padding0{0};
+		};
+		static_assert(sizeof(VisibilitySortKeygenPushConstants) == 32u);
+
 		struct VisibilitySortDispatch
 		{
 			PipelineHandle pipelineHandle{};
 			rhi::ArgumentTableHandle argumentTable{};
+			PipelineHandle keygenPipelineHandle{};
+			rhi::ArgumentTableHandle keygenArgumentTable{};
+			VisibilitySortKeygenPushConstants keygenPushConstants{};
 			rhi::BufferHandle uploadKeyBufferHandle{};
 			rhi::BufferHandle uploadValueBufferHandle{};
 			rhi::BufferHandle keyBufferHandle{};
@@ -909,14 +924,27 @@ namespace demo
 			info.keyBufferHandle = f.keyBuffer;
 			info.valueBufferHandle = f.valueBuffer;
 			info.paddedElementCount = f.paddedElementCount;
+			info.keygenPipelineHandle = m_visibilitySortKeygenPipelineHandle;
+			info.keygenArgumentTable = f.keygenArgumentTable;
+			info.keygenPushConstants = VisibilitySortKeygenPushConstants{
+				.cameraPosition = glm::vec4(f.keygenCameraPosition, 0.0f),
+				.activeCount = f.activeElementCount,
+				.paddedCount = f.paddedElementCount,
+				.sceneObjectCount = f.keygenSceneObjectCount,
+			};
 			const bool copyBuffersValid =
 				!f.uploadKeyBuffer.isNull() && !f.uploadValueBuffer.isNull()
 				&& !f.keyBuffer.isNull() && !f.valueBuffer.isNull();
 			const bool bitonicDispatchReady =
 				f.paddedElementCount <= 1u
 				|| (!m_visibilitySortPipelineHandle.isNull() && !f.argumentTable.isNull());
+			// Transparent sort keys are always produced on the GPU, so the keygen
+			// dispatch is required even for a single element.
+			const bool keygenDispatchReady =
+				!m_visibilitySortKeygenPipelineHandle.isNull() && !f.keygenArgumentTable.isNull()
+				&& !f.boundKeygenSceneObjectBuffer.isNull();
 			info.valid =
-				f.paddedElementCount > 0u && copyBuffersValid && bitonicDispatchReady;
+				f.paddedElementCount > 0u && copyBuffersValid && bitonicDispatchReady && keygenDispatchReady;
 			return info;
 		}
 
@@ -985,6 +1013,30 @@ namespace demo
 		[[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountBufferRHIHandle(uint32_t frameIndex) const
 		{
 			return m_renderer.getGPUCullingDrawCountBufferRHIHandle(frameIndex);
+		}
+		[[nodiscard]] rhi::BufferHandle getGPUCullingStatsBufferRHIHandle(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingStatsBufferRHIHandle(frameIndex);
+		}
+		[[nodiscard]] rhi::BufferHandle getGPUCullingResultBufferRHIHandle(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingResultBufferRHIHandle(frameIndex);
+		}
+		[[nodiscard]] rhi::BufferHandle getGPUCullingStatsStagingHandle(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingStatsStagingHandle(frameIndex);
+		}
+		[[nodiscard]] rhi::BufferHandle getGPUCullingDrawCountStagingHandle(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingDrawCountStagingHandle(frameIndex);
+		}
+		[[nodiscard]] rhi::BufferHandle getGPUCullingResultStagingHandle(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingResultStagingHandle(frameIndex);
+		}
+		[[nodiscard]] uint32_t getGPUCullingResultCount(uint32_t frameIndex) const
+		{
+			return m_renderer.getGPUCullingResultCount(frameIndex);
 		}
 		[[nodiscard]] rhi::BufferHandle getShadowCullingIndirectBufferRHIHandle(uint32_t frameIndex) const
 		{
@@ -1567,6 +1619,13 @@ namespace demo
 			void* uploadKeyMapped{nullptr};
 			void* uploadValueMapped{nullptr};
 			rhi::ArgumentTableHandle argumentTable{}; // owned RHI ArgumentTable
+			// GPU transparent key generation: keys/values (read-write) + GPUSceneObject buffer.
+			rhi::ArgumentTableHandle keygenArgumentTable{}; // owned RHI ArgumentTable
+			rhi::BufferHandle boundKeygenKeyBuffer{};
+			rhi::BufferHandle boundKeygenValueBuffer{};
+			rhi::BufferHandle boundKeygenSceneObjectBuffer{};
+			glm::vec3 keygenCameraPosition{0.0f};
+			uint32_t keygenSceneObjectCount{0};
 			uint32_t capacity{0};
 			uint32_t activeElementCount{0};
 			uint32_t paddedElementCount{0};
@@ -1618,6 +1677,7 @@ namespace demo
 		void shutdownVisibilitySortResources();
 		void ensureVisibilitySortCapacity(uint32_t frameIndex, uint32_t requiredCount);
 		void updateVisibilitySortArgumentTable(uint32_t frameIndex);
+		void updateVisibilitySortKeygenArgumentTable(uint32_t frameIndex, rhi::BufferHandle sceneObjectBuffer);
 		void prepareVisibilitySortInputs(uint32_t frameIndex);
 		void initTransparentVisibilityPatchResources();
 		void shutdownTransparentVisibilityPatchResources();
@@ -1736,7 +1796,9 @@ namespace demo
 		std::vector<uint32_t> m_meshletIndicesCpu;
 		std::vector<shaderio::GPUCullObject> m_meshletCullObjectsCpu;
 		std::vector<uint32_t> m_visibilitySortInputObjects;
-		std::vector<uint32_t> m_visibilitySortInputKeys;
+		// GPUSceneObject index per transparent sort input; the GPU keygen derives the key.
+		std::vector<uint32_t> m_visibilitySortInputSceneObjects;
+		glm::vec3 m_visibilitySortCameraPosition{0.0f};
 		std::vector<shaderio::DrawUniforms> m_persistentDrawData;
 		std::vector<SceneUploadResult::SceneDrawRecord> m_sceneDrawRecords;
 		std::vector<SubmittedTransformHistory> m_transformHistoryByDrawRecord;
@@ -1850,6 +1912,8 @@ namespace demo
 		uint64_t m_cachedStaticVisibilitySortTopologyVersion{0};
 		rhi::ArgumentLayoutHandle m_visibilitySortArgumentLayout{};
 		PipelineHandle m_visibilitySortPipelineHandle{};
+		rhi::ArgumentLayoutHandle m_visibilitySortKeygenArgumentLayout{};
+		PipelineHandle m_visibilitySortKeygenPipelineHandle{};
 		std::vector<VisibilitySortFrameResources> m_visibilitySortFrames;
 		PipelineHandle m_transparentVisibilityPatchPipelineHandle{};
 		rhi::ArgumentLayoutHandle m_transparentVisibilityPatchArgumentLayout{};
@@ -1937,6 +2001,21 @@ namespace demo
 		rhi::TextureViewHandle m_aoDenoisedView{};
 		rhi::TextureHandle m_ssrRawImage{};
 		rhi::TextureViewHandle m_ssrRawView{};
+		// Per-frame-slot cache for the SSR argument table. Rebuilt only when a binding source
+		// changes; never registered in RenderDevice's transientArgumentTables because those are
+		// destroyed at the start of every frame.
+		struct SsrTempArgumentTable
+		{
+			rhi::ArgumentTableHandle table{};
+			rhi::TextureViewHandle historyView{};
+			rhi::TextureViewHandle depthView{};
+			rhi::TextureViewHandle gbufferView0{};
+			rhi::TextureViewHandle gbufferView1{};
+			rhi::TextureViewHandle rawView{};
+			rhi::BufferHandle cameraBuffer{};
+			uint32_t cameraOffset{0};
+		};
+		std::vector<SsrTempArgumentTable> m_ssrTempArgumentTables;
 		rhi::TextureHandle m_ssrDenoisedImage{};
 		rhi::TextureViewHandle m_ssrDenoisedView{};
 		rhi::TextureHandle m_shadowAtlasImage{};

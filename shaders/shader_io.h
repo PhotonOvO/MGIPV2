@@ -557,6 +557,7 @@ struct GPUCullObject
   uint32_t flags;
   // Number of valid entries in lodLevels. Zero means the object has no chain and the range
   // above is authoritative, which keeps the no-LOD path identical to the previous behavior.
+  // No shader reads lodLevels yet; the field exists so the ABI does not change when selection lands.
   uint32_t lodLevelCount;
   uint32_t _lodPadding0;
   uint32_t _lodPadding1;
@@ -673,6 +674,9 @@ struct TransparentVisibilityPatchPushConstants
   uint32_t outputCapacity;
 };
 
+// Capability note (see README.md, "Meshlet capability"): meshlets are used only for
+// culling acceleration today, not for cluster-level draws. indexOffset/indexCount are
+// uploaded but no shader consumes them; draws are issued per object.
 struct Meshlet
 {
   vec4     boundsSphere;

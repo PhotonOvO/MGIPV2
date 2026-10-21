@@ -1099,6 +1099,9 @@ namespace demo
 			if (!frameUserData.gpuCullingStatsBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsBuffer);
 			if (!frameUserData.gpuCullingUniformBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingUniformBuffer);
 			if (!frameUserData.gpuCullingResultBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultBuffer);
+			if (!frameUserData.gpuCullingStatsStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsStaging);
+			if (!frameUserData.gpuCullingDrawCountStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingDrawCountStaging);
+			if (!frameUserData.gpuCullingResultStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultStaging);
 			if (!frameUserData.shadowCullingObjectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingObjectBuffer);
 			if (!frameUserData.shadowCullingIndirectBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingIndirectBuffer);
 			if (!frameUserData.shadowCullingDrawDataBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.shadowCullingDrawDataBuffer);
@@ -1606,6 +1609,7 @@ namespace demo
 		m_perFrame.uploadManager.init(*m_device.device, numFrames);
 
 		m_perFrame.frameUserData.resize(numFrames);
+		m_frameSlotSubmissions.assign(numFrames, rhi::SubmissionToken{});
 		for (auto& frameUserData : m_perFrame.frameUserData)
 		{
 			frameUserData.transientAllocator.init(*m_device.device, kPerFrameTransientAllocatorSize);
@@ -1893,7 +1897,9 @@ namespace demo
 
 		if (!frameUserData.gpuCullingObjectBuffer.isNull() || !frameUserData.gpuCullingIndirectBuffer.isNull()
 			|| !frameUserData.gpuCullingDrawCountBuffer.isNull()
-			|| !frameUserData.gpuCullingStatsBuffer.isNull() || !frameUserData.gpuCullingResultBuffer.isNull())
+			|| !frameUserData.gpuCullingStatsBuffer.isNull() || !frameUserData.gpuCullingResultBuffer.isNull()
+			|| !frameUserData.gpuCullingStatsStaging.isNull() || !frameUserData.gpuCullingDrawCountStaging.isNull()
+			|| !frameUserData.gpuCullingResultStaging.isNull())
 		{
 			// These per-frame buffers are consumed by submitted graphics work and some
 			// passes read the previous frame's culling outputs. When scene switches force
@@ -1905,6 +1911,9 @@ namespace demo
 		if (!frameUserData.gpuCullingDrawCountBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingDrawCountBuffer);
 		if (!frameUserData.gpuCullingStatsBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsBuffer);
 		if (!frameUserData.gpuCullingResultBuffer.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultBuffer);
+		if (!frameUserData.gpuCullingStatsStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingStatsStaging);
+		if (!frameUserData.gpuCullingDrawCountStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingDrawCountStaging);
+		if (!frameUserData.gpuCullingResultStaging.isNull()) m_device.device->destroyBuffer(frameUserData.gpuCullingResultStaging);
 
 		frameUserData.gpuCullingObjectBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(shaderio::GPUCullObject) * requiredCapacity,
@@ -1925,7 +1934,7 @@ namespace demo
 		frameUserData.gpuCullingDrawCountBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(shaderio::GPUCullDrawCounts),
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::indirect
-			       | rhi::BufferUsageFlags::transferDst
+			       | rhi::BufferUsageFlags::transferDst | rhi::BufferUsageFlags::transferSrc
 			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
@@ -1934,17 +1943,37 @@ namespace demo
 		frameUserData.gpuCullingStatsBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(shaderio::GPUCullStats),
 			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferDst
-			       | rhi::BufferUsageFlags::shaderDeviceAddress,
+			       | rhi::BufferUsageFlags::transferSrc | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "gpuCullingStatsBuffer",
 		});
 		frameUserData.gpuCullingResultBuffer = m_device.device->createBuffer(rhi::BufferDesc{
 			.size = sizeof(uint32_t) * requiredCapacity,
-			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::shaderDeviceAddress,
+			.usage = rhi::BufferUsageFlags::storage | rhi::BufferUsageFlags::transferSrc
+			       | rhi::BufferUsageFlags::shaderDeviceAddress,
 			.memoryUsage = rhi::MemoryUsage::gpuOnly,
 			.allowGpuAddress = true,
 			.debugName = "gpuCullingResultBuffer",
+		});
+		// gpuToCpu staging: GPUDrivenCullingPass copies the device-local outputs here after culling.
+		frameUserData.gpuCullingStatsStaging = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullStats),
+			.usage = rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+			.debugName = "gpuCullingStatsStaging",
+		});
+		frameUserData.gpuCullingDrawCountStaging = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(shaderio::GPUCullDrawCounts),
+			.usage = rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+			.debugName = "gpuCullingDrawCountStaging",
+		});
+		frameUserData.gpuCullingResultStaging = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = sizeof(uint32_t) * requiredCapacity,
+			.usage = rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+			.debugName = "gpuCullingResultStaging",
 		});
 		frameUserData.gpuCullingMeshCapacity = requiredCapacity;
 		frameUserData.gpuCullingResults.resize(requiredCapacity, shaderio::LGPUCullResultVisible);
@@ -2497,45 +2526,72 @@ namespace demo
 			return;
 		}
 
-		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[frameIndex];
-		void* statsMapped = frameUserData.gpuCullingStatsBuffer.isNull()
-			? nullptr : m_device.device->mapBuffer(frameUserData.gpuCullingStatsBuffer);
-		if (statsMapped == nullptr)
+		// Read the most recently submitted slot, never the slot being recorded now. Its staging copy
+		// was written by a submission that has been queued; it is only read once isComplete() reports
+		// that submission finished. Non-blocking: a pending slot is a skipped read, not a wait.
+		const uint32_t slotCount = m_perFrame.frameScheduler.frameCount();
+		if (slotCount == 0 || frameIndex >= slotCount || frameIndex >= m_frameSlotSubmissions.size())
 		{
 			return;
 		}
+		const uint32_t readSlot = (frameIndex + slotCount - 1u) % slotCount;
+		const rhi::SubmissionToken readToken = m_frameSlotSubmissions[readSlot];
+		if (!readToken.isValid())
+		{
+			// Slot never submitted: no data yet. This is not a read failure.
+			return;
+		}
+		if (!m_perFrame.frameScheduler.queue().isComplete(readToken))
+		{
+			++m_statsReadFailures;
+			return;
+		}
 
+		PerFrameResources::FrameUserData& frameUserData = m_perFrame.frameUserData[readSlot];
+		void* statsMapped = frameUserData.gpuCullingStatsStaging.isNull()
+			? nullptr : m_device.device->mapBuffer(frameUserData.gpuCullingStatsStaging);
+		if (statsMapped == nullptr)
 		{
-			// cpuToGpu memory is HOST_COHERENT — no vmaInvalidateAllocation needed.
-			std::memcpy(&m_lastGPUCullingStats, statsMapped, sizeof(m_lastGPUCullingStats));
+			++m_statsReadFailures;
+			return;
 		}
-		m_lastGPUCullingDrawCounts = {};
-		if (!frameUserData.gpuCullingDrawCountBuffer.isNull())
+
+		// Stage-then-read: the staging copies are gpuToCpu and therefore HOST_COHERENT on Vulkan.
+		shaderio::GPUCullStats statsSnapshot{};
+		std::memcpy(&statsSnapshot, statsMapped, sizeof(statsSnapshot));
+
+		shaderio::GPUCullDrawCounts drawCountSnapshot{};
+		if (!frameUserData.gpuCullingDrawCountStaging.isNull())
 		{
-			void* drawCountMapped = m_device.device->mapBuffer(frameUserData.gpuCullingDrawCountBuffer);
-			if (drawCountMapped != nullptr)
+			void* drawCountMapped = m_device.device->mapBuffer(frameUserData.gpuCullingDrawCountStaging);
+			if (drawCountMapped == nullptr)
 			{
-				std::memcpy(&m_lastGPUCullingDrawCounts, drawCountMapped, sizeof(m_lastGPUCullingDrawCounts));
+				++m_statsReadFailures;
+				return;
 			}
+			std::memcpy(&drawCountSnapshot, drawCountMapped, sizeof(drawCountSnapshot));
 		}
+
+		m_lastGPUCullingStats = statsSnapshot;
+		m_lastGPUCullingDrawCounts = drawCountSnapshot;
+		m_statsValid = true;
 
 		m_lastGPUCullingOverlayObjects.clear();
 		if (!readOverlayObjects)
 		{
 			return;
 		}
-		if (frameUserData.gpuCullingResultBuffer.isNull() || frameUserData.gpuCullingResults.empty())
+		if (frameUserData.gpuCullingResultStaging.isNull() || frameUserData.gpuCullingResults.empty())
 		{
 			return;
 		}
 
 		{
-			void* resultMapped = m_device.device->mapBuffer(frameUserData.gpuCullingResultBuffer);
+			void* resultMapped = m_device.device->mapBuffer(frameUserData.gpuCullingResultStaging);
 			if (resultMapped == nullptr)
 			{
 				return;
 			}
-			// cpuToGpu memory is HOST_COHERENT — no vmaInvalidateAllocation needed.
 			std::memcpy(frameUserData.gpuCullingResults.data(),
 			            resultMapped,
 			            sizeof(uint32_t) * frameUserData.gpuCullingResults.size());
@@ -2937,8 +2993,16 @@ namespace demo
 					const auto now = std::chrono::steady_clock::now().time_since_epoch();
 					const uint64_t endNs =
 						static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+					const double elapsedMs = static_cast<double>(endNs - startNs) * 1e-6;
 					renderer->m_passGpuProfile.frames[context.frameIndex].cpuPassDurationsMs[passIndex] =
-						static_cast<double>(endNs - startNs) * 1e-6;
+						elapsedMs;
+					// Per-pass CPU cost as a plot, so a hotspot list comes from the profiler rather
+					// than from a temporary log. One plot per pass name, microseconds.
+					if (passIndex < renderer->m_passGpuProfile.passNames.size())
+					{
+						VKDEMO_PLOT(renderer->m_passGpuProfile.passNames[passIndex].c_str(),
+						            elapsedMs * 1000.0);
+					}
 				}
 			}
 			renderer->writePassGpuProfileTimestamp(context, passIndex, false);
@@ -3517,11 +3581,16 @@ namespace demo
 
 		{
 			demo::profiling::ScopedCpuRange queueSubmitRange("QueueSubmit");
+			const uint32_t submittedSlot = m_perFrame.frameScheduler.currentFrameIndex();
 			const rhi::SubmissionToken submitted =
 				m_perFrame.frameScheduler.submitFrame(
 				cmdBuffer,
 				m_swapchainDependent.acquireWaitPoint,
 				m_swapchainDependent.renderCompleteSignal);
+			if (submittedSlot < m_frameSlotSubmissions.size())
+			{
+				m_frameSlotSubmissions[submittedSlot] = submitted;
+			}
 #if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
 			m_lastSubmittedFrameToken = submitted;
 			releaseSceneTransactionFrameResources(submitted);
@@ -7920,6 +7989,42 @@ namespace demo
 	{
 		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
 		return m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountBufferRHI;
+	}
+
+	rhi::BufferHandle RenderDevice::getGPUCullingStatsBufferRHIHandle(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
+		return m_perFrame.frameUserData[frameIndex].gpuCullingStatsBufferRHI;
+	}
+
+	rhi::BufferHandle RenderDevice::getGPUCullingResultBufferRHIHandle(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
+		return m_perFrame.frameUserData[frameIndex].gpuCullingResultBufferRHI;
+	}
+
+	rhi::BufferHandle RenderDevice::getGPUCullingStatsStagingHandle(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
+		return m_perFrame.frameUserData[frameIndex].gpuCullingStatsStaging;
+	}
+
+	rhi::BufferHandle RenderDevice::getGPUCullingDrawCountStagingHandle(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
+		return m_perFrame.frameUserData[frameIndex].gpuCullingDrawCountStaging;
+	}
+
+	rhi::BufferHandle RenderDevice::getGPUCullingResultStagingHandle(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return {};
+		return m_perFrame.frameUserData[frameIndex].gpuCullingResultStaging;
+	}
+
+	uint32_t RenderDevice::getGPUCullingResultCount(uint32_t frameIndex) const
+	{
+		if (frameIndex >= m_perFrame.frameUserData.size()) return 0u;
+		return static_cast<uint32_t>(m_perFrame.frameUserData[frameIndex].gpuCullingResults.size());
 	}
 
 	rhi::BufferHandle RenderDevice::getPreviousGPUCullingIndirectBufferRHIHandle(uint32_t currentFrameIndex) const

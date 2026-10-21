@@ -79,6 +79,40 @@ namespace demo
 				cmdBuffer->barrier(rhi::StageFlags::compute,
 				                   rhi::StageFlags::compute | rhi::StageFlags::commandInput,
 				                   rhi::HazardFlags::drawArguments | rhi::HazardFlags::bufferWrites);
+
+				// Snapshot the culling outputs for CPU readback. The compute writes above are made
+				// visible to transfer reads, then the device-local buffers are copied to gpuToCpu staging.
+				// The stats/draw-count copies are unconditional (small). The result copy is always
+				// recorded because the overlay may be enabled on any frame.
+				const rhi::BufferHandle statsBuffer = m_renderer->getGPUCullingStatsBufferRHIHandle(currentFrameIndex);
+				const rhi::BufferHandle statsStaging = m_renderer->getGPUCullingStatsStagingHandle(currentFrameIndex);
+				const rhi::BufferHandle resultBuffer = m_renderer->getGPUCullingResultBufferRHIHandle(currentFrameIndex);
+				const rhi::BufferHandle resultStaging = m_renderer->getGPUCullingResultStagingHandle(currentFrameIndex);
+				const rhi::BufferHandle drawCountStaging = m_renderer->getGPUCullingDrawCountStagingHandle(currentFrameIndex);
+				if (!statsBuffer.isNull() && !statsStaging.isNull() && !resultBuffer.isNull()
+					&& !resultStaging.isNull() && !drawCountStaging.isNull())
+				{
+					const uint32_t resultCount = m_renderer->getGPUCullingResultCount(currentFrameIndex);
+					cmdBuffer->barrier(rhi::StageFlags::compute, rhi::StageFlags::transfer,
+					                   rhi::HazardFlags::bufferWrites);
+					const std::array<rhi::BufferBarrier, 3> toTransferSrc{
+						rhi::BufferBarrier{.buffer = statsBuffer, .before = rhi::ResourceState::ShaderWrite,
+						                   .after = rhi::ResourceState::TransferSrc},
+						rhi::BufferBarrier{.buffer = drawCountBuffer, .before = rhi::ResourceState::ShaderWrite,
+						                   .after = rhi::ResourceState::TransferSrc},
+						rhi::BufferBarrier{.buffer = resultBuffer, .before = rhi::ResourceState::ShaderWrite,
+						                   .after = rhi::ResourceState::TransferSrc},
+					};
+					cmdBuffer->resourceBarrier({}, toTransferSrc);
+					rhi::ComputeEncoder* copy = cmdBuffer->beginComputePass();
+					copy->copyBuffer(statsBuffer, 0u, statsStaging, 0u, sizeof(shaderio::GPUCullStats));
+					copy->copyBuffer(drawCountBuffer, 0u, drawCountStaging, 0u, sizeof(shaderio::GPUCullDrawCounts));
+					if (resultCount != 0u)
+					{
+						copy->copyBuffer(resultBuffer, 0u, resultStaging, 0u, sizeof(uint32_t) * resultCount);
+					}
+					cmdBuffer->endEncoding();
+				}
 			}
 		}
 

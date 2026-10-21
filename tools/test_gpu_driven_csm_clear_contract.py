@@ -91,8 +91,13 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
         self.assertIn("context.commandBuffer->endEvent()", fallback_body)
         self.assertIn("return;", fallback_body)
 
+        # Only two early exits may precede the fallback: the null-guard and the
+        # clean-cache no-op. Neither is a recording failure; the clear-only
+        # fallback is the single recording-failure exit.
         pre_fallback = execute_body[: execute_body.index("if (!canDrawShadows)")]
-        self.assertEqual(1, pre_fallback.count("return;"))
+        self.assertEqual(2, pre_fallback.count("return;"))
+        self.assertIn("context.commandBuffer == nullptr", pre_fallback)
+        self.assertIn("dirtyCascadeMask == 0u", pre_fallback)
 
     def test_draw_preconditions_cover_scene_pipeline_tables_indirect_and_geometry(self) -> None:
         execute_body = braced_source(
@@ -110,7 +115,7 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
             "hasPassInputs",
             "hasShadowCasters",
             "shadowData != nullptr",
-            "!csmPipeline.isNull()",
+            "hasShadowPipelines",
             "!computePipeline.isNull()",
             "!computeTable.isNull()",
             "!materialTable.isNull()",
@@ -149,10 +154,12 @@ class GPUDrivenCSMClearContractTests(unittest.TestCase):
         self.assertIn("rhi::HazardFlags::drawArguments", cascade_loop)
         self.assertIn("beginCascadeDepthPass", cascade_loop)
         self.assertIn("DrawStreamRecorder::recordIndexedIndirect", cascade_loop)
-        self.assertIn(
-            ".stride = m_renderer->getGPUCullingIndirectCommandStride()",
+        self.assertRegex(
             cascade_loop,
+            r"const\s+uint32_t\s+indirectCommandStride\s*=\s*"
+            r"m_renderer->getGPUCullingIndirectCommandStride\(\);",
         )
+        self.assertEqual(2, cascade_loop.count(".stride = indirectCommandStride,"))
         self.assertLess(
             cascade_loop.index("rhi::HazardFlags::readBeforeWrite"),
             cascade_loop.index("cenc->dispatch"),

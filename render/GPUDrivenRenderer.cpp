@@ -21,6 +21,7 @@
 #include "_autogen/shader.light_culling.slang.h"
 #include "_autogen/shader.light_gpu_driven.slang.h"
 #include "_autogen/shader.transparent_visibility_patch.slang.h"
+#include "_autogen/shader.visibility_sort_keygen.slang.h"
 #include "_autogen/ssr_denoise.slang.h"
 #include "_autogen/ssr_trace.slang.h"
 #if !defined(__ANDROID__)
@@ -8314,14 +8315,23 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 					m_cachedStaticVisibilitySortTopologyVersion = m_sceneTopologyVersion;
 				}
 
-				const glm::vec3 cameraPos =
+				// Transparent sort keys are generated on the GPU (shader.visibility_sort_keygen.slang)
+				// from GPUSceneObject.worldMatrixRows and this camera position. The CPU only
+				// publishes which draws participate and the scene object each one reads.
+				m_visibilitySortCameraPosition =
 					params.cameraUniforms != nullptr ? params.cameraUniforms->cameraPosition : glm::vec3(0.0f);
-				const size_t totalSortInputCount =
-					m_cachedStaticVisibilitySortObjects.size() + transparentDrawIndices.size();
+				uint32_t sortSceneObjectCount = m_sceneRegistry.getObjectCount();
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+				if (m_sceneTransactionRendererStateLease != nullptr)
+				{
+					sortSceneObjectCount =
+						static_cast<uint32_t>(m_sceneTransactionRendererStateLease->overlayObjects.size());
+				}
+#endif
 				m_visibilitySortInputObjects.clear();
-				m_visibilitySortInputKeys.clear();
-				m_visibilitySortInputObjects.reserve(m_transparentDrawIndices.size());
-				m_visibilitySortInputKeys.reserve(m_transparentDrawIndices.size());
+				m_visibilitySortInputSceneObjects.clear();
+				m_visibilitySortInputObjects.reserve(transparentDrawIndices.size());
+				m_visibilitySortInputSceneObjects.reserve(transparentDrawIndices.size());
 				const auto appendTransparentDraws = [&](std::span<const uint32_t> drawIndices)
 				{
 					for (uint32_t drawIndex : drawIndices)
@@ -8332,23 +8342,27 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 							continue;
 						}
 
-						const MeshRecord* mesh = nullptr;
+						uint32_t sceneObjectIndex = UINT32_MAX;
 #if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
-						mesh = m_renderer.tryGetSceneTransactionMesh(meshHandle);
+						if (m_sceneTransactionRendererStateLease != nullptr)
+						{
+							// Transaction registries register one object per draw record in
+							// draw-record order, so the dense object index is the draw index.
+							sceneObjectIndex = drawIndex;
+						}
+						else
 #endif
-						if (mesh == nullptr) mesh = m_renderer.getMeshPool().tryGet(meshHandle);
-						if (mesh == nullptr)
+						if (drawIndex < m_drawIdentityByDrawIndex.size())
+						{
+							sceneObjectIndex = m_drawIdentityByDrawIndex[drawIndex].sceneObjectIndex;
+						}
+						if (sceneObjectIndex >= sortSceneObjectCount)
 						{
 							continue;
 						}
 
-						const glm::vec3 meshCenter = glm::vec3(mesh->transform[3]);
-						const float distanceSquared = glm::dot(meshCenter - cameraPos, meshCenter - cameraPos);
-						const uint32_t subKey = encodeSortableFloatKey(distanceSquared) >> 2u;
-
 						m_visibilitySortInputObjects.push_back(drawIndex);
-						m_visibilitySortInputKeys.push_back(
-							encodeVisibilitySortKey(kVisibilitySortCategoryTransparent, subKey));
+						m_visibilitySortInputSceneObjects.push_back(sceneObjectIndex);
 					}
 				};
 				appendTransparentDraws(transparentDrawIndices);
@@ -8365,7 +8379,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		else
 		{
 			m_visibilitySortInputObjects.clear();
-			m_visibilitySortInputKeys.clear();
+			m_visibilitySortInputSceneObjects.clear();
 		}
 
 		// A failed prepare path must not consume temporal history. CPU scene caches and
@@ -10362,7 +10376,7 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_persistentDrawData.clear();
 		m_persistentDrawFrameUploads.clear();
 		m_visibilitySortInputObjects.clear();
-		m_visibilitySortInputKeys.clear();
+		m_visibilitySortInputSceneObjects.clear();
 		m_objectHandleByMeshHandle.clear();
 		m_objectHandlesByMeshHandle.clear();
 		m_drawIndexByMeshHandle.clear();
@@ -12328,6 +12342,13 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		{
 			return rhi::ArgumentTableHandle{};
 		}
+		// SSR arguments are owned per frame slot: a slot's table is only rewritten after that
+		// slot's previous submission retired, so cached handles never alias in-flight GPU reads.
+		const uint32_t frameIndex = m_renderer.getCurrentFrameIndexHint();
+		if (frameIndex >= m_ssrTempArgumentTables.size())
+		{
+			return rhi::ArgumentTableHandle{};
+		}
 		const GPUDrivenSceneView& sceneView = m_sceneView;
 		const rhi::TextureViewHandle historyView = !sceneView.sceneColorHistoryReadView.isNull()
 			                                           ? sceneView.sceneColorHistoryReadView
@@ -12381,9 +12402,51 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 				.accessIntent = rhi::ArgumentAccessIntent::readWrite,
 			};
 		}
-		return m_renderer.createTemporaryArgumentTable(m_ssrLayoutHandle, writes.data(),
-		                                               static_cast<uint32_t>(writes.size()),
-		                                               ArgumentSlot::shaderSpecific, "gpu-driven-ssr-temp");
+		// Reuse this frame slot's SSR table when every binding source is unchanged. The handle is
+		// persistent-per-slot and therefore must NOT be registered in transientArgumentTables:
+		// RenderDevice destroys every transient table at the start of each frame, which would
+		// invalidate a cached handle. A slot's table is only rewritten after that slot's previous
+		// submission retired, so the GPU can no longer be reading the arguments being replaced.
+		SsrTempArgumentTable& cache = m_ssrTempArgumentTables[frameIndex];
+		const bool sameSignature =
+			!cache.table.isNull()
+			&& cache.historyView == historyView
+			&& cache.depthView == sceneView.sceneDepthView
+			&& cache.gbufferView0 == sceneView.gbufferViews[0]
+			&& cache.gbufferView1 == sceneView.gbufferViews[1]
+			&& cache.rawView == m_ssrRawView
+			&& cache.cameraBuffer == cameraBuffer
+			&& cache.cameraOffset == cameraOffset;
+		if (sameSignature)
+		{
+			return cache.table;
+		}
+
+		if (!cache.table.isNull())
+		{
+			// The table outlives individual frames (it is persistent and owned by RenderDevice),
+			// so only its descriptors are rewritten. The slot's previous submission has retired,
+			// which is what makes in-place descriptor replacement safe here.
+			m_renderer.updateArgumentTable(cache.table, writes.data(), static_cast<uint32_t>(writes.size()));
+		}
+		else
+		{
+			cache.table = m_renderer.createPersistentArgumentTable(m_ssrLayoutHandle, "gpu-driven-ssr-temp");
+			if (cache.table.isNull())
+			{
+				cache = SsrTempArgumentTable{};
+				return rhi::ArgumentTableHandle{};
+			}
+			m_renderer.updateArgumentTable(cache.table, writes.data(), static_cast<uint32_t>(writes.size()));
+		}
+		cache.historyView = historyView;
+		cache.depthView = sceneView.sceneDepthView;
+		cache.gbufferView0 = sceneView.gbufferViews[0];
+		cache.gbufferView1 = sceneView.gbufferViews[1];
+		cache.rawView = m_ssrRawView;
+		cache.cameraBuffer = cameraBuffer;
+		cache.cameraOffset = cameraOffset;
+		return cache.table;
 	}
 
 	void GPUDrivenRenderer::rebuildFlaxRadianceSources()
@@ -13446,11 +13509,59 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		m_visibilitySortPipelineHandle = getRHIDevice().createComputePipeline(desc);
 #endif
 
+		// Transparent key generation: sortKeys/sortValues (read-write) + GPUSceneObject (read).
+		const std::array<ArgumentLayoutEntry, 3> keygenEntries{
+			{
+				{0, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+				{1, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+				{2, rhi::ShaderStage::compute, rhi::BindlessResourceType::storageBuffer, 1},
+			}
+		};
+		m_visibilitySortKeygenArgumentLayout = m_renderer.createArgumentLayout(
+			ArgumentLayoutDesc{
+				.entries = keygenEntries.data(), .entryCount = static_cast<uint32_t>(keygenEntries.size())
+			});
+
+#ifdef USE_SLANG
+		{
+			const std::array<rhi::ArgumentLayoutHandle, 1> keygenArgumentLayouts{
+				{m_visibilitySortKeygenArgumentLayout}
+			};
+			const std::array<rhi::RootBindingDesc, 1> keygenRootBindings{{
+				rhi::RootBindingDesc{
+					.slot = kPrimaryRootConstantsSlot,
+					.kind = rhi::RootBindingKind::constants,
+					.visibility = rhi::ShaderStage::compute,
+					.size = sizeof(VisibilitySortKeygenPushConstants),
+					.alignment = alignof(VisibilitySortKeygenPushConstants),
+				},
+			}};
+			const rhi::PipelineBindingSchemaStorage keygenBindingSchema{keygenArgumentLayouts, keygenRootBindings};
+			const rhi::ComputePipelineDesc keygenDesc{
+				.shaderStage =
+				rhi::ShaderEntry{
+					.stage = rhi::ShaderStage::compute,
+					.library = loadEmbeddedSpirvLibrary(
+						getRHIDevice(), shader_visibility_sort_keygen_slang, "visibility-sort-keygen"),
+					.entryPoint = "visibilitySortKeygenMain",
+				},
+				.bindingSchema = keygenBindingSchema.view(),
+				.threadgroupSize = {64, 1, 1},
+				.specializationVariant = 0x6402u,
+			};
+			m_visibilitySortKeygenPipelineHandle = getRHIDevice().createComputePipeline(keygenDesc);
+		}
+#endif
+
 		m_visibilitySortFrames.resize(frameCount);
+		m_ssrTempArgumentTables.resize(frameCount);
 		for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
 		{
 			m_visibilitySortFrames[frameIndex].argumentTable =
 				m_renderer.createPersistentArgumentTable(m_visibilitySortArgumentLayout, "gpu-driven-visibility-sort");
+			m_visibilitySortFrames[frameIndex].keygenArgumentTable =
+				m_renderer.createPersistentArgumentTable(m_visibilitySortKeygenArgumentLayout,
+				                                         "gpu-driven-visibility-sort-keygen");
 		}
 	}
 
@@ -13471,6 +13582,9 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		getRHIDevice().destroyPipeline(m_visibilitySortPipelineHandle);
 		m_visibilitySortPipelineHandle = {};
 		m_visibilitySortArgumentLayout = {};
+		getRHIDevice().destroyPipeline(m_visibilitySortKeygenPipelineHandle);
+		m_visibilitySortKeygenPipelineHandle = {};
+		m_visibilitySortKeygenArgumentLayout = {};
 	}
 
 	void GPUDrivenRenderer::initTransparentVisibilityPatchResources()
@@ -13858,6 +13972,53 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		                               static_cast<uint32_t>(writes.size()));
 	}
 
+	void GPUDrivenRenderer::updateVisibilitySortKeygenArgumentTable(uint32_t frameIndex,
+	                                                                rhi::BufferHandle sceneObjectBuffer)
+	{
+		if (frameIndex >= m_visibilitySortFrames.size())
+		{
+			return;
+		}
+
+		VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
+		if (frameResources.keygenArgumentTable.isNull() || frameResources.keyBuffer.isNull()
+			|| frameResources.valueBuffer.isNull() || sceneObjectBuffer.isNull())
+		{
+			frameResources.boundKeygenSceneObjectBuffer = {};
+			return;
+		}
+
+		if (frameResources.boundKeygenKeyBuffer == frameResources.keyBuffer
+			&& frameResources.boundKeygenValueBuffer == frameResources.valueBuffer
+			&& frameResources.boundKeygenSceneObjectBuffer == sceneObjectBuffer)
+		{
+			return;
+		}
+
+		// Called only from the authoritative frame-slot callback: this table is used solely
+		// by frameIndex, whose previous submission has retired, so rewriting it is safe.
+		const std::array<rhi::ArgumentWrite, 3> writes{
+			{
+				rhi::ArgumentWrite{
+					.binding = 0, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.keyBuffer,
+					.accessIntent = rhi::ArgumentAccessIntent::readWrite
+				},
+				rhi::ArgumentWrite{
+					.binding = 1, .type = rhi::ArgumentType::storageBuffer, .buffer = frameResources.valueBuffer,
+					.accessIntent = rhi::ArgumentAccessIntent::readWrite
+				},
+				rhi::ArgumentWrite{
+					.binding = 2, .type = rhi::ArgumentType::storageBuffer, .buffer = sceneObjectBuffer
+				},
+			}
+		};
+		m_renderer.updateArgumentTable(frameResources.keygenArgumentTable, writes.data(),
+		                               static_cast<uint32_t>(writes.size()));
+		frameResources.boundKeygenKeyBuffer = frameResources.keyBuffer;
+		frameResources.boundKeygenValueBuffer = frameResources.valueBuffer;
+		frameResources.boundKeygenSceneObjectBuffer = sceneObjectBuffer;
+	}
+
 	void GPUDrivenRenderer::prepareVisibilitySortInputs(uint32_t frameIndex)
 	{
 		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.PrepareVisibilitySort");
@@ -13867,8 +14028,8 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		}
 
 		VisibilitySortFrameResources& frameResources = m_visibilitySortFrames[frameIndex];
-		if (m_visibilitySortInputObjects.empty() || m_visibilitySortInputKeys.size() != m_visibilitySortInputObjects.
-			size())
+		if (m_visibilitySortInputObjects.empty()
+			|| m_visibilitySortInputSceneObjects.size() != m_visibilitySortInputObjects.size())
 		{
 			frameResources.activeElementCount = 0;
 			frameResources.paddedElementCount = 0;
@@ -13879,19 +14040,39 @@ const shaderio::LightCoarseCullingUniforms coarseUniforms{
 		ensureVisibilitySortCapacity(frameIndex, paddedCount);
 		if (frameResources.uploadKeyMapped == nullptr || frameResources.uploadValueMapped == nullptr)
 		{
+			frameResources.activeElementCount = 0;
+			frameResources.paddedElementCount = 0;
 			return;
 		}
 
+		// This runs in the authoritative frame-slot callback after refreshSceneView, so the
+		// scene object buffer is the one the culling pass reads this frame. The keygen table
+		// belongs only to frameIndex, whose previous GPU use has retired.
+		uint32_t sceneObjectCount = m_sceneRegistry.getObjectCount();
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		if (m_sceneTransactionRendererStateLease != nullptr)
+		{
+			sceneObjectCount = static_cast<uint32_t>(m_sceneTransactionRendererStateLease->overlayObjects.size());
+		}
+#endif
+		updateVisibilitySortKeygenArgumentTable(frameIndex, m_sceneView.gpuCullSceneObjectBuffer);
+		if (frameResources.boundKeygenSceneObjectBuffer.isNull())
+		{
+			frameResources.activeElementCount = 0;
+			frameResources.paddedElementCount = 0;
+			return;
+		}
+
+		// GPU key generation input: keys carry the GPUSceneObject index of each transparent
+		// draw, values carry the draw index. shader.visibility_sort_keygen.slang replaces the
+		// keys with distance keys and writes the 0xffffffff padding slots itself.
 		auto* mappedKeys = static_cast<uint32_t*>(frameResources.uploadKeyMapped);
 		auto* mappedValues = static_cast<uint32_t*>(frameResources.uploadValueMapped);
 		const uint32_t activeCount = static_cast<uint32_t>(m_visibilitySortInputObjects.size());
-		std::memcpy(mappedKeys, m_visibilitySortInputKeys.data(), activeCount * sizeof(uint32_t));
+		std::memcpy(mappedKeys, m_visibilitySortInputSceneObjects.data(), activeCount * sizeof(uint32_t));
 		std::memcpy(mappedValues, m_visibilitySortInputObjects.data(), activeCount * sizeof(uint32_t));
-		if (paddedCount > activeCount)
-		{
-			std::fill(mappedKeys + activeCount, mappedKeys + paddedCount, 0xffffffffu);
-			std::fill(mappedValues + activeCount, mappedValues + paddedCount, 0xffffffffu);
-		}
+		frameResources.keygenCameraPosition = m_visibilitySortCameraPosition;
+		frameResources.keygenSceneObjectCount = sceneObjectCount;
 		frameResources.activeElementCount = activeCount;
 		frameResources.paddedElementCount = paddedCount;
 	}
