@@ -1812,6 +1812,9 @@ private:
     // render phase of the frame from the profiler's point of view.
     demo::profiling::ScopedCpuRange renderRange("Render");
     body();
+    // Closes the frame for the profiler after all of this frame's work. Without it Tracy cannot
+    // build a frame timeline or report per-frame statistics.
+    demo::profiling::markFrame();
   }
 
 #if defined(_MSC_VER)
