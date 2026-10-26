@@ -1390,15 +1390,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(meshoptimizer)
 
-# Tracy profiler. Off by default: it adds a client library that opens a socket to the Tracy
-# GUI and instruments every zone in the frame. Enable with -DDEMO_ENABLE_TRACY=ON, and also
-# define TRACY_ENABLE for the target so the client headers emit code.
-option(DEMO_ENABLE_TRACY "Build with the Tracy frame profiler client" OFF)
+# Tracy profiler. On by default so a plain build can be profiled without a second build tree; the
+# client only costs a socket listener until a GUI connects, and the instrumentation is what the
+# frame timeline needs. Set -DDEMO_ENABLE_TRACY=OFF to build without it.
+option(DEMO_ENABLE_TRACY "Build with the Tracy frame profiler client" ON)
 if(DEMO_ENABLE_TRACY)
+  # Tracy gates its own implementation on this variable and defaults it to OFF, which would build a
+  # client library without any of the code the instrumented translation units reference. Set it
+  # before the dependency is configured, alongside the compile definition for our own targets.
+  set(TRACY_ENABLE ON CACHE BOOL "Enable the Tracy client implementation" FORCE)
   FetchContent_Declare(
     tracy
     GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-    GIT_TAG v0.13.1
+    GIT_TAG v0.14.1
     GIT_SHALLOW TRUE
     GIT_PROGRESS TRUE
   )
@@ -2450,7 +2454,10 @@ if(DEMO_ENABLE_TRACY)
   # every translation unit that includes ProfilerMarkers.h, hence PUBLIC. The client library
   # must be linked into the executable, not only the static core.
   target_compile_definitions(demo_core PUBLIC TRACY_ENABLE=1 VKDEMO_HAS_TRACY=1)
+  # The client defines the allocator hooks the instrumented translation units reference, so
+  # every final executable links it directly. A static library cannot carry that resolution.
   target_link_libraries(demo_core PUBLIC TracyClient)
+  set(DEMO_TRACY_LINK_TARGETS TracyClient)
 endif()
 
    
@@ -2552,6 +2559,9 @@ else()
     app/editor/EditorTransactionPath.cpp
   )
   target_link_libraries(Demo PRIVATE demo_core)
+  if(DEMO_ENABLE_TRACY)
+    target_link_libraries(Demo PRIVATE TracyClient)
+  endif()
   if(WIN32 AND DEMO_ENABLE_D3D12)
     # D3D12SDKVersion/D3D12SDKPath must be exported by the executable: the loader reads them
     # from the entry point module, and nothing references them, so a static library would drop
