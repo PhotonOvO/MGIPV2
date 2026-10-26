@@ -1470,6 +1470,7 @@ bool EditorController::replaceDocument(std::unique_ptr<GltfDocument> document,
     // old projection.
     std::optional<std::uint32_t> candidateVariant;
     SceneProjectionOptions options;
+    options.buildMeshlets = true;
     options.baseMappingEpoch = m_projection ? m_projection->mappingEpoch : 0u;
     options.activeVariant = candidateVariant;
     SceneProjectionResult projected =
@@ -3341,6 +3342,8 @@ bool EditorController::rebuildProjection(ProjectionRefresh refresh,
     return false;
   }
   SceneProjectionOptions options;
+  // Meshlet payloads drive the per-cluster draw path in GPUDrivenRenderer.
+  options.buildMeshlets = true;
   options.baseMappingEpoch = m_projection ? m_projection->mappingEpoch : 0u;
   options.activeVariant = m_currentVariant;
   if (m_animationPose) {

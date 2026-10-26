@@ -4263,6 +4263,18 @@ namespace demo
 				state.objectBuffer = registry.getBufferHandle();
 				state.cullBuffer = registry.getCullBufferHandle();
 			}
+			// The snapshot owns the asset, so the renderer can rebuild the global meshlet
+			// buffers when this generation becomes current. Without these the cluster draw
+			// path never engages and every draw stays object-level.
+			state.meshletSourceAsset = &m_candidateConcrete->asset;
+			state.meshletObjectTransforms.reserve(m_candidateConcrete->objects.size());
+			for (const ConcreteObjectRecord& object : m_candidateConcrete->objects)
+			{
+				state.meshletObjectTransforms.push_back(object.registration.transform);
+			}
+			state.meshletsRequested =
+				m_candidateConcrete->asset.meshletPayloads.size() == m_candidateConcrete->asset.meshes.size()
+				&& !m_candidateConcrete->asset.meshletPayloads.empty();
 			state.overlayObjects.reserve(m_candidateConcrete->objects.size());
 			if (!m_pendingFullSnapshot)
 			{
@@ -10443,6 +10455,97 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_runtimeStats.meshletCount = m_meshletBuffer.getMeshletCount();
 	}
 
+	bool GPUDrivenRenderer::rebuildMeshletsFromTransactionAsset(
+		const SceneAsset& asset,
+		const std::vector<glm::mat4>& objectTransforms,
+		const std::vector<shaderio::GPUCullObject>& objectCullObjects)
+	{
+		if (!m_enableExperimentalMeshletPath)
+		{
+			return false;
+		}
+		if (asset.meshletPayloads.size() != asset.meshes.size() || asset.meshletPayloads.empty())
+		{
+			return false;
+		}
+
+		m_meshletDataCpu.clear();
+		m_meshletIndicesCpu.clear();
+		m_meshletCullObjectsCpu.clear();
+		m_runtimeStats.meshletTriangleCount = 0u;
+
+		const std::size_t objectCount =
+			std::min(objectTransforms.size(), objectCullObjects.size());
+
+		for (std::size_t meshIndex = 0; meshIndex < asset.meshletPayloads.size(); ++meshIndex)
+		{
+			const SceneAsset::MeshletPayload& payload = asset.meshletPayloads[meshIndex];
+			const std::size_t meshletStride = sizeof(shaderio::Meshlet);
+			if (meshletStride == 0u || payload.meshletData.empty()
+				|| (payload.meshletData.size() % meshletStride) != 0u)
+			{
+				continue;
+			}
+			// The cull object order matches the draw order, not necessarily the mesh order, so a
+			// mesh without a matching object cannot be given cluster draws.
+			if (meshIndex >= objectCount)
+			{
+				continue;
+			}
+
+			const uint32_t meshletCount =
+				static_cast<uint32_t>(payload.meshletData.size() / meshletStride);
+			const shaderio::Meshlet* sourceMeshlets =
+				reinterpret_cast<const shaderio::Meshlet*>(payload.meshletData.data());
+			const uint32_t* sourcePackedIndices =
+				reinterpret_cast<const uint32_t*>(payload.indexData.data());
+			const uint32_t packedIndexCount =
+				static_cast<uint32_t>(payload.indexData.size() / sizeof(uint32_t));
+
+			const glm::mat4& objectTransform = objectTransforms[meshIndex];
+			const shaderio::GPUCullObject& objectCull = objectCullObjects[meshIndex];
+			const uint32_t baseIndexOffset = static_cast<uint32_t>(m_meshletIndicesCpu.size());
+
+			for (uint32_t localMeshletIndex = 0; localMeshletIndex < meshletCount; ++localMeshletIndex)
+			{
+				shaderio::Meshlet meshlet = sourceMeshlets[localMeshletIndex];
+				// The cluster sphere is authored in mesh-local space, so it has to go through the
+				// object's world transform. Using the object centre as an offset would ignore
+				// rotation and scale and would cull the wrong clusters.
+				const glm::vec4 worldClusterSphere =
+					transformBoundsSphere(objectTransform, meshlet.boundsSphere);
+				meshlet.indexOffset += baseIndexOffset;
+				meshlet.objectIndex = static_cast<uint32_t>(meshIndex);
+				meshlet.flags = objectCull.flags;
+				meshlet.localIndex = localMeshletIndex;
+				m_meshletDataCpu.push_back(meshlet);
+				m_meshletCullObjectsCpu.push_back(shaderio::GPUCullObject{
+					.sphereCenterRadius = worldClusterSphere,
+					.indexCount = meshlet.indexCount,
+					.firstIndex = meshlet.indexOffset,
+					.vertexOffset = objectCull.vertexOffset,
+					.flags = objectCull.flags,
+				});
+			}
+
+			if (sourcePackedIndices != nullptr && packedIndexCount > 0u)
+			{
+				m_meshletIndicesCpu.insert(m_meshletIndicesCpu.end(),
+				                           sourcePackedIndices,
+				                           sourcePackedIndices + packedIndexCount);
+			}
+			m_runtimeStats.meshletTriangleCount += packedIndexCount / 3u;
+		}
+
+		if (m_meshletDataCpu.empty())
+		{
+			return false;
+		}
+		m_meshletUploadDirty = true;
+		m_meshletMetadataFullRewriteDirty = true;
+		return true;
+	}
+
 	void GPUDrivenRenderer::flushPendingSceneUploads()
 	{
 		VKDEMO_CPU_SCOPE("Renderer.GPUDriven.FlushSceneUploads");
@@ -11059,6 +11162,31 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 		m_sceneView.gpuCullSceneObjectBuffer = transactionState != nullptr
 			? transactionState->objectBuffer : m_sceneRegistry.getBufferHandle();
 		m_sceneView.gpuCullMeshletBuffer = {};
+		// The cluster draw path needs the meshlet buffers, which are global. Rebuild them when
+		// the published generation changes, then expose them through the scene view so the
+		// culling shader sees a cluster-level cull object stream.
+		bool meshletViewActive = false;
+#if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
+		if (transactionState != nullptr && transactionState->meshletsRequested
+			&& transactionState->meshletSourceAsset != nullptr
+			&& transactionState->generation != m_meshletSourceGeneration)
+		{
+			if (rebuildMeshletsFromTransactionAsset(*transactionState->meshletSourceAsset,
+			                                        transactionState->meshletObjectTransforms,
+			                                        transactionState->overlayObjects))
+			{
+				m_meshletSourceGeneration = transactionState->generation;
+				// The shared buffers are about to be rewritten; every slot must be idle.
+				m_renderer.waitForIdle();
+				uploadPendingMeshletsAfterIdle();
+			}
+		}
+		if (transactionState != nullptr && m_meshletBuffer.getMeshletCount() > 0u
+			&& m_meshletBuffer.getMeshletCullObjectBuffer().isValid())
+		{
+			meshletViewActive = true;
+		}
+#endif
 		const std::span<const shaderio::GPUCullObject> overlayObjects =
 			transactionState != nullptr
 				? std::span<const shaderio::GPUCullObject>{transactionState->overlayObjects}
@@ -11082,7 +11210,10 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 			                             : GPUDrivenIndirectSourceKind::none;
 		m_sceneView.indirectCommandStride =
 			m_sceneView.usePersistentCullingObjects ? m_renderer.getGPUCullingIndirectCommandStride() : 0;
-		if (transactionState == nullptr && m_enableExperimentalMeshletPath &&
+		// meshletViewActive is set above for the transaction path, which is the one Sponza uses;
+		// the non-transaction path is decided inline. Either way the view must expose the cluster
+		// stream, otherwise the culling shader never enables meshlet culling.
+		if ((transactionState == nullptr || meshletViewActive) && m_enableExperimentalMeshletPath &&
 			m_meshletBuffer.getMeshletCount() > 0u
 			&& m_meshletBuffer.getMeshletCullObjectBuffer().isValid())
 		{

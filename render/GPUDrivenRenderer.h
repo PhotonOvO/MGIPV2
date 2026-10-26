@@ -1544,6 +1544,11 @@ namespace demo
 			editor::SceneRenderOccurrenceSnapshot occurrenceSnapshot;
 #if defined(MGIF_ENABLE_SCENE_TRANSACTIONS)
 			std::shared_ptr<RenderDevice::SceneTransactionResources> deviceResources;
+			// Meshlet payloads travel with the snapshot: the GPU buffer is global, so the
+			// renderer rebuilds it whenever the published generation changes.
+			const SceneAsset* meshletSourceAsset{nullptr};
+			std::vector<glm::mat4> meshletObjectTransforms;
+			bool meshletsRequested{false};
 #endif
 		};
 #if !defined(__ANDROID__)
@@ -1711,6 +1716,13 @@ namespace demo
 		void clearGPUDrivenScene();
 		void flushPendingMeshletUpload();
 		void uploadPendingMeshletsAfterIdle();
+		// Rebuilds the global meshlet buffers from a published transaction snapshot. The GPU
+		// buffers are single-instance while snapshots are per-generation, so this runs only when
+		// the published generation changes and immediately before the upload retires.
+		bool rebuildMeshletsFromTransactionAsset(
+			const SceneAsset& asset,
+			const std::vector<glm::mat4>& objectTransforms,
+			const std::vector<shaderio::GPUCullObject>& objectCullObjects);
 		void flushPendingSceneUploads();
 		void advanceSceneTopologyVersion();
 		void advanceShadowContentVersion();
@@ -2050,6 +2062,9 @@ namespace demo
 		std::vector<SortedBootstrapFrameState> m_sortedBootstrapFrames;
 		std::vector<RawCullingBootstrapFrameState> m_rawCullingBootstrapFrames;
 		uint64_t m_sceneTopologyVersion{1};
+		// Generation whose meshlet payloads currently back m_meshletBuffer. The GPU buffer is
+		// single-instance, so a new published snapshot has to rebuild it.
+		uint64_t m_meshletSourceGeneration{0};
 		uint64_t m_shadowContentVersion{1};
 		bool m_enableExperimentalMeshletPath{false};
 		bool m_suspendSceneRendering{false};
