@@ -555,6 +555,12 @@ namespace demo
 			return m_renderer.getLastGPUCullingDrawCounts();
 		}
 
+		[[nodiscard]] bool isGPUCullingStatsValid() const { return m_renderer.isGPUCullingStatsValid(); }
+
+		// Forwards to the render device, which owns the output texture and the staging path.
+		void requestOutputTextureDump(const char* path) { m_renderer.requestOutputTextureDump(path); }
+		bool flushPendingOutputTextureDump() { return m_renderer.flushPendingOutputTextureDump(); }
+
 		[[nodiscard]] const std::vector<GPUCullOverlayObject>& getLastGPUCullingOverlayObjects() const
 		{
 			return m_renderer.getLastGPUCullingOverlayObjects();

@@ -234,6 +234,13 @@ namespace demo
 		[[nodiscard]] bool isGPUCullingStatsValid() const { return m_statsValid; }
 		[[nodiscard]] uint32_t getGPUCullingStatsReadFailureCount() const { return m_statsReadFailures; }
 
+		// --dump-frame. requestOutputTextureDump records the path; flushPendingOutputTextureDump
+		// copies the final-color output through the upload manager's own submission, waits for
+		// the queue to drain, and writes an 8-bit PNG. Used to give rendering changes a pixel
+		// baseline: the contract tests only see code shape, not what the frame looks like.
+		void requestOutputTextureDump(const char* path);
+		bool flushPendingOutputTextureDump();
+
 		[[nodiscard]] const std::vector<GPUCullOverlayObject>& getLastGPUCullingOverlayObjects() const
 		{
 			return m_lastGPUCullingOverlayObjects;
@@ -1147,6 +1154,8 @@ namespace demo
 		// "No data" rather than zero. Failed reads keep the previous values and bump the failure counter.
 		bool m_statsValid{false};
 		uint32_t m_statsReadFailures{0};
+		// --dump-frame state: a pending path means the next flush copies and writes it.
+		std::string m_pendingFrameDumpPath;
 		// Submit token of each frame slot's most recent submission. Used to gate staging readback.
 		std::vector<rhi::SubmissionToken> m_frameSlotSubmissions;
 		const shaderio::GPUCullObject* m_externalGPUCullingOverlayObjects{nullptr};

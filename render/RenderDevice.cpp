@@ -11,6 +11,10 @@
 #include "../loader/Ktx2Loader.h"
 #include "../scene/SceneAssetView.h"
 #include "../scene/SceneUploadPlanner.h"
+// PNG writer for --dump-frame. tinygltf already compiles STB_IMAGE_WRITE_IMPLEMENTATION into
+// its translation unit, so only the declarations are included here; defining the implementation
+// again would collide at link time (LNK2005 on stbi_write_*).
+#include "stb_image_write.h"
 
 #ifdef USE_SLANG
 #include "_autogen/shader.comp.slang.h"
@@ -1842,6 +1846,125 @@ namespace demo
 		{
 			m_perFrame.frameScheduler.waitForFrame(i);
 		}
+	}
+
+	void RenderDevice::requestOutputTextureDump(const char* path)
+	{
+		m_pendingFrameDumpPath = path != nullptr ? path : "";
+	}
+
+	bool RenderDevice::flushPendingOutputTextureDump()
+	{
+		if (m_pendingFrameDumpPath.empty())
+		{
+			return false;
+		}
+
+		// The swapchain image is colorAttachment|transferDst only, so it cannot be a copy source.
+		// The final-color output texture carries transferSrc and holds exactly the presented pixels.
+		const rhi::TextureHandle outputImage = getOutputTextureImage();
+		const rhi::Extent2D extent = getSceneExtent();
+		if (outputImage.isNull() || extent.width == 0u || extent.height == 0u)
+		{
+			LOGW("flushPendingOutputTextureDump: output texture or extent unavailable");
+			m_pendingFrameDumpPath.clear();
+			return false;
+		}
+
+		const uint32_t bytesPerPixel = 4u;
+		const uint64_t rowPitch = static_cast<uint64_t>(extent.width) * bytesPerPixel;
+		const uint64_t bufferBytes = rowPitch * extent.height;
+		const bool sourceIsBgra = getOutputTextureFormat() == rhi::TextureFormat::bgra8Unorm;
+
+		rhi::BufferHandle staging = m_device.device->createBuffer(rhi::BufferDesc{
+			.size = bufferBytes,
+			.usage = rhi::BufferUsageFlags::transferDst,
+			.memoryUsage = rhi::MemoryUsage::gpuToCpu,
+			.debugName = "dumpFrameStaging",
+		});
+		if (staging.isNull())
+		{
+			LOGW("flushPendingOutputTextureDump: staging buffer creation failed");
+			m_pendingFrameDumpPath.clear();
+			return false;
+		}
+
+		// Recorded on the upload manager's own graphics submission, which waits for its slot
+		// before reusing it. That keeps this copy off the frame ring entirely, so it cannot
+		// collide with the frame that is currently in flight.
+		m_perFrame.uploadManager.execute([&](rhi::CommandBuffer& cmd) {
+			const std::array<rhi::TextureBarrier, 1> toTransferSrc{
+				rhi::TextureBarrier{
+					.texture = outputImage,
+					.before = rhi::ResourceState::ColorAttachment,
+					.after = rhi::ResourceState::TransferSrc,
+				},
+			};
+			cmd.resourceBarrier(toTransferSrc, {});
+			rhi::ComputeEncoder* copy = cmd.beginComputePass();
+			copy->copyTextureToBuffer(rhi::BufferTextureCopyDesc{
+				.buffer = staging,
+				.bufferOffset = 0,
+				.texture = outputImage,
+				.aspect = rhi::TextureAspect::color,
+				.width = extent.width,
+				.height = extent.height,
+				.depth = 1u,
+			});
+			cmd.endEncoding();
+		});
+
+		// execute() retires its slot before reuse but does not block on this submission, so wait
+		// for the graphics queue to drain before mapping the staging buffer.
+		m_perFrame.frameScheduler.waitForAllFrames();
+
+		const rhi::Result<rhi::MappedBufferRange> mapped =
+			m_device.device->mapBufferRange(staging, rhi::BufferMapDesc{
+				.offset = 0,
+				.size = bufferBytes,
+				.mode = rhi::BufferMapMode::read,
+				.invalidateBeforeRead = true,
+			});
+
+		bool written = false;
+		if (mapped.succeeded())
+		{
+			const auto* source = static_cast<const uint8_t*>(mapped.value.data);
+			std::vector<uint8_t> rgba(static_cast<size_t>(bufferBytes));
+			for (uint64_t index = 0; index < bufferBytes; index += bytesPerPixel)
+			{
+				// BGRA -> RGBA so the PNG matches what a screenshot tool would show.
+				rgba[index + 0u] = sourceIsBgra ? source[index + 2u] : source[index + 0u];
+				rgba[index + 1u] = source[index + 1u];
+				rgba[index + 2u] = sourceIsBgra ? source[index + 0u] : source[index + 2u];
+				rgba[index + 3u] = source[index + 3u];
+			}
+			m_device.device->unmapBuffer(staging);
+			written = stbi_write_png(m_pendingFrameDumpPath.c_str(),
+			                         static_cast<int>(extent.width),
+			                         static_cast<int>(extent.height),
+			                         static_cast<int>(bytesPerPixel),
+			                         rgba.data(),
+			                         static_cast<int>(rowPitch)) != 0;
+		}
+		else
+		{
+			LOGW("flushPendingOutputTextureDump: staging map failed");
+		}
+
+		m_device.device->destroyBuffer(staging);
+		if (written)
+		{
+			LOGI("flushPendingOutputTextureDump: wrote %s (%ux%u, %s)",
+			     m_pendingFrameDumpPath.c_str(), extent.width, extent.height,
+			     sourceIsBgra ? "BGRA->RGBA" : "RGBA");
+		}
+		else
+		{
+			LOGW("flushPendingOutputTextureDump: PNG write failed for %s", m_pendingFrameDumpPath.c_str());
+		}
+		m_pendingFrameDumpPath.clear();
+		return written;
 	}
 
 	static void recordGPUCullingDrawCountReset(rhi::CommandBuffer& cmdBuffer,

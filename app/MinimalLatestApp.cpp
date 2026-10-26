@@ -234,6 +234,10 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 		{
 			options.metricsOutputPath = std::filesystem::path(std::string(value));
 		}
+		else if(const std::string_view value = optionValue(argument, "--dump-frame"); !value.empty())
+		{
+			options.dumpFramePath = std::filesystem::path(std::string(value));
+		}
 		else if(const std::string_view value = optionValue(argument, "--editor-visual-case"); !value.empty())
 		{
 			options.editorVisualCase = std::string(value);
@@ -424,6 +428,7 @@ void printUsage()
 	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi|--ddgi-smoke] [--auto-exit]\n"
 	    << "            [--capture-sync-dir=PATH] [--capture-sync-timeout-ms=N]\n"
 	    << "            [--capture-control-frame] [--metrics-output=PATH]\n"
+	    << "            [--dump-frame=PATH]  (write the settled automation frame as a PNG)\n"
 	    << "            [--editor-empty|--editor-scene=PATH]\n"
 	    << "            [--editor-window-undecorated]\n"
 		    << "            [--editor-visual-case=V01-grid|V02-gizmo-components|V03-parent-space|V04-depth-xray|V07-dpi-resize]\n"

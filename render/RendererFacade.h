@@ -135,6 +135,9 @@ namespace demo
 		[[nodiscard]] FlaxGIDebugViewSet getFlaxGIDebugViewSet() const;
 
 		[[nodiscard]] const shaderio::GPUCullStats& getLastGPUCullingStats() const;
+		[[nodiscard]] bool isGPUCullingStatsValid() const { return gpuDriven().isGPUCullingStatsValid(); }
+		void requestOutputTextureDump(const char* path) { gpuDriven().requestOutputTextureDump(path); }
+		bool flushPendingOutputTextureDump() { return gpuDriven().flushPendingOutputTextureDump(); }
 		[[nodiscard]] RuntimeProfileSnapshot getRuntimeProfileSnapshot() const;
 		[[nodiscard]] rhi::RHIHotPathCounters getRhiHotPathCounters() const noexcept;
 		void resetRhiHotPathCounters() noexcept;

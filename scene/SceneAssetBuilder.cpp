@@ -2,6 +2,7 @@
 
 #include "../common/ProfilerMarkers.h"
 #include "../render/MeshLodBuilder.h"
+#include "../render/MeshletConverter.h"
 #include "../common/logger.h"
 
 #include <algorithm>
@@ -371,9 +372,30 @@ void SceneAssetBuilder::buildNodes(SceneAsset& asset, const GltfModel& model)
 void SceneAssetBuilder::buildMeshlets(SceneAsset& asset, const GltfModel& model)
 {
   VKDEMO_CPU_SCOPE("Scene.Asset.Build.Meshlets");
-  // TODO: integrate MeshletConverter when meshlet path is needed
-  // For now, leave meshletPayloads empty; the GPUDrivenRenderer can fall back
-  // to runtime conversion from GltfModel or from SceneAsset's vertexPayload.
+  asset.meshletPayloads.clear();
+  asset.meshletPayloads.reserve(asset.meshes.size());
+
+  // The GPU-driven culling path issues one draw per cluster, which needs a payload per mesh.
+  // Without these the renderer falls back to a single object-level draw for every mesh, so the
+  // culling shader's cluster range is never exercised. buildMeshes pushes one SceneMesh per
+  // GltfMeshData in order, so the same index addresses both.
+  for(std::size_t meshIndex = 0; meshIndex < asset.meshes.size(); ++meshIndex) {
+    SceneAsset::MeshletPayload payload;
+    if(meshIndex < model.meshes.size()) {
+      const MeshletConversionResult converted = MeshletConverter::convert(model.meshes[meshIndex]);
+      if(!converted.meshlets.empty()) {
+        payload.meshletData.resize(converted.meshlets.size() * sizeof(shaderio::Meshlet));
+        std::memcpy(payload.meshletData.data(),
+                    converted.meshlets.data(),
+                    payload.meshletData.size());
+        payload.indexData.resize(converted.packedIndices.size() * sizeof(uint32_t));
+        std::memcpy(payload.indexData.data(),
+                    converted.packedIndices.data(),
+                    payload.indexData.size());
+      }
+    }
+    asset.meshletPayloads.push_back(std::move(payload));
+  }
 }
 
 void SceneAssetBuilder::buildMeshLodChains(SceneAsset& asset, const GltfModel& model)

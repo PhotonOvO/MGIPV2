@@ -92,6 +92,9 @@ public:
     bool captureControlFrame{false};
     std::filesystem::path captureSyncDirectory{};
     std::filesystem::path metricsOutputPath{};
+    // When set, the automation settled frame is written here as an 8-bit PNG so a rendering
+    // change can be compared pixel-for-pixel against a recorded baseline.
+    std::filesystem::path dumpFramePath{};
     // Normal production-editor startup controls. Automation paths retain
     // their fixture selection; these options make Demo a direct editor entry.
     bool editorEmptyStart{false};
@@ -1282,21 +1285,28 @@ private:
         }
         if(ImGui::TreeNode("Stats"))
         {
-          ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
-          ImGui::Text("Opaque Visible: %u / %u", gpuCullStats.opaqueVisibleCount, gpuCullStats.opaqueCount);
-          ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
-          ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
-          ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
-          ImGui::Text("Hi-Z Candidates: %u", gpuCullStats.hizCandidateCount);
-          ImGui::Text("Hi-Z Tested: %u", gpuCullStats.hizTestedCount);
-          ImGui::Text("Hi-Z Skipped Large: %u", gpuCullStats.hizRejectedLargeCount);
-          ImGui::Text("Hi-Z Skipped Near: %u", gpuCullStats.hizRejectedNearCount);
-          ImGui::Text("Hi-Z Skipped Offscreen: %u", gpuCullStats.hizRejectedOffscreenCount);
-          ImGui::Text("Meshlet Cone Culled: %u", gpuCullStats.meshletConeCulledCount);
-          ImGui::Text("Total: %u", gpuCullStats.totalCount);
-          ImGui::Text("Visible Ratio: %.1f%%",
-                      100.0f * static_cast<float>(gpuCullStats.visibleCount)
-                          / static_cast<float>(totalCullEvaluated));
+          if(!m_renderer.isGPUCullingStatsValid())
+          {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "No data yet (staging readback pending)");
+          }
+          else
+          {
+            ImGui::Text("Visible: %u", gpuCullStats.visibleCount);
+            ImGui::Text("Opaque Visible: %u / %u", gpuCullStats.opaqueVisibleCount, gpuCullStats.opaqueCount);
+            ImGui::Text("Transparent Visible: %u / %u", gpuCullStats.transparentVisibleCount, gpuCullStats.transparentCount);
+            ImGui::Text("Frustum Culled: %u", gpuCullStats.frustumCulledCount);
+            ImGui::Text("Occlusion Culled: %u", gpuCullStats.occlusionCulledCount);
+            ImGui::Text("Hi-Z Candidates: %u", gpuCullStats.hizCandidateCount);
+            ImGui::Text("Hi-Z Tested: %u", gpuCullStats.hizTestedCount);
+            ImGui::Text("Hi-Z Skipped Large: %u", gpuCullStats.hizRejectedLargeCount);
+            ImGui::Text("Hi-Z Skipped Near: %u", gpuCullStats.hizRejectedNearCount);
+            ImGui::Text("Hi-Z Skipped Offscreen: %u", gpuCullStats.hizRejectedOffscreenCount);
+            ImGui::Text("Meshlet Cone Culled: %u", gpuCullStats.meshletConeCulledCount);
+            ImGui::Text("Total: %u", gpuCullStats.totalCount);
+            ImGui::Text("Visible Ratio: %.1f%%",
+                        100.0f * static_cast<float>(gpuCullStats.visibleCount)
+                            / static_cast<float>(totalCullEvaluated));
+          }
           ImGui::TreePop();
         }
 
@@ -1336,7 +1346,14 @@ private:
                       m_renderer.isExperimentalMeshletPathEnabled() ? "Experimental Meshlet" : "Object-Level Shipping");
           ImGui::Text("Scene Authority: %s", authorityName);
           ImGui::Text("Indirect Source: %s", indirectSourceName);
-          ImGui::Text("Indirect Draws: %u", gpuDrivenStats.indirectDrawCount);
+          if(m_renderer.isGPUCullingStatsValid())
+          {
+            ImGui::Text("Indirect Draws: %u", gpuDrivenStats.indirectDrawCount);
+          }
+          else
+          {
+            ImGui::Text("Indirect Draws: No data");
+          }
           ImGui::Text("Indirect Stride: %u", gpuDrivenStats.indirectCommandStride);
           ImGui::Text("Persistent Cull Objects: %s", gpuDrivenStats.usesPersistentCullObjects ? "Yes" : "No");
           ImGui::Text("Render Chain Ownership: %s", gpuDrivenStats.ownsFullRenderChain ? "GPU-Driven Full Chain" : "Hybrid");
@@ -6388,6 +6405,18 @@ inline void MinimalLatestApp::onAutomationFrameRendered()
     }
     m_automationComplete = true;
     writeAutomationMetrics();
+    if(!m_automationOptions.dumpFramePath.empty())
+    {
+      // The settled frame has already been submitted at this point, so the copy is issued as its
+      // own upload-manager submission rather than appended to a frame command buffer.
+      m_renderer.requestOutputTextureDump(
+          m_automationOptions.dumpFramePath.string().c_str());
+      const bool dumped = m_renderer.flushPendingOutputTextureDump();
+      LOGI("[FRAME_DUMP] marker=%s path=%s frame=%llu",
+           dumped ? "written" : "failed",
+           m_automationOptions.dumpFramePath.string().c_str(),
+           static_cast<unsigned long long>(m_automationFrame));
+    }
     LOGI("[CSM_AUTOMATION] marker=complete mode=%s frames=%llu",
          automationModeName(),
          static_cast<unsigned long long>(automationTotalFrames()));
