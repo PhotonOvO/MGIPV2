@@ -28,6 +28,8 @@ static const uint kDepthPyramidGeneratedMipCount = 5u;
 static const int kMaxHiZSamplesPerAxis = 8;
 static const float kHiZPixelBoundaryEpsilon = 1.0e-4;
 static const float kHiZClipBoundaryEpsilon = 1.0e-5;
+// Screen-space error budget for derived LOD selection, in pixels.
+static const float kLodPixelErrorThreshold = 4.0;
 static const float kMeshletConeSimilarityRelativeTolerance = 1.0e-6;
 static const float kMeshletConeSimilarityCutoffSlack = 1.0e-3;
 
@@ -514,6 +516,41 @@ void gpuCullingMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             indirectCommands[objectIndex] = command;
             return;
         }
+    }
+
+    // LOD selection runs only for objects that survived every cull, so culled objects keep the
+    // source range and their command stays byte-identical to the pre-LOD path.
+    if(objectData.lodLevelCount > 0u)
+    {
+        // Conservative pixel-error estimate: geometricError is in mesh units, the vertical FOV
+        // scale is proj[1][1], and the view-space depth is used instead of the Euclidean
+        // distance so wide-FOV edges are not underestimated.
+        const float viewDepth = max(-mul(gpuCullingUniforms.viewMatrix, float4(center, 1.0)).z, 1.0e-4);
+        const float projScaleY = abs(gpuCullingUniforms.projectionMatrix[1][1]);
+        // lodLevels[0] is the first DERIVED level, which is already coarser than the source mesh.
+        // When even that level exceeds the pixel budget the correct choice is the source range,
+        // which the command already holds, so selection starts at "no level chosen".
+        int chosenLevel = -1;
+        for(uint level = 0u; level < objectData.lodLevelCount; ++level)
+        {
+            const float projectedError = objectData.lodLevels[level].geometricError
+                * 0.5 * gpuCullingUniforms.screenSizeAndPyramidSize.y * projScaleY / viewDepth;
+            if(projectedError <= kLodPixelErrorThreshold)
+            {
+                chosenLevel = int(level);
+            }
+            else
+            {
+                break;
+            }
+        }
+        if(chosenLevel >= 0)
+        {
+            command.indexCount = objectData.lodLevels[uint(chosenLevel)].indexCount;
+            command.firstIndex = objectData.lodLevels[uint(chosenLevel)].firstIndex;
+        }
+        // vertexOffset and firstInstance stay untouched: every derived level reuses the source
+        // vertex buffer (MeshLodBuilder only permutes indices) and the draw identity is per object.
     }
 
     command.instanceCount = 1u;

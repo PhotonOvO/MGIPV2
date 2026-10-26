@@ -331,7 +331,11 @@ namespace demo
 		record.localBoundsMax = glm::vec3(std::numeric_limits<float>::lowest());
 
 		const size_t vertexDataSize = meshData.interleavedVertexData.size();
-		const size_t indexDataSize = meshData.indices.size_bytes();
+		const size_t sourceIndexBytes = meshData.indices.size_bytes();
+		const size_t derivedIndexBytes = meshData.derivedIndices.size_bytes();
+		// The derived levels are written directly after the source range so a LOD draw can
+		// address them through the same index buffer, at firstIndex + indexCount + levelOffset.
+		const size_t indexDataSize = sourceIndexBytes + derivedIndexBytes;
 
 		reserve(vertexDataSize, indexDataSize, cmd);
 
@@ -351,7 +355,13 @@ namespace demo
 			                                vertexDataSize);
 
 			const BatchUploadContext::Slice indexSlice = batchUpload->allocate(indexDataSize, alignof(uint32_t));
-			std::memcpy(indexSlice.cpuPtr, meshData.indices.data(), indexDataSize);
+			std::memcpy(indexSlice.cpuPtr, meshData.indices.data(), sourceIndexBytes);
+			if (derivedIndexBytes > 0u)
+			{
+				std::memcpy(static_cast<uint8_t*>(indexSlice.cpuPtr) + sourceIndexBytes,
+				            meshData.derivedIndices.data(),
+				            derivedIndexBytes);
+			}
 			batchUpload->recordBufferUpload(indexSlice,
 			                                m_sharedIndexBuffer.buffer,
 			                                record.indexBufferOffset,
@@ -361,8 +371,16 @@ namespace demo
 		{
 			const std::span<const std::byte> vertexBytes(
 				reinterpret_cast<const std::byte*>(meshData.interleavedVertexData.data()), vertexDataSize);
-			const std::span<const std::byte> indexBytes(reinterpret_cast<const std::byte*>(meshData.indices.data()),
-			                                            indexDataSize);
+			std::vector<uint8_t> packedIndices(indexDataSize);
+			std::memcpy(packedIndices.data(), meshData.indices.data(), sourceIndexBytes);
+			if (derivedIndexBytes > 0u)
+			{
+				std::memcpy(packedIndices.data() + sourceIndexBytes,
+				            meshData.derivedIndices.data(),
+				            derivedIndexBytes);
+			}
+			const std::span<const std::byte> indexBytes(
+				reinterpret_cast<const std::byte*>(packedIndices.data()), indexDataSize);
 
 			ASSERT(m_rhiDevice != nullptr, "MeshPool RHI device is required for non-batched upload");
 			rhi::BufferHandle vertexStagingBuffer = upload::createUploadStagingBuffer(*m_rhiDevice, vertexBytes);

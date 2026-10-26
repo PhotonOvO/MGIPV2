@@ -6916,11 +6916,24 @@ namespace demo
 			const uint8_t* vertexBegin = asset.vertexPayload.data() + meshPlan.vertexSrcOffset;
 			const uint32_t* indexBegin = reinterpret_cast<const uint32_t*>(asset.indexPayload.data() + meshPlan.
 				indexSrcOffset);
+			// Derived LOD indices for this mesh, when the asset carries a chain.
+			std::span<const uint32_t> derivedIndices{};
+			if (meshPlan.meshIndex < asset.meshLodPayloads.size())
+			{
+				const SceneAsset::MeshLodPayload& lodPayload = asset.meshLodPayloads[meshPlan.meshIndex];
+				if (!lodPayload.indexData.empty())
+				{
+					derivedIndices = std::span<const uint32_t>(lodPayload.indexData.data(),
+					                                           lodPayload.indexData.size());
+				}
+			}
+
 			SceneMeshData sceneMeshData{
 				.interleavedVertexData = std::span<const uint8_t>(vertexBegin,
 				                                                  static_cast<size_t>(meshPlan.vertexByteSize)),
 				.vertexCount = meshPlan.vertexCount,
 				.indices = std::span<const uint32_t>(indexBegin, meshPlan.indexCount),
+				.derivedIndices = derivedIndices,
 				.transform = mesh.exportTransform,
 				.materialIndex = static_cast<int32_t>(mesh.materialIndex),
 			};

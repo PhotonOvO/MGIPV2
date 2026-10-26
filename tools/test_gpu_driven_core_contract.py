@@ -249,6 +249,37 @@ class SteadyStateAllocationContractTests(unittest.TestCase):
         self.assertLess(sort_early_return, sort_guard.index("createBuffer"))
 
 
+class MeshLodContractTests(unittest.TestCase):
+    def test_lod_chain_is_requested_and_rebased(self) -> None:
+        # LOD levels are authored relative to their own payload but drawn from the shared index
+        # buffer, so registration must rebase them; an unrebas ed offset addresses wrong geometry.
+        projection = read("scene/editor/SceneProjection.cpp")
+        self.assertIn("buildOptions.buildMeshLod = true;", projection)
+
+        registry = read("render/GPUSceneRegistry.cpp")
+        self.assertIn("const uint32_t derivedBase = desc.firstIndex + desc.indexCount;", registry)
+        self.assertIn("derivedBase + desc.lodLevels[level].firstIndex", registry)
+
+        mesh_pool = read("render/MeshPool.cpp")
+        self.assertIn("meshData.derivedIndices", mesh_pool)
+        self.assertIn("sourceIndexBytes", mesh_pool)
+
+    def test_lod_selection_falls_back_to_the_source_range(self) -> None:
+        # lodLevels[0] is the first DERIVED level and is already coarser than the source. When
+        # even that exceeds the pixel budget the source range must win, which means selection
+        # starts at "none chosen" rather than at level 0.
+        shader = read("shaders/shader.gpu_culling.slang")
+        self.assertIn("int chosenLevel = -1;", shader)
+        self.assertIn("kLodPixelErrorThreshold", shader)
+        self.assertIn("command.vertexOffset", shader)
+        # A level switch must not touch the draw identity or the shared vertex base.
+        lod_block_start = shader.index("if(objectData.lodLevelCount > 0u)")
+        lod_block = shader[lod_block_start : shader.index("command.instanceCount = 1u;", lod_block_start)]
+        # Only assignments matter; the explanatory comment names both fields.
+        self.assertNotIn("command.firstInstance", lod_block)
+        self.assertNotIn("command.vertexOffset", lod_block)
+
+
 class HotPathBudgetContractTests(unittest.TestCase):
     def test_stable_recording_budget_predicate_still_covers_descriptors(self) -> None:
         counters = read("rhi/RHIDebugCounters.h")

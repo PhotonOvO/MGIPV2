@@ -3358,6 +3358,25 @@ namespace demo
 				registration.vertexOffset = mesh.record.vertexOffset;
 				break;
 			}
+			// Level offsets stay asset-relative here; packCullObject rebases them with
+			// firstIndex + indexCount once the object is packed for the GPU.
+			if (draw.meshIndex < generation.asset.meshLodPayloads.size())
+			{
+				const SceneAsset::MeshLodPayload& lodPayload =
+					generation.asset.meshLodPayloads[draw.meshIndex];
+				const uint32_t levelCount = std::min(
+					static_cast<uint32_t>(lodPayload.levels.size()),
+					static_cast<uint32_t>(shaderio::LGPUCullDerivedLodCount));
+				registration.lodLevelCount = lodPayload.indexData.empty() ? 0u : levelCount;
+				for (uint32_t level = 0u; level < registration.lodLevelCount; ++level)
+				{
+					registration.lodLevels[level] = GPUSceneRegistrationDesc::LodRange{
+						.firstIndex = lodPayload.levels[level].indexOffset,
+						.indexCount = lodPayload.levels[level].indexCount,
+						.geometricError = lodPayload.levels[level].geometricError,
+					};
+				}
+			}
 			generation.objects.push_back({
 				.sourceId = draw.nodeSourceId,
 				.primitiveSourceId = draw.sourceId,

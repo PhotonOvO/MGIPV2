@@ -254,6 +254,10 @@ struct SceneMeshData {
   std::span<const uint8_t> interleavedVertexData;  // 48-byte stride
   uint32_t                 vertexCount = 0;
   std::span<const uint32_t> indices;
+  // Derived LOD indices, uploaded directly after `indices` in the shared index buffer so a level
+  // range is addressable by the same draw call. Level offsets in the asset stay relative to this
+  // block; registration rebases them with firstIndex + indexCount.
+  std::span<const uint32_t> derivedIndices;
   glm::mat4                transform = glm::mat4(1.0f);
   int32_t                  materialIndex = -1;
 };
