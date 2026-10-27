@@ -88,6 +88,9 @@ public:
     bool noDdgi{false};
     bool ddgiSmoke{false};
     bool taa{false};
+    // Enables screen-space reflections without a UI, so the SSR pass can be exercised (and its
+    // per-frame argument-table path observed) under automation.
+    bool ssr{false};
     bool autoExit{false};
     bool captureControlFrame{false};
     std::filesystem::path captureSyncDirectory{};
@@ -272,6 +275,7 @@ public:
     m_debugOptions.enableGPUOcclusionCulling = false;
     m_debugOptions.enableGPUMeshletOcclusionCulling = false;
     m_debugOptions.enableIBL = false;
+    m_debugOptions.enableSSR = m_automationOptions.ssr;
 
 
     ImGui::GetIO().ConfigFlags = ImGuiConfigFlags_DockingEnable;

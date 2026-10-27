@@ -195,6 +195,10 @@ void validateEditorTransactionOptions(AutomationOptions& options)
 		{
 			options.ddgiSmoke = true;
 		}
+		else if(argument == "--ssr")
+		{
+			options.ssr = true;
+		}
 		else if(argument == "--taa")
 		{
 			options.taa = true;
@@ -425,7 +429,7 @@ void printUsage()
 	    << "            [--automation=csm-translate-stop|csm-rotate-stop]\n"
 	    << "            [--fixed-dt=SECONDS] [--warmup-frames=N]\n"
 	    << "            [--motion-frames=N] [--hold-frames=N]\n"
-	    << "            [--no-ui] [--no-post|--taa] [--no-ddgi|--ddgi-smoke] [--auto-exit]\n"
+	    << "            [--no-ui] [--no-post|--taa] [--ssr] [--no-ddgi|--ddgi-smoke] [--auto-exit]\n"
 	    << "            [--capture-sync-dir=PATH] [--capture-sync-timeout-ms=N]\n"
 	    << "            [--capture-control-frame] [--metrics-output=PATH]\n"
 	    << "            [--dump-frame=PATH]  (write the settled automation frame as a PNG)\n"
