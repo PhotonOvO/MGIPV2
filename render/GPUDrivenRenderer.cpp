@@ -12291,6 +12291,39 @@ void GPUDrivenRenderer::shutdownFlaxDDGIResources()
 
 		void GPUDrivenRenderer::bindPhase7PassResources()
 		{
+		// The AO/SSR denoised images are written by their compute passes (leaving them in General)
+		// and then sampled through the lighting texture array. Registering them here is what lets
+		// PassExecutor emit the General -> ShaderRead transition the array binding requires.
+		if (!m_aoDenoisedImage.isNull())
+		{
+			m_passExecutor.bindTexture({
+				.handle = kPassAODenoisedHandle,
+				.rhiTexture = m_aoDenoisedImage,
+				.aspect = rhi::TextureAspect::color,
+				.initialState = rhi::ResourceState::Undefined,
+				.isSwapchain = false,
+			});
+		}
+		if (!m_ssrRawImage.isNull())
+		{
+			m_passExecutor.bindTexture({
+				.handle = kPassSSRRawHandle,
+				.rhiTexture = m_ssrRawImage,
+				.aspect = rhi::TextureAspect::color,
+				.initialState = rhi::ResourceState::Undefined,
+				.isSwapchain = false,
+			});
+		}
+		if (!m_ssrDenoisedImage.isNull())
+		{
+			m_passExecutor.bindTexture({
+				.handle = kPassSSRDenoisedHandle,
+				.rhiTexture = m_ssrDenoisedImage,
+				.aspect = rhi::TextureAspect::color,
+				.initialState = rhi::ResourceState::Undefined,
+				.isSwapchain = false,
+			});
+		}
 		if (!m_shadowAtlasImage.isNull())
 		{
 			m_passExecutor.bindTexture({

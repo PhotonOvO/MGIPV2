@@ -17,7 +17,7 @@ namespace demo
 
 	PassNode::HandleSlice<PassResourceDependency> GPUDrivenLightPass::getDependencies() const
 	{
-		static const std::array<PassResourceDependency, 9> dependencies = {
+		static const std::array<PassResourceDependency, 11> dependencies = {
 			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
 			                                rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassGBuffer1Handle, ResourceAccess::read, rhi::ShaderStage::fragment,
@@ -34,6 +34,12 @@ namespace demo
 			                               rhi::ShaderStage::fragment),
 			PassResourceDependency::buffer(kPassLightCoarseCullingUniformHandle, ResourceAccess::read,
 			                               rhi::ShaderStage::fragment),
+			// Screen-space AO/SSR outputs arrive here from their compute passes in General; the
+			// lighting texture array binds them as sampled images, which requires ShaderRead.
+			PassResourceDependency::texture(kPassAODenoisedHandle, ResourceAccess::read,
+			                                rhi::ShaderStage::fragment, rhi::ResourceState::ShaderRead),
+			PassResourceDependency::texture(kPassSSRDenoisedHandle, ResourceAccess::read,
+			                                rhi::ShaderStage::fragment, rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassSceneColorHdrHandle, ResourceAccess::write,
 			                                rhi::StageFlags::rasterColorOut, rhi::HazardFlags::textureWrites,
 			                                rhi::ResourceState::ColorAttachment),

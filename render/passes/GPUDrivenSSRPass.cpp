@@ -22,7 +22,7 @@ namespace demo
 		// layout no longer matches the actual image layout at dispatch time.  The depth pyramid
 		// (Hi-Z march input) is storage-written and stays in GENERAL, so its state is left
 		// unspecified on purpose -- the default General matches its readWrite descriptor intent.
-		static const std::array<PassResourceDependency, 5> dependencies = {
+		static const std::array<PassResourceDependency, 7> dependencies = {
 			PassResourceDependency::texture(kPassSceneColorHistoryReadHandle, ResourceAccess::read,
 			                                rhi::ShaderStage::compute, rhi::ResourceState::ShaderRead),
 			PassResourceDependency::texture(kPassGBuffer0Handle, ResourceAccess::read, rhi::ShaderStage::compute,
@@ -35,6 +35,13 @@ namespace demo
 			// stay in GENERAL for both the write and the sampled read.
 			PassResourceDependency::texture(kPassDepthPyramidHandle, ResourceAccess::read, rhi::ShaderStage::compute,
 			                                rhi::ResourceState::General),
+			// Both SSR outputs are storage-written by this pass (trace then denoise). Declaring them
+			// is what lets the graph insert General -> ShaderRead before the lighting pass samples
+			// them through its texture array.
+			PassResourceDependency::texture(kPassSSRRawHandle, ResourceAccess::write, rhi::ShaderStage::compute,
+			                                rhi::ResourceState::General),
+			PassResourceDependency::texture(kPassSSRDenoisedHandle, ResourceAccess::write,
+			                                rhi::ShaderStage::compute, rhi::ResourceState::General),
 		};
 		return {dependencies.data(), static_cast<uint32_t>(dependencies.size())};
 	}
@@ -106,9 +113,24 @@ namespace demo
 		denoise->dispatch(rhi::DispatchDesc{groupsX, groupsY, 1u});
 		context.commandBuffer->endEncoding();
 		// Local output barrier: SSR denoise writes a renderer-private texture sampled by
-		// later lighting; it has no PassResourceDependency handle in the graph yet.
+		// later lighting.
 		context.commandBuffer->barrier(rhi::StageFlags::compute,
 		                               rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
 		                               rhi::HazardFlags::textureWrites);
+
+		// The denoise wrote through a storage descriptor, which leaves the image in General. The
+		// lighting texture array binds it as a combinedImageSampler, and that descriptor requires
+		// SHADER_READ_ONLY_OPTIMAL. Stage barriers do not change layout, so the transition has to be
+		// declared here; without it validation rejects the lighting draw.
+		const rhi::TextureHandle denoised = m_renderer->getSSRDenoisedImageHandle();
+		if (!denoised.isNull())
+		{
+			const rhi::TextureBarrier toRead{
+				.texture = denoised,
+				.before = rhi::ResourceState::General,
+				.after = rhi::ResourceState::ShaderRead,
+			};
+			context.commandBuffer->resourceBarrier(std::span{&toRead, 1}, {});
+		}
 	}
 } // namespace demo

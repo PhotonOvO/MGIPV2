@@ -118,5 +118,19 @@ namespace demo
 		context.commandBuffer->barrier(rhi::StageFlags::compute,
 		                               rhi::StageFlags::compute | rhi::StageFlags::fragmentShader,
 		                               rhi::HazardFlags::textureWrites);
+
+		// The denoise wrote through a storage descriptor, which leaves the image in General. The
+		// lighting texture array binds it as a combinedImageSampler and requires
+		// SHADER_READ_ONLY_OPTIMAL; stage barriers do not change layout, so declare it here.
+		const rhi::TextureHandle denoised = m_renderer->getAODenoisedImageHandle();
+		if (!denoised.isNull())
+		{
+			const rhi::TextureBarrier toRead{
+				.texture = denoised,
+				.before = rhi::ResourceState::General,
+				.after = rhi::ResourceState::ShaderRead,
+			};
+			context.commandBuffer->resourceBarrier(std::span{&toRead, 1}, {});
+		}
 	}
 } // namespace demo

@@ -143,6 +143,12 @@ namespace demo
 	inline constexpr TextureHandle kPassSceneColorHistoryReadHandle{0xF10Du, 1u};
 	inline constexpr TextureHandle kPassSceneColorHistoryWriteHandle{0xF10Eu, 1u};
 	inline constexpr TextureHandle kPassGPUDrivenShadowAtlasHandle{0xF10Fu, 1u};
+	// Phase-7 screen-space compute outputs. They are storage-written by their own passes and
+	// sampled by the lighting pass, so they must be declared as pass resources to get the
+	// General -> ShaderRead transition the texture array binding requires.
+	inline constexpr TextureHandle kPassSSRRawHandle{0xF112u, 1u};
+	inline constexpr TextureHandle kPassAODenoisedHandle{0xF110u, 1u};
+	inline constexpr TextureHandle kPassSSRDenoisedHandle{0xF111u, 1u};
 	inline constexpr TextureHandle kPassBloomEighthHandle{0xF110u, 1u};
 	inline constexpr TextureHandle kPassBloomSixteenthHandle{0xF111u, 1u};
 	inline constexpr TextureHandle kPassBloomThirtySecondHandle{0xF112u, 1u};
