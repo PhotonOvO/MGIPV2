@@ -280,6 +280,45 @@ class MeshLodContractTests(unittest.TestCase):
         self.assertNotIn("command.vertexOffset", lod_block)
 
 
+class Phase7LayoutContractTests(unittest.TestCase):
+    def test_denoised_outputs_are_transitioned_before_lighting_samples_them(self) -> None:
+        # AO/SSR denoise write their outputs through storage descriptors, which leaves the image
+        # in General. The lighting texture array binds them as combinedImageSampler and requires
+        # ShaderRead. A stage barrier only orders writes, so without an explicit layout barrier
+        # validation rejects the lighting draw (VUID-VkDescriptorImageInfo-imageLayout-00344).
+        for path, getter in (
+            ("render/passes/GPUDrivenSSRPass.cpp", "getSSRDenoisedImageHandle"),
+            ("render/passes/GPUDrivenAOPass.cpp", "getAODenoisedImageHandle"),
+        ):
+            with self.subTest(pass_file=path):
+                source = read(path)
+                self.assertIn(getter, source)
+                self.assertIn("rhi::ResourceState::General", source)
+                self.assertIn("rhi::ResourceState::ShaderRead", source)
+                self.assertIn("resourceBarrier", source)
+
+    def test_denoised_outputs_are_registered_as_pass_resources(self) -> None:
+        # Registering the image is what gives PassExecutor a handle to plan the transition with.
+        passes = read("render/Pass.h")
+        self.assertIn("kPassAODenoisedHandle", passes)
+        self.assertIn("kPassSSRDenoisedHandle", passes)
+
+        renderer = read("render/GPUDrivenRenderer.cpp")
+        for handle in ("kPassAODenoisedHandle", "kPassSSRDenoisedHandle"):
+            with self.subTest(handle=handle):
+                self.assertIn(".handle = " + handle, renderer)
+
+        light_pass = read("render/passes/GPUDrivenLightPass.cpp")
+        for handle in ("kPassAODenoisedHandle", "kPassSSRDenoisedHandle"):
+            with self.subTest(consumer=handle):
+                self.assertIn(handle, light_pass)
+
+    def test_ssr_pass_declares_both_storage_outputs(self) -> None:
+        ssr = read("render/passes/GPUDrivenSSRPass.cpp")
+        self.assertIn("kPassSSRRawHandle", ssr)
+        self.assertIn("ResourceAccess::write", ssr)
+
+
 class HotPathBudgetContractTests(unittest.TestCase):
     def test_stable_recording_budget_predicate_still_covers_descriptors(self) -> None:
         counters = read("rhi/RHIDebugCounters.h")

@@ -532,11 +532,36 @@ The caller or RenderGraph must emit the required barriers.
 
 ### Meshlet Capability
 
-Meshlets are currently used only for culling acceleration, not for cluster-level draws. `Meshlet::indexOffset` / `indexCount` are uploaded by `render/MeshletConverter.cpp`, but no shader consumes them; `shader.gpu_culling.slang` builds indirect commands from `GPUCullObject` per object. Culling granularity is meshlet; draw granularity is object.
+Meshlets drive cluster-level draws. `render/MeshletConverter.cpp` packs each mesh into clusters;
+`SceneAssetBuilder::buildMeshlets` stores them per mesh, and the scene-transaction path rebuilds the
+shared meshlet buffers when a generation is published. `GPUCullObject` is then filled from
+`Meshlet::indexCount` / `indexOffset` (rebased to the shared index buffer), so `gpuCullingMain`
+culls and draws one cluster at a time. On the reference scene this turns 393 object draws into
+3749 cluster draws covering the same 262204 triangles.
+
+Cluster culling and mesh LOD do not compose: the meshlet path builds its cull objects without LOD
+ranges, so `lodLevelCount` stays zero there. Measured on the reference scene, cluster culling alone
+already removes about 29% of visible triangles without a quality change, so combining the two is not
+worth the per-level meshlet data it would require.
 
 ### Mesh LOD Capability
 
-Mesh LOD chains are built at load time (`render/MeshLodBuilder.cpp`) into `SceneAsset::MeshLodPayload`, but no runtime consumer selects a level. `SceneAssetBuilder::BuildOptions::buildMeshLod` defaults to `false` (`scene/editor/SceneProjection.cpp`), no registration site populates `GPUSceneRegistrationDesc::lodLevels`, so `GPUCullObject::lodLevelCount` is always 0 and `lodLevels[]` stays zeroed. No shader reads `lodLevels`; `gpuCullingMain` builds indirect commands from the source-mesh range (`indexCount`/`firstIndex`), and `SceneAssetSerializer` does not persist the payloads. Screen-space LOD selection is unimplemented.
+Mesh LOD chains are built at load time (`render/MeshLodBuilder.cpp`) into
+`SceneAsset::MeshLodPayload`, and `SceneProjectionOptions::buildMeshlets` / `buildMeshLod` request
+them. `SceneMeshData::derivedIndices` uploads the derived levels directly after each mesh's source
+range in the shared index buffer, and `GPUSceneRegistry::packCullObject` rebases the asset-relative
+level offsets to `firstIndex + indexCount + levelOffset`, so `GPUCullObject::lodLevels` addresses
+real geometry.
+
+`gpuCullingMain` selects the coarsest level whose projected screen error fits
+`kLodPixelErrorThreshold` pixels, using view-space depth rather than Euclidean distance. Selection
+starts at "no level chosen", not level 0, because `lodLevels[0]` is already a derived (coarser) level:
+when even that exceeds the budget the source range is the correct answer. A switch leaves
+`vertexOffset` and `firstInstance` untouched, since derived levels reuse the source vertex buffer and
+the draw identity stays per object.
+
+LOD applies to the object-level path. With the meshlet path active the cull objects carry no LOD
+ranges, so selection is inactive there. `SceneAssetSerializer` does not persist the payloads.
 
 ## 7. Multi-backend Mapping
 
